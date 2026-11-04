@@ -6,16 +6,16 @@ import {
   type Memory,
   type MemoryKind,
   type Trust,
-} from '@synapse/core';
+} from '@mindly/core';
 import { memoryLine } from '../context/render.js';
 import { sessionLabel } from '../coordination/work.js';
 import type { Kernel } from '../kernel.js';
 import { rankTrust } from '../memory/service.js';
-import type { Synapse } from '../synapse.js';
+import type { Mindly } from '../mindly.js';
 import { attachService } from './shared.js';
 
 /*
- * Context X-Ray: explains what context Synapse gave a session and why items were left out.
+ * Context X-Ray: explains what context Mindly gave a session and why items were left out.
  * The constants and scoring below mirror `context/builder.ts` (prompt retrieval); keep in sync.
  */
 const RECENT_SERVE_WINDOW_MS = 2 * 60 * 60_000;
@@ -268,6 +268,6 @@ function round(n: number): number {
 }
 
 /** Feature module: attaches the Context X-Ray service (no bus handlers). */
-export const xrayModule = (synapse: Synapse): void => {
-  attachService(synapse, 'xray', new XRayService(synapse.kernel));
+export const xrayModule = (mindly: Mindly): void => {
+  attachService(mindly, 'xray', new XRayService(mindly.kernel));
 };

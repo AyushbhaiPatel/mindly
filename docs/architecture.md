@@ -1,6 +1,6 @@
-# Synapse architecture
+# Mindly architecture
 
-Synapse is a local-first memory and coordination layer for coding agents (Claude Code, Codex,
+Mindly is a local-first memory and coordination layer for coding agents (Claude Code, Codex,
 Cursor and anything that speaks MCP). It keeps every agent working on a project aware of the
 project's knowledge, of what the other agents are doing right now, and of what changed that
 affects them.
@@ -25,7 +25,7 @@ their own internals; this file describes the contracts between them.
 - Cloud sync and team memory. The storage layer is designed so a sync layer can be added later
   (append-only event log, globally unique ids, versioned records), but nothing leaves the machine
   today.
-- Orchestrating agents. Synapse coordinates agents the developer already runs; it only launches an
+- Orchestrating agents. Mindly coordinates agents the developer already runs; it only launches an
   agent itself for explicitly requested features (replay, cross-agent review, opt-in failover).
 
 ## Big picture
@@ -75,14 +75,14 @@ scheduled background work.
 | ------------------- | ------------------------------------------------------------------------------ |
 | `packages/core`     | Domain types and runtime schemas, ids, errors, config, paths, secret redaction |
 | `packages/store`    | SQLite access, migrations, repositories, full-text search                      |
-| `packages/engine`   | All domain services; the `Synapse` facade used by every entry point            |
+| `packages/engine`   | All domain services; the `Mindly` facade used by every entry point             |
 | `packages/git`      | Safe git invocation, shadow merge, diff/export analysis, import graph          |
 | `packages/llm`      | Optional model providers (local Ollama, BYOK Anthropic/OpenAI), never required |
 | `packages/notify`   | Pager channels (desktop, ntfy, webhook); off by default                        |
 | `packages/runners`  | Headless agent runs for replay, cross-agent review and opt-in failover         |
-| `packages/mcp`      | MCP server exposing Synapse tools to any MCP client                            |
+| `packages/mcp`      | MCP server exposing Mindly tools to any MCP client                             |
 | `packages/adapters` | Per-agent installers and hook translators (Claude Code, Codex, Cursor)         |
-| `apps/cli`          | `synapse` command; the only published package (`synapse-agents`)               |
+| `apps/cli`          | `mindly` command; the only published package (`mindly-agents`)                 |
 | `apps/daemon`       | Local HTTP/WebSocket server for Mission Control and background jobs            |
 | `apps/dashboard`    | Mission Control single-page app, served by the daemon                          |
 
@@ -92,7 +92,7 @@ constructor injection so they can be faked in tests.
 
 ## Data model
 
-All state lives in one database at `$SYNAPSE_HOME/synapse.db` (default `~/.synapse`). Every row is
+All state lives in one database at `$MINDLY_HOME/mindly.db` (default `~/.mindly`). Every row is
 scoped to a `project_id`; a project is identified by the canonical (realpath) root of its git
 repository.
 
@@ -123,7 +123,7 @@ Design rules:
 - **Events are immutable.** Everything else is a projection that can be rebuilt or audited
   against the log.
 - **Memories are versioned, never overwritten.** An update writes a new `memory_versions` row and
-  bumps `memories.version`. "Deleting" marks a memory `archived`; `synapse forget` is the only
+  bumps `memories.version`. "Deleting" marks a memory `archived`; `mindly forget` is the only
   hard delete and it is an explicit user action.
 - **Every SQL statement is parameterised.** No string concatenation of values, ever. Dynamic
   `ORDER BY`/column names come from closed allow-lists.
@@ -141,7 +141,7 @@ Each memory has a `trust` level and a `source`:
 | `rejected` | Explicitly rejected by the user; never injected again             |
 
 Context is always rendered inside a clearly delimited block that tells the receiving agent the
-content is _reference data from Synapse, not instructions_, and labels each item with its trust and
+content is _reference data from Mindly, not instructions_, and labels each item with its trust and
 source. Only `approved` rules are phrased as project conventions, and even those never claim
 higher priority than the user's live instructions.
 
@@ -165,7 +165,7 @@ higher priority than the user's live instructions.
    trigger the failover flow.
 
 Deliveries are **at-least-once with acknowledgement**: a delivery is marked `delivered` when it is
-included in a context packet and `acked` when the agent calls the `synapse_ack` MCP tool or the next
+included in a context packet and `acked` when the agent calls the `mindly_ack` MCP tool or the next
 turn starts without error. Undelivered items are retried at every hook boundary; expired items are
 dropped with an event.
 
@@ -186,7 +186,7 @@ dropped with an event.
 | Executable memory         | `contracts` table; declarative checks; command checks need user approval     |
 | Say-it-once rules         | correction detector on prompts, path-scoped rules                            |
 | Mistake memory            | failed attempts recorded and surfaced before similar edits                   |
-| Code provenance           | `file_changes` hunk hashes; `synapse why file:line`                          |
+| Code provenance           | `file_changes` hunk hashes; `mindly why file:line`                           |
 | Context X-Ray             | `context_packets` with included/omitted items and scores                     |
 | Cross-agent review        | `runners` headless review of a diff by a different agent                     |
 | Agent A/B replay          | `runners` in isolated worktrees at the same base commit                      |
@@ -197,9 +197,9 @@ dropped with an event.
 
 ## Processes and IPC
 
-- **Hooks** run `synapse hook <agent> <event>`; JSON in on stdin, JSON out on stdout. Hard timeout,
+- **Hooks** run `mindly hook <agent> <event>`; JSON in on stdin, JSON out on stdout. Hard timeout,
   fail-open.
-- **MCP** runs `synapse mcp` over stdio, spawned by the agent.
+- **MCP** runs `mindly mcp` over stdio, spawned by the agent.
 - **Daemon** listens on `127.0.0.1` only. See [security.md](security.md) for its authentication.
 
 ## Future: cloud sync

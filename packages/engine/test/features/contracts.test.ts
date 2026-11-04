@@ -1,6 +1,6 @@
 import { symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { isSynapseError, type ContractKind } from '@synapse/core';
+import { isMindlyError, type ContractKind } from '@mindly/core';
 import { describe, expect, it } from 'vitest';
 import { checkSafePattern, commandHash, contractsOf, USER } from '../../src/index.js';
 import { event, writeTool } from '../helpers.js';
@@ -8,7 +8,7 @@ import { agentSource, AUTH_V1, featureSetup } from './fixtures.js';
 
 async function withDecision() {
   const f = await featureSetup();
-  const memory = f.synapse.memory.remember({
+  const memory = f.mindly.memory.remember({
     projectId: f.pid,
     projectRoot: f.root,
     kind: 'decision',
@@ -16,21 +16,21 @@ async function withDecision() {
     body: 'The login response always carries the role.',
     source: USER,
   });
-  return { ...f, memory, contracts: contractsOf(f.synapse) };
+  return { ...f, memory, contracts: contractsOf(f.mindly) };
 }
 
 function codeOf(fn: () => unknown): string {
   try {
     fn();
   } catch (err) {
-    return isSynapseError(err) ? err.code : 'other';
+    return isMindlyError(err) ? err.code : 'other';
   }
   return 'none';
 }
 
 describe('executable memory', () => {
   it('opens a critical conflict when a contract breaks and resolves it when fixed', async () => {
-    const { root, synapse, pid, cx, write, memory, contracts } = await withDecision();
+    const { root, mindly, pid, cx, write, memory, contracts } = await withDecision();
     const c = contracts.create(
       memory.id,
       'pattern_present',
@@ -41,33 +41,33 @@ describe('executable memory', () => {
     expect(c.spec.path).toBe('src/auth.ts');
 
     write('src/auth.ts', AUTH_V1.replace('{ role: "admin" }', '{ ok: true }'));
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'ok') }),
     );
-    const open = synapse.store.conflicts.list(pid).filter((x) => x.kind === 'contract_broken');
+    const open = mindly.store.conflicts.list(pid).filter((x) => x.kind === 'contract_broken');
     expect(open).toHaveLength(1);
     expect(open[0]!.severity).toBe('critical');
-    expect(synapse.store.contracts.get(c.id).state).toBe('failing');
+    expect(mindly.store.contracts.get(c.id).state).toBe('failing');
 
-    const res = await synapse.hooks.handle(
+    const res = await mindly.hooks.handle(
       event(root, 'codex', 'cx', 'prompt', { prompt: 'keep going' }),
     );
     expect(res.context).toContain(
       "Decision 'login returns user.role' no longer holds: pattern not found in src/auth.ts",
     );
     expect(
-      synapse.store.deliveries
+      mindly.store.deliveries
         .list(pid)
         .filter((d) => d.kind === 'conflict' && d.targetSessionId === cx.id),
     ).toHaveLength(1);
 
     write('src/auth.ts', AUTH_V1);
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'role') }),
     );
-    expect(synapse.store.conflicts.get(open[0]!.id).status).toBe('resolved');
-    expect(synapse.store.contracts.get(c.id).state).toBe('passing');
-    const results = synapse.store.events.query(pid, { types: ['contract.result'] });
+    expect(mindly.store.conflicts.get(open[0]!.id).status).toBe('resolved');
+    expect(mindly.store.contracts.get(c.id).state).toBe('passing');
+    const results = mindly.store.events.query(pid, { types: ['contract.result'] });
     expect(results.map((e) => e.payload['state'])).toEqual(['passing', 'failing', 'passing']);
   });
 

@@ -1,12 +1,12 @@
 import { realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import { SynapseError, isSynapseError, resolveInsideRoot } from '@synapse/core';
+import { MindlyError, isMindlyError, resolveInsideRoot } from '@mindly/core';
 import { driverOverrides, gitVersion, runGit, versionAtLeast } from './exec.js';
 import { assertSafeRelativePath, assertValidRevision } from './refs.js';
 
 function absoluteDir(cwd: string): string {
   if (typeof cwd !== 'string' || cwd === '' || cwd.includes('\0')) {
-    throw new SynapseError('invalid_input', 'invalid directory');
+    throw new MindlyError('invalid_input', 'invalid directory');
   }
   return resolve(cwd);
 }
@@ -20,7 +20,7 @@ export async function findRepoRoot(cwd: string): Promise<string> {
   const res = await runGit(['rev-parse', '--show-toplevel'], { cwd: dir, okExitCodes: [128] });
   const top = res.stdout.trim();
   if (res.exitCode !== 0 || top === '') {
-    throw new SynapseError('not_found', 'not inside a git working tree');
+    throw new MindlyError('not_found', 'not inside a git working tree');
   }
   return realpathSync(top);
 }
@@ -31,7 +31,7 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
     await findRepoRoot(cwd);
     return true;
   } catch (err) {
-    if (isSynapseError(err, 'not_found') || isSynapseError(err, 'invalid_input')) return false;
+    if (isMindlyError(err, 'not_found') || isMindlyError(err, 'invalid_input')) return false;
     throw err;
   }
 }
@@ -236,7 +236,7 @@ export async function changedFiles(cwd: string): Promise<ChangedFile[]> {
 
 function relativeInside(root: string, path: string): string {
   const { rel } = resolveInsideRoot(root, path);
-  if (rel === '') throw new SynapseError('invalid_input', 'path must name a file');
+  if (rel === '') throw new MindlyError('invalid_input', 'path must name a file');
   return assertSafeRelativePath(rel);
 }
 
@@ -266,7 +266,7 @@ export async function diffForFile(
   if (options.against !== undefined) {
     assertValidRevision(options.against);
     const commit = await resolveCommit(root, options.against);
-    if (!commit) throw new SynapseError('not_found', 'revision not found');
+    if (!commit) throw new MindlyError('not_found', 'revision not found');
     args.push(commit);
   } else if (options.staged) {
     args.push('--cached');
@@ -290,16 +290,16 @@ export async function fileAtRef(cwd: string, ref: string, path: string): Promise
   const rel = assertSafeRelativePath(path);
   const dir = absoluteDir(cwd);
   const commit = await resolveCommit(dir, ref);
-  if (!commit) throw new SynapseError('not_found', 'revision not found');
+  if (!commit) throw new MindlyError('not_found', 'revision not found');
   const spec = `${commit}:${rel}`;
   const type = await runGit(['cat-file', '-t', spec], { cwd: dir, okExitCodes: [1, 128] });
   if (type.exitCode !== 0) return null;
   if (type.stdout.trim() !== 'blob') {
-    throw new SynapseError('invalid_input', 'path does not name a file at that revision');
+    throw new MindlyError('invalid_input', 'path does not name a file at that revision');
   }
   const size = await runGit(['cat-file', '-s', spec], { cwd: dir });
   if (Number(size.stdout.trim()) > MAX_BLOB_BYTES) {
-    throw new SynapseError('invalid_input', 'file too large');
+    throw new MindlyError('invalid_input', 'file too large');
   }
   const res = await runGit(['cat-file', 'blob', spec], {
     cwd: dir,

@@ -1,4 +1,4 @@
-import { isSynapseError, systemClock, type Clock, type UserConfig } from '@synapse/core';
+import { isMindlyError, systemClock, type Clock, type UserConfig } from '@mindly/core';
 import {
   defaultExecFile,
   sendDesktop,
@@ -63,7 +63,7 @@ export function createNotifier(config: UserConfig['notify'], opts: NotifierOptio
         ? { channel: channel.type, status: 'sent' }
         : { channel: channel.type, status: 'skipped', reason: outcome.reason };
     } catch (err) {
-      const reason = isSynapseError(err) ? err.message : `${channel.type} failed`;
+      const reason = isMindlyError(err) ? err.message : `${channel.type} failed`;
       return { channel: channel.type, status: 'failed', reason };
     }
   };

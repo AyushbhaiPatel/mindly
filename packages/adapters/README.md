@@ -1,28 +1,28 @@
-# @synapse/adapters
+# @mindly/adapters
 
 Per-agent hook translators and installers for Claude Code, Codex and Cursor. Each adapter
-implements `AgentAdapter` from `@synapse/core` (`packages/core/src/hooks.ts`):
+implements `AgentAdapter` from `@mindly/core` (`packages/core/src/hooks.ts`):
 
 - `parse(nativeEvent, payload)` turns a native hook payload into a `NormalizedHookEvent`, or
   returns `null` (never throws) for unknown events or payloads missing the session id / cwd.
 - `render(event, result)` produces the exact stdout each agent expects. An empty result prints
   nothing. Exit code is always 0; denials use the agent's JSON fields, never exit code 2.
-- `planInstall` / `planUninstall` compute `InstallStep`s that merge Synapse's hooks and MCP
+- `planInstall` / `planUninstall` compute `InstallStep`s that merge Mindly's hooks and MCP
   server into the agent's config without touching user entries. `applyInstallSteps` writes them
   atomically, keeps a `<file>.<timestamp>.bak` backup, and refuses if a file changed after planning.
 
 Hooks run `<command> hook <agent> <NativeEvent>`; the MCP server is `<command> mcp --agent <agent>`.
 Each argv element is POSIX single-quoted when needed; argv containing CR, LF or NUL is rejected.
 Uninstall removes hook entries whose command contains `hook <agent> <event>` and the MCP server
-named `synapse`.
+named `mindly`.
 
 ## Agents
 
-| Agent       | Hook config                                                                    | MCP config                                        |
-| ----------- | ------------------------------------------------------------------------------ | ------------------------------------------------- |
-| Claude Code | `~/.claude/settings.json` or `<project>/.claude/settings.json`                 | `~/.claude.json` (user) or `<project>/.mcp.json`  |
-| Codex       | `$CODEX_HOME/hooks.json` (default `~/.codex`) or `<project>/.codex/hooks.json` | `config.toml` next to it, `[mcp_servers.synapse]` |
-| Cursor      | `~/.cursor/hooks.json` or `<project>/.cursor/hooks.json`                       | `mcp.json` next to it                             |
+| Agent       | Hook config                                                                    | MCP config                                       |
+| ----------- | ------------------------------------------------------------------------------ | ------------------------------------------------ |
+| Claude Code | `~/.claude/settings.json` or `<project>/.claude/settings.json`                 | `~/.claude.json` (user) or `<project>/.mcp.json` |
+| Codex       | `$CODEX_HOME/hooks.json` (default `~/.codex`) or `<project>/.codex/hooks.json` | `config.toml` next to it, `[mcp_servers.mindly]` |
+| Cursor      | `~/.cursor/hooks.json` or `<project>/.cursor/hooks.json`                       | `mcp.json` next to it                            |
 
 **Claude Code** events: `SessionStart`, `UserPromptSubmit`, `PreToolUse` / `PostToolUse` /
 `PostToolUseFailure` (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`), `Stop`, `SessionEnd`.
@@ -34,7 +34,7 @@ gets `additionalContext` because that would keep Claude working.
 `^(Bash|apply_patch)$`), `Stop`, `SessionEnd` (3 s timeout, the documented maximum). `apply_patch`
 envelopes are parsed into per-file edits (bounded to 2 MB input). Codex has no `ask` decision, so
 `ask` is turned into context. Hooks are written to `hooks.json`; `config.toml` gets only a
-marker-delimited `[mcp_servers.synapse]` block, leaving the rest of the file byte-for-byte intact.
+marker-delimited `[mcp_servers.mindly]` block, leaving the rest of the file byte-for-byte intact.
 Codex asks the user to review new non-managed hooks (`/hooks`) before they run, and loads
 project-level `.codex/` config only for trusted projects.
 

@@ -32,7 +32,7 @@ importers:
 
   packages/adapters:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
       smol-toml:
@@ -50,10 +50,10 @@ importers:
 
   packages/engine:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
-      '@synapse/store':
+      '@mindly/store':
         specifier: workspace:*
         version: link:../store
       zod:
@@ -62,13 +62,13 @@ importers:
 
   packages/git:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
 
   packages/llm:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
       zod:
@@ -77,13 +77,13 @@ importers:
 
   packages/notify:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
 
   packages/store:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
 

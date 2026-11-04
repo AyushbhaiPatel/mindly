@@ -1,4 +1,4 @@
-import type { FileEdit } from '@synapse/core';
+import type { FileEdit } from '@mindly/core';
 import { capText, MAX_EDITS, MAX_PATH_CHARS, MAX_TEXT_CHARS } from '../shared/payload.js';
 
 /** Inputs larger than this are truncated before parsing. */

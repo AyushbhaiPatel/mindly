@@ -9,7 +9,7 @@ import type {
   InstallStep,
   NormalizedHookEvent,
   RenderedHookOutput,
-} from '@synapse/core';
+} from '@mindly/core';
 import { hookCommand, MCP_SERVER_NAME, mcpLaunch } from '../shared/command.js';
 import { ensureRecord } from '../shared/config-files.js';
 import { detectAgent } from '../shared/detect.js';
@@ -37,7 +37,7 @@ import { buildTool } from '../shared/tools.js';
 
 const KIND = 'cursor';
 
-/** How a native Cursor event maps to Synapse. */
+/** How a native Cursor event maps to Mindly. */
 interface CursorEventSpec {
   event: HookEventName;
   /** How the tool section is built for tool events. */
@@ -47,7 +47,7 @@ interface CursorEventSpec {
   acceptsContext?: boolean;
 }
 
-/** Native Cursor hook events Synapse understands. */
+/** Native Cursor hook events Mindly understands. */
 export const CURSOR_EVENTS: Readonly<Record<string, CursorEventSpec>> = {
   sessionStart: { event: 'session_start', acceptsContext: true },
   beforeSubmitPrompt: { event: 'prompt' },
@@ -217,7 +217,7 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
   }));
   const hooks = await planJsonFile(
     paths.hooks,
-    install ? 'Register Synapse hooks for Cursor' : 'Remove Synapse hooks from Cursor',
+    install ? 'Register Mindly hooks for Cursor' : 'Remove Mindly hooks from Cursor',
     mode,
     (config) => {
       if (!install && !isRecord(config['hooks'])) return;
@@ -231,8 +231,8 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
   const mcp = await planJsonFile(
     paths.mcp,
     install
-      ? 'Register the Synapse MCP server for Cursor'
-      : 'Remove the Synapse MCP server from Cursor',
+      ? 'Register the Mindly MCP server for Cursor'
+      : 'Remove the Mindly MCP server from Cursor',
     mode,
     (config) => {
       if (install) {

@@ -1,4 +1,4 @@
-import type { Clock } from '@synapse/core';
+import type { Clock } from '@mindly/core';
 
 /** A given `dedupeKey` is sent at most once per this window. */
 export const DEDUPE_WINDOW_MS = 10 * 60 * 1000;

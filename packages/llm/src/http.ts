@@ -1,4 +1,4 @@
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 import type { FetchLike } from './types.js';
 
 /** Default per-attempt request timeout. */
@@ -37,12 +37,12 @@ function isRetryable(status: number): boolean {
 function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(new SynapseError('unavailable', 'request aborted'));
+      reject(new MindlyError('unavailable', 'request aborted'));
       return;
     }
     const onAbort = (): void => {
       clearTimeout(timer);
-      reject(new SynapseError('unavailable', 'request aborted'));
+      reject(new MindlyError('unavailable', 'request aborted'));
     };
     const timer = setTimeout(() => {
       signal?.removeEventListener('abort', onAbort);
@@ -58,8 +58,8 @@ export async function readCappedText(
   maxBytes: number,
   provider: string,
 ): Promise<string> {
-  const tooLarge = (): SynapseError =>
-    new SynapseError('unavailable', `${provider} response exceeded ${maxBytes} bytes`);
+  const tooLarge = (): MindlyError =>
+    new MindlyError('unavailable', `${provider} response exceeded ${maxBytes} bytes`);
   const declared = Number(res.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => undefined);
@@ -108,20 +108,20 @@ async function attemptOnce(req: PostJsonRequest, http: HttpSettings): Promise<At
     try {
       return { kind: 'ok', json: JSON.parse(text) as unknown };
     } catch {
-      throw new SynapseError('unavailable', `${req.provider} returned a non-JSON response`);
+      throw new MindlyError('unavailable', `${req.provider} returned a non-JSON response`);
     }
   } catch (err) {
     if (timedOut) {
-      throw new SynapseError(
+      throw new MindlyError(
         'timeout',
         `${req.provider} request timed out after ${http.timeoutMs}ms`,
       );
     }
-    if (err instanceof SynapseError) throw err;
+    if (err instanceof MindlyError) throw err;
     if (req.signal?.aborted)
-      throw new SynapseError('unavailable', `${req.provider} request aborted`);
+      throw new MindlyError('unavailable', `${req.provider} request aborted`);
     // Deliberately no `cause`: transport errors are not guaranteed to be free of request data.
-    throw new SynapseError('unavailable', `${req.provider} request failed`);
+    throw new MindlyError('unavailable', `${req.provider} request failed`);
   } finally {
     clearTimeout(timer);
     req.signal?.removeEventListener('abort', onExternalAbort);
@@ -131,7 +131,7 @@ async function attemptOnce(req: PostJsonRequest, http: HttpSettings): Promise<At
 /**
  * POSTs JSON and returns the parsed JSON response. Enforces a per-attempt timeout, a streaming
  * response size cap, refuses redirects and retries once on 429/5xx with jittered backoff.
- * Errors are `SynapseError`s whose messages never contain headers, bodies or URLs with secrets.
+ * Errors are `MindlyError`s whose messages never contain headers, bodies or URLs with secrets.
  */
 export async function postJson(req: PostJsonRequest, http: HttpSettings): Promise<unknown> {
   for (let attempt = 1; ; attempt++) {
@@ -142,7 +142,7 @@ export async function postJson(req: PostJsonRequest, http: HttpSettings): Promis
       await abortableSleep(delay, req.signal);
       continue;
     }
-    throw new SynapseError(
+    throw new MindlyError(
       'unavailable',
       `${req.provider} request failed with HTTP ${outcome.status}`,
       { details: { status: outcome.status } },

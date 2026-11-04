@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
-import type { InstallStep } from '@synapse/core';
-import { SynapseError } from '@synapse/core';
+import type { InstallStep } from '@mindly/core';
+import { MindlyError } from '@mindly/core';
 import { isRecord } from './payload.js';
 
 /** Default size cap for agent config files we read and rewrite. */
@@ -19,20 +19,20 @@ export async function readConfigText(
     info = await stat(path);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw new SynapseError('unavailable', `cannot read agent config: ${path}`, { cause: err });
+    throw new MindlyError('unavailable', `cannot read agent config: ${path}`, { cause: err });
   }
   if (!info.isFile()) {
-    throw new SynapseError('invalid_input', `agent config is not a regular file: ${path}`);
+    throw new MindlyError('invalid_input', `agent config is not a regular file: ${path}`);
   }
   if (info.size > maxBytes) {
-    throw new SynapseError('invalid_input', `agent config is too large to edit safely: ${path}`);
+    throw new MindlyError('invalid_input', `agent config is too large to edit safely: ${path}`);
   }
   return readFile(path, 'utf8');
 }
 
 /**
  * Parses an agent's JSON config. Missing or blank files yield `{}`; invalid JSON or a non-object
- * top level is refused with a `SynapseError` so we never overwrite a file we do not understand.
+ * top level is refused with a `MindlyError` so we never overwrite a file we do not understand.
  */
 export function parseJsonConfig(path: string, text: string | null): Record<string, unknown> {
   if (text === null || text.trim() === '') return {};
@@ -40,14 +40,14 @@ export function parseJsonConfig(path: string, text: string | null): Record<strin
   try {
     value = JSON.parse(text.replace(/^\uFEFF/, ''));
   } catch (cause) {
-    throw new SynapseError(
+    throw new MindlyError(
       'invalid_input',
       `${path} is not valid JSON; fix or remove it before running the installer`,
       { cause },
     );
   }
   if (!isRecord(value)) {
-    throw new SynapseError('invalid_input', `${path} must contain a JSON object`);
+    throw new MindlyError('invalid_input', `${path} must contain a JSON object`);
   }
   return value;
 }
@@ -86,7 +86,7 @@ export function ensureRecord(
     return created;
   }
   if (!isRecord(existing)) {
-    throw new SynapseError('invalid_input', `"${key}" in ${path} must be an object`);
+    throw new MindlyError('invalid_input', `"${key}" in ${path} must be an object`);
   }
   return existing;
 }

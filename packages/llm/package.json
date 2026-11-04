@@ -1,13 +1,13 @@
 {
-  "name": "@synapse/llm",
+  "name": "@mindly/llm",
   "version": "0.1.0",
   "private": true,
-  "description": "Optional, fail-soft model providers (Ollama, Anthropic, OpenAI) for Synapse.",
+  "description": "Optional, fail-soft model providers (Ollama, Anthropic, OpenAI) for Mindly.",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {
-      "@synapse/source": "./src/index.ts",
+      "@mindly/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
@@ -19,7 +19,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@synapse/core": "workspace:*",
+    "@mindly/core": "workspace:*",
     "zod": "4.6.7"
   }
 }

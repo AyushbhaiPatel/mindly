@@ -1,7 +1,7 @@
 /**
- * `@synapse/git`: safe git invocation, side-effect-free work-tree capture, shadow merge, check
+ * `@mindly/git`: safe git invocation, side-effect-free work-tree capture, shadow merge, check
  * runner, snapshot refs and deterministic code analysis (exports, imports, import graph, hunk
- * hashes). Depends only on `@synapse/core` and Node built-ins.
+ * hashes). Depends only on `@mindly/core` and Node built-ins.
  *
  * Every git call goes through `runGit`: `execFile` with an argument array (never a shell), a
  * minimal environment, hooks/fsmonitor/network protocols disabled, a timeout and an output cap.

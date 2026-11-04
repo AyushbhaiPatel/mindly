@@ -7,18 +7,18 @@ import {
   resolveInsideRoot,
   sanitizeLine,
   sha256,
-  SynapseError,
+  MindlyError,
   type Contract,
   type ContractKind,
   type ContractSpec,
   type ContractState,
   type MemorySource,
   type Session,
-} from '@synapse/core';
+} from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
 import { readBounded } from '../memory/service.js';
-import type { Synapse } from '../synapse.js';
+import type { Mindly } from '../mindly.js';
 import { attachService, guarded, liveSessions, safeProjectPath } from './shared.js';
 
 /*
@@ -210,14 +210,14 @@ export class ContractService {
     let approvedHash: string | null = null;
     if (kind === 'command') {
       if (by.type !== 'user') {
-        throw new SynapseError('forbidden', 'only the user can create command contracts');
+        throw new MindlyError('forbidden', 'only the user can create command contracts');
       }
       approvedHash = commandHash(clean.argv ?? []);
     } else {
       const resolved = resolveInsideRoot(project.root, clean.path ?? '');
       if (resolved.rel === '') throw invalidInput('contract path must be a file in the project');
       if (isDeniedPath(resolved.rel, this.k.config.redaction.denyPaths)) {
-        throw new SynapseError('forbidden', 'contract path is on the deny-list');
+        throw new MindlyError('forbidden', 'contract path is on the deny-list');
       }
       clean.path = resolved.rel;
     }
@@ -445,13 +445,13 @@ function hasDotPath(doc: unknown, key: string): boolean {
 }
 
 /** Feature module: re-evaluates contracts bound to changed files. */
-export const contractsModule = (synapse: Synapse): void => {
+export const contractsModule = (mindly: Mindly): void => {
   const service = attachService(
-    synapse,
+    mindly,
     'contracts',
-    new ContractService(synapse.kernel, synapse.telepathy),
+    new ContractService(mindly.kernel, mindly.telepathy),
   );
-  synapse.bus.on('files.changed', 'contracts', async (p) => {
+  mindly.bus.on('files.changed', 'contracts', async (p) => {
     await service.onFilesChanged(p);
   });
 };

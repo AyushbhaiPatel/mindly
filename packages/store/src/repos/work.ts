@@ -16,7 +16,7 @@ import {
   type Task,
   type TaskPlanStep,
   type TaskStatus,
-} from '@synapse/core';
+} from '@mindly/core';
 import {
   json,
   limit,

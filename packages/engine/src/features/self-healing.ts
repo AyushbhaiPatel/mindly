@@ -1,9 +1,9 @@
 import { statSync } from 'node:fs';
-import { sha256, type MemoryEvidence, type Session } from '@synapse/core';
+import { sha256, type MemoryEvidence, type Session } from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
 import { normalizeBlock, readBounded, type MemoryService } from '../memory/service.js';
-import type { Synapse } from '../synapse.js';
+import type { Mindly } from '../mindly.js';
 import {
   attachService,
   guarded,
@@ -191,13 +191,13 @@ type FileState =
   { kind: 'present'; content: string } | { kind: 'missing' } | { kind: 'unreadable' };
 
 /** Feature module: re-verifies memory evidence on `files.changed`. */
-export const selfHealingModule = (synapse: Synapse): void => {
+export const selfHealingModule = (mindly: Mindly): void => {
   const service = attachService(
-    synapse,
+    mindly,
     'self-healing',
-    new SelfHealingService(synapse.kernel, synapse.memory, synapse.telepathy),
+    new SelfHealingService(mindly.kernel, mindly.memory, mindly.telepathy),
   );
-  synapse.bus.on('files.changed', 'self-healing', async (p) => {
+  mindly.bus.on('files.changed', 'self-healing', async (p) => {
     await service.onFilesChanged(p);
   });
 };

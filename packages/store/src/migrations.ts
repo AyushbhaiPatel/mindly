@@ -17,7 +17,7 @@ import {
   SOURCE_TYPES,
   TASK_STATUSES,
   TRUST_LEVELS,
-} from '@synapse/core';
+} from '@mindly/core';
 
 /** `col IN ('a','b')` from a closed enum tuple (values are compile-time constants, not input). */
 function oneOf(col: string, values: readonly string[]): string {

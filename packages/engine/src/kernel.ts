@@ -1,5 +1,5 @@
-import type { Clock, Logger, Session, UserConfig } from '@synapse/core';
-import type { Store } from '@synapse/store';
+import type { Clock, Logger, Session, UserConfig } from '@mindly/core';
+import type { Store } from '@mindly/store';
 import type { Ports } from './ports.js';
 
 /** Timing constants shared by services. */

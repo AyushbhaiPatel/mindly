@@ -1,23 +1,22 @@
 import { parse, stringify } from 'smol-toml';
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 import { isRecord } from '../shared/payload.js';
 
 /*
- * Minimal, comment-preserving edits to Codex's `config.toml`. Synapse owns exactly one table,
- * `[mcp_servers.synapse]`, written inside marker comments. Everything else in the file is kept
+ * Minimal, comment-preserving edits to Codex's `config.toml`. Mindly owns exactly one table,
+ * `[mcp_servers.mindly]`, written inside marker comments. Everything else in the file is kept
  * byte-for-byte; the result is re-parsed before it is returned.
  */
 
-export const TOML_BLOCK_BEGIN =
-  '# >>> synapse: managed MCP server (edit with `synapse install`) >>>';
-export const TOML_BLOCK_END = '# <<< synapse <<<';
+export const TOML_BLOCK_BEGIN = '# >>> mindly: managed MCP server (edit with `mindly install`) >>>';
+export const TOML_BLOCK_END = '# <<< mindly <<<';
 
-/** Parses TOML, refusing invalid documents with a `SynapseError`. */
+/** Parses TOML, refusing invalid documents with a `MindlyError`. */
 export function parseToml(path: string, text: string): Record<string, unknown> {
   try {
     return parse(text) as Record<string, unknown>;
   } catch (cause) {
-    throw new SynapseError(
+    throw new MindlyError(
       'invalid_input',
       `${path} is not valid TOML; fix it before running the installer`,
       { cause },
@@ -46,9 +45,9 @@ function removeMarkedBlock(path: string, lines: string[]): string[] {
     out.push(line);
   }
   if (inside) {
-    throw new SynapseError(
+    throw new MindlyError(
       'invalid_input',
-      `${path} has an unterminated Synapse block; remove it by hand`,
+      `${path} has an unterminated Mindly block; remove it by hand`,
     );
   }
   return out;
@@ -90,7 +89,7 @@ function trimTrailingBlank(lines: string[]): string[] {
 }
 
 /**
- * Returns `text` with Synapse's MCP server table removed and, when `server` is given, re-added
+ * Returns `text` with Mindly's MCP server table removed and, when `server` is given, re-added
  * as a marked block at the end of the file.
  */
 export function upsertMcpServerToml(
@@ -105,9 +104,9 @@ export function upsertMcpServerToml(
   if (hasServer(parseToml(path, lines.join('\n')), name)) {
     lines = removeTable(lines, `mcp_servers.${name}`);
     if (hasServer(parseToml(path, lines.join('\n')), name)) {
-      throw new SynapseError(
+      throw new MindlyError(
         'invalid_input',
-        `${path} defines mcp_servers.${name} in a form Synapse cannot edit; remove it by hand`,
+        `${path} defines mcp_servers.${name} in a form Mindly cannot edit; remove it by hand`,
       );
     }
   }
@@ -123,7 +122,7 @@ export function upsertMcpServerToml(
   const doc = parseToml(path, result);
   const ok = server === null ? !hasServer(doc, name) : hasServer(doc, name);
   if (!ok) {
-    throw new SynapseError(
+    throw new MindlyError(
       'invalid_input',
       `could not update mcp_servers.${name} in ${path} safely`,
     );

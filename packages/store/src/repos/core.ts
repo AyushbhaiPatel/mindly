@@ -6,8 +6,8 @@ import {
   type Project,
   type Session,
   type SessionStatus,
-  type SynapseEvent,
-} from '@synapse/core';
+  type MindlyEvent,
+} from '@mindly/core';
 import { json, limit, num, numOrNull, str, strOrNull, toJson, type Db, type Row } from '../db.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -230,7 +230,7 @@ export class SessionRepo {
 // Events (append-only)
 // ---------------------------------------------------------------------------------------------
 
-function toEvent(r: Row): SynapseEvent {
+function toEvent(r: Row): MindlyEvent {
   return {
     seq: num(r, 'seq'),
     id: str(r, 'id'),
@@ -269,7 +269,7 @@ export class EventRepo {
     type: EventType;
     payload: Record<string, unknown>;
     id?: string;
-  }): SynapseEvent {
+  }): MindlyEvent {
     const now = this.clock.now();
     const id = input.id ?? uuidv7(now);
     this.db
@@ -278,15 +278,15 @@ export class EventRepo {
          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
       )
       .run(id, input.projectId, input.sessionId, input.type, toJson(input.payload), now);
-    return this.getById(id) as SynapseEvent;
+    return this.getById(id) as MindlyEvent;
   }
 
-  getById(id: string): SynapseEvent | null {
+  getById(id: string): MindlyEvent | null {
     const r = this.db.prepare('SELECT * FROM events WHERE id = ?').get(id) as Row | undefined;
     return r ? toEvent(r) : null;
   }
 
-  query(projectId: string, q: EventQuery = {}): SynapseEvent[] {
+  query(projectId: string, q: EventQuery = {}): MindlyEvent[] {
     const where: string[] = ['project_id = ?'];
     const params: (string | number)[] = [projectId];
     if (q.afterSeq !== undefined) {

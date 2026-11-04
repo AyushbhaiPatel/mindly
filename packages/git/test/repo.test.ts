@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isSynapseError } from '@synapse/core';
+import { isMindlyError } from '@mindly/core';
 import {
   captureWorktreeCommit,
   changedFiles,
@@ -25,7 +25,7 @@ describe('repository info', () => {
     expect(await isGitRepo(plain)).toBe(false);
     expect(await isGitRepo(join(plain, 'missing'))).toBe(false);
     await expect(findRepoRoot(plain)).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'not_found'),
+      isMindlyError(e, 'not_found'),
     );
   });
 
@@ -87,20 +87,20 @@ describe('repository info', () => {
     expect(diff).toContain('+two');
     expect(await diffForFile(root, join(root, 'src/a.ts'), { staged: true })).toBe('');
     await expect(diffForFile(root, '../outside.txt')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'path_outside_project'),
+      isMindlyError(e, 'path_outside_project'),
     );
     commitAll(root, 'two');
     expect(await fileAtRef(root, first, 'src/a.ts')).toBe('one\n');
     expect(await fileAtRef(root, 'HEAD', 'src/a.ts')).toBe('two\n');
     expect(await fileAtRef(root, 'HEAD', 'src/missing.ts')).toBeNull();
     await expect(fileAtRef(root, 'no-such-branch', 'src/a.ts')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'not_found'),
+      isMindlyError(e, 'not_found'),
     );
     await expect(fileAtRef(root, '-x', 'src/a.ts')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
     await expect(fileAtRef(root, 'HEAD', '../etc/passwd')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
   });
 });
@@ -139,7 +139,7 @@ describe('captureWorktreeCommit', () => {
     expect(tree.sort()).toEqual(['.gitignore', 'a.txt', 'src/new.ts', 'staged.txt']);
     expect(git(root, 'show', `${captured.commit}:a.txt`)).toBe('a modified\n');
     expect(git(root, 'log', '-1', '--format=%an <%ae>', captured.commit).trim()).toBe(
-      'Synapse <synapse@localhost.invalid>',
+      'Mindly <mindly@localhost.invalid>',
     );
 
     // Deterministic: same state, same commit.

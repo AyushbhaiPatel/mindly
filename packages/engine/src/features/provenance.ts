@@ -5,14 +5,14 @@ import {
   redactText,
   resolveInsideRoot,
   sanitizeLine,
-  SynapseError,
+  MindlyError,
   type MemoryKind,
   type Trust,
-} from '@synapse/core';
+} from '@mindly/core';
 import { sessionLabel } from '../coordination/work.js';
 import type { Kernel } from '../kernel.js';
 import { readBounded } from '../memory/service.js';
-import type { Synapse } from '../synapse.js';
+import type { Mindly } from '../mindly.js';
 import { attachService } from './shared.js';
 
 /** One recorded agent edit that introduced the line. */
@@ -36,7 +36,7 @@ export interface ProvenanceMemory {
   evidenceValid: boolean;
 }
 
-/** Answer to `synapse why file:line`. */
+/** Answer to `mindly why file:line`. */
 export interface ProvenanceResult {
   path: string;
   line: number;
@@ -60,7 +60,7 @@ export class ProvenanceService {
     const resolved = resolveInsideRoot(projectRoot, file);
     if (resolved.rel === '') throw invalidInput('path must be a file in the project');
     if (isDeniedPath(resolved.rel, this.k.config.redaction.denyPaths)) {
-      throw new SynapseError('forbidden', 'path is on the deny-list');
+      throw new MindlyError('forbidden', 'path is on the deny-list');
     }
     const content = readBounded(resolved.abs);
     if (content === null) throw notFound('file', resolved.rel);
@@ -118,6 +118,6 @@ export class ProvenanceService {
 }
 
 /** Feature module: attaches the provenance service (no bus handlers). */
-export const provenanceModule = (synapse: Synapse): void => {
-  attachService(synapse, 'provenance', new ProvenanceService(synapse.kernel));
+export const provenanceModule = (mindly: Mindly): void => {
+  attachService(mindly, 'provenance', new ProvenanceService(mindly.kernel));
 };

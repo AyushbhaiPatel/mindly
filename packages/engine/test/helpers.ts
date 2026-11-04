@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import type { Clock, HookEventName, NormalizedHookEvent } from '@synapse/core';
-import { nullGit, Synapse, type GitPort } from '../src/index.js';
+import type { Clock, HookEventName, NormalizedHookEvent } from '@mindly/core';
+import { nullGit, Mindly, type GitPort } from '../src/index.js';
 
 export class FakeClock implements Clock {
   constructor(public t = 1_750_000_000_000) {}
@@ -34,8 +34,8 @@ export function setup() {
     'export function login(user: string) {\n  return { role: "admin" };\n}\n',
   );
   const clock = new FakeClock();
-  const synapse = Synapse.open({ inMemory: true, clock, ports: { git: fakeGit } });
-  return { root, clock, synapse };
+  const mindly = Mindly.open({ inMemory: true, clock, ports: { git: fakeGit } });
+  return { root, clock, mindly };
 }
 
 export function event(

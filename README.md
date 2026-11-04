@@ -1,8 +1,8 @@
-# Synapse
+# Mindly
 
 **One shared brain for every coding agent you run.**
 
-Synapse keeps Claude Code, Codex, Cursor and any MCP-capable agent in sync: what the project knows,
+Mindly keeps Claude Code, Codex, Cursor and any MCP-capable agent in sync: what the project knows,
 what each agent is doing right now, and what just changed that the others need to know. It runs
 entirely on your machine. No account, no server, no telemetry.
 
@@ -12,7 +12,7 @@ entirely on your machine. No account, no server, no telemetry.
 
 Running several agents in parallel saves time until they step on each other: one renames an API
 while another builds against the old shape, you repeat "we use pnpm" to every new session, and
-when one agent hits its usage limit you re-explain the whole task to the next. Synapse removes
+when one agent hits its usage limit you re-explain the whole task to the next. Mindly removes
 that overhead.
 
 ## What it does
@@ -44,7 +44,7 @@ that overhead.
 **Insight**
 
 - **Mission Control** – a live local dashboard of every agent, task, intent and conflict.
-- **Code provenance** – `synapse why src/auth.ts:42` shows which agent wrote a line and why.
+- **Code provenance** – `mindly why src/auth.ts:42` shows which agent wrote a line and why.
 - **Context X-Ray** – see exactly what context an agent received, and what it missed.
 - **Cross-agent review** – one agent reviews another's diff automatically.
 - **A/B replay** – rerun a task with a different agent from the same commit and compare.
@@ -57,24 +57,24 @@ that overhead.
 Requires Node.js 22.13 or newer and git.
 
 ```bash
-npx synapse-agents init
+npx mindly-agents init
 ```
 
 `init` detects installed agents, shows the exact hook and MCP configuration it will add, asks for
-confirmation, and initialises local storage in `~/.synapse`. Then open Claude Code and Codex in the
+confirmation, and initialises local storage in `~/.mindly`. Then open Claude Code and Codex in the
 same project as usual.
 
 ```bash
-synapse status          # agents, tasks and conflicts for this project
-synapse dashboard       # open Mission Control
-synapse why <file>:<n>  # provenance for a line
-synapse standup         # what happened since yesterday
+mindly status          # agents, tasks and conflicts for this project
+mindly dashboard       # open Mission Control
+mindly why <file>:<n>  # provenance for a line
+mindly standup         # what happened since yesterday
 ```
 
 ## Security and privacy
 
-Everything stays in `~/.synapse` on your machine. Memory is always treated as data, never as
-instructions. Secrets are redacted before storage. A freshly cloned repository cannot make Synapse
+Everything stays in `~/.mindly` on your machine. Memory is always treated as data, never as
+instructions. Secrets are redacted before storage. A freshly cloned repository cannot make Mindly
 run commands until you explicitly trust it. Read the full [security model](docs/security.md).
 
 ## Documentation

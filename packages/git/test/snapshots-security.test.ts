@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isSynapseError } from '@synapse/core';
+import { isMindlyError } from '@mindly/core';
 import {
   captureWorktreeCommit,
   changedFiles,
@@ -23,13 +23,13 @@ describe('snapshots', () => {
     const statusBefore = git(root, 'status', '--porcelain');
 
     const snap = await createSnapshotRef(root, root, 'snap-1');
-    expect(snap.ref).toBe('refs/synapse/snapshots/snap-1');
+    expect(snap.ref).toBe('refs/mindly/snapshots/snap-1');
     expect(git(root, 'rev-parse', snap.ref).trim()).toBe(snap.commit);
     expect(git(root, 'status', '--porcelain')).toBe(statusBefore);
     expect(git(root, 'branch', '--list').trim()).toBe('* main');
 
     await expect(createSnapshotRef(root, root, 'snap-1')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'conflict'),
+      isMindlyError(e, 'conflict'),
     );
     await createSnapshotRef(root, root, 'snap-0');
     expect((await listSnapshotRefs(root)).map((s) => s.id)).toEqual(['snap-0', 'snap-1']);
@@ -52,24 +52,24 @@ describe('snapshots', () => {
     write(root, 'a.txt', 'changed\n');
     await createSnapshotRef(root, root, 's1');
     await expect(restoreSnapshotToBranch(root, 's1', 'main')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'conflict'),
+      isMindlyError(e, 'conflict'),
     );
     expect(git(root, 'rev-parse', 'main').trim()).toBe(mainBefore);
     await expect(restoreSnapshotToBranch(root, 's1', '-f')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
     await expect(restoreSnapshotToBranch(root, 's1', 'a..b')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
     await expect(restoreSnapshotToBranch(root, 'missing', 'x')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'not_found'),
+      isMindlyError(e, 'not_found'),
     );
     await expect(createSnapshotRef(root, root, '../escape')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
     const other = makeRepo();
     await expect(createSnapshotRef(root, other, 'foreign')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
   });
 });

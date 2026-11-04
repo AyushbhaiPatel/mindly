@@ -9,8 +9,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, resolve, sep } from 'node:path';
-import type { InstallStep } from '@synapse/core';
-import { SynapseError } from '@synapse/core';
+import type { InstallStep } from '@mindly/core';
+import { MindlyError } from '@mindly/core';
 
 /** Result of applying one install step. */
 export interface AppliedStep {
@@ -83,15 +83,15 @@ export function applyInstallSteps(
   const applied: AppliedStep[] = [];
   for (const step of steps) {
     if (!isAbsolute(step.file) || step.file.includes('\0')) {
-      throw new SynapseError('invalid_input', 'install step path must be absolute');
+      throw new MindlyError('invalid_input', 'install step path must be absolute');
     }
     const file = resolve(step.file);
     if (file.endsWith(sep))
-      throw new SynapseError('invalid_input', 'install step path is a directory');
+      throw new MindlyError('invalid_input', 'install step path is a directory');
     const exists = existsSync(file);
     const current = exists ? readFileSync(file, 'utf8') : null;
     if (current !== step.previous) {
-      throw new SynapseError(
+      throw new MindlyError(
         'conflict',
         `${file} changed since the install plan was made; re-run the command`,
       );

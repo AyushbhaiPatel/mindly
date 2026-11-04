@@ -1,5 +1,5 @@
 {
-  "name": "@synapse/notify",
+  "name": "@mindly/notify",
   "version": "0.1.0",
   "private": true,
   "description": "Opt-in pager channels (desktop, ntfy, webhook) with minimal, redacted payloads.",
@@ -7,7 +7,7 @@
   "type": "module",
   "exports": {
     ".": {
-      "@synapse/source": "./src/index.ts",
+      "@mindly/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
@@ -19,6 +19,6 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@synapse/core": "workspace:*"
+    "@mindly/core": "workspace:*"
   }
 }

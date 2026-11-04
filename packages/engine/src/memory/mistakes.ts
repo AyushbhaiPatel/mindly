@@ -1,11 +1,11 @@
-import { fingerprint, redactText, sanitizeLine, type Memory, type Session } from '@synapse/core';
+import { fingerprint, redactText, sanitizeLine, type Memory, type Session } from '@mindly/core';
 import type { Kernel } from '../kernel.js';
 import type { MemoryService } from './service.js';
 
 /*
  * Mistake memory: failed approaches are remembered and surfaced before an agent repeats them.
  * Today the automatic signal is a failing shell command; agents can also record mistakes
- * explicitly through MCP (`synapse_record_mistake`).
+ * explicitly through MCP (`mindly_record_mistake`).
  */
 
 /**

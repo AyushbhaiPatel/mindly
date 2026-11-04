@@ -2,8 +2,8 @@ import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'n
 import { dirname, join } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import { describe, expect, it } from 'vitest';
-import type { AgentAdapter, InstallOptions } from '@synapse/core';
-import { isSynapseError } from '@synapse/core';
+import type { AgentAdapter, InstallOptions } from '@mindly/core';
+import { isMindlyError } from '@mindly/core';
 import {
   applyInstallSteps,
   createClaudeCodeAdapter,
@@ -14,7 +14,7 @@ import {
 } from '../src/index.js';
 import { must, tempDir } from './helpers.js';
 
-const COMMAND = ['/opt/my tools/synapse', '--profile', "it's"];
+const COMMAND = ['/opt/my tools/mindly', '--profile', "it's"];
 const claude = createClaudeCodeAdapter({ env: {} });
 const codex = createCodexAdapter({ env: {} });
 const cursor = createCursorAdapter({ env: {} });
@@ -74,7 +74,7 @@ describe('claude-code install', () => {
       hooks: [
         {
           type: 'command',
-          command: `'/opt/my tools/synapse' --profile 'it'\\''s' hook claude-code PreToolUse`,
+          command: `'/opt/my tools/mindly' --profile 'it'\\''s' hook claude-code PreToolUse`,
           timeout: 10,
         },
       ],
@@ -95,9 +95,9 @@ describe('claude-code install', () => {
     expect(c['numStartups']).toBe(3);
     expect(c['mcpServers']).toEqual({
       other: { command: 'x' },
-      synapse: {
+      mindly: {
         type: 'stdio',
-        command: '/opt/my tools/synapse',
+        command: '/opt/my tools/mindly',
         args: ['--profile', "it's", 'mcp', '--agent', 'claude-code'],
         env: {},
       },
@@ -113,7 +113,7 @@ describe('claude-code install', () => {
     expect(readFileSync(settings, 'utf8')).toBe(before);
   });
 
-  it('uninstall removes only Synapse entries', async () => {
+  it('uninstall removes only Mindly entries', async () => {
     const home = tempDir();
     const settings = join(home, '.claude', 'settings.json');
     write(settings, JSON.stringify({ hooks: { PreToolUse: [USER_HOOK] } }));
@@ -127,7 +127,7 @@ describe('claude-code install', () => {
     expect(await claude.planUninstall(opts(home))).toEqual([]);
   });
 
-  it('keeps user hooks that share a matcher group with Synapse', async () => {
+  it('keeps user hooks that share a matcher group with Mindly', async () => {
     const home = tempDir();
     const settings = join(home, '.claude', 'settings.json');
     await install(claude, opts(home));
@@ -160,24 +160,24 @@ describe('claude-code install', () => {
     const home = tempDir();
     write(join(home, '.claude', 'settings.json'), '{ "hooks": ');
     await expect(claude.planInstall(opts(home))).rejects.toSatisfy((e) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
     write(join(home, '.claude', 'settings.json'), '[1,2]');
     await expect(claude.planInstall(opts(home))).rejects.toSatisfy((e) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
     write(join(home, '.claude', 'settings.json'), '{"hooks": {"Stop": "bad"}}');
     await expect(claude.planInstall(opts(home))).rejects.toSatisfy((e) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
   });
 
   it('rejects argv containing newlines or NUL', async () => {
     const home = tempDir();
-    for (const bad of [['/bin/synapse\nrm -rf ~'], ['/bin/syn\0apse'], [], ['']]) {
+    for (const bad of [['/bin/mindly\nrm -rf ~'], ['/bin/syn\0apse'], [], ['']]) {
       await expect(
         claude.planInstall({ command: bad, homeDir: home, projectRoot: null }),
-      ).rejects.toSatisfy((e) => isSynapseError(e, 'invalid_input'));
+      ).rejects.toSatisfy((e) => isMindlyError(e, 'invalid_input'));
     }
   });
 });
@@ -206,8 +206,8 @@ describe('codex install', () => {
     expect(toml.startsWith(userToml.trimEnd())).toBe(true);
     expect(toml).toContain('command = "docs-mcp" # keep me');
     const doc = parseToml(toml) as Record<string, Record<string, unknown>>;
-    expect(doc['mcp_servers']?.['synapse']).toEqual({
-      command: '/opt/my tools/synapse',
+    expect(doc['mcp_servers']?.['mindly']).toEqual({
+      command: '/opt/my tools/mindly',
       args: ['--profile', "it's", 'mcp', '--agent', 'codex'],
     });
     expect(doc['profiles']).toEqual({ fast: { model: 'gpt-5-mini' } });
@@ -225,17 +225,17 @@ describe('codex install', () => {
     expect(await codex.planUninstall(opts(home))).toEqual([]);
   });
 
-  it('replaces an unmarked synapse server table', async () => {
+  it('replaces an unmarked mindly server table', async () => {
     const home = tempDir();
     const file = join(home, '.codex', 'config.toml');
     write(
       file,
-      '[mcp_servers.synapse]\ncommand = "old"\n\n[mcp_servers.synapse.env]\nA = "1"\n\n[x]\ny = 1\n',
+      '[mcp_servers.mindly]\ncommand = "old"\n\n[mcp_servers.mindly.env]\nA = "1"\n\n[x]\ny = 1\n',
     );
     await install(codex, opts(home));
     const doc = parseToml(readFileSync(file, 'utf8')) as Record<string, Record<string, unknown>>;
-    expect((doc['mcp_servers']?.['synapse'] as Record<string, unknown>)['command']).toBe(
-      '/opt/my tools/synapse',
+    expect((doc['mcp_servers']?.['mindly'] as Record<string, unknown>)['command']).toBe(
+      '/opt/my tools/mindly',
     );
     expect(doc['x']).toEqual({ y: 1 });
   });
@@ -256,11 +256,11 @@ describe('codex install', () => {
     const file = join(home, '.codex', 'config.toml');
     write(file, 'model = "unterminated\n');
     await expect(codex.planInstall(opts(home))).rejects.toSatisfy((e) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
-    write(file, 'mcp_servers = { synapse = { command = "x" } }\n');
+    write(file, 'mcp_servers = { mindly = { command = "x" } }\n');
     await expect(codex.planInstall(opts(home))).rejects.toSatisfy((e) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
   });
 });
@@ -280,14 +280,14 @@ describe('cursor install', () => {
     const h = hooks['hooks'] as Record<string, { command: string }[]>;
     expect(h['afterFileEdit']).toEqual([
       { command: './format.sh' },
-      { command: `'/opt/my tools/synapse' --profile 'it'\\''s' hook cursor afterFileEdit` },
+      { command: `'/opt/my tools/mindly' --profile 'it'\\''s' hook cursor afterFileEdit` },
     ]);
     expect(h['postToolUse']).toBeUndefined();
     expect(
-      (readJson(join(dir, 'mcp.json'))['mcpServers'] as Record<string, unknown>)['synapse'],
+      (readJson(join(dir, 'mcp.json'))['mcpServers'] as Record<string, unknown>)['mindly'],
     ).toEqual({
       type: 'stdio',
-      command: '/opt/my tools/synapse',
+      command: '/opt/my tools/mindly',
       args: ['--profile', "it's", 'mcp', '--agent', 'cursor'],
     });
 
@@ -297,10 +297,10 @@ describe('cursor install', () => {
     expect(readJson(join(dir, 'mcp.json'))).toEqual(userMcp);
   });
 
-  it('leaves Synapse hooks of other agent kinds alone', async () => {
+  it('leaves Mindly hooks of other agent kinds alone', async () => {
     const home = tempDir();
     const file = join(home, '.cursor', 'hooks.json');
-    const foreign = { version: 1, hooks: { stop: [{ command: 'synapse hook generic stop' }] } };
+    const foreign = { version: 1, hooks: { stop: [{ command: 'mindly hook generic stop' }] } };
     write(file, JSON.stringify(foreign));
     await install(cursor, opts(home));
     applyInstallSteps(await cursor.planUninstall(opts(home)));

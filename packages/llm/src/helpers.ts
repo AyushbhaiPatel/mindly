@@ -1,4 +1,4 @@
-import { sanitizeForContext, sanitizeLine, truncate } from '@synapse/core';
+import { sanitizeForContext, sanitizeLine, truncate } from '@mindly/core';
 import { z } from 'zod';
 import type { LlmProvider } from './types.js';
 

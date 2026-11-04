@@ -3,7 +3,7 @@ import type {
   HookResult,
   NormalizedHookEvent,
   RenderedHookOutput,
-} from '@synapse/core';
+} from '@mindly/core';
 import { capText } from './payload.js';
 
 /** Builds an event with every optional section empty. */
@@ -75,5 +75,5 @@ export function userMessageText(result: HookResult): string | null {
 export function reasonText(result: HookResult): string {
   return result.reason !== null && result.reason.trim() !== ''
     ? capText(result.reason, MAX_NOTICE_CHARS)
-    : 'Blocked by a Synapse project rule.';
+    : 'Blocked by a Mindly project rule.';
 }

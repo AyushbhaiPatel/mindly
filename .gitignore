@@ -7,6 +7,6 @@ coverage/
 .env.*
 !.env.example
 *.log
-.synapse-dev/
+.mindly-dev/
 .turbo/
 .claude/

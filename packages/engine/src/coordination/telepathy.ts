@@ -5,7 +5,7 @@ import {
   type Delivery,
   type DeliveryKind,
   type Session,
-} from '@synapse/core';
+} from '@mindly/core';
 import { DELIVERY_TTL_MS, LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
 
 export type Recipients =

@@ -1,12 +1,12 @@
-# @synapse/llm
+# @mindly/llm
 
-Optional model access for Synapse. Every feature that uses a model has a deterministic fallback,
-so this package **fails soft**: providers throw typed `SynapseError`s, and the high-level helpers
+Optional model access for Mindly. Every feature that uses a model has a deterministic fallback,
+so this package **fails soft**: providers throw typed `MindlyError`s, and the high-level helpers
 return `null` instead of throwing.
 
 ## Configuration
 
-Read from `UserConfig.llm` (`~/.synapse/config.json`):
+Read from `UserConfig.llm` (`~/.mindly/config.json`):
 
 ```json
 { "llm": { "provider": "ollama", "model": "llama3.2", "baseUrl": "http://127.0.0.1:11434" } }
@@ -20,7 +20,7 @@ Read from `UserConfig.llm` (`~/.synapse/config.json`):
 | `openai`    | `https://api.openai.com/v1/chat/completions` | `OPENAI_API_KEY`             | `gpt-4.1-mini`     |
 
 ```ts
-import { createProvider, createLlmHelpers } from '@synapse/llm';
+import { createProvider, createLlmHelpers } from '@mindly/llm';
 
 const llm = createLlmHelpers(createProvider(config.llm));
 const verdict = await llm.classifyCorrection('no, use pnpm not npm'); // null => use fallback
@@ -40,5 +40,5 @@ prompts for a strict JSON object, validates it with zod and returns `null` on an
 - **Transport limits**: 20 s timeout per attempt, 1 MB response cap enforced while streaming,
   redirects refused, one retry on 429/5xx with jitter.
 - **Responses are untrusted**: output is redacted and passed through `sanitizeForContext`
-  (control and invisible characters stripped, Synapse delimiters neutralised, length capped).
+  (control and invisible characters stripped, Mindly delimiters neutralised, length capped).
   Untrusted input is embedded as escaped JSON inside a `<data>` block that it cannot close.
