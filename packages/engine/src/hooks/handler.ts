@@ -1,3 +1,4 @@
+import { isAbsolute, resolve } from 'node:path';
 import {
   EMPTY_HOOK_RESULT,
   isDeniedPath,
@@ -151,16 +152,20 @@ export class HookHandler {
   }
 
   /** Resolves agent-reported paths to project-relative paths, dropping anything outside/denied. */
-  private projectPaths(
+  /**
+   * Resolves agent-reported paths to paths relative to the agent's own working tree (which may be
+   * a linked worktree of the project), dropping anything outside it or on the deny-list.
+   */
+  private async projectPaths(
     project: ProjectContext,
     cwd: string,
     paths: readonly string[],
-  ): { rel: string; abs: string }[] {
+  ): Promise<{ rel: string; abs: string }[]> {
+    const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
     const out: { rel: string; abs: string }[] = [];
     for (const p of paths.slice(0, 50)) {
-      const abs = tryResolveInsideRoot(cwd, p);
-      if (!abs) continue;
-      const inProject = tryResolveInsideRoot(project.root, abs.abs);
+      if (typeof p !== 'string' || p.length === 0 || p.length > 4096) continue;
+      const inProject = tryResolveInsideRoot(treeRoot, isAbsolute(p) ? p : resolve(cwd, p));
       if (!inProject || inProject.rel === '') continue;
       if (isDeniedPath(inProject.rel, this.k.config.redaction.denyPaths)) continue;
       out.push({ rel: inProject.rel, abs: inProject.abs });
@@ -176,10 +181,12 @@ export class HookHandler {
     const tool = evt.tool;
     if (!tool) return EMPTY_HOOK_RESULT;
     if (tool.writes && tool.edits.length > 0) {
-      const paths = this.projectPaths(
-        project,
-        evt.cwd,
-        tool.edits.map((e) => e.path),
+      const paths = (
+        await this.projectPaths(
+          project,
+          evt.cwd,
+          tool.edits.map((e) => e.path),
+        )
       ).map((p) => p.rel);
       if (paths.length === 0) return EMPTY_HOOK_RESULT;
       const overlap = this.d.intents.noteEditing(session, paths);
@@ -238,7 +245,7 @@ export class HookHandler {
     })[0];
     const changed: ChangedFile[] = [];
     for (const edit of tool.edits.slice(0, 50)) {
-      const [resolved] = this.projectPaths(project, evt.cwd, [edit.path]);
+      const [resolved] = await this.projectPaths(project, evt.cwd, [edit.path]);
       if (!resolved) continue;
       const hashes = this.k.ports.git.hunkHashes(edit.addedText);
       this.k.store.fileChanges.record({
