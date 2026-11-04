@@ -11,6 +11,7 @@ import {
   Status,
   Time,
   cx,
+  statusTone,
 } from '../components/ui';
 import { duration, splitList } from '../format';
 import {
@@ -98,16 +99,24 @@ export function RunsView() {
                     <li key={r.id}>
                       <button
                         type="button"
-                        className={cx('run-row', r.id === selectedId && 'is-open')}
+                        className={cx(
+                          'run-row',
+                          'row',
+                          `status-${statusTone(r.status)}`,
+                          r.id === selectedId && 'is-open',
+                        )}
                         aria-current={r.id === selectedId}
                         onClick={() => navigate('runs', { run: r.id })}
                       >
-                        <span className="run-row-top">
+                        <span className="row-top">
+                          <span className="dot" aria-hidden="true" />
+                          <span className="row-title run-title">{humanizeAgentText(r.title)}</span>
+                        </span>
+                        <span className="row-sub run-row-top">
                           <Status value={r.status} label={runStatusWords(r.status)} />
-                          <span className="tag">{runKindWords(r.kind)}</span>
+                          <span>{runKindWords(r.kind)}</span>
                           <Time ms={r.createdAt} />
                         </span>
-                        <span className="run-title">{humanizeAgentText(r.title)}</span>
                       </button>
                     </li>
                   ))}

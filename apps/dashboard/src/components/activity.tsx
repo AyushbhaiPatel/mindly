@@ -26,11 +26,12 @@ export function ActivityStream({ events, limit = 60 }: { events: MindlyEvent[]; 
     <ol className="log" aria-label="Activity, newest first">
       {rows.map(({ e, line }) => (
         <li key={e.seq} className={cx('log-row', `tone-${line.tone}`)}>
-          <span className="log-time">
-            <Time ms={e.createdAt} />
-          </span>
+          <span className="dot" aria-hidden="true" />
           <span className="log-text">
             {line.actor && <span className="log-actor">{line.actor}</span>} {line.text}
+          </span>
+          <span className="log-time">
+            <Time ms={e.createdAt} />
           </span>
         </li>
       ))}

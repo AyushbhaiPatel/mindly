@@ -1,5 +1,16 @@
 import { useEffect, useState } from 'react';
-import { Empty, Loaded, Mono, Panel, Segmented, Status, Tag, Time, cx } from '../components/ui';
+import {
+  Empty,
+  Loaded,
+  Mono,
+  Panel,
+  Segmented,
+  Status,
+  Tag,
+  Time,
+  cx,
+  statusTone,
+} from '../components/ui';
 import { useApp, useResource } from '../state';
 import type { Handoff, Intent, Task, TaskStatus } from '../types';
 import {
@@ -24,10 +35,8 @@ export function CoordinationView() {
   return (
     <div className="view">
       <TaskBoard />
-      <div className="grid-2">
-        <IntentsPanel />
-        <DeliveriesPanel />
-      </div>
+      <IntentsPanel />
+      <DeliveriesPanel />
       <HandoffsPanel />
     </div>
   );
@@ -214,22 +223,28 @@ function DeliveriesPanel() {
                   : 'No agent has seen an update yet.'}
             </Empty>
           ) : (
-            <ul className="deliveries">
+            <ul className="deliveries list">
               {shown.map((d) => (
-                <li key={d.id}>
-                  <div className="row-line">
+                <li key={d.id} className={cx('row', `status-${statusTone(d.status)}`)}>
+                  <div className="row-top">
+                    <span className="dot" aria-hidden="true" />
+                    <span className="row-title">{humanizeAgentText(d.title)}</span>
+                    <span className="row-when">
+                      <Time ms={d.createdAt} />
+                    </span>
+                  </div>
+                  <div className="row-sub row-line">
                     <Status value={d.status} label={deliveryStatusWords(d.status)} />
                     <Tag>{deliveryKindWords(d.kind)}</Tag>
-                    <span className="grow">{humanizeAgentText(d.title)}</span>
+                    <span className="small">
+                      from{' '}
+                      {d.sourceSessionId ? sessionName(sessions.get(d.sourceSessionId)) : 'Mindly'}{' '}
+                      to{' '}
+                      {d.targetSessionId
+                        ? sessionName(sessions.get(d.targetSessionId))
+                        : `the next ${productName(d.targetAgentKind)} session`}
+                    </span>
                   </div>
-                  <p className="muted small">
-                    from{' '}
-                    {d.sourceSessionId ? sessionName(sessions.get(d.sourceSessionId)) : 'Mindly'} to{' '}
-                    {d.targetSessionId
-                      ? sessionName(sessions.get(d.targetSessionId))
-                      : `the next ${productName(d.targetAgentKind)} session`}{' '}
-                    · <Time ms={d.createdAt} />
-                  </p>
                 </li>
               ))}
             </ul>
@@ -253,7 +268,7 @@ function HandoffsPanel() {
               its usage limit), its progress is packaged here for the next agent.
             </Empty>
           ) : (
-            <ul className="handoffs">
+            <ul className="handoffs list">
               {hs.map((h) => (
                 <HandoffCard key={h.id} h={h} />
               ))}
@@ -272,14 +287,19 @@ function HandoffCard({ h }: { h: Handoff }) {
     ? sessionName(sessions.get(h.claimedBySessionId))
     : undefined;
   return (
-    <li className="handoff">
-      <div className="row-line">
+    <li className={cx('handoff', 'row', `status-${statusTone(h.status)}`)}>
+      <div className="row-top">
+        <span className="dot" aria-hidden="true" />
+        <span className="row-title handoff-title">{humanizeAgentText(h.summary)}</span>
+        <span className="row-when">
+          <Time ms={h.createdAt} />
+        </span>
+      </div>
+      <div className="row-sub row-line">
         <Status value={h.status} label={handoffStatusWords(h, claimedBy)} />
         <Tag tone={h.reason === 'manual' ? 'neutral' : 'warn'}>{handoffReasonWords(h.reason)}</Tag>
-        <span className="grow handoff-title">{humanizeAgentText(h.summary)}</span>
-        <Time ms={h.createdAt} />
       </div>
-      <p className="muted small">
+      <p className="row-sub small">
         from {sessionName(sessions.get(h.fromSessionId))} to{' '}
         {h.toAgentKind ? productName(h.toAgentKind) : 'any agent'}
         {p.branch && (
@@ -295,7 +315,7 @@ function HandoffCard({ h }: { h: Handoff }) {
           </>
         )}
       </p>
-      <div className="handoff-grid">
+      <div className="handoff-grid row-text">
         <div>
           <h4 className="sub">Goal</h4>
           <p>{p.goal}</p>
@@ -332,7 +352,7 @@ function HandoffCard({ h }: { h: Handoff }) {
         )}
       </div>
       {h.status === 'pending' && (
-        <p className="help">
+        <p className="help row-stack">
           The next {h.toAgentKind ? productName(h.toAgentKind) : 'agent'} session started in this
           project picks this up automatically.
         </p>

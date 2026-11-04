@@ -50,31 +50,20 @@ export function OverviewView() {
   return (
     <Loaded res={res}>
       {(ov) => (
-        <div className="overview">
+        <div className="overview view">
           <SummaryBar ov={ov} />
           <NeedsYou ov={ov} onChange={res.reload} />
-          <div className="grid-main">
-            <div className="col">
-              <Panel title="Agents" count={ov.sessions.length} noun="agent">
-                <AgentCards sessions={ov.sessions} tasks={ov.tasks} intents={ov.intents} />
-              </Panel>
-              <Panel
-                title="Open conflicts"
-                count={ov.conflicts.length}
-                noun="conflict"
-                help="conflict"
-              >
-                <ConflictList conflicts={ov.conflicts} onChange={res.reload} />
-              </Panel>
-            </div>
-            <div className="col">
-              <ShadowMergePanel ov={ov} onQueued={res.reload} />
-              <MemoryCounts ov={ov} />
-              <Panel title="Activity" className="panel-activity">
-                <ActivityStream events={events} />
-              </Panel>
-            </div>
-          </div>
+          <Panel title="Agents" count={ov.sessions.length} noun="agent">
+            <AgentCards sessions={ov.sessions} tasks={ov.tasks} intents={ov.intents} />
+          </Panel>
+          <Panel title="Open conflicts" count={ov.conflicts.length} noun="conflict" help="conflict">
+            <ConflictList conflicts={ov.conflicts} onChange={res.reload} />
+          </Panel>
+          <ShadowMergePanel ov={ov} onQueued={res.reload} />
+          <MemoryCounts ov={ov} />
+          <Panel title="Activity" className="panel-activity">
+            <ActivityStream events={events} />
+          </Panel>
         </div>
       )}
     </Loaded>
@@ -98,13 +87,8 @@ function SummaryBar({ ov }: { ov: Overview }) {
   const quiet = isAllQuiet(input);
   return (
     <p className={cx('summary-bar', input.needsYou > 0 && 'summary-attn')} role="status">
-      <span className="summary-project">{ov.project.name}</span>
-      <span aria-hidden="true" className="summary-sep">
-        {'·'}
-      </span>
-      <span>
-        {quiet ? 'All quiet. No agents are running and nothing needs you.' : summaryLine(input)}
-      </span>
+      <span className="visually-hidden">{ov.project.name}: </span>
+      {quiet ? 'All quiet. No agents are running and nothing needs you.' : summaryLine(input)}
     </p>
   );
 }
@@ -264,12 +248,10 @@ function NeedsYou({ ov, onChange }: { ov: Overview; onChange(): void }) {
           up here.
         </p>
       ) : (
-        <ul className="needs-items">
+        <ul className="needs-items list">
           {items.map((i) => (
-            <li key={i.key} className={cx('needs-item', `needs-${i.tone}`)}>
-              <span className="needs-mark" aria-hidden="true">
-                {i.tone === 'bad' ? '✗' : '!'}
-              </span>
+            <li key={i.key} className={cx('needs-item', 'row', `needs-${i.tone}`)}>
+              <span className="dot" aria-hidden="true" />
               <p className="needs-text">{i.text}</p>
               <div className="needs-actions">{i.actions}</div>
             </li>
@@ -280,17 +262,18 @@ function NeedsYou({ ov, onChange }: { ov: Overview; onChange(): void }) {
   );
 }
 
-const AGENT_MARK: Record<string, string> = {
-  'claude-code': 'CC',
-  codex: 'CX',
-  cursor: 'CU',
-};
+const KNOWN_AGENT_KINDS = new Set(['claude-code', 'codex', 'cursor']);
 
+/**
+ * The agent's stable colour dot (Claude Code violet, Codex blue, Cursor pink, others grey).
+ * Decorative: the agent's name is always written next to it.
+ */
 export function AgentMark({ kind }: { kind: string }) {
   return (
-    <span className={cx('agent-mark', `agent-${kind}`)} aria-hidden="true">
-      {AGENT_MARK[kind] ?? kind.slice(0, 2).toUpperCase()}
-    </span>
+    <span
+      className={cx('dot', 'agent-dot', `agent-${KNOWN_AGENT_KINDS.has(kind) ? kind : 'other'}`)}
+      aria-hidden="true"
+    />
   );
 }
 
@@ -312,7 +295,7 @@ function AgentCards({
     );
   let helpShown = false;
   return (
-    <ul className="agents">
+    <ul className="agents list">
       {sessions.map((s) => {
         const task = tasks.find((t) => t.id === s.currentTaskId);
         const files = [
@@ -322,59 +305,49 @@ function AgentCards({
         const showHelp = files.length > 0 && !helpShown;
         if (showHelp) helpShown = true;
         return (
-          <li key={s.id} className={cx('agent', `agent-status-${s.status}`)}>
-            <div className="agent-head">
+          <li key={s.id} className={cx('agent', 'row', `agent-status-${s.status}`)}>
+            <div className="row-top">
               <AgentMark kind={s.agentKind} />
-              <div className="agent-id">
-                <span className="agent-kind">
-                  {productName(s.agentKind)}
-                  <span className="agent-sep" aria-hidden="true">
-                    {' · '}
-                  </span>
-                  <ShortId id={s.id} label="session id" />
-                </span>
-                {s.label && <span className="agent-label">{s.label}</span>}
-              </div>
-              <Status value={s.status} label={sessionStatusWords(s.status)} />
+              <span className="row-title">{productName(s.agentKind)}</span>
+              {s.label && <span className="agent-label">{s.label}</span>}
+              <ShortId id={s.id} label="session id" />
+              <span className="row-when">
+                <Status value={s.status} label={sessionStatusWords(s.status)} />
+              </span>
             </div>
-            <ul className="agent-lines">
-              <li>
-                {task ? (
-                  <>
-                    <span className="muted">working on</span> {task.title}
-                    {task.plan.length > 0 && (
-                      <span className="muted">
-                        {' '}
-                        ({done} of {count(task.plan.length, 'step')} done)
-                      </span>
-                    )}
-                  </>
-                ) : (
-                  <span className="muted">no task recorded</span>
-                )}
-              </li>
-              <li className="file-list">
-                {files.length === 0 ? (
-                  <span className="muted">not editing anything right now</span>
-                ) : (
-                  <>
-                    <span className="muted">editing</span>
-                    {files.map((f) => (
-                      <Mono key={f}>{f}</Mono>
-                    ))}
-                    {showHelp && <Help term="intent" />}
-                  </>
-                )}
-              </li>
-              <li>
-                <span className="muted">on branch</span> <Mono>{s.branch ?? 'no branch'}</Mono>
-              </li>
-              <li>
-                <span className="muted">
-                  <Time ms={s.lastSeenAt} prefix="last active" />
-                </span>
-              </li>
-            </ul>
+            <p className="row-sub">
+              {task ? (
+                <>
+                  Working on <span className="agent-task">{task.title}</span>
+                  {task.plan.length > 0 && (
+                    <span className="muted">
+                      {' '}
+                      ({done} of {count(task.plan.length, 'step')} done)
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="muted">no task recorded</span>
+              )}
+            </p>
+            <p className="row-text file-list">
+              {files.length === 0 ? (
+                <span>not editing anything right now</span>
+              ) : (
+                <>
+                  <span>editing</span>
+                  {files.map((f) => (
+                    <Mono key={f}>{f}</Mono>
+                  ))}
+                  {showHelp && <Help term="intent" />}
+                </>
+              )}
+            </p>
+            <p className="row-stack">
+              on branch <Mono>{s.branch ?? 'no branch'}</Mono>
+              <span aria-hidden="true">{' · '}</span>
+              <Time ms={s.lastSeenAt} prefix="last active" />
+            </p>
           </li>
         );
       })}
@@ -398,27 +371,30 @@ export function ConflictList({ conflicts, onChange }: { conflicts: Conflict[]; o
       { critical: 0, warning: 1, info: 2 }[b.severity],
   );
   return (
-    <ul className="conflicts" id="conflicts-list" tabIndex={-1}>
+    <ul className="conflicts list" id="conflicts-list" tabIndex={-1}>
       {sorted.map((c) => (
         <li
           key={c.id}
           id={`conflict-${c.id}`}
           tabIndex={-1}
-          className={cx('conflict', `sev-row-${c.severity}`)}
+          className={cx('conflict', 'row', `sev-row-${c.severity}`)}
         >
-          <div className="conflict-head">
-            <SeverityBadge severity={c.severity} />
-            <span className="conflict-title">
+          <div className="row-top conflict-head">
+            <span className="dot" aria-hidden="true" />
+            <span className="row-title conflict-title">
               <CodeText text={conflictHeadline(c, sessions)} />
             </span>
-            {c.status !== 'open' && (
-              <Status value={c.status} label={conflictStatusWords(c.status)} />
-            )}
+            <span className="row-when">
+              <SeverityBadge severity={c.severity} />
+              {c.status !== 'open' && (
+                <Status value={c.status} label={conflictStatusWords(c.status)} />
+              )}
+            </span>
           </div>
-          <p className="conflict-detail">
+          <p className="row-text conflict-detail">
             <CodeText text={humanizeAgentText(c.detail)} />
           </p>
-          <div className="conflict-meta">
+          <div className="row-stack conflict-meta">
             {c.paths.map((p) => (
               <Mono key={p}>{p}</Mono>
             ))}
@@ -432,14 +408,14 @@ export function ConflictList({ conflicts, onChange }: { conflicts: Conflict[]; o
             </span>
             <ShortId id={c.id} label="conflict id" />
           </div>
-          <div className="btn-row">
+          <div className="btn-row row-actions">
             {CONFLICT_ACTIONS.filter(
               (a) => !(a === 'acknowledged' && c.status === 'acknowledged'),
             ).map((a) => (
               <button
                 key={a}
                 type="button"
-                className={cx('btn btn-small', a === 'resolved' && 'btn-primary')}
+                className="btn btn-small"
                 disabled={busy !== null}
                 aria-label={`${conflictActionWords(a)}: conflict ${shortId(c.id)}`}
                 onClick={() =>
@@ -528,11 +504,12 @@ function MemoryCounts({ ov }: { ov: Overview }) {
             <li key={t}>
               <button
                 type="button"
-                className="trust-count-btn"
+                className={cx('trust-count-btn', `trust-row-${t}`)}
                 onClick={() => navigate('memory', { trust: t })}
               >
-                <span className="trust-count">{ov.memoryCounts[t] ?? 0}</span>
+                <span className="dot" aria-hidden="true" />
                 <TrustBadge trust={t} />
+                <span className="trust-count">{ov.memoryCounts[t] ?? 0}</span>
               </button>
             </li>
           ))}

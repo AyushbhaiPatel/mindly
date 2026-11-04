@@ -103,6 +103,7 @@ export function App() {
   if (boot.state === 'loading') {
     return (
       <div className="splash" role="status">
+        <Sky />
         <Logo />
         <p>Connecting to the Mindly daemon…</p>
       </div>
@@ -111,8 +112,11 @@ export function App() {
   if (boot.state === 'unauth') {
     return (
       <main className="splash">
+        <Sky />
         <Logo />
-        <h1>Sign in from your terminal</h1>
+        <h1>
+          Sign in from your <em>terminal</em>
+        </h1>
         {boot.reason && <p className="splash-warn">{boot.reason}</p>}
         <p>Mission Control opens with a one-time link. In the project you want to watch, run:</p>
         <pre className="splash-cmd">mindly dashboard</pre>
@@ -126,8 +130,11 @@ export function App() {
   if (boot.state === 'error') {
     return (
       <main className="splash">
+        <Sky />
         <Logo />
-        <h1>Can’t reach the daemon</h1>
+        <h1>
+          Can’t reach the <em>daemon</em>
+        </h1>
         <p>{boot.message}</p>
         <p className="muted">
           Start it with <code className="mono">mindly daemon</code> or reopen with{' '}
@@ -142,8 +149,11 @@ export function App() {
   if (boot.projects.length === 0) {
     return (
       <main className="splash">
+        <Sky />
         <Logo />
-        <h1>No projects yet</h1>
+        <h1>
+          No projects <em>yet</em>
+        </h1>
         <p>
           Run <code className="mono">mindly init</code> inside a git repository, then start an agent
           there. It will show up here.
@@ -154,21 +164,54 @@ export function App() {
   return <Shell client={boot.client} liveFactory={boot.live} projects={boot.projects} />;
 }
 
+/** The product mark: a lowercase wordmark in Newsreader, like the portfolio's name mark. */
 function Logo() {
+  return <span className="logo">mindly</span>;
+}
+
+/**
+ * The portfolio's sky: a fixed, decorative layer (gradient, one wide glow, blurred cloud bands)
+ * behind every page. Purely visual, hidden from assistive technology.
+ */
+function Sky() {
   return (
-    <div className="logo" aria-label="Mindly">
-      <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
-        <path
-          d="M3 17h7l3-9 5 16 3-10 2 3h6"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.6"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-      <span>mindly</span>
+    <div className="sky" aria-hidden="true">
+      <i className="sky-glow" />
+      <i className="sky-band b1" />
+      <i className="sky-band b2" />
+      <i className="sky-band b3" />
     </div>
+  );
+}
+
+/** Page titles in Newsreader; the last word is set in italic, like the portfolio's name. */
+const TITLES: Record<TabKey, readonly [lead: string, accent: string]> = {
+  overview: ['Mission', 'Control'],
+  memory: ['', 'Memory'],
+  coordination: ['', 'Coordination'],
+  runs: ['', 'Runs'],
+  insight: ['', 'Insight'],
+  settings: ['Trust &', 'settings'],
+};
+
+function PageHead({ tab, project }: { tab: TabKey; project: Project }) {
+  const [lead, accent] = TITLES[tab];
+  return (
+    <header className="page-head">
+      <h1 className="page-title">
+        {lead ? `${lead} ` : ''}
+        <em>{accent}</em>
+      </h1>
+      <p className="page-role">
+        <span className="page-project">{project.name}</span>
+        <span aria-hidden="true" className="page-sep">
+          {'·'}
+        </span>
+        <code className="mono root-path" title={project.root}>
+          {project.root}
+        </code>
+      </p>
+    </header>
   );
 }
 
@@ -341,8 +384,9 @@ function Shell({
       >
         Skip to content
       </button>
+      <Sky />
       <header className="topbar">
-        <div className="topbar-row">
+        <div className="topbar-brand">
           <Logo />
           <span className="crumb-sep" aria-hidden="true">
             /
@@ -357,11 +401,18 @@ function Shell({
               ))}
             </select>
           </label>
-          <code className="mono root-path" title={project.root}>
-            {project.root}
-          </code>
-          <div className="topbar-spacer" />
-          {client.mock && <span className="tag tone-accent">mock data</span>}
+        </div>
+        <nav aria-label="Views" className="topbar-tabs">
+          <Tabs
+            tabs={TABS}
+            value={route.tab}
+            onChange={(k) => writeRoute(k, { p: projectId })}
+            label="Views"
+            idPrefix="view"
+          />
+        </nav>
+        <div className="topbar-status">
+          {client.mock && <span className="mock-tag">mock data</span>}
           <span className={cx('live-pill', `live-${liveStatus}`)} role="status" aria-live="polite">
             <span className="live-dot" aria-hidden="true" />
             {liveLabel[liveStatus]}
@@ -377,18 +428,10 @@ function Shell({
             aria-label={`Theme: ${theme}. Switch theme`}
             title="Switch theme"
           >
+            <span className="theme-glyph" aria-hidden="true" />
             {theme === 'system' ? 'auto' : theme}
           </button>
         </div>
-        <nav aria-label="Views" className="topbar-tabs">
-          <Tabs
-            tabs={TABS}
-            value={route.tab}
-            onChange={(k) => writeRoute(k, { p: projectId })}
-            label="Views"
-            idPrefix="view"
-          />
-        </nav>
       </header>
       <main
         id="view-panel"
@@ -397,6 +440,7 @@ function Shell({
         aria-labelledby={`view-tab-${route.tab}`}
         tabIndex={-1}
       >
+        <PageHead key={`${route.tab}:${projectId}`} tab={route.tab} project={project} />
         {route.tab === 'overview' && <OverviewView key={projectId} />}
         {route.tab === 'memory' && <MemoryView key={projectId} />}
         {route.tab === 'coordination' && <CoordinationView key={projectId} />}
@@ -407,6 +451,7 @@ function Shell({
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={cx('toast', `toast-${t.tone}`)} role="status">
+            <span className="dot" aria-hidden="true" />
             {t.text}
           </div>
         ))}

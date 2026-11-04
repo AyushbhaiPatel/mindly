@@ -165,41 +165,48 @@ export function MemoryView() {
                     : 'No memories yet. Agents suggest rules, decisions and known pitfalls as they work, and they appear here for you to approve. You can also add one with \u201cNew memory\u201d.'}
               </Empty>
             ) : (
-              <ul className="mem-list">
+              <ul className="mem-list list">
                 {list.map((m) => (
                   <li key={m.id}>
                     <button
                       type="button"
-                      className={cx('mem-row', m.id === openId && 'is-open')}
+                      className={cx(
+                        'mem-row',
+                        'row',
+                        `trust-row-${m.trust}`,
+                        m.id === openId && 'is-open',
+                      )}
                       onClick={() => setOpen(m.id)}
                     >
-                      <span className="mem-badges">
+                      <span className="row-top">
+                        <span className="dot" aria-hidden="true" />
+                        <span className="row-title mem-title">{m.title}</span>
+                        <span className="row-when">
+                          <Time ms={m.updatedAt} prefix="updated" />
+                        </span>
+                      </span>
+                      <span className="row-sub mem-badges">
                         <Tag>{memoryKindWords(m.kind)}</Tag>
                         <TrustBadge trust={m.trust} by={sourceWords(m.source, sessions)} />
+                        {m.pinned && (
+                          <span className="pin" title="Pinned: always given to every agent">
+                            always included
+                          </span>
+                        )}
+                        {m.enforce && (
+                          <span
+                            className="enforced"
+                            title="Enforced: Mindly may block an edit that clearly breaks this rule"
+                          >
+                            enforced
+                          </span>
+                        )}
                       </span>
-                      <span className="mem-main">
-                        <span className="mem-title">
-                          {m.pinned && (
-                            <span className="pin" title="Pinned: always given to every agent">
-                              always included
-                            </span>
-                          )}
-                          {m.title}
-                          {m.enforce && (
-                            <span
-                              className="enforced"
-                              title="Enforced: Mindly may block an edit that clearly breaks this rule"
-                            >
-                              enforced
-                            </span>
-                          )}
-                        </span>
-                        <span className="mem-body">{m.body}</span>
-                      </span>
-                      <span className="mem-side">
-                        <span className="muted">added by {sourceWords(m.source, sessions)}</span>
+                      <span className="row-text mem-body">{m.body}</span>
+                      <span className="row-stack mem-side">
+                        <span>added by {sourceWords(m.source, sessions)}</span>
                         {m.scope.branch && (
-                          <span className="muted">
+                          <span>
                             only on <Mono>{m.scope.branch}</Mono>
                           </span>
                         )}
@@ -208,9 +215,6 @@ export function MemoryView() {
                             {p}
                           </Mono>
                         ))}
-                        <span className="muted">
-                          <Time ms={m.updatedAt} prefix="updated" />
-                        </span>
                       </span>
                     </button>
                   </li>
