@@ -83,6 +83,52 @@ describe('init / uninstall', () => {
     expect(readFileSync(join(sb.home, '.codex', 'hooks.json'), 'utf8')).not.toContain('hook codex');
   });
 
+  it('writes MCP config for MCP-only clients and keeps other servers', async () => {
+    const sb = sandbox();
+    const geminiFile = join(sb.home, '.gemini', 'settings.json');
+    write(
+      sb.home,
+      join('.gemini', 'settings.json'),
+      '{\n  // mine\n  "theme": "GitHub",\n  "mcpServers": {\n    "other": { "command": "x" }\n  }\n}\n',
+    );
+    const r = await cli(sb, ['init', '--agents', 'windsurf,gemini', '--yes']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('no automatic capture');
+    expect(r.stdout).toContain('mindly_context');
+
+    const windsurf = json<{ mcpServers: Record<string, { command: string; args: string[] }> }>(
+      readFileSync(join(sb.home, '.codeium', 'windsurf', 'mcp_config.json'), 'utf8'),
+    );
+    expect(windsurf.mcpServers['mindly']?.args.slice(-3)).toEqual(['mcp', '--agent', 'windsurf']);
+    const gemini = readFileSync(geminiFile, 'utf8');
+    expect(gemini).toContain('// mine');
+    expect(gemini).toContain('"other": { "command": "x" }');
+    expect(gemini).toMatch(/"--agent",\s+"gemini"/);
+
+    const again = await cli(sb, ['init', '--agents', 'windsurf,gemini', '--yes']);
+    expect(again.stdout).toContain('already configured');
+
+    const doctor = await cli(sb, ['doctor', '--json']);
+    const checks = json<{ checks: { name: string; status: string }[] }>(doctor.stdout).checks;
+    expect(checks.find((c) => c.name === 'windsurf')?.status).toBe('ok');
+    expect(checks.find((c) => c.name === 'zed')).toBeUndefined();
+
+    const removed = await cli(sb, ['uninstall', '--yes']);
+    expect(removed.code).toBe(0);
+    expect(readFileSync(geminiFile, 'utf8')).not.toContain('mindly');
+    expect(readFileSync(geminiFile, 'utf8')).toContain('"other"');
+  });
+
+  it('lists supported agents with their integration level', async () => {
+    const sb = sandbox();
+    const r = await cli(sb, ['init', '--list-agents']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toMatch(/claude-code\s+hooks \+ MCP/);
+    expect(r.stdout).toMatch(/windsurf\s+MCP tools/);
+    expect(r.stdout).toContain('Claude Desktop (user scope only)');
+    expect(existsSync(join(sb.mindlyHome, 'mindly.db'))).toBe(false);
+  });
+
   it('rejects unknown agents as a usage error', async () => {
     const sb = sandbox();
     const r = await cli(sb, ['init', '--agents', 'vim']);

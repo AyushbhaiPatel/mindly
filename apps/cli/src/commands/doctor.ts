@@ -6,7 +6,8 @@ import { MIGRATIONS, schemaVersion, Store } from '@mindly/store';
 import { withProject } from '../context.js';
 import { clean, type Out } from '../util.js';
 import { runningDaemon } from './daemon.js';
-import { adaptersFor, installCommand, SUPPORTED_AGENTS, userHome } from './setup.js';
+import { McpClientAdapter } from '@mindly/adapters';
+import { adapterOf, adaptersFor, installCommand, SUPPORTED_AGENTS, userHome } from './setup.js';
 
 /** Result of one doctor check. */
 export interface Check {
@@ -59,6 +60,49 @@ function permissionChecks(paths: HomePaths): Check[] {
           detail: `readable by others: ${loose.slice(0, 5).join(', ')}${loose.length > 5 ? ', ...' : ''} (chmod 700 directories, 600 files)`,
         },
   ];
+}
+
+/**
+ * Doctor line for an MCP-only client, or null when it is neither installed nor configured (so
+ * the dozen catalog clients do not each add a "not installed" line).
+ */
+async function mcpClientCheck(
+  adapter: McpClientAdapter,
+  command: string[],
+  homeDir: string,
+  projectRoot: string | null,
+): Promise<Check | null> {
+  const name = adapter.kind;
+  try {
+    const scopes: (string | null)[] =
+      projectRoot !== null && adapter.supportsProjectScope ? [null, projectRoot] : [null];
+    let present = false;
+    for (const root of scopes) {
+      const steps = await adapter.planInstall({ command, projectRoot: root, homeDir });
+      if (steps.length === 0) {
+        const where = root === null ? '' : ' for this project';
+        return { name, status: 'ok', detail: `MCP server configured${where} (MCP tools only)` };
+      }
+      if (await adapter.isConfigured({ homeDir, projectRoot: root })) present = true;
+    }
+    if (present) {
+      return {
+        name,
+        status: 'warn',
+        detail: 'Mindly MCP entry points elsewhere (run mindly init --agents ' + name + ')',
+      };
+    }
+    if (await adapter.detect()) {
+      return {
+        name,
+        status: 'info',
+        detail: `installed, MCP not configured (optional: mindly init --agents ${name})`,
+      };
+    }
+    return null;
+  } catch (err) {
+    return { name, status: 'warn', detail: describeError(err) };
+  }
 }
 
 /** Runs every check. Never prints or returns secrets (only paths, versions and states). */
@@ -134,7 +178,12 @@ export async function runChecks(out: Out): Promise<Check[]> {
     projectRoot = null;
   }
   for (const kind of SUPPORTED_AGENTS) {
-    const adapter = adapters[kind];
+    const adapter = adapterOf(adapters, kind);
+    if (adapter instanceof McpClientAdapter) {
+      const check = await mcpClientCheck(adapter, command, userHome(env), projectRoot);
+      if (check !== null) checks.push(check);
+      continue;
+    }
     try {
       const detected = await adapter.detect();
       const plan = (root: string | null) =>

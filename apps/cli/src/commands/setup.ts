@@ -7,6 +7,11 @@ import {
   createClaudeCodeAdapter,
   createCodexAdapter,
   createCursorAdapter,
+  createMcpClientAdapters,
+  HOOK_AGENT_KINDS,
+  integrationOf,
+  MCP_CLIENTS,
+  McpClientAdapter,
 } from '@mindly/adapters';
 import {
   defaultUserConfig,
@@ -23,9 +28,16 @@ import { diffSummary } from '../diff.js';
 import { confirm, type CliIo } from '../io.js';
 import { splitList, UsageError, type Out } from '../util.js';
 
-/** Agents `mindly init` knows how to connect. */
-export const SUPPORTED_AGENTS = ['claude-code', 'codex', 'cursor'] as const;
-export type SupportedAgent = (typeof SUPPORTED_AGENTS)[number];
+/** Agents `mindly init` knows how to connect: hook agents first, then MCP-only clients. */
+export const SUPPORTED_AGENTS: readonly string[] = Object.freeze([
+  ...HOOK_AGENT_KINDS,
+  ...MCP_CLIENTS.map((c) => c.kind),
+]);
+/** An agent kind from {@link SUPPORTED_AGENTS}. */
+export type SupportedAgent = string;
+
+/** Suggestion printed for MCP-only clients (Mindly never edits their rule files). */
+export const MCP_ONLY_RULE = 'Call `mindly_context` at the start of each task';
 
 /** The user's home directory as seen by `io` (tests point `HOME` at a temp dir). */
 export function userHome(env: NodeJS.ProcessEnv): string {
@@ -40,7 +52,36 @@ export function adaptersFor(env: NodeJS.ProcessEnv): Record<SupportedAgent, Agen
     'claude-code': createClaudeCodeAdapter({ homeDir, env }),
     codex: createCodexAdapter({ homeDir, env }),
     cursor: createCursorAdapter({ homeDir, env }),
+    ...createMcpClientAdapters({ homeDir, env }),
   };
+}
+
+/** The adapter for a supported agent kind. */
+export function adapterOf(all: Record<SupportedAgent, AgentAdapter>, kind: string): AgentAdapter {
+  const adapter = Object.prototype.hasOwnProperty.call(all, kind) ? all[kind] : undefined;
+  if (adapter === undefined) throw new UsageError(`unknown agent "${kind}"`);
+  return adapter;
+}
+
+/** `mindly init --list-agents`: every supported agent with its integration level. */
+export function listAgents(out: Out): number {
+  const all = adaptersFor(out.io.env);
+  const s = out.style;
+  const width = Math.max(...SUPPORTED_AGENTS.map((k) => k.length)) + 2;
+  out.line(s.bold(`${'Agent'.padEnd(width)}Integration  Name`));
+  for (const kind of SUPPORTED_AGENTS) {
+    const adapter = adapterOf(all, kind);
+    const level = integrationOf(adapter) === 'mcp' ? 'MCP tools  ' : 'hooks + MCP';
+    const scope =
+      adapter instanceof McpClientAdapter && !adapter.supportsProjectScope
+        ? ' (user scope only)'
+        : '';
+    out.line(`${kind.padEnd(width)}${level}  ${adapter.displayName}${scope}`);
+  }
+  out.line();
+  out.line('hooks + MCP: automatic capture and context injection, plus Mindly tools.');
+  out.line('MCP tools: Mindly tools only; the agent must call them itself.');
+  return 0;
 }
 
 /** Parses `--agents a,b`. */
@@ -50,10 +91,12 @@ export function parseAgents(value: string | undefined): SupportedAgent[] | null 
   if (list.length === 0) throw new UsageError('--agents needs at least one agent');
   for (const a of list) {
     if (!(SUPPORTED_AGENTS as readonly string[]).includes(a)) {
-      throw new UsageError(`unknown agent "${a}" (supported: ${SUPPORTED_AGENTS.join(', ')})`);
+      throw new UsageError(
+        `unknown agent "${a}" (supported: ${SUPPORTED_AGENTS.join(', ')}; see mindly init --list-agents)`,
+      );
     }
   }
-  return [...new Set(list)] as SupportedAgent[];
+  return [...new Set(list)];
 }
 
 async function onPath(binary: string, env: NodeJS.ProcessEnv): Promise<string | null> {
@@ -149,29 +192,41 @@ interface SetupOptions {
   project?: boolean;
   yes?: boolean;
   dryRun?: boolean;
+  listAgents?: boolean;
 }
 
 /** `mindly init`. */
 export async function init(out: Out, o: SetupOptions): Promise<number> {
+  if (o.listAgents) return listAgents(out);
   const env = out.io.env;
   const all = adaptersFor(env);
+  const projectRoot = o.project ? await projectRootOf(out.io.cwd) : null;
   let agents = parseAgents(o.agents);
   if (agents === null) {
     agents = [];
-    for (const a of SUPPORTED_AGENTS) if (await all[a].detect()) agents.push(a);
+    for (const a of SUPPORTED_AGENTS) if (await adapterOf(all, a).detect()) agents.push(a);
     if (agents.length === 0) {
-      out.line('No supported agent (Claude Code, Codex, Cursor) was detected.');
+      out.line('No supported agent was detected.');
       out.line('Choose explicitly with: mindly init --agents claude-code,codex,cursor');
+      out.line('See every supported agent with: mindly init --list-agents');
     } else {
-      out.line(`Detected: ${agents.map((a) => all[a].displayName).join(', ')}`);
+      out.line(`Detected: ${agents.map((a) => adapterOf(all, a).displayName).join(', ')}`);
+    }
+    if (projectRoot !== null) {
+      const userOnly = agents.filter((a) => !supportsProject(adapterOf(all, a)));
+      if (userOnly.length > 0) {
+        out.line(
+          `Skipping ${userOnly.map((a) => adapterOf(all, a).displayName).join(', ')}: no project-level MCP config (run mindly init without --project).`,
+        );
+        agents = agents.filter((a) => !userOnly.includes(a));
+      }
     }
   }
   const command = await installCommand(env);
-  const projectRoot = o.project ? await projectRootOf(out.io.cwd) : null;
   const homeDir = userHome(env);
   const plans: AgentPlan[] = [];
   for (const agent of agents) {
-    const adapter = all[agent];
+    const adapter = adapterOf(all, agent);
     plans.push({
       agent,
       adapter,
@@ -210,28 +265,39 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
       'Codex: start Codex and run /hooks to review and approve the Mindly hooks; Codex does not run new hooks until you approve them.',
     );
   }
+  const mcpOnly = plans.filter((p) => integrationOf(p.adapter) === 'mcp');
+  if (mcpOnly.length > 0) out.line();
+  for (const p of mcpOnly) {
+    out.line(
+      `${p.adapter.displayName}: gets Mindly's MCP tools but no automatic capture; add "${MCP_ONLY_RULE}" to its rules/instructions file.`,
+    );
+  }
   if (agents.length > 0) {
     out.line('Restart running agent sessions so they pick up the hooks and the MCP server.');
   }
   return 0;
 }
 
+function supportsProject(adapter: AgentAdapter): boolean {
+  return !(adapter instanceof McpClientAdapter) || adapter.supportsProjectScope;
+}
+
 /** `mindly uninstall`: removes Mindly's hooks and MCP entries (data in `$MINDLY_HOME` is kept). */
 export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
   const env = out.io.env;
   const all = adaptersFor(env);
-  const agents = parseAgents(o.agents) ?? [...SUPPORTED_AGENTS];
+  const explicit = parseAgents(o.agents);
+  const agents = explicit ?? [...SUPPORTED_AGENTS];
   const command = await installCommand(env);
   const projectRoot = o.project ? await projectRootOf(out.io.cwd) : null;
   const homeDir = userHome(env);
   const plans: AgentPlan[] = [];
   for (const agent of agents) {
-    const adapter = all[agent];
-    plans.push({
-      agent,
-      adapter,
-      steps: await adapter.planUninstall({ command, projectRoot, homeDir }),
-    });
+    const adapter = adapterOf(all, agent);
+    const steps = await adapter.planUninstall({ command, projectRoot, homeDir });
+    // Without --agents, MCP-only clients with nothing to remove are not worth a line each.
+    if (explicit === null && steps.length === 0 && integrationOf(adapter) === 'mcp') continue;
+    plans.push({ agent, adapter, steps });
   }
   const total = printPlan(out, plans, 'nothing to remove');
   if (o.dryRun) {
