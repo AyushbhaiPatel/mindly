@@ -18,6 +18,8 @@ npx mindly-cli init
 
 </div>
 
+<p align="center"><img src="docs/assets/demo.svg" alt="Demo: Claude Code changes login() in src/auth.ts; before Codex edits src/dashboard.ts, which calls it, Mindly tells Codex about the change; mindly status and Mission Control show both agents and the open conflict." width="860"></p>
+
 ---
 
 ## The problem
