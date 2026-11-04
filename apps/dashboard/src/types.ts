@@ -83,6 +83,8 @@ export interface Overview {
     proposedRules: number;
     proposedMemories: number;
     criticalConflicts: number;
+    /** Open conflicts that are more than FYI (same rule as `conflictNeedsUser` in core). */
+    openConflicts: number;
     pendingHandoffs: number;
   };
   lastSeq: number;

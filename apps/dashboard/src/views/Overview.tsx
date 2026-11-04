@@ -103,7 +103,7 @@ export function OverviewView() {
 
 function needsTotal(ov: Overview): number {
   const n = ov.needsYou;
-  return n.proposedRules + n.proposedMemories + n.criticalConflicts + n.pendingHandoffs;
+  return n.proposedRules + n.proposedMemories + n.openConflicts + n.pendingHandoffs;
 }
 
 function Stats({ ov }: { ov: Overview }) {
@@ -146,11 +146,11 @@ function NeedsYou({
   const { busy, run } = useAction();
   const items: NeedItem[] = [];
 
-  for (const c of ov.conflicts.filter((x) => x.severity === 'critical' && x.status === 'open')) {
+  for (const c of ov.conflicts.filter((x) => x.status === 'open' && x.severity !== 'info')) {
     items.push({
       key: `c:${c.id}`,
       kind: 'conflict',
-      tone: 'bad',
+      tone: c.severity === 'critical' ? 'bad' : 'warn',
       text: <CodeText text={conflictHeadline(c, sessions)} />,
       action: (
         <button

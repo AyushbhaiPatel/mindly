@@ -423,8 +423,8 @@ function renderBar(scene) {
 
 function renderRows(scene, i) {
   let g = '';
-  // Centre the rows in the card (sized for the tallest scene), a little above the middle.
-  let y = bodyTop + 24 + Math.round(((CARD_H - BAR - bodyHeight(scene)) / 2) * 0.85);
+  // Rows start at the top of the card, like a real terminal; no floating block in the middle.
+  let y = bodyTop + 40;
   let n = 0;
   const delay = () => 0.35 + Math.min(n++, 14) * 0.16;
   for (const [kind, text] of scene.rows) {

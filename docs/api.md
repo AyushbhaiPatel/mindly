@@ -82,7 +82,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
   memoryCounts: Record<Trust, number>;
   pendingDeliveries: number;
   lastShadowMerge: Run | null;
-  needsYou: { proposedRules: number; proposedMemories: number; criticalConflicts: number; pendingHandoffs: number };
+  needsYou: { proposedRules: number; proposedMemories: number; criticalConflicts: number; openConflicts: number; pendingHandoffs: number };
   lastSeq: number;                // highest event seq, for the live feed
 }
 ```
