@@ -1,0 +1,28 @@
+{
+  "name": "@mindly/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Wires the Mindly engine with real git, model and pager ports and default modules.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@mindly/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@mindly/core": "workspace:*",
+    "@mindly/engine": "workspace:*",
+    "@mindly/git": "workspace:*",
+    "@mindly/llm": "workspace:*",
+    "@mindly/notify": "workspace:*"
+  }
+}
