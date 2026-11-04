@@ -1,0 +1,26 @@
+{
+  "name": "@synapse/adapters",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent adapters (Claude Code, Codex, Cursor): hook translation and config installers.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@synapse/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@synapse/core": "workspace:*",
+    "smol-toml": "1.9.1",
+    "zod": "4.1.12"
+  }
+}

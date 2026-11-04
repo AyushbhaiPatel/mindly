@@ -1,0 +1,21 @@
+{
+  "conversation_id": "6b1f0c2e-3a4d-4e5f-8a9b-0c1d2e3f4a5b",
+  "generation_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+  "model": "claude-sonnet-4.5",
+  "cursor_version": "2.1.0",
+  "workspace_roots": ["/Users/dev/shop"],
+  "user_email": "dev@example.com",
+  "transcript_path": null,
+  "hook_event_name": "afterFileEdit",
+  "file_path": "/Users/dev/shop/src/checkout.ts",
+  "edits": [
+    {
+      "old_string": "total: number;",
+      "new_string": "total: number;\n  discount: number;"
+    },
+    {
+      "old_string": "v1",
+      "new_string": "v2"
+    }
+  ]
+}
