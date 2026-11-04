@@ -1,0 +1,17 @@
+{
+  "theme": "GitHub",
+  "general": {
+    "vimMode": true
+  },
+  "mcpServers": {
+    "other": {
+      "command": "python",
+      "args": [
+        "-m",
+        "my_server"
+      ],
+      "timeout": 30000,
+      "trust": false
+    }
+  }
+}

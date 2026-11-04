@@ -1,0 +1,8 @@
+// User settings for windsurf
+{
+  /* servers used every day */
+  "mcpServers": {
+    // keep this one
+    "other": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": "${env:GITHUB_TOKEN}"}}, // trailing comment
+  },
+}

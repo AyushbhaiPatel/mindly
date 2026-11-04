@@ -1,0 +1,8 @@
+// User settings for opencode
+{
+  /* servers used every day */
+  "mcp": {
+    // keep this one
+    "other": {"type": "local", "command": ["npx", "-y", "@modelcontextprotocol/server-everything"], "enabled": true}, // trailing comment
+  },
+}

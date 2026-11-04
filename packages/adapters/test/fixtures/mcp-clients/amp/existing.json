@@ -1,0 +1,12 @@
+{
+  "amp.notifications.enabled": true,
+  "amp.mcpServers": {
+    "other": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    }
+  }
+}

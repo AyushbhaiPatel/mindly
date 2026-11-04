@@ -1,0 +1,8 @@
+// User settings for zed
+{
+  /* servers used every day */
+  "context_servers": {
+    // keep this one
+    "other": {"command": "some-command", "args": ["arg-1"], "env": {}}, // trailing comment
+  },
+}

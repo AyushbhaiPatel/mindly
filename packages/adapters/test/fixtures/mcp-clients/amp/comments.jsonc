@@ -1,0 +1,8 @@
+// User settings for amp
+{
+  /* servers used every day */
+  "amp.mcpServers": {
+    // keep this one
+    "other": {"command": "npx", "args": ["-y", "@playwright/mcp@latest"]}, // trailing comment
+  },
+}

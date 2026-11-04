@@ -68,13 +68,15 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
   // ---- setup ---------------------------------------------------------------------------------
   const setupOptions = (cmd: Command): Command =>
     cmd
-      .option('--agents <list>', 'comma-separated: claude-code,codex,cursor')
+      .option('--agents <list>', 'comma-separated, e.g. claude-code,codex,cursor,windsurf')
       .option('--project', 'configure this project only instead of user-wide')
       .option('-y, --yes', 'apply without asking')
       .option('--dry-run', 'show the changes without writing anything');
   setupOptions(
     program.command('init').description('Connect your agents to Mindly and initialise storage'),
-  ).action(act((o: object) => async (out) => (await import('./commands/setup.js')).init(out, o)));
+  )
+    .option('--list-agents', 'list supported agents and their integration level')
+    .action(act((o: object) => async (out) => (await import('./commands/setup.js')).init(out, o)));
   setupOptions(
     program.command('uninstall').description('Remove Mindly hooks and MCP entries from agents'),
   ).action(

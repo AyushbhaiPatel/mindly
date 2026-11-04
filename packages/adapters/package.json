@@ -2,7 +2,7 @@
   "name": "@mindly/adapters",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent adapters (Claude Code, Codex, Cursor): hook translation and config installers.",
+  "description": "Agent adapters (Claude Code, Codex, Cursor) and MCP-only client installers.",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@mindly/core": "workspace:*",
+    "jsonc-parser": "3.3.1",
     "smol-toml": "1.9.1",
     "zod": "4.6.7"
   }

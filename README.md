@@ -100,12 +100,46 @@ Use `--project` to set up only the current repository and `--dry-run` to preview
 agents as usual; there is nothing else to run. `mindly doctor` checks the setup and
 `mindly uninstall` removes it.
 
-| Agent          | Integration | Status                                           |
-| -------------- | ----------- | ------------------------------------------------ |
-| Claude Code    | hooks + MCP | tested end to end                                |
-| Codex CLI      | hooks + MCP | supported (approve the hooks once with `/hooks`) |
-| Cursor         | hooks + MCP | supported                                        |
-| Any MCP client | MCP tools   | supported                                        |
+| Agent                    | Integration | Status                                           |
+| ------------------------ | ----------- | ------------------------------------------------ |
+| Claude Code              | hooks + MCP | tested end to end                                |
+| Codex CLI                | hooks + MCP | supported (approve the hooks once with `/hooks`) |
+| Cursor                   | hooks + MCP | supported                                        |
+| Windsurf                 | MCP tools   | supported                                        |
+| Kiro                     | MCP tools   | supported                                        |
+| Gemini CLI               | MCP tools   | supported                                        |
+| VS Code (GitHub Copilot) | MCP tools   | supported                                        |
+| Cline                    | MCP tools   | supported                                        |
+| Roo Code                 | MCP tools   | supported                                        |
+| Claude Desktop           | MCP tools   | supported                                        |
+| OpenCode                 | MCP tools   | supported                                        |
+| Zed                      | MCP tools   | supported                                        |
+| Amp                      | MCP tools   | supported                                        |
+| Augment (Auggie CLI)     | MCP tools   | supported                                        |
+| LM Studio                | MCP tools   | supported                                        |
+| Any other MCP client     | MCP tools   | supported (manual config, below)                 |
+
+`mindly init --list-agents` prints the agent names to pass to `--agents` (for example
+`mindly init --agents windsurf,gemini`). Hook agents capture work and receive context
+automatically. MCP-only clients get Mindly's tools but no automatic capture, so add a line such as
+"Call `mindly_context` at the start of each task" to that agent's rules or instructions file.
+`init` edits only the `mindly` entry in each config file and keeps comments, other servers and
+formatting as they are.
+
+### Other MCP clients
+
+For a client not in the list, add a stdio server to its MCP config. Most use this shape (run
+`which mindly` for the absolute path if the client does not inherit your `PATH`):
+
+```json
+{
+  "mcpServers": {
+    "mindly": { "command": "mindly", "args": ["mcp", "--agent", "my-agent"] }
+  }
+}
+```
+
+`--agent` is a short lowercase name you choose; it labels the client in Mindly's status views.
 
 ## Features
 

@@ -1,0 +1,8 @@
+// User settings for gemini
+{
+  /* servers used every day */
+  "mcpServers": {
+    // keep this one
+    "other": {"command": "python", "args": ["-m", "my_server"], "timeout": 30000, "trust": false}, // trailing comment
+  },
+}

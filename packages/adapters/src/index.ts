@@ -2,6 +2,7 @@ import type { AgentAdapter } from '@mindly/core';
 import { claudeCodeAdapter } from './claude-code/index.js';
 import { codexAdapter } from './codex/index.js';
 import { cursorAdapter } from './cursor/index.js';
+import { createMcpClientAdapters } from './mcp-clients/adapter.js';
 
 export {
   CLAUDE_CODE_EVENTS,
@@ -30,6 +31,33 @@ export {
   cursorPaths,
 } from './cursor/index.js';
 export type { CursorAdapterOptions } from './cursor/index.js';
+export {
+  createMcpClientAdapter,
+  createMcpClientAdapters,
+  genericMcpSnippet,
+  integrationOf,
+  McpClientAdapter,
+} from './mcp-clients/adapter.js';
+export type { IntegrationLevel, McpClientAdapterOptions } from './mcp-clients/adapter.js';
+export {
+  findMcpClient,
+  MCP_CLIENTS,
+  mcpPlatform,
+  parseJsonPointer,
+} from './mcp-clients/catalog.js';
+export type {
+  McpClientSpec,
+  McpConfigFormat,
+  McpLaunch,
+  McpPathContext,
+  McpPlatform,
+} from './mcp-clients/catalog.js';
+export {
+  detectFormatting,
+  readJsoncValue,
+  removeJsoncValue,
+  setJsoncValue,
+} from './mcp-clients/jsonc-edit.js';
 export { applyInstallSteps } from './apply.js';
 export type { AppliedStep } from './apply.js';
 export {
@@ -44,11 +72,18 @@ export {
 export { classifyTool, extractEdits } from './shared/tools.js';
 export { MAX_EXCERPT_CHARS, MAX_TEXT_CHARS } from './shared/payload.js';
 
-/** Every built-in adapter, keyed by agent kind. */
+/** Agents with deep hook integration (hooks + MCP). */
+export const HOOK_AGENT_KINDS = ['claude-code', 'codex', 'cursor'] as const;
+
+/**
+ * Every built-in adapter, keyed by agent kind: the hook adapters first, then the MCP-only
+ * clients from the catalog.
+ */
 export const adapters: Readonly<Record<string, AgentAdapter>> = Object.freeze({
   [claudeCodeAdapter.kind]: claudeCodeAdapter,
   [codexAdapter.kind]: codexAdapter,
   [cursorAdapter.kind]: cursorAdapter,
+  ...createMcpClientAdapters(),
 });
 
 /** Returns the built-in adapter for `kind`, or null when none exists. */

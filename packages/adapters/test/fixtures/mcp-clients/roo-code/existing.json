@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "other": {
+      "command": "node",
+      "args": [
+        "/srv/fs/index.js"
+      ],
+      "alwaysAllow": [
+        "read_file"
+      ],
+      "disabled": false
+    }
+  }
+}

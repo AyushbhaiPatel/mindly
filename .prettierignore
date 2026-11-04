@@ -3,3 +3,4 @@ coverage
 pnpm-lock.yaml
 .claude
 release
+packages/adapters/test/fixtures/mcp-clients
