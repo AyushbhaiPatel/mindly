@@ -1,7 +1,7 @@
 import { symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { isMindlyError, type ContractKind } from '@mindly/core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { checkSafePattern, commandHash, contractsOf, USER } from '../../src/index.js';
 import { event, writeTool } from '../helpers.js';
 import { agentSource, AUTH_V1, featureSetup } from './fixtures.js';
@@ -127,9 +127,33 @@ describe('executable memory', () => {
 });
 
 describe('safe regex subset', () => {
-  it.each(['role', 'export\\s+function\\s+login', '^import .* from', '(?:foo|bar)\\d?', '[a-z]+'])(
-    'accepts %s',
-    (p) => expect(checkSafePattern(p)).toBeNull(),
+  it.each([
+    'role',
+    'export\\s+function\\s+login',
+    '^import .* from',
+    '(?:foo|bar)\\d?',
+    '[a-z]+',
+    '.*a.*x',
+    'a?b?c?.*a.*x',
+    'v\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}',
+    '(?:api[_-]?key|secret|token|password)\\s*[:=]\\s*[\'"]',
+    '(TODO|FIXME|XXX|HACK|BUG|NOTE|OPTIMIZE|REVIEW|DEPRECATED)\\s*:.*',
+    '^(feat|fix|docs|chore|refactor|test|perf|ci|build|style|revert)(\\(.+\\))?: .+',
+    '^\\s*(?:export\\s)?(?:const|let|var) \\w+ = require\\(',
+    'https?://(?:www\\.)?(?:staging|dev)\\.[a-z]+\\.com/.*',
+    '\\b(?:describe|it|test)\\.only\\(',
+    '<(?<tag>script|iframe)\\b[^>]*>',
+  ])('accepts %s', (p) => expect(checkSafePattern(p)).toBeNull());
+
+  it.each([
+    [
+      '(api[_-]?key|secret|token|password)\\s*[:=]\\s*x',
+      '(?:api[_-]?key|secret|token|password)\\s*[:=]\\s*x',
+    ],
+    ['(a|ab|abc)'.repeat(3) + '.*.*x', '(?:a|ab|abc)'.repeat(3) + '.*.*x'],
+    ['(?<x>a|ab|abc)(?<y>a|ab|abc)(?<z>a|ab|abc).*.*x', '(?:a|ab|abc)'.repeat(3) + '.*.*x'],
+  ])('treats %s like its non-capturing form', (capturing, plain) =>
+    expect(checkSafePattern(capturing)).toBe(checkSafePattern(plain)),
   );
 
   it.each([
@@ -144,17 +168,64 @@ describe('safe regex subset', () => {
     ['\\s*\\s*\\s*x', 'unbounded'],
     ['\\s{0,2000}\\s*\\s*x', 'unbounded'],
     ['a?a?a?a?a?a?a?a?a?aaaaaaaaa', 'quantifiers'],
+    ['a?b?c?d?.*a.*x', 'backtracking'],
+    ['a{0,16}a{0,16}a{0,16}a{0,16}a{0,16}a{0,16}.*.*x', 'backtracking'],
+    ['(a|a)'.repeat(20) + 'x', 'backtracking'],
+    ['(?:a|a)'.repeat(20) + 'x', 'backtracking'],
+    ['(?:a|ab|abc)'.repeat(3) + '.*.*x', 'backtracking'],
+    ['((a|b))+x', 'nested'],
     ['[', 'compile'],
   ])('rejects %s', (p, why) => expect(checkSafePattern(p)).toMatch(why));
 });
 
 describe('regex budget', () => {
-  it('evaluates the worst allowed pattern on hostile content quickly', () => {
-    expect(checkSafePattern('.*a.*x')).toBeNull();
-    const re = new RegExp('.*a.*x');
-    const line = 'a'.repeat(200);
-    const start = performance.now();
-    for (let i = 0; i < 50; i++) re.test(line);
-    expect(performance.now() - start).toBeLessThan(500);
+  it('keeps the worst allowed pattern polynomial in the line length', () => {
+    const worst = 'a?a?a?.*a.*x';
+    expect(checkSafePattern(worst)).toBeNull();
+    const re = new RegExp(worst);
+    const fastest = (line: string): number => {
+      const start = performance.now();
+      re.test(line);
+      return performance.now() - start;
+    };
+    const short = 'a'.repeat(100);
+    const long = 'a'.repeat(200);
+    fastest(short);
+    fastest(long);
+    let shortMs = Infinity;
+    let longMs = Infinity;
+    for (let i = 0; i < 7; i++) {
+      shortMs = Math.min(shortMs, fastest(short));
+      longMs = Math.min(longMs, fastest(long));
+    }
+    // Doubling the line costs about 8x for a cubic matcher; exponential backtracking would be
+    // billions of times slower. The ratio is load-independent, unlike an absolute budget.
+    expect(longMs / Math.max(shortMs, 0.01)).toBeLessThan(32);
+  });
+
+  it('explains why an existing contract with a now-rejected pattern cannot run', async () => {
+    const { root, memory, contracts } = await withDecision();
+    const spec = { path: 'src/auth.ts', pattern: 'role' };
+    const c = contracts.create(memory.id, 'pattern_absent', spec, USER);
+    const pattern = '(a|a)'.repeat(20) + 'x';
+    const result = contracts.evaluate({ ...c, spec: { ...spec, pattern } }, root);
+    expect(result.state).toBe('error');
+    expect(result.message).toContain(
+      `pattern rejected as too expensive to evaluate safely: ${pattern} (pattern allows too much backtracking`,
+    );
+    expect(result.message).toContain('add a contract with a simpler pattern');
+  });
+
+  it('stops evaluating once the time budget is spent', async () => {
+    const { memory, contracts } = await withDecision();
+    const spec = { path: 'src/auth.ts', pattern: 'never-present' };
+    expect(contracts.create(memory.id, 'pattern_absent', spec, USER).state).toBe('passing');
+    let now = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => (now += 60));
+    try {
+      expect(contracts.create(memory.id, 'pattern_absent', spec, USER).state).toBe('error');
+    } finally {
+      clock.mockRestore();
+    }
   });
 });

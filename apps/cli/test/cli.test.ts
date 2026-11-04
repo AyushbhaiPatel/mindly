@@ -605,6 +605,37 @@ describe('memory and rules', () => {
     expect(ok.code).toBe(0);
     expect(ok.stdout).toContain('pass');
   });
+
+  it('doctor lists contracts whose pattern is now rejected', async () => {
+    const sb = sandbox();
+    const m = json<{ id: string }>(
+      (await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'No secrets', '--json']))
+        .stdout,
+    );
+    write(sb.repo, 'config.ts', 'export const x = 1;\n');
+    const add = ['contract', 'add', m.id, '--kind', 'pattern_absent', '--path', 'config.ts'];
+    expect((await cli(sb, [...add, '--pattern', 'secret'])).code).toBe(0);
+    expect((await cli(sb, ['doctor', '--json'])).stdout).not.toContain('contract-patterns');
+
+    const pattern = '(a|a)'.repeat(20) + 'x';
+    const mindly = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
+    try {
+      mindly.store.db
+        .prepare("UPDATE contracts SET spec = json_set(spec, '$.pattern', ?)")
+        .run(pattern);
+    } finally {
+      mindly.close();
+    }
+    const r = await cli(sb, ['doctor']);
+    expect(r.stdout).toContain('[!] 1 contract cannot run: pattern rejected as too expensive');
+    expect(r.stdout).toContain('-> mindly contract add');
+    const checks = json<{ checks: { name: string; status: string; detail: string }[] }>(
+      (await cli(sb, ['doctor', '--json'])).stdout,
+    ).checks;
+    const check = checks.find((c) => c.name === 'contract-patterns');
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain(`(memory ${shortId(m.id)}: ${pattern.slice(0, 60)}`);
+  });
 });
 
 describe('why', () => {
