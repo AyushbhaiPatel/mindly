@@ -26,6 +26,20 @@ export interface GitPort {
   diffExportSurface(before: Map<string, string>, after: Map<string, string>): ExportSurfaceDiff;
   /** Repo-relative files that import `file` (bounded). */
   dependentsOf(repoRoot: string, file: string): Promise<string[]>;
+  /**
+   * Optional (time machine): records tracked and untracked work of `worktree` under a hidden ref
+   * `refs/synapse/snapshots/<id>` without touching the index or working tree. Null when nothing
+   * could be captured.
+   */
+  createSnapshotRef?(
+    repoRoot: string,
+    worktree: string,
+    id: string,
+  ): Promise<{ ref: string; commit: string } | null>;
+  /** Optional (time machine): creates a *new* branch `branch` pointing at snapshot `id`. */
+  restoreSnapshotToBranch?(repoRoot: string, id: string, branch: string): Promise<void>;
+  /** Optional (memory branches): whether `branch` is fully merged into `into`. */
+  isMerged?(repoRoot: string, branch: string, into: string): Promise<boolean>;
 }
 
 export interface LlmPort {
