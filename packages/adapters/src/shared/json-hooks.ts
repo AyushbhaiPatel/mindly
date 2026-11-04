@@ -10,8 +10,10 @@ export interface HookSpec {
   /** Tool-name matcher, when the agent supports one. */
   matcher?: string;
   command: string;
-  /** Seconds. */
+  /** Timeout in the agent's own unit (seconds for most agents, milliseconds for Gemini CLI). */
   timeout?: number;
+  /** Display name, for agents that show one (Gemini CLI's `/hooks panel`). */
+  name?: string;
 }
 
 /**
@@ -55,6 +57,7 @@ export function addGroupedHooks(
   for (const spec of specs) {
     const list = eventList(hooks, spec.event, path);
     const handler: Record<string, unknown> = { type: 'command', command: spec.command };
+    if (spec.name !== undefined) handler['name'] = spec.name;
     if (spec.timeout !== undefined) handler['timeout'] = spec.timeout;
     const group: Record<string, unknown> = {};
     if (spec.matcher !== undefined) group['matcher'] = spec.matcher;

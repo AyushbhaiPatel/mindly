@@ -1,0 +1,16 @@
+{
+  "session_id": "6a4260f2-59ce-4412-be01-5df46b5bee9d",
+  "transcript_path": "/Users/dev/.gemini/tmp/proj/chats/session-2026-11-04T18-26-6a4260f2.jsonl",
+  "cwd": "/Users/dev/shop",
+  "hook_event_name": "AfterTool",
+  "timestamp": "2026-11-04T18:26:42.185Z",
+  "tool_name": "run_shell_command",
+  "tool_input": {
+    "command": "cat hello.ts && exit 3",
+    "description": "show file"
+  },
+  "tool_response": {
+    "llmContent": "<untrusted_context>\nOutput: export const hello = 'gemini';\nExit Code: 3\nProcess Group PGID: 77380\n</untrusted_context>",
+    "returnDisplay": "export const hello = 'gemini';"
+  }
+}

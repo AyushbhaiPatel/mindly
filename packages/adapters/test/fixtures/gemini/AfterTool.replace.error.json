@@ -1,0 +1,22 @@
+{
+  "session_id": "32203f5b-a108-40f2-8163-4f83f28bd797",
+  "transcript_path": "/Users/dev/.gemini/tmp/proj/chats/session-2026-11-04T18-27-32203f5b.jsonl",
+  "cwd": "/Users/dev/shop",
+  "hook_event_name": "AfterTool",
+  "timestamp": "2026-11-04T18:27:22.246Z",
+  "tool_name": "replace",
+  "tool_input": {
+    "file_path": "/Users/dev/shop/hello.ts",
+    "old_string": "'nope'",
+    "new_string": "'x'",
+    "instruction": "x"
+  },
+  "tool_response": {
+    "llmContent": "Could not find an exact match for 'old_string' in '/Users/dev/shop/hello.ts'. If previous edits modified the file or you are modifying lines outside your recent read window, please use ReadFile to inspect the target lines before retrying with an exact 'old_string'.",
+    "returnDisplay": "Error: Could not find an exact match for old_string in '/Users/dev/shop/hello.ts'.",
+    "error": {
+      "message": "Could not find an exact match for 'old_string' in '/Users/dev/shop/hello.ts'. If previous edits modified the file or you are modifying lines outside your recent read window, please use ReadFile to inspect the target lines before retrying with an exact 'old_string'.",
+      "type": "edit_no_occurrence_found"
+    }
+  }
+}

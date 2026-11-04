@@ -3,6 +3,17 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## Unreleased
+
+### Added
+
+- Gemini CLI gets the full integration (hooks + MCP), like Claude Code, Codex and Cursor:
+  `mindly init` registers `SessionStart`, `BeforeAgent`, `BeforeTool`, `AfterTool`, `AfterAgent`
+  and `SessionEnd` hooks in `.gemini/settings.json` next to the MCP server, so Gemini's edits and
+  shell commands are captured, context is injected at session start, on each prompt and after
+  tool calls, and enforced rules can block a write. Comments and your own hooks in the settings
+  file are kept, and `mindly uninstall` restores it.
+
 ## 0.1.3 — 2026-11-04
 
 ### Changed

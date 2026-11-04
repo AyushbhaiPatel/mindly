@@ -2,6 +2,7 @@ import type { AgentAdapter } from '@mindly/core';
 import { claudeCodeAdapter } from './claude-code/index.js';
 import { codexAdapter } from './codex/index.js';
 import { cursorAdapter } from './cursor/index.js';
+import { geminiAdapter } from './gemini/index.js';
 import { createMcpClientAdapters } from './mcp-clients/adapter.js';
 
 export {
@@ -31,6 +32,14 @@ export {
   cursorPaths,
 } from './cursor/index.js';
 export type { CursorAdapterOptions } from './cursor/index.js';
+export {
+  createGeminiAdapter,
+  GEMINI_EVENTS,
+  GEMINI_TOOL_MATCHER,
+  geminiAdapter,
+  geminiSettingsPath,
+} from './gemini/index.js';
+export type { GeminiAdapterOptions } from './gemini/index.js';
 export {
   createMcpClientAdapter,
   createMcpClientAdapters,
@@ -73,7 +82,7 @@ export { classifyTool, extractEdits } from './shared/tools.js';
 export { MAX_EXCERPT_CHARS, MAX_TEXT_CHARS } from './shared/payload.js';
 
 /** Agents with deep hook integration (hooks + MCP). */
-export const HOOK_AGENT_KINDS = ['claude-code', 'codex', 'cursor'] as const;
+export const HOOK_AGENT_KINDS = ['claude-code', 'codex', 'cursor', 'gemini'] as const;
 
 /**
  * Every built-in adapter, keyed by agent kind: the hook adapters first, then the MCP-only
@@ -83,6 +92,7 @@ export const adapters: Readonly<Record<string, AgentAdapter>> = Object.freeze({
   [claudeCodeAdapter.kind]: claudeCodeAdapter,
   [codexAdapter.kind]: codexAdapter,
   [cursorAdapter.kind]: cursorAdapter,
+  [geminiAdapter.kind]: geminiAdapter,
   ...createMcpClientAdapters(),
 });
 

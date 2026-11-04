@@ -1,0 +1,34 @@
+{
+  "session_id": "6a4260f2-59ce-4412-be01-5df46b5bee9d",
+  "transcript_path": "/Users/dev/.gemini/tmp/proj/chats/session-2026-11-04T18-26-6a4260f2.jsonl",
+  "cwd": "/Users/dev/shop",
+  "hook_event_name": "AfterTool",
+  "timestamp": "2026-11-04T18:26:42.120Z",
+  "tool_name": "write_file",
+  "tool_input": {
+    "file_path": "/Users/dev/shop/hello.ts",
+    "content": "export const hello = 'world';\n"
+  },
+  "tool_response": {
+    "llmContent": "Successfully created and wrote to new file: /Users/dev/shop/hello.ts. Here is the updated code:\nexport const hello = 'world';\n",
+    "returnDisplay": {
+      "fileDiff": "Index: hello.ts\n===================================================================\n--- hello.ts\tOriginal\n+++ hello.ts\tWritten\n@@ -0,0 +1,1 @@\n+export const hello = 'world';\n",
+      "fileName": "hello.ts",
+      "filePath": "/Users/dev/shop/hello.ts",
+      "originalContent": "",
+      "newContent": "export const hello = 'world';\n",
+      "diffStat": {
+        "model_added_lines": 1,
+        "model_removed_lines": 0,
+        "model_added_chars": 29,
+        "model_removed_chars": 0,
+        "user_added_lines": 0,
+        "user_removed_lines": 0,
+        "user_added_chars": 0,
+        "user_removed_chars": 0
+      },
+      "isNewFile": true,
+      "isBuildFile": false
+    }
+  }
+}

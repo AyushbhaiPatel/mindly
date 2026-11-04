@@ -1,0 +1,36 @@
+{
+  "session_id": "6a4260f2-59ce-4412-be01-5df46b5bee9d",
+  "transcript_path": "/Users/dev/.gemini/tmp/proj/chats/session-2026-11-04T18-26-6a4260f2.jsonl",
+  "cwd": "/Users/dev/shop",
+  "hook_event_name": "AfterTool",
+  "timestamp": "2026-11-04T18:26:42.145Z",
+  "tool_name": "replace",
+  "tool_input": {
+    "file_path": "/Users/dev/shop/hello.ts",
+    "old_string": "'world'",
+    "new_string": "'gemini'",
+    "instruction": "change greeting"
+  },
+  "tool_response": {
+    "llmContent": "Successfully modified file: /Users/dev/shop/hello.ts (1 replacements). Here is the updated code:\nexport const hello = 'gemini';\n",
+    "returnDisplay": {
+      "fileDiff": "Index: hello.ts\n===================================================================\n--- hello.ts\tCurrent\n+++ hello.ts\tProposed\n@@ -1,1 +1,1 @@\n-export const hello = 'world';\n+export const hello = 'gemini';\n",
+      "fileName": "hello.ts",
+      "filePath": "/Users/dev/shop/hello.ts",
+      "originalContent": "export const hello = 'world';\n",
+      "newContent": "export const hello = 'gemini';\n",
+      "diffStat": {
+        "model_added_lines": 1,
+        "model_removed_lines": 1,
+        "model_added_chars": 30,
+        "model_removed_chars": 29,
+        "user_added_lines": 0,
+        "user_removed_lines": 0,
+        "user_added_chars": 0,
+        "user_removed_chars": 0
+      },
+      "isNewFile": false,
+      "isBuildFile": false
+    }
+  }
+}

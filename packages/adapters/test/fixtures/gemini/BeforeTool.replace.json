@@ -1,0 +1,14 @@
+{
+  "session_id": "6a4260f2-59ce-4412-be01-5df46b5bee9d",
+  "transcript_path": "/Users/dev/.gemini/tmp/proj/chats/session-2026-11-04T18-26-6a4260f2.jsonl",
+  "cwd": "/Users/dev/shop",
+  "hook_event_name": "BeforeTool",
+  "timestamp": "2026-11-04T18:26:42.133Z",
+  "tool_name": "replace",
+  "tool_input": {
+    "file_path": "/Users/dev/shop/hello.ts",
+    "old_string": "'world'",
+    "new_string": "'gemini'",
+    "instruction": "change greeting"
+  }
+}

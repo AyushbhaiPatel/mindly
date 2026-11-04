@@ -112,7 +112,6 @@ describe('catalog', () => {
       '/home/u/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json',
     );
     expect(user('windsurf', 'darwin')).toBe('/home/u/.codeium/windsurf/mcp_config.json');
-    expect(user('gemini', 'linux')).toBe('/home/u/.gemini/settings.json');
     expect(user('kiro', 'darwin')).toBe('/home/u/.kiro/settings/mcp.json');
     expect(user('zed', 'darwin')).toBe('/home/u/.config/zed/settings.json');
     expect(user('opencode', 'darwin')).toBe('/home/u/.config/opencode/opencode.json');
@@ -128,7 +127,6 @@ describe('catalog', () => {
     const project = (kind: string) =>
       adapterFor(must(findMcpClient(kind)), home).configPath({ homeDir: home, projectRoot: root });
     expect(project('vscode')).toBe(join(root, '.vscode', 'mcp.json'));
-    expect(project('gemini')).toBe(join(root, '.gemini', 'settings.json'));
     expect(project('kiro')).toBe(join(root, '.kiro', 'settings', 'mcp.json'));
     expect(project('roo-code')).toBe(join(root, '.roo', 'mcp.json'));
     expect(project('zed')).toBe(join(root, '.zed', 'settings.json'));
@@ -287,15 +285,15 @@ describe('MCP client detection', () => {
     expect(await windsurf.detect()).toBe(true);
 
     const bin = tempDir();
-    write(join(bin, 'gemini'), '#!/bin/sh\n');
+    write(join(bin, 'kiro'), '#!/bin/sh\n');
     const { chmodSync } = await import('node:fs');
-    chmodSync(join(bin, 'gemini'), 0o755);
-    const gemini = createMcpClientAdapter(must(findMcpClient('gemini')), {
+    chmodSync(join(bin, 'kiro'), 0o755);
+    const kiro = createMcpClientAdapter(must(findMcpClient('kiro')), {
       homeDir: home,
       env: { PATH: bin },
       platform: 'linux',
     });
-    expect(await gemini.detect()).toBe(true);
+    expect(await kiro.detect()).toBe(true);
   });
 });
 

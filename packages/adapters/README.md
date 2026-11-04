@@ -1,8 +1,8 @@
 # @mindly/adapters
 
-Per-agent hook translators and installers for Claude Code, Codex and Cursor, plus MCP-only
-installers for a catalog of other MCP clients (see [MCP-only clients](#mcp-only-clients)). Each adapter
-implements `AgentAdapter` from `@mindly/core` (`packages/core/src/hooks.ts`):
+Per-agent hook translators and installers for Claude Code, Codex, Cursor and Gemini CLI, plus
+MCP-only installers for a catalog of other MCP clients (see [MCP-only clients](#mcp-only-clients)).
+Each adapter implements `AgentAdapter` from `@mindly/core` (`packages/core/src/hooks.ts`):
 
 - `parse(nativeEvent, payload)` turns a native hook payload into a `NormalizedHookEvent`, or
   returns `null` (never throws) for unknown events or payloads missing the session id / cwd.
@@ -24,6 +24,7 @@ named `mindly`.
 | Claude Code | `~/.claude/settings.json` or `<project>/.claude/settings.json`                 | `~/.claude.json` (user) or `<project>/.mcp.json` |
 | Codex       | `$CODEX_HOME/hooks.json` (default `~/.codex`) or `<project>/.codex/hooks.json` | `config.toml` next to it, `[mcp_servers.mindly]` |
 | Cursor      | `~/.cursor/hooks.json` or `<project>/.cursor/hooks.json`                       | `mcp.json` next to it                            |
+| Gemini CLI  | `~/.gemini/settings.json` or `<project>/.gemini/settings.json`, key `hooks`    | the same file, key `mcpServers`                  |
 
 **Claude Code** events: `SessionStart`, `UserPromptSubmit`, `PreToolUse` / `PostToolUse` /
 `PostToolUseFailure` (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`), `Stop`, `SessionEnd`.
@@ -44,6 +45,25 @@ project-level `.codex/` config only for trusted projects.
 `afterShellExecution`, `postToolUseFailure` (`additional_context`), `stop`, `sessionEnd`.
 `beforeShellExecution` and `postToolUse` are parsed but not installed (to avoid double counting).
 `beforeSubmitPrompt` cannot add context, so prompt-time context reaches Cursor through MCP.
+
+**Gemini CLI** events: `SessionStart` (`source` startup/resume/clear), `BeforeAgent` (the
+prompt), `BeforeTool` / `AfterTool` (regex matcher `^(write_file|replace|run_shell_command)$`),
+`AfterAgent` (`prompt_response` as the last message) and `SessionEnd`. The payload uses the same
+base fields as Claude Code (`session_id`, `cwd`, `transcript_path`), so parsing reuses the
+Claude-style parser; `write_file` and `replace` are file edits, `run_shell_command` is shell.
+`tool_response` is `{ llmContent, returnDisplay, error? }`: a tool fails when `error` is set, and a
+shell command fails when `llmContent` reports a non-zero `Exit Code: N`. Context goes out as
+`hookSpecificOutput.additionalContext`, which Gemini reads on SessionStart, BeforeAgent and AfterTool
+only (it escapes `<`/`>` and wraps it in `<hook_context>`). BeforeTool has no context channel, so a
+`deny` folds the context into the top-level `reason` the model sees; `ask` is passed through and
+its reason shown as `systemMessage` in Gemini's confirmation prompt. AfterAgent never gets a
+decision (a `deny` there forces a retry turn). In headless mode (`gemini -p`) Gemini prepends the
+SessionStart context to the first prompt, so the adapter strips that `<hook_context>` block before
+the prompt is stored. Timeouts are in milliseconds (10 000) and each hook is named
+`mindly-<Event>` for `/hooks panel`. Hooks and the MCP server share `settings.json`, which is JSONC:
+the installer edits single array elements and properties in place, so comments and the user's own
+hook groups keep their bytes, and uninstall restores the original file. Gemini fingerprints
+project-level hooks and warns before running new or changed ones in untrusted folders.
 
 No adapter ever emits an `allow` decision: it would skip the agent's own permission prompt.
 
@@ -66,7 +86,6 @@ Invalid files, comments in strict-JSON files and non-object containers are refus
 | ---------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------- | ----------------- | ------ |
 | `windsurf`       | `~/.codeium/windsurf/mcp_config.json`                                                                             | none                      | `mcpServers`      | JSONC  |
 | `kiro`           | `~/.kiro/settings/mcp.json`                                                                                       | `.kiro/settings/mcp.json` | `mcpServers`      | JSON   |
-| `gemini`         | `~/.gemini/settings.json`                                                                                         | `.gemini/settings.json`   | `mcpServers`      | JSONC  |
 | `vscode`         | `~/Library/Application Support/Code/User/mcp.json` / `~/.config/Code/User/mcp.json`                               | `.vscode/mcp.json`        | `servers`         | JSONC  |
 | `cline`          | `~/.cline/data/settings/cline_mcp_settings.json`                                                                  | none                      | `mcpServers`      | JSON   |
 | `roo-code`       | `<VS Code User>/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json`                              | `.roo/mcp.json`           | `mcpServers`      | JSON   |
@@ -104,7 +123,10 @@ Docs for each client are listed below and in each catalog entry's `docs` field.
 - Cursor MCP: https://cursor.com/docs/context/mcp
 - Windsurf: https://docs.windsurf.com/windsurf/cascade/mcp (now redirects to https://docs.devin.ai/desktop/cascade/mcp)
 - Kiro: https://kiro.dev/docs/mcp/configuration/
-- Gemini CLI: https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md
+- Gemini CLI hooks: https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/index.md,
+  https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md (payloads and
+  output handling checked against `@google/gemini-cli` 0.66.0; fixtures captured from a real run)
+- Gemini CLI MCP: https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md
 - VS Code: https://code.visualstudio.com/docs/agents/reference/mcp-configuration,
   https://code.visualstudio.com/docs/copilot/customization/mcp-servers,
   https://code.visualstudio.com/docs/configure/settings (User directory per OS)

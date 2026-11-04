@@ -114,18 +114,6 @@ export const MCP_CLIENTS: readonly McpClientSpec[] = Object.freeze([
     docs: ['https://kiro.dev/docs/mcp/configuration/'],
   },
   {
-    kind: 'gemini',
-    displayName: 'Gemini CLI',
-    format: 'jsonc',
-    userConfig: (ctx) => [join(ctx.homeDir, '.gemini', 'settings.json')],
-    projectConfig: (root) => [join(root, '.gemini', 'settings.json')],
-    serversPointer: '/mcpServers',
-    entry: standard,
-    detectDirs: (ctx) => [join(ctx.homeDir, '.gemini')],
-    detectBinaries: ['gemini'],
-    docs: ['https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md'],
-  },
-  {
     kind: 'vscode',
     displayName: 'VS Code (GitHub Copilot)',
     format: 'jsonc',

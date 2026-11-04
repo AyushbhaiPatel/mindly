@@ -84,7 +84,7 @@ describe('init / uninstall', () => {
     expect(readFileSync(join(sb.home, '.codex', 'hooks.json'), 'utf8')).not.toContain('hook codex');
   });
 
-  it('writes MCP config for MCP-only clients and keeps other servers', async () => {
+  it('connects MCP-only clients and Gemini CLI, keeping comments and other servers', async () => {
     const sb = sandbox();
     const geminiFile = join(sb.home, '.gemini', 'settings.json');
     write(
@@ -105,6 +105,7 @@ describe('init / uninstall', () => {
     expect(gemini).toContain('// mine');
     expect(gemini).toContain('"other": { "command": "x" }');
     expect(gemini).toMatch(/"--agent",\s+"gemini"/);
+    expect(gemini).toContain('hook gemini BeforeTool');
 
     const again = await cli(sb, ['init', '--agents', 'windsurf,gemini', '--yes']);
     expect(again.stdout).toContain('already configured');
@@ -112,6 +113,7 @@ describe('init / uninstall', () => {
     const doctor = await cli(sb, ['doctor', '--json']);
     const checks = json<{ checks: { name: string; status: string }[] }>(doctor.stdout).checks;
     expect(checks.find((c) => c.name === 'windsurf')?.status).toBe('ok');
+    expect(checks.find((c) => c.name === 'gemini')?.status).toBe('ok');
     expect(checks.find((c) => c.name === 'zed')).toBeUndefined();
 
     const removed = await cli(sb, ['uninstall', '--yes']);
@@ -128,6 +130,7 @@ describe('init / uninstall', () => {
     const [full = '', tools = ''] = r.stdout.split('Tools only (MCP)');
     expect(full).toMatch(/Full integration \(hooks \+ MCP\)/);
     expect(full).toMatch(/Claude Code\s+claude-code/);
+    expect(full).toMatch(/Gemini CLI\s+gemini/);
     expect(tools).toMatch(/Windsurf\s+windsurf/);
     expect(tools).toMatch(/Claude Desktop\s+claude-desktop\s+\(user-wide only/);
     expect(existsSync(join(sb.mindlyHome, 'mindly.db'))).toBe(false);
@@ -154,6 +157,29 @@ describe('hook', () => {
     const r = await cli(sb, ['hook', 'claude-code', 'SessionStart'], {
       stdin: JSON.stringify(payload),
     });
+    expect(r.code).toBe(0);
+    expect(r.stderr).toBe('');
+    const out = json<{ hookSpecificOutput: { hookEventName: string; additionalContext: string } }>(
+      r.stdout,
+    );
+    expect(out.hookSpecificOutput.hookEventName).toBe('SessionStart');
+    expect(out.hookSpecificOutput.additionalContext).toContain('Use pnpm, never npm');
+  });
+
+  it('Gemini CLI SessionStart prints JSON with additionalContext', async () => {
+    const sb = sandbox();
+    expect(
+      (await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm, never npm'])).code,
+    ).toBe(0);
+    const payload = {
+      session_id: 'gemini-session-1',
+      transcript_path: join(sb.home, 'session.jsonl'),
+      cwd: sb.repo,
+      hook_event_name: 'SessionStart',
+      timestamp: '2026-11-04T18:26:42.032Z',
+      source: 'startup',
+    };
+    const r = await cli(sb, ['hook', 'gemini', 'SessionStart'], { stdin: JSON.stringify(payload) });
     expect(r.code).toBe(0);
     expect(r.stderr).toBe('');
     const out = json<{ hookSpecificOutput: { hookEventName: string; additionalContext: string } }>(
