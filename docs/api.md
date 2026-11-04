@@ -35,7 +35,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 | GET    | `/api/projects`                                                                  | `Project[]`                                                                                                       |
 | GET    | `/api/projects/:projectId/overview`                                              | `Overview` (below)                                                                                                |
 | GET    | `/api/projects/:projectId/sessions?limit`                                        | `Session[]` (most recent first)                                                                                   |
-| GET    | `/api/projects/:projectId/events?afterSeq&beforeSeq&types&sessionId&limit&order` | `MindlyEvent[]` (`types` comma-separated)                                                                        |
+| GET    | `/api/projects/:projectId/events?afterSeq&beforeSeq&types&sessionId&limit&order` | `MindlyEvent[]` (`types` comma-separated)                                                                         |
 | GET    | `/api/projects/:projectId/memories?q&kind&trust&branch&status&limit`             | `Memory[]` (`q` uses FTS search)                                                                                  |
 | POST   | `/api/projects/:projectId/memories`                                              | create user memory `{ kind, title, body, tags?, scopePaths?, enforce?, pinned? }` → `Memory`                      |
 | GET    | `/api/memories/:id`                                                              | `{ memory, versions: MemoryVersion[], evidence: MemoryEvidence[], contracts: Contract[], xray: ContextPacket[] }` |

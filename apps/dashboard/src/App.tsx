@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ApiError,
-  createHttpClient,
-  describeError,
-  takeLoginCode,
-  type MindlyClient,
-} from './api';
+import { ApiError, createHttpClient, describeError, takeLoginCode, type MindlyClient } from './api';
 import { Tabs, cx, type TabDef } from './components/ui';
 import {
   createLiveFeed,
@@ -151,8 +145,8 @@ export function App() {
         <Logo />
         <h1>No projects yet</h1>
         <p>
-          Run <code className="mono">mindly init</code> inside a git repository, then start an
-          agent there. It will show up here.
+          Run <code className="mono">mindly init</code> inside a git repository, then start an agent
+          there. It will show up here.
         </p>
       </main>
     );
