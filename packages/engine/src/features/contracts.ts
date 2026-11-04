@@ -30,10 +30,14 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
  * subset at creation time (see `checkSafePattern`): at most 300 characters, no backreferences, no
  * lookaround, no quantified group that itself contains a quantifier or alternation (the classic
  * `(a+)+` / `(a|aa)*` shapes), at most two unbounded quantifiers (a `{n,m}` with m > 16 counts as
- * unbounded) and at most eight quantifiers in total. That bounds the cost of a single line to
- * roughly cubic in the line length, so matching line by line over at most 512 KB of content with
- * lines capped at 200 characters keeps each line in the low milliseconds and lets the 100 ms
- * budget (checked after every line) take effect.
+ * unbounded) and at most eight quantifiers in total. A backtracking matcher without nested
+ * quantifiers tries at most one path per combination of choices, so the product of every
+ * quantifier's repeat choices and every alternation's branches bounds the work per start position;
+ * that product is capped at `MAX_CHOICES` (two unbounded quantifiers over a full line, with a
+ * little room for optional tokens). That bounds the cost of a single line to roughly cubic in the
+ * line length, so matching line by line over at most 512 KB of content with lines capped at 200
+ * characters keeps each line within a few milliseconds to a few tens of milliseconds and lets the
+ * 100 ms budget (checked after every line) take effect.
  *
  * `command` contracts are never executed here: only the user may create them, their argv hash is
  * pinned at creation, and the daemon runs them later through a trusted runner.
@@ -48,6 +52,8 @@ const MAX_UNBOUNDED_QUANTIFIERS = 2;
 const MAX_QUANTIFIERS = 8;
 /** A bounded repeat with an upper bound above this counts as unbounded. */
 const MAX_BOUNDED_REPEAT = 16;
+/** Cap on the product of all repeat choices and alternation branches (see above). */
+const MAX_CHOICES = 8 * (MAX_LINE_CHARS + 1) ** 2;
 
 /** Result of evaluating a contract once. */
 export interface ContractEvaluation {
@@ -71,10 +77,12 @@ export function checkSafePattern(pattern: string): string | null {
   interface Frame {
     quantified: boolean;
     alternation: boolean;
+    branches: number;
   }
-  const stack: Frame[] = [{ quantified: false, alternation: false }];
+  const stack: Frame[] = [{ quantified: false, alternation: false, branches: 1 }];
   let unbounded = 0;
   let quantifiers = 0;
+  let choices = 1;
   let lastClosed: Frame | null = null;
   let i = 0;
   const top = (): Frame => stack[stack.length - 1] as Frame;
@@ -104,7 +112,7 @@ export function checkSafePattern(pattern: string): string | null {
       if (pattern.startsWith('(?<=', i) || pattern.startsWith('(?<!', i)) {
         return 'lookbehind is not allowed';
       }
-      stack.push({ quantified: false, alternation: false });
+      stack.push({ quantified: false, alternation: false, branches: 1 });
       i++;
       lastClosed = null;
       continue;
@@ -114,12 +122,14 @@ export function checkSafePattern(pattern: string): string | null {
       if (!closed || stack.length === 0) return 'unbalanced parentheses';
       // A group containing a quantifier makes the enclosing group "quantified" too.
       if (closed.quantified) top().quantified = true;
+      choices *= closed.branches;
       lastClosed = closed;
       i++;
       continue;
     }
     if (ch === '|') {
       top().alternation = true;
+      top().branches++;
       i++;
       lastClosed = null;
       continue;
@@ -139,6 +149,9 @@ export function checkSafePattern(pattern: string): string | null {
         return 'nested quantifiers are not allowed';
       }
       if (isUnbounded) unbounded++;
+      const lower = Number(/^\{(\d+)/.exec(tok)?.[1] ?? (tok === '+' ? 1 : 0));
+      const upperBound = isUnbounded ? MAX_LINE_CHARS : tok === '?' ? 1 : Number(upper ?? lower);
+      choices *= Math.max(1, upperBound - Math.min(lower, upperBound) + 1);
       if (tok !== '?') top().quantified = true;
       i += tok.length;
       // Skip a lazy/possessive marker.
@@ -154,6 +167,10 @@ export function checkSafePattern(pattern: string): string | null {
   }
   if (unbounded > MAX_UNBOUNDED_QUANTIFIERS) {
     return `at most ${MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers are allowed`;
+  }
+  choices *= top().branches;
+  if (choices > MAX_CHOICES) {
+    return 'pattern allows too much backtracking; use fewer optional parts or alternatives';
   }
   return null;
 }

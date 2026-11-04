@@ -127,8 +127,9 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   points at a device or FIFO cannot hang hooks.
 - Deny-list matching is case-insensitive and uses the on-disk case (`realpath.native`).
 - Contract regexes allow at most two unbounded quantifiers (large bounded repeats count as
-  unbounded) and eight quantifiers in total, over lines capped at 200 characters, with the time
-  budget checked after every line.
+  unbounded) and eight quantifiers in total, and patterns whose optional parts and alternatives
+  combine into too many ways to match are rejected, so the work per line stays polynomial. Lines
+  are capped at 200 characters, with the time budget checked after every line.
 
 ## Data retention and deletion
 
