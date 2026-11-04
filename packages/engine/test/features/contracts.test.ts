@@ -141,6 +141,20 @@ describe('safe regex subset', () => {
     ['(?=x)y', 'lookahead'],
     ['(?<!x)y', 'lookbehind'],
     ['a*b*c*d*e*', 'unbounded'],
+    ['\\s*\\s*\\s*x', 'unbounded'],
+    ['\\s{0,2000}\\s*\\s*x', 'unbounded'],
+    ['a?a?a?a?a?a?a?a?a?aaaaaaaaa', 'quantifiers'],
     ['[', 'compile'],
   ])('rejects %s', (p, why) => expect(checkSafePattern(p)).toMatch(why));
+});
+
+describe('regex budget', () => {
+  it('evaluates the worst allowed pattern on hostile content quickly', () => {
+    expect(checkSafePattern('.*a.*x')).toBeNull();
+    const re = new RegExp('.*a.*x');
+    const line = 'a'.repeat(200);
+    const start = performance.now();
+    for (let i = 0; i < 50; i++) re.test(line);
+    expect(performance.now() - start).toBeLessThan(500);
+  });
 });

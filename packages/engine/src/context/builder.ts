@@ -80,7 +80,7 @@ export class ContextBuilder {
         `- ${sessionLabel(other)} (${other.status}, active ${relativeTime(other.lastSeenAt, now)})`,
       ];
       if (task) parts.push(`task: ${sanitizeLine(task.title, 120)}`);
-      if (files.length) parts.push(`editing: ${files.join(', ')}`);
+      if (files.length) parts.push(`editing: ${files.map((f) => sanitizeLine(f, 160)).join(', ')}`);
       cands.push({
         item: {
           ref: other.id,
@@ -255,7 +255,17 @@ export class ContextBuilder {
       );
     for (const m of scopedRules) {
       if (m.enforce && m.source.type === 'user' && !deny) deny = m;
-      cands.push(this.memoryCandidate(m, `Rules for ${paths.slice(0, 2).join(', ')}`, 1, 1));
+      cands.push(
+        this.memoryCandidate(
+          m,
+          `Rules for ${paths
+            .slice(0, 2)
+            .map((p) => sanitizeLine(p, 80))
+            .join(', ')}`,
+          1,
+          1,
+        ),
+      );
     }
 
     for (const p of paths.slice(0, 5)) {
@@ -361,7 +371,12 @@ export class ContextBuilder {
         `Plan: ${p.plan.map((s) => `${s.done ? '[x]' : '[ ]'} ${sanitizeLine(s.text, 120)}`).join('; ')}`,
       );
     if (p.filesChanged.length)
-      lines.push(`Files changed so far: ${p.filesChanged.slice(0, 20).join(', ')}`);
+      lines.push(
+        `Files changed so far: ${p.filesChanged
+          .slice(0, 20)
+          .map((f) => sanitizeLine(f, 160))
+          .join(', ')}`,
+      );
     if (p.decisions.length)
       lines.push(
         `Decisions: ${p.decisions

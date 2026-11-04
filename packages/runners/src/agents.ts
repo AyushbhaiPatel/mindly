@@ -244,6 +244,10 @@ export const AGENT_PROFILES: Readonly<Record<RunnerAgentKind, AgentProfile>> = {
         '--output-format',
         'json',
         '--no-session-persistence',
+        // Load only the user's own settings: a hostile repository's .claude/settings.json (hooks,
+        // permission allow-lists) must not apply to runs Mindly starts in it.
+        '--setting-sources',
+        'user',
         '--max-turns',
         String(ctx.maxTurns),
       ];

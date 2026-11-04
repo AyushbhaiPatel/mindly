@@ -9,6 +9,7 @@ import {
   type Session,
 } from '@mindly/core';
 import type { ContextBuilder } from '../context/builder.js';
+import { memoryLine, renderSections } from '../context/render.js';
 import type { IntentService } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { LIVE_WINDOW_MS, type ChangedFile, type EngineBus, type Kernel } from '../kernel.js';
@@ -187,7 +188,7 @@ export class HookHandler {
         return {
           ...EMPTY_HOOK_RESULT,
           decision: 'deny',
-          reason: `Blocked by a project rule the user marked as enforced: "${built.deny.title}". Ask the user before changing ${paths.join(', ')}.`,
+          reason: `Blocked by a project rule the user marked as enforced: "${built.deny.title}". Ask the user before changing ${paths.map((x) => sanitizeLine(x, 160)).join(', ')}.`,
           context: built.text,
         };
       }
@@ -196,15 +197,14 @@ export class HookHandler {
     if (tool.shell && tool.command) {
       const mistakes = this.d.mistakes.forCommand(project.project.id, tool.command);
       if (mistakes.length === 0) return EMPTY_HOOK_RESULT;
-      const lines = mistakes.map((m) => `- ${sanitizeLine(m.body, 300)}`);
       return {
         ...EMPTY_HOOK_RESULT,
-        context: [
-          '<mindly-context>',
-          'Mindly note: a similar command failed before in this project.',
-          ...lines,
-          '</mindly-context>',
-        ].join('\n'),
+        context: renderSections([
+          {
+            heading: 'A similar command failed before in this project',
+            lines: mistakes.map((m) => memoryLine(m)),
+          },
+        ]),
       };
     }
     return EMPTY_HOOK_RESULT;

@@ -55,6 +55,7 @@ describe('buildAgentEnv', () => {
       HOME: '/home/x',
       TERM: 'dumb',
       NO_COLOR: '1',
+      MINDLY_HEADLESS_RUN: '1',
       ANTHROPIC_API_KEY: 'k',
     });
   });

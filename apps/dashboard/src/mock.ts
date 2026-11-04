@@ -1391,7 +1391,7 @@ export function createMockClient(): MindlyClient {
             : [{ name: 'build', argv: ['npx', 'next', 'build'] }],
       });
     },
-    trustConfig: (id) => {
+    trustConfig: (id, _configHash) => {
       const p = projects.find((x) => x.id === id);
       if (!p) return notFound();
       p.trustedConfigHash = 'b1946ac92492d2347c6235b4d2611184';
