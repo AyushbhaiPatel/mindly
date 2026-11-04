@@ -118,10 +118,8 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - Rules are auto-approved only from short prompts without code blocks; anything else (typically
   pasted, untrusted text) is proposed.
 - Rules imported from a repository's agent instruction files (`CLAUDE.md`, `AGENTS.md`, …) are
-  approved only after the user saw the list and confirmed it (or passed `--yes`); they are never
-  `enforce` rules. Only files at the project root that resolve inside it and are not deny-listed
-  are read, with a size cap, and each rule keeps its source line as evidence so editing it out of
-  the file marks the rule stale. Agents Mindly launches itself carry `MINDLY_HEADLESS_RUN=1`,
+  approved only after the user saw the list and confirmed it (or passed `--yes`), and they are
+  never `enforce` rules. Agents Mindly launches itself carry `MINDLY_HEADLESS_RUN=1`,
   and their prompts are never captured as rules. Headless Claude Code runs load only user settings.
 - Failed command output is never stored or replayed; mistake memories keep only the command.
 - Trusting a project config requires the hash the user reviewed; a changed file is refused.
