@@ -16,4 +16,4 @@ export interface Clock {
 
 export const systemClock: Clock = { now: () => Date.now() };
 
-export const MINDLY_VERSION = '0.1.0';
+export const MINDLY_VERSION = '0.1.1';
