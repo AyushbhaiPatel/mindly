@@ -118,6 +118,24 @@ importers:
         specifier: 4.6.7
         version: 4.6.7
 
+  packages/runtime:
+    dependencies:
+      '@mindly/core':
+        specifier: workspace:*
+        version: link:../core
+      '@mindly/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@mindly/git':
+        specifier: workspace:*
+        version: link:../git
+      '@mindly/llm':
+        specifier: workspace:*
+        version: link:../llm
+      '@mindly/notify':
+        specifier: workspace:*
+        version: link:../notify
+
   packages/store:
     dependencies:
       '@mindly/core':
