@@ -1,8 +1,14 @@
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { ensureHome, homePaths, mindlyHome, MindlyError, type HomePaths } from '@mindly/core';
+import { join } from 'node:path';
+import {
+  ensureHome,
+  homePaths,
+  mindlyHome,
+  MindlyError,
+  resolveLayout,
+  type HomePaths,
+} from '@mindly/core';
 import type { DaemonState } from '@mindly/daemon';
 import { ago, type Out } from '../util.js';
 
@@ -117,20 +123,21 @@ export async function daemonRequest<T>(
   return json as T;
 }
 
-/** Absolute path of the daemon's built entry point (`apps/daemon/dist/main.js`). */
+/**
+ * Absolute path of the daemon's entry point: `dist/daemon.js` of the installed `mindly-agents`
+ * package, or `apps/daemon/dist/main.js` in a monorepo checkout.
+ */
 export function daemonMainPath(): string {
-  let resolved: string;
-  try {
-    resolved = fileURLToPath(import.meta.resolve('@mindly/daemon'));
-  } catch (cause) {
-    throw new MindlyError('unavailable', 'the Mindly daemon package is not installed', { cause });
+  const layout = resolveLayout(import.meta.url);
+  if (!existsSync(layout.daemonMain)) {
+    throw new MindlyError(
+      'unavailable',
+      layout.kind === 'dev'
+        ? 'the Mindly daemon is not built (run pnpm build)'
+        : 'the Mindly daemon entry point is missing; reinstall mindly-agents',
+    );
   }
-  // .../daemon/dist/index.js or .../daemon/src/index.ts (source checkouts)
-  const main = join(dirname(dirname(resolved)), 'dist', 'main.js');
-  if (!existsSync(main)) {
-    throw new MindlyError('unavailable', 'the Mindly daemon is not built (run pnpm build)');
-  }
-  return main;
+  return layout.daemonMain;
 }
 
 /** Starts the daemon in the background and waits until it answers. */

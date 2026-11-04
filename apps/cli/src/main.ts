@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import './quiet-warnings.js';
-import { processIo } from './io.js';
-import { run } from './run.js';
 
 /**
- * Entry point of the `mindly` binary. `hook` exits as soon as its answer is written: when the
- * deadline passed, the abandoned handler must not keep the agent waiting.
+ * Entry point of the `mindly` binary. The rest of the CLI is loaded with a dynamic import so the
+ * warning filter above is installed before any module (including `node:sqlite`) is linked.
+ * `hook` exits as soon as its answer is written: when the deadline passed, the abandoned handler
+ * must not keep the agent waiting.
  */
 async function main(): Promise<void> {
+  const [{ processIo }, { run }] = await Promise.all([import('./io.js'), import('./run.js')]);
   const argv = process.argv.slice(2);
   const code = await run(argv, processIo());
   if (argv[0] === 'hook') {

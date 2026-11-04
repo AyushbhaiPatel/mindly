@@ -10,3 +10,4 @@ coverage/
 .mindly-dev/
 .turbo/
 .claude/
+release/
