@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { USER } from '../src/index.js';
-import { event, setup, shellTool, writeTool } from './helpers.js';
+import { event, fakeGit, setup, shellTool, writeTool } from './helpers.js';
 
 describe('hook flow', () => {
   it('captures a rule from one agent and delivers it to the other', async () => {
@@ -172,3 +172,26 @@ describe('hook flow', () => {
     expect(mindly.store.handoffs.list(pid)[0]?.status).toBe('claimed');
   });
 });
+
+describe('provenance for partial-line edits', () => {
+  it('maps a whole line back to an edit that changed only part of it', async () => {
+    const { root, mindly } = setup();
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(
+      `${root}/src/auth.ts`,
+      'export function login(user: string, pw: string) {\n  return 1;\n}\n',
+    );
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', {
+        tool: writeTool('src/auth.ts', 'login(user: string, pw: string)'),
+      }),
+    );
+    const pid = mindly.store.projects.list()[0]!.id;
+    const [hash] = fakeGitHash('export function login(user: string, pw: string) {');
+    expect(mindly.store.fileChanges.findByHash(pid, 'src/auth.ts', hash!)).toHaveLength(1);
+  });
+});
+
+function fakeGitHash(line: string): string[] {
+  return fakeGit.hunkHashes(line);
+}

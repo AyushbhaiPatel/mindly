@@ -10,6 +10,7 @@ import {
   type Session,
 } from '@mindly/core';
 import type { ContextBuilder } from '../context/builder.js';
+import { readBounded } from '../memory/service.js';
 import { memoryLine, renderSections } from '../context/render.js';
 import type { IntentService } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
@@ -247,7 +248,7 @@ export class HookHandler {
     for (const edit of tool.edits.slice(0, 50)) {
       const [resolved] = await this.projectPaths(project, evt.cwd, [edit.path]);
       if (!resolved) continue;
-      const hashes = this.k.ports.git.hunkHashes(edit.addedText);
+      const hashes = this.provenanceHashes(resolved.abs, edit.addedText);
       this.k.store.fileChanges.record({
         projectId: project.project.id,
         sessionId: session.id,
@@ -281,6 +282,30 @@ export class HookHandler {
       files: changed,
     });
     return EMPTY_HOOK_RESULT;
+  }
+
+  /**
+   * Line hashes for provenance. Edits often replace part of a line (`old_string` / `new_string`),
+   * so besides the added text itself, every line of the file as written that contains an added
+   * fragment is hashed too; `mindly why` hashes whole lines and would otherwise miss them.
+   */
+  private provenanceHashes(abs: string, addedText: string): string[] {
+    const hashes = new Set(this.k.ports.git.hunkHashes(addedText));
+    const fragments = addedText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length >= 4)
+      .slice(0, 200);
+    if (fragments.length === 0) return [...hashes];
+    const content = readBounded(abs, MAX_PROVENANCE_FILE_BYTES);
+    if (content === null) return [...hashes];
+    for (const line of content.split(/\r?\n/)) {
+      if (line.length > 2000) continue;
+      if (fragments.some((f) => line.includes(f))) {
+        for (const h of this.k.ports.git.hunkHashes(line)) hashes.add(h);
+      }
+    }
+    return [...hashes].slice(0, 5000);
   }
 
   private async stop(
@@ -326,6 +351,9 @@ export class HookHandler {
     return EMPTY_HOOK_RESULT;
   }
 }
+
+/** Upper bound on file size read to map partial-line edits back to whole lines. */
+const MAX_PROVENANCE_FILE_BYTES = 512 * 1024;
 
 function countLines(text: string): number {
   if (!text) return 0;
