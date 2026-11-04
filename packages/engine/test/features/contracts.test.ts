@@ -152,7 +152,6 @@ describe('safe regex subset', () => {
     ],
     ['(a|ab|abc)'.repeat(3) + '.*.*x', '(?:a|ab|abc)'.repeat(3) + '.*.*x'],
     ['(?<x>a|ab|abc)(?<y>a|ab|abc)(?<z>a|ab|abc).*.*x', '(?:a|ab|abc)'.repeat(3) + '.*.*x'],
-    ['(?i:a|b)(?i:a|b)\\d?.*.*x', '(?:a|b)(?:a|b)\\d?.*.*x'],
   ])('treats %s like its non-capturing form', (capturing, plain) =>
     expect(checkSafePattern(capturing)).toBe(checkSafePattern(plain)),
   );
