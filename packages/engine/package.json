@@ -1,0 +1,25 @@
+{
+  "name": "@synapse/engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Domain services and the Synapse facade.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@synapse/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@synapse/core": "workspace:*",
+    "@synapse/store": "workspace:*"
+  }
+}

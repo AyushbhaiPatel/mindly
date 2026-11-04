@@ -700,12 +700,12 @@ export class DeliveryRepo {
     return n;
   }
 
-  /** Acks everything delivered to a session before `before` (implicit ack on next turn). */
+  /** Acks everything delivered to a session up to `before` (implicit ack on next turn). */
   ackDeliveredBefore(sessionId: string, before: number): number {
     const res = this.db
       .prepare(
         `UPDATE deliveries SET status = 'acked', acked_at = ?
-         WHERE target_session_id = ? AND status = 'delivered' AND delivered_at < ?`,
+         WHERE target_session_id = ? AND status = 'delivered' AND delivered_at <= ?`,
       )
       .run(this.clock.now(), sessionId, before);
     return Number(res.changes);
