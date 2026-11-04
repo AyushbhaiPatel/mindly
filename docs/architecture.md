@@ -82,7 +82,7 @@ scheduled background work.
 | `packages/runners`  | Headless agent runs for replay, cross-agent review and opt-in failover         |
 | `packages/mcp`      | MCP server exposing Mindly tools to any MCP client                             |
 | `packages/adapters` | Per-agent installers and hook translators (Claude Code, Codex, Cursor)         |
-| `apps/cli`          | `mindly` command; the only published package (`mindly-agents`)                 |
+| `apps/cli`          | `mindly` command; the only published package (`mindly` on npm)                 |
 | `apps/daemon`       | Local HTTP/WebSocket server for Mission Control and background jobs            |
 | `apps/dashboard`    | Mission Control single-page app, served by the daemon                          |
 

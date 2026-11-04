@@ -1,5 +1,5 @@
 {
-  "name": "mindly-agents",
+  "name": "mindly",
   "version": "0.1.0",
   "private": true,
   "description": "The mindly command: shared memory and live coordination for coding agents.",

@@ -83,7 +83,7 @@ function sameFile(a: string, b: string): boolean {
 }
 
 /**
- * Absolute path of the CLI's entry point: `dist/main.js` of the installed `mindly-agents` package,
+ * Absolute path of the CLI's entry point: `dist/main.js` of the installed `mindly` package,
  * or `apps/cli/dist/main.js` in a monorepo checkout.
  */
 export function cliEntry(): string {

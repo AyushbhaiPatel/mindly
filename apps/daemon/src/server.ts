@@ -16,7 +16,7 @@ import { registerApi } from './routes/api.js';
 export const BODY_LIMIT = 256 * 1024;
 
 /**
- * Default location of the built dashboard: `dashboard/` in the installed `mindly-agents` package,
+ * Default location of the built dashboard: `dashboard/` in the installed `mindly` package,
  * or `apps/dashboard/dist` in a monorepo checkout.
  */
 export function defaultDashboardDir(): string {

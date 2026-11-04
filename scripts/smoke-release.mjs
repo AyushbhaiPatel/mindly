@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Smoke-tests a packed `mindly-agents` tarball the way a user would install it.
+// Smoke-tests a packed `mindly` tarball the way a user would install it.
 //
-// Usage: node scripts/smoke-release.mjs <path/to/mindly-agents-x.y.z.tgz>
+// Usage: node scripts/smoke-release.mjs <path/to/mindly-x.y.z.tgz>
 //
 // Everything runs in a fresh temp directory with a temp HOME and MINDLY_HOME, so the real
 // ~/.mindly, ~/.claude and npm cache are never touched. `npm install` of the tarball needs network
@@ -43,7 +43,7 @@ const dirs = {
 for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true, mode: 0o700 });
 
 const bin = join(dirs.app, 'node_modules', '.bin');
-const pkgDir = join(dirs.app, 'node_modules', 'mindly-agents');
+const pkgDir = join(dirs.app, 'node_modules', 'mindly');
 const env = {
   PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
   HOME: dirs.home,
@@ -143,8 +143,7 @@ try {
     commands.every(
       (c) =>
         c.includes(realpathSync(dirs.app)) &&
-        (c.includes(join('mindly-agents', 'dist', 'main.js')) ||
-          c.includes(join('.bin', 'mindly'))),
+        (c.includes(join('mindly', 'dist', 'main.js')) || c.includes(join('.bin', 'mindly'))),
     );
   check(
     pointsInside,
