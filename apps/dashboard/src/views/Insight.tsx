@@ -114,8 +114,8 @@ function XRay() {
           {(packets) =>
             packets.length === 0 ? (
               <Empty>
-                Mindly has not sent this agent any context yet. It does so when the agent starts,
-                gets a prompt or is about to edit a file.
+                Mindly has not sent {current ? sessionName(current) : 'this agent'} any context yet.
+                It does so when the agent starts, gets a prompt or is about to edit a file.
               </Empty>
             ) : (
               <ol className="packets">
