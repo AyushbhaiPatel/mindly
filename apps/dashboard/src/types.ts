@@ -27,6 +27,7 @@ export type {
   ContextPacket,
   Contract,
   Delivery,
+  DeliveryKind,
   DeliveryStatus,
   EventType,
   Handoff,
