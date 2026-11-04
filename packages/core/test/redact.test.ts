@@ -27,6 +27,24 @@ describe('redact', () => {
     expect(out.text).toBe(`DATABASE_PASSWORD=${REDACTED} and api_key: "${REDACTED}"`);
   });
 
+  it.each([
+    'function login(user: string, password: string) {',
+    'def login(password: str) -> bool:',
+    'const password = process.env.DB_PASSWORD;',
+    'apiKey: config.apiKey,',
+    'token: Optional[str] = None',
+    'type Creds = { password: SecretString }',
+  ])('leaves code that only names secrets alone: %s', (code) => {
+    expect(redact(code).count).toBe(0);
+  });
+
+  it('still redacts literal values next to secret names', () => {
+    expect(redact('password: Hunter2024!').count).toBe(1);
+    expect(redact('const token = "abc123def456"').count).toBe(1);
+    expect(redact('password = Summerwind').count).toBe(1);
+    expect(redact('PASSWORD=string').count).toBe(1);
+  });
+
   it('removes credentials from URLs but keeps the host', () => {
     expect(redact('postgres://admin:s3cr3t@db.local:5432/app').text).toBe(
       `postgres://admin:${REDACTED}@db.local:5432/app`,
