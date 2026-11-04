@@ -15,7 +15,7 @@ import {
 import { getAdapter } from '@mindly/adapters';
 import type { Mindly } from '@mindly/engine';
 import { openMindly, type RuntimeOptions } from '@mindly/runtime';
-import type { CliIo } from './io.js';
+import { readStdin, StdinTooLarge, type CliIo } from './io.js';
 
 /** Largest hook payload read from stdin. */
 export const MAX_HOOK_STDIN_BYTES = 2 * 1024 * 1024;
@@ -27,23 +27,7 @@ export interface HookDeps {
 
 const defaultDeps: HookDeps = { open: openMindly };
 
-class StdinTooLarge extends Error {}
-
-/** Reads stdin completely, refusing more than `max` bytes. */
-export async function readStdin(
-  stdin: AsyncIterable<Buffer | string>,
-  max = MAX_HOOK_STDIN_BYTES,
-): Promise<string> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of stdin) {
-    const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-    total += buf.length;
-    if (total > max) throw new StdinTooLarge('hook payload too large');
-    chunks.push(buf);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
+export { readStdin };
 
 function hookLogger(env: NodeJS.ProcessEnv): Logger {
   try {
@@ -90,7 +74,7 @@ export async function runHook(
 
   let raw: string;
   try {
-    raw = await readStdin(io.stdin);
+    raw = await readStdin(io.stdin, MAX_HOOK_STDIN_BYTES);
   } catch (err) {
     return fail(err instanceof StdinTooLarge ? 'payload too large' : 'stdin unreadable');
   }

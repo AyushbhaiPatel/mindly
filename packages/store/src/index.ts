@@ -14,6 +14,7 @@ import {
 import { ConflictRepo, DeliveryRepo, FileChangeRepo, IntentRepo, TaskRepo } from './repos/work.js';
 
 export * from './db.js';
+export * from './glance.js';
 export { MIGRATIONS } from './migrations.js';
 export * from './repos/core.js';
 export * from './repos/ids.js';

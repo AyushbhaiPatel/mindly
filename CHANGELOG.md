@@ -13,6 +13,10 @@ All notable changes to `mindly-cli` are documented here. The project follows
   shell commands are captured, context is injected at session start, on each prompt and after
   tool calls, and enforced rules can block a write. Comments and your own hooks in the settings
   file are kept, and `mindly uninstall` restores it.
+- Claude Code status line: `mindly statusline` shows `mindly · 3 rules · 1 update · 0 conflicts`
+  for the session's project. `mindly init` adds it unless you already have a status line (then it
+  explains how to chain one into the other; `--no-statusline` skips it), `mindly doctor` reports
+  it and `mindly uninstall` removes it. Read-only, no daemon needed, falls back to `mindly`.
 
 ## 0.1.3 — 2026-11-04
 

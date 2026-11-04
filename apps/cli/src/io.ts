@@ -16,13 +16,32 @@ export interface TextOut {
 export interface CliIo {
   stdout: TextOut;
   stderr: TextOut;
-  /** Raw standard input (only the `hook` command reads it). */
+  /** Raw standard input (only the `hook` and `statusline` commands read it). */
   stdin: AsyncIterable<Buffer | string>;
   env: NodeJS.ProcessEnv;
   /** Absolute working directory. */
   cwd: string;
   /** Asks the user a question on a terminal; null when not interactive (no prompts possible). */
   prompt: ((question: string) => Promise<string>) | null;
+}
+
+/** Thrown by {@link readStdin} when the input exceeds its limit. */
+export class StdinTooLarge extends Error {}
+
+/** Reads stdin completely, refusing more than `max` bytes. */
+export async function readStdin(
+  stdin: AsyncIterable<Buffer | string>,
+  max: number,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stdin) {
+    const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+    total += buf.length;
+    if (total > max) throw new StdinTooLarge('payload too large');
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 /** The `CliIo` of the current process. */
