@@ -1,42 +1,55 @@
 import { useEffect, useId, useState, type FormEvent } from 'react';
 import {
+  Age,
   Confirm,
+  CopyId,
+  DataTable,
+  DotWord,
   Drawer,
   Empty,
+  Facts,
+  Help,
   Loaded,
   Mono,
-  Help,
+  Overflow,
   Panel,
-  ShortId,
+  Paths,
+  Segmented,
   Status,
-  Tag,
-  Time,
-  TrustBadge,
-  cx,
+  TextLink,
+  TrustMark,
+  type Column,
 } from '../components/ui';
 import { splitList } from '../format';
 import { useAction, useApp, useResource } from '../state';
 import {
   MEMORY_KINDS,
   TRUST_LEVELS,
+  type ContextPacket,
+  type Contract,
   type Memory,
   type MemoryDetail,
+  type MemoryEvidence,
   type MemoryKind,
+  type MemoryVersion,
   type Trust,
 } from '../types';
 import {
+  COLUMNS,
+  EMPTY,
   absTime,
   checkStateWords,
   memoryKindPlural,
   memoryKindWords,
   omitReasonWords,
+  productName,
   relevanceWords,
-  sessionName,
   sourceWords,
   triggerWords,
-  trustWords,
+  trustShort,
   words,
 } from '../vocab';
+import { AgentName } from './Overview';
 
 function useDebounced<T>(value: T, ms: number): T {
   const [v, setV] = useState(value);
@@ -83,143 +96,110 @@ export function MemoryView() {
     navigate('memory', p);
   };
 
+  const cols: Column<Memory>[] = [
+    { key: 'trust', header: COLUMNS.trust, cell: (m) => <TrustMark trust={m.trust} /> },
+    { key: 'kind', header: COLUMNS.kind, cell: (m) => memoryKindWords(m.kind) },
+    {
+      key: 'title',
+      header: COLUMNS.title,
+      kind: 'main',
+      title: (m) => m.title,
+      cell: (m) => m.title,
+    },
+    {
+      key: 'from',
+      header: COLUMNS.from,
+      kind: 'clip',
+      cell: (m) => sourceWords(m.source, sessions),
+    },
+    {
+      key: 'updated',
+      header: COLUMNS.updated,
+      kind: 'meta',
+      cell: (m) => <Age ms={m.updatedAt} />,
+    },
+  ];
+
   return (
     <div className="view">
       <Panel
         title="Memory"
-        count={res.data?.length}
-        noun="memory"
-        plural="memories"
         help="memory"
-        actions={
-          <button
-            type="button"
-            className="btn btn-primary btn-small"
-            onClick={() => setCreating(true)}
-          >
-            New memory
-          </button>
-        }
+        meta={res.data ? String(res.data.length) : undefined}
+        actions={<TextLink onClick={() => setCreating(true)}>New memory</TextLink>}
       >
-        <form className="filters" role="search" onSubmit={(e) => e.preventDefault()}>
-          <label className="field field-grow">
-            <span>Search</span>
-            <input
-              type="search"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Full-text: title, body, tags"
-              maxLength={200}
-            />
-          </label>
-          <label className="field">
-            <span>Type</span>
-            <select value={kind} onChange={(e) => setKind(e.target.value as MemoryKind | '')}>
-              <option value="">all types</option>
-              {MEMORY_KINDS.map((k) => (
-                <option key={k} value={k}>
-                  {memoryKindPlural(k)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>Trust</span>
-            <select value={trust} onChange={(e) => setTrust(e.target.value as Trust | '')}>
-              <option value="">any trust</option>
-              {TRUST_LEVELS.map((t) => (
-                <option key={t} value={t}>
-                  {trustWords(t)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>Branch</span>
-            <input
-              value={branch}
-              onChange={(e) => setBranch(e.target.value)}
-              placeholder="all branches"
-              maxLength={200}
-            />
-          </label>
-          <label className="field">
-            <span>Show</span>
-            <select
+        <div className="filters" role="search">
+          <Segmented
+            label="Trust"
+            value={trust}
+            onChange={setTrust}
+            options={[
+              { key: '', label: 'all' },
+              ...(['proposed', 'approved', 'verified', 'stale', 'rejected'] as const).map((t) => ({
+                key: t,
+                label: trustShort(t),
+              })),
+            ]}
+          />
+          <Segmented
+            label="Kind"
+            value={kind}
+            onChange={setKind}
+            options={[
+              { key: '', label: 'all kinds' },
+              ...MEMORY_KINDS.map((k) => ({ key: k, label: memoryKindPlural(k) })),
+            ]}
+          />
+          <div className="filter-line">
+            <label className="line-field line-field-grow">
+              <span className="visually-hidden">Search</span>
+              <input
+                type="search"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search title, body, tags"
+                maxLength={200}
+              />
+            </label>
+            <label className="line-field">
+              <span className="visually-hidden">Branch</span>
+              <input
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+                placeholder="any branch"
+                maxLength={200}
+              />
+            </label>
+            <Segmented
+              label="Show"
               value={status}
-              onChange={(e) => setStatus(e.target.value as 'active' | 'archived')}
-            >
-              <option value="active">in use</option>
-              <option value="archived">archived</option>
-            </select>
-          </label>
-        </form>
+              onChange={setStatus}
+              options={[
+                { key: 'active', label: 'in use' },
+                { key: 'archived', label: 'archived' },
+              ]}
+            />
+          </div>
+        </div>
         <Loaded res={res}>
           {(list) =>
             list.length === 0 ? (
               <Empty>
                 {dq || kind || trust || db
-                  ? 'No memories match these filters. Clear a filter to see more.'
+                  ? EMPTY.memoryFiltered
                   : status === 'archived'
-                    ? 'Nothing archived. Memories you archive stay here for history and are no longer given to agents.'
-                    : 'No memories yet. Agents suggest rules, decisions and known pitfalls as they work, and they appear here for you to approve. You can also add one with \u201cNew memory\u201d.'}
+                    ? EMPTY.memoryArchived
+                    : EMPTY.memory}
               </Empty>
             ) : (
-              <ul className="mem-list list">
-                {list.map((m) => (
-                  <li key={m.id}>
-                    <button
-                      type="button"
-                      className={cx(
-                        'mem-row',
-                        'row',
-                        `trust-row-${m.trust}`,
-                        m.id === openId && 'is-open',
-                      )}
-                      onClick={() => setOpen(m.id)}
-                    >
-                      <span className="row-top">
-                        <span className="dot" aria-hidden="true" />
-                        <span className="row-title mem-title">{m.title}</span>
-                        <span className="row-when">
-                          <Time ms={m.updatedAt} prefix="updated" />
-                        </span>
-                      </span>
-                      <span className="row-sub mem-badges">
-                        <Tag>{memoryKindWords(m.kind)}</Tag>
-                        <TrustBadge trust={m.trust} by={sourceWords(m.source, sessions)} />
-                        {m.pinned && (
-                          <span className="pin" title="Pinned: always given to every agent">
-                            always included
-                          </span>
-                        )}
-                        {m.enforce && (
-                          <span
-                            className="enforced"
-                            title="Enforced: Mindly may block an edit that clearly breaks this rule"
-                          >
-                            enforced
-                          </span>
-                        )}
-                      </span>
-                      <span className="row-text mem-body">{m.body}</span>
-                      <span className="row-stack mem-side">
-                        <span>added by {sourceWords(m.source, sessions)}</span>
-                        {m.scope.branch && (
-                          <span>
-                            only on <Mono>{m.scope.branch}</Mono>
-                          </span>
-                        )}
-                        {m.scope.paths.slice(0, 2).map((p) => (
-                          <Mono key={p} title="Applies to these files">
-                            {p}
-                          </Mono>
-                        ))}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <DataTable
+                label="Memories"
+                columns={cols}
+                rows={list}
+                rowKey={(m) => m.id}
+                onOpen={(m) => setOpen(m.id)}
+                isCurrent={(m) => m.id === openId}
+              />
             )
           }
         </Loaded>
@@ -289,6 +269,7 @@ function MemoryDetailView({
   const m = d.memory;
   const versions = [...d.versions].sort((a, b) => b.version - a.version);
   const shown = viewVersion !== null ? versions.find((v) => v.version === viewVersion) : undefined;
+  const waiting = m.trust !== 'approved' && m.trust !== 'verified' && m.trust !== 'rejected';
 
   const act = (key: string, fn: () => Promise<unknown>, msg: string) =>
     void run(key, fn, msg).then((ok) => ok && onChanged());
@@ -297,46 +278,151 @@ function MemoryDetailView({
     return <MemoryForm existing={m} onDone={() => (setEditing(false), onChanged())} />;
   }
 
+  const versionCols: Column<MemoryVersion>[] = [
+    { key: 'v', header: COLUMNS.version, cell: (v) => `v${v.version}` },
+    { key: 'trust', header: COLUMNS.trust, cell: (v) => <TrustMark trust={v.trust} /> },
+    {
+      key: 'change',
+      header: COLUMNS.change,
+      kind: 'main',
+      title: (v) => v.reason ?? undefined,
+      cell: (v) => v.reason ?? 'changed',
+    },
+    {
+      key: 'by',
+      header: COLUMNS.by,
+      kind: 'clip',
+      cell: (v) => sourceWords(v.changedBy, sessions),
+    },
+    { key: 'when', header: COLUMNS.when, kind: 'meta', cell: (v) => <Age ms={v.createdAt} /> },
+  ];
+  const evidenceCols: Column<MemoryEvidence>[] = [
+    {
+      key: 'state',
+      header: COLUMNS.status,
+      cell: (e) => (
+        <DotWord tone={e.valid ? 'good' : 'bad'}>{e.valid ? 'matches' : 'code changed'}</DotWord>
+      ),
+    },
+    { key: 'type', header: COLUMNS.type, cell: (e) => words(e.type) },
+    {
+      key: 'ref',
+      header: COLUMNS.ref,
+      kind: 'main',
+      title: (e) => e.ref,
+      cell: (e) => <Mono>{e.ref}</Mono>,
+    },
+    {
+      key: 'checked',
+      header: COLUMNS.checked,
+      kind: 'meta',
+      cell: (e) => <Age ms={e.checkedAt} />,
+    },
+  ];
+  const checkCols: Column<Contract>[] = [
+    {
+      key: 'state',
+      header: COLUMNS.status,
+      cell: (c) => <Status value={c.state} label={checkStateWords(c.state)} />,
+    },
+    { key: 'kind', header: COLUMNS.kind, cell: (c) => words(c.kind) },
+    {
+      key: 'spec',
+      header: COLUMNS.spec,
+      kind: 'main',
+      cell: (c) => (
+        <Mono>
+          {[
+            c.spec.path ?? c.spec.argv?.join(' '),
+            c.spec.pattern && `/${c.spec.pattern}/`,
+            c.spec.symbol,
+            c.spec.key,
+          ]
+            .filter(Boolean)
+            .join(' ')}
+        </Mono>
+      ),
+    },
+    { key: 'last', header: COLUMNS.lastRun, kind: 'meta', cell: (c) => <Age ms={c.lastRunAt} /> },
+  ];
+  const xrayCols: Column<ContextPacket>[] = [
+    {
+      key: 'res',
+      header: COLUMNS.result,
+      cell: (p) =>
+        p.included.some((i) => i.ref === m.id) ? (
+          <DotWord tone="good">included</DotWord>
+        ) : (
+          <DotWord tone="warn">left out</DotWord>
+        ),
+    },
+    {
+      key: 'agent',
+      header: COLUMNS.agent,
+      cell: (p) => <AgentName kind={sessions.get(p.sessionId)?.agentKind} />,
+    },
+    {
+      key: 'why',
+      header: COLUMNS.why,
+      kind: 'main',
+      cell: (p) => {
+        const inc = p.included.find((i) => i.ref === m.id);
+        const it = inc ?? p.omitted.find((i) => i.ref === m.id);
+        if (!it) return triggerWords(p.trigger);
+        return (
+          <span title={`Relevance score ${it.score.toFixed(2)}`}>
+            {relevanceWords(it.score)} {'·'} {inc ? it.reason : omitReasonWords(it.reason)}
+          </span>
+        );
+      },
+    },
+    { key: 'when', header: COLUMNS.when, kind: 'meta', cell: (p) => <Age ms={p.createdAt} /> },
+  ];
+
   return (
-    <div className="stack-lg">
-      <div className="detail-head">
-        <div className="mem-badges">
-          <Tag>{memoryKindWords(m.kind)}</Tag>
-          <TrustBadge trust={m.trust} by={sourceWords(m.source, sessions)} />
-          {m.status === 'archived' && <Status value="archived" />}
-          {m.pinned && <Tag tone="accent">always included</Tag>}
-          {m.enforce && <Tag tone="warn">enforced</Tag>}
-        </div>
+    <div className="drawer-stack">
+      <header className="detail-head">
         <h3 className="detail-title">{shown ? shown.title : m.title}</h3>
-        <p className="muted small">
-          version {m.version} · added by {sourceWords(m.source, sessions)} ·{' '}
-          <Time ms={m.updatedAt} prefix="updated" />
-          {m.lastVerifiedAt && (
+        <p className="detail-meta">
+          <TrustMark trust={m.trust} />
+          <span className="sep">{'·'}</span>
+          {memoryKindWords(m.kind)}
+          <span className="sep">{'·'}</span>
+          from {sourceWords(m.source, sessions)}
+          <span className="sep">{'·'}</span>v{m.version}
+          <span className="sep">{'·'}</span>
+          <Age ms={m.updatedAt} />
+          {m.status === 'archived' && (
             <>
-              {' '}
-              · <Time ms={m.lastVerifiedAt} prefix="last confirmed in the code" />
+              <span className="sep">{'·'}</span>archived
             </>
-          )}{' '}
-          · <ShortId id={m.id} label="memory id" />
+          )}
+          {m.pinned && (
+            <>
+              <span className="sep">{'·'}</span>always included
+            </>
+          )}
+          {m.enforce && (
+            <>
+              <span className="sep">{'·'}</span>enforced
+            </>
+          )}
         </p>
-      </div>
+      </header>
 
       {shown && (
-        <div className="time-travel" role="status">
-          Viewing version {shown.version} from {absTime(shown.createdAt)} ({trustWords(shown.trust)}
-          ).{' '}
-          <button type="button" className="link" onClick={() => setViewVersion(null)}>
-            Back to current
-          </button>
-        </div>
+        <p className="notice" role="status">
+          Version {shown.version}, {absTime(shown.createdAt)}.{' '}
+          <TextLink onClick={() => setViewVersion(null)}>Back to current</TextLink>
+        </p>
       )}
       <div className="body-text">{shown ? shown.body : m.body}</div>
 
-      <div className="btn-row">
-        {m.trust !== 'approved' && m.trust !== 'verified' && (
+      <div className="action-row">
+        {waiting && (
           <button
             type="button"
-            className="btn btn-primary"
+            className="btn-primary"
             disabled={!!busy}
             onClick={() => act('approve', () => client.approveMemory(m.id), 'Approved')}
           >
@@ -344,196 +430,135 @@ function MemoryDetailView({
           </button>
         )}
         {m.trust !== 'rejected' && (
-          <button
-            type="button"
-            className="btn"
+          <TextLink
             disabled={!!busy}
             onClick={() => act('reject', () => client.rejectMemory(m.id), 'Rejected')}
           >
             Reject
-          </button>
+          </TextLink>
         )}
-        <button
-          type="button"
-          className="btn"
-          disabled={!!busy}
-          onClick={() =>
-            act(
-              'pin',
-              () => client.updateMemory(m.id, { pinned: !m.pinned }),
-              m.pinned ? 'Unpinned' : 'Pinned',
-            )
-          }
-        >
-          {m.pinned ? 'Unpin' : 'Pin'}
-        </button>
-        <button type="button" className="btn" disabled={!!busy} onClick={() => setEditing(true)}>
+        <TextLink disabled={!!busy} onClick={() => setEditing(true)}>
           Edit
-        </button>
-        {m.status !== 'archived' && (
-          <button
-            type="button"
-            className="btn"
-            disabled={!!busy}
-            onClick={() => act('archive', () => client.archiveMemory(m.id), 'Archived')}
-          >
-            Archive
-          </button>
-        )}
-        <button
-          type="button"
-          className="btn btn-danger"
-          disabled={!!busy}
-          onClick={() => setConfirmDelete(true)}
-        >
-          Delete
-        </button>
+        </TextLink>
+        <Overflow
+          label="More memory actions"
+          items={[
+            {
+              label: m.pinned ? 'Stop always including' : 'Always include',
+              disabled: !!busy,
+              onSelect: () =>
+                act(
+                  'pin',
+                  () => client.updateMemory(m.id, { pinned: !m.pinned }),
+                  m.pinned ? 'No longer always included' : 'Always included',
+                ),
+            },
+            ...(m.status !== 'archived'
+              ? [
+                  {
+                    label: 'Archive',
+                    disabled: !!busy,
+                    onSelect: () => act('archive', () => client.archiveMemory(m.id), 'Archived'),
+                  },
+                ]
+              : []),
+            {
+              label: 'Copy id',
+              onSelect: () => void navigator.clipboard?.writeText(m.id).catch(() => undefined),
+            },
+            { label: 'Delete', danger: true, onSelect: () => setConfirmDelete(true) },
+          ]}
+        />
       </div>
 
-      <dl className="kv">
-        <dt>Applies to</dt>
-        <dd className="file-list">
-          {m.scope.paths.length === 0 ? (
-            <span className="muted">the whole project</span>
-          ) : (
-            m.scope.paths.map((p) => <Mono key={p}>{p}</Mono>)
-          )}
-        </dd>
-        <dt>Branch</dt>
-        <dd>
-          {m.scope.branch ? (
-            <Mono>{m.scope.branch}</Mono>
-          ) : (
-            <span className="muted">all branches</span>
-          )}
-        </dd>
-        <dt>Tags</dt>
-        <dd className="file-list">
-          {m.tags.length ? (
-            m.tags.map((t) => <Tag key={t}>{t}</Tag>)
-          ) : (
-            <span className="muted">none</span>
-          )}
-        </dd>
-      </dl>
+      <Facts
+        items={[
+          [
+            'Applies to',
+            m.scope.paths.length === 0 ? (
+              <span className="muted">whole project</span>
+            ) : (
+              <Paths paths={m.scope.paths} max={Infinity} />
+            ),
+          ],
+          [
+            'Branch',
+            m.scope.branch ? <Mono>{m.scope.branch}</Mono> : <span className="muted">all</span>,
+          ],
+          ['Tags', m.tags.length > 0 && m.tags.join(', ')],
+          ['Id', <CopyId key="id" id={m.id} label="memory id" />],
+        ]}
+      />
 
-      <section aria-label="Version history">
+      <section aria-label="History" className="drawer-section">
         <h4 className="sub">History</h4>
-        <ol className="timeline">
-          {versions.map((v) => (
-            <li
-              key={v.version}
-              className={cx('tl-item', v.version === (viewVersion ?? m.version) && 'tl-current')}
-            >
-              <button
-                type="button"
-                className="tl-btn"
-                onClick={() => setViewVersion(v.version === m.version ? null : v.version)}
-                aria-pressed={v.version === (viewVersion ?? m.version)}
-              >
-                <span className="tl-ver">version {v.version}</span>
-                <TrustBadge trust={v.trust} by={sourceWords(v.changedBy, sessions)} />
-                <span className="tl-reason">{v.reason ?? 'changed'}</span>
-                <span className="muted">by {sourceWords(v.changedBy, sessions)}</span>
-                <Time ms={v.createdAt} />
-              </button>
-            </li>
-          ))}
-        </ol>
+        <DataTable
+          label="Version history"
+          columns={versionCols}
+          rows={versions}
+          rowKey={(v) => String(v.version)}
+          isCurrent={(v) => v.version === (viewVersion ?? m.version)}
+          onOpen={(v) => setViewVersion(v.version === m.version ? null : v.version)}
+        />
       </section>
 
-      <section aria-label="Evidence">
+      <section aria-label="Evidence" className="drawer-section">
         <h4 className="sub">Evidence</h4>
         {d.evidence.length === 0 ? (
-          <Empty>
-            No evidence linked. When a memory points at code (a file, a commit, a test), Mindly
-            notices when that code changes and marks the memory “may be outdated”.
-          </Empty>
+          <Empty>{EMPTY.evidence}</Empty>
         ) : (
-          <ul className="evidence">
-            {d.evidence.map((e) => (
-              <li key={e.id}>
-                <span className={cx('tag', e.valid ? 'tone-good' : 'tone-bad')}>
-                  {e.valid ? 'still matches the code' : 'code changed since'}
-                </span>
-                <Tag>{e.type}</Tag>
-                <Mono>{e.ref}</Mono>
-                {e.checkedAt && (
-                  <span className="muted small">
-                    <Time ms={e.checkedAt} prefix="checked" />
-                  </span>
-                )}
-                {e.excerpt && <pre className="pre pre-inline">{e.excerpt}</pre>}
-              </li>
-            ))}
-          </ul>
+          <DataTable
+            label="Evidence"
+            columns={evidenceCols}
+            rows={d.evidence}
+            rowKey={(e) => e.id}
+            detail={(e) => (e.excerpt ? <pre className="pre">{e.excerpt}</pre> : null)}
+          />
         )}
       </section>
 
-      <section aria-label="Checks">
+      <section aria-label="Checks" className="drawer-section">
         <h4 className="sub">
           Checks <Help term="check" />
         </h4>
         {d.contracts.length === 0 ? (
-          <Empty>
-            No checks tied to this memory. Add one from the CLI to have Mindly test it after every
-            change.
-          </Empty>
+          <Empty>{EMPTY.checks}</Empty>
         ) : (
-          <ul className="evidence">
-            {d.contracts.map((c) => (
-              <li key={c.id}>
-                <Status value={c.state} label={checkStateWords(c.state)} />
-                <Tag>{words(c.kind)}</Tag>
-                <Mono>{c.spec.path ?? c.spec.argv?.join(' ') ?? ''}</Mono>
-                {c.spec.pattern && <Mono>/{c.spec.pattern}/</Mono>}
-                {c.spec.symbol && <Mono>{c.spec.symbol}</Mono>}
-                {c.spec.key && <Mono>{c.spec.key}</Mono>}
-                {c.kind === 'command' && !c.approvedHash && (
-                  <Tag tone="warn">needs your approval to run</Tag>
-                )}
-                {c.lastMessage && <span className="small">{c.lastMessage}</span>}
-                <span className="muted small">
-                  <Time ms={c.lastRunAt} prefix="last run" />
-                </span>
-              </li>
-            ))}
-          </ul>
+          <DataTable
+            label="Checks"
+            columns={checkCols}
+            rows={d.contracts}
+            rowKey={(c) => c.id}
+            detail={(c) =>
+              c.lastMessage || (c.kind === 'command' && !c.approvedHash) ? (
+                <Facts
+                  items={[
+                    ['Message', c.lastMessage],
+                    [
+                      'Approval',
+                      c.kind === 'command' && !c.approvedHash && 'needs your approval to run',
+                    ],
+                  ]}
+                />
+              ) : null
+            }
+          />
         )}
       </section>
 
-      <section aria-label="Given to agents">
+      <section aria-label="Given to agents" className="drawer-section">
         <h4 className="sub">
           Given to agents <Help term="xray" />
         </h4>
         {d.xray.length === 0 ? (
-          <Empty>
-            No agent has received this memory yet. It is sent when an agent works on matching files.
-          </Empty>
+          <Empty>{EMPTY.givenTo}</Empty>
         ) : (
-          <ul className="evidence">
-            {d.xray.map((p) => {
-              const inc = p.included.find((i) => i.ref === m.id);
-              const om = p.omitted.find((i) => i.ref === m.id);
-              const it = inc ?? om;
-              return (
-                <li key={p.id}>
-                  <span className={cx('tag', inc ? 'tone-good' : 'tone-warn')}>
-                    {inc ? 'included' : 'left out'}
-                  </span>
-                  <span>{sessionName(sessions.get(p.sessionId))}</span>
-                  <span className="muted small">{triggerWords(p.trigger)}</span>
-                  {it && (
-                    <span className="small" title={`Relevance score ${it.score.toFixed(2)}`}>
-                      {relevanceWords(it.score)} relevance ·{' '}
-                      {inc ? it.reason : `left out because ${omitReasonWords(it.reason)}`}
-                    </span>
-                  )}
-                  <Time ms={p.createdAt} />
-                </li>
-              );
-            })}
-          </ul>
+          <DataTable
+            label="Given to agents"
+            columns={xrayCols}
+            rows={d.xray}
+            rowKey={(p) => p.id}
+          />
         )}
       </section>
 
@@ -552,8 +577,7 @@ function MemoryDetailView({
       >
         <p>
           “{m.title}” and its {versions.length} version{versions.length === 1 ? '' : 's'} will be
-          removed from the database. This can’t be undone. Archive it instead if you only want
-          agents to stop seeing it.
+          removed. This can’t be undone. Archive it instead to keep the history.
         </p>
       </Confirm>
     </div>
@@ -599,7 +623,7 @@ function MemoryForm({ existing, onDone }: { existing?: Memory; onDone(m?: Memory
     <form className="form" onSubmit={submit}>
       {!existing && (
         <label className="field">
-          <span>Type</span>
+          <span>Kind</span>
           <select value={kind} onChange={(e) => setKind(e.target.value as MemoryKind)}>
             {MEMORY_KINDS.map((k) => (
               <option key={k} value={k}>
@@ -634,7 +658,7 @@ function MemoryForm({ existing, onDone }: { existing?: Memory; onDone(m?: Memory
         <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="tooling, ci" />
       </label>
       <label className="field">
-        <span>Applies to files (optional)</span>
+        <span>Applies to files</span>
         <textarea
           rows={3}
           value={paths}
@@ -651,11 +675,9 @@ function MemoryForm({ existing, onDone }: { existing?: Memory; onDone(m?: Memory
             onChange={(e) => setEnforce(e.target.checked)}
             aria-describedby={`${fid}-enf-help`}
           />
-          <label htmlFor={`${fid}-enf`}>Enforce this rule</label>
+          <label htmlFor={`${fid}-enf`}>Enforce</label>
           <p id={`${fid}-enf-help`} className="help">
-            When on, Mindly may block an agent’s file edit or command that clearly violates this
-            rule (the agent sees why and can adjust). Leave off for guidance agents should weigh,
-            not obey.
+            Mindly may block an edit or command that clearly breaks this rule.
           </p>
         </div>
       )}
@@ -666,19 +688,17 @@ function MemoryForm({ existing, onDone }: { existing?: Memory; onDone(m?: Memory
           checked={pinned}
           onChange={(e) => setPinned(e.target.checked)}
         />
-        <label htmlFor={`${fid}-pin`}>Always include (give it to every agent, every time)</label>
+        <label htmlFor={`${fid}-pin`}>Always include</label>
       </div>
-      <div className="btn-row">
+      <div className="action-row">
         <button
           type="submit"
-          className="btn btn-primary"
+          className="btn-primary"
           disabled={!!busy || !title.trim() || !body.trim()}
         >
           {existing ? 'Save changes' : 'Create memory'}
         </button>
-        <button type="button" className="btn" onClick={() => onDone()}>
-          Cancel
-        </button>
+        <TextLink onClick={() => onDone()}>Cancel</TextLink>
       </div>
     </form>
   );

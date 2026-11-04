@@ -140,7 +140,7 @@ export function App() {
           Start it with <code className="mono">mindly daemon</code> or reopen with{' '}
           <code className="mono">mindly dashboard</code>.
         </p>
-        <button type="button" className="btn btn-primary" onClick={() => void start()}>
+        <button type="button" className="btn-primary" onClick={() => void start()}>
           Try again
         </button>
       </main>
@@ -419,7 +419,7 @@ function Shell({
           </span>
           <button
             type="button"
-            className="btn btn-ghost theme-toggle"
+            className="theme-toggle"
             onClick={() => {
               const t = nextTheme(theme);
               setTheme(t);

@@ -1,31 +1,41 @@
 import { useEffect, useState } from 'react';
 import {
+  Age,
+  CopyId,
+  DataTable,
   Empty,
+  Facts,
   Loaded,
   Mono,
   Panel,
+  Paths,
   Segmented,
   Status,
-  Tag,
-  Time,
-  cx,
-  statusTone,
+  type Column,
 } from '../components/ui';
 import { useApp, useResource } from '../state';
-import type { Handoff, Intent, Task, TaskStatus } from '../types';
+import type { Delivery, Handoff, Intent, Task, TaskStatus } from '../types';
 import {
+  COLUMNS,
+  EMPTY,
   deliveryKindWords,
   deliveryStatusWords,
   handoffReasonWords,
   handoffStatusWords,
   humanizeAgentText,
   productName,
-  sessionName,
+  progressWords,
   taskStatusWords,
 } from '../vocab';
-import { AgentMark } from './Overview';
+import { AgentName } from './Overview';
 
-const COLUMNS: TaskStatus[] = ['open', 'in_progress', 'blocked', 'done'];
+const STATUS_ORDER: Record<TaskStatus, number> = {
+  in_progress: 0,
+  blocked: 1,
+  open: 2,
+  done: 3,
+  abandoned: 4,
+};
 
 export function CoordinationView() {
   const { params } = useApp();
@@ -34,7 +44,7 @@ export function CoordinationView() {
   }, [params]);
   return (
     <div className="view">
-      <TaskBoard />
+      <TasksPanel />
       <IntentsPanel />
       <DeliveriesPanel />
       <HandoffsPanel />
@@ -42,49 +52,83 @@ export function CoordinationView() {
   );
 }
 
-function TaskBoard() {
+function TasksPanel() {
   const { client, project, sessions } = useApp();
   const res = useResource(() => client.tasks(project.id), [project.id], ['tasks']);
+  const cols: Column<Task>[] = [
+    {
+      key: 'status',
+      header: COLUMNS.status,
+      cell: (t) => <Status value={t.status} label={taskStatusWords(t.status)} />,
+    },
+    {
+      key: 'task',
+      header: COLUMNS.task,
+      kind: 'main',
+      title: (t) => t.title,
+      cell: (t) => t.title,
+    },
+    {
+      key: 'owner',
+      header: COLUMNS.owner,
+      kind: 'clip',
+      cell: (t) => {
+        const s = t.ownerSessionId ? sessions.get(t.ownerSessionId) : undefined;
+        return s ? <AgentName kind={s.agentKind} /> : <span className="muted">{'—'}</span>;
+      },
+    },
+    {
+      key: 'progress',
+      header: COLUMNS.progress,
+      kind: 'meta',
+      cell: (t) =>
+        progressWords(t.plan.filter((p) => p.done).length, t.plan.length) || (
+          <span className="muted">{'—'}</span>
+        ),
+    },
+    {
+      key: 'updated',
+      header: COLUMNS.updated,
+      kind: 'meta',
+      cell: (t) => <Age ms={t.updatedAt} />,
+    },
+  ];
   return (
-    <Panel title="Tasks" count={res.data?.length} noun="task">
+    <Panel title="Tasks" help="tasks" meta={res.data ? String(res.data.length) : undefined}>
       <Loaded res={res}>
         {(tasks) =>
           tasks.length === 0 ? (
-            <Empty>
-              No tasks yet. When an agent plans its work, the task and its steps appear here so
-              every agent can see who is doing what.
-            </Empty>
+            <Empty>{EMPTY.tasks}</Empty>
           ) : (
-            <div className="board">
-              {COLUMNS.map((col) => {
-                const items = tasks.filter(
-                  (t) => t.status === col || (col === 'done' && t.status === 'abandoned'),
-                );
-                return (
-                  <section
-                    key={col}
-                    className={cx('board-col', `col-${col}`)}
-                    aria-label={taskStatusWords(col)}
-                  >
-                    <h3 className="board-head">
-                      {taskStatusWords(col)}
-                      <span className="count">{items.length}</span>
-                    </h3>
-                    <ul className="board-items">
-                      {items.map((t) => (
-                        <TaskCard
-                          key={t.id}
-                          t={t}
-                          owner={
-                            t.ownerSessionId ? sessionName(sessions.get(t.ownerSessionId)) : null
-                          }
-                        />
-                      ))}
-                    </ul>
-                  </section>
-                );
-              })}
-            </div>
+            <DataTable
+              label="Tasks"
+              columns={cols}
+              rows={[...tasks].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status])}
+              rowKey={(t) => t.id}
+              detail={(t) => (
+                <Facts
+                  items={[
+                    [
+                      'Plan',
+                      t.plan.length > 0 && (
+                        <ol className="steps">
+                          {t.plan.map((p, i) => (
+                            <li key={i} className={p.done ? 'step-done' : undefined}>
+                              <span className="visually-hidden">
+                                {p.done ? 'done: ' : 'to do: '}
+                              </span>
+                              {p.text}
+                            </li>
+                          ))}
+                        </ol>
+                      ),
+                    ],
+                    ['Blocked by', t.blockers.length > 0 && t.blockers.join('; ')],
+                    ['Id', <CopyId key="id" id={t.id} label="task id" />],
+                  ]}
+                />
+              )}
+            />
           )
         }
       </Loaded>
@@ -92,94 +136,77 @@ function TaskBoard() {
   );
 }
 
-function TaskCard({ t, owner }: { t: Task; owner: string | null }) {
-  const done = t.plan.filter((p) => p.done).length;
-  return (
-    <li className="task">
-      <p className="task-title">{t.title}</p>
-      {t.status === 'abandoned' && (
-        <Status value="abandoned" label={taskStatusWords('abandoned')} />
-      )}
-      {t.plan.length > 0 && (
-        <ol className="plan" aria-label={`Plan, ${done} of ${t.plan.length} done`}>
-          {t.plan.map((p, i) => (
-            <li key={i} className={p.done ? 'plan-done' : ''}>
-              <span aria-hidden="true">{p.done ? '✓' : '○'}</span>{' '}
-              <span className="visually-hidden">{p.done ? 'done: ' : 'todo: '}</span>
-              {p.text}
-            </li>
-          ))}
-        </ol>
-      )}
-      {t.blockers.length > 0 && (
-        <ul className="blockers">
-          {t.blockers.map((b, i) => (
-            <li key={i}>Blocked: {b}</li>
-          ))}
-        </ul>
-      )}
-      <p className="task-foot">
-        <span className="muted">{owner ?? 'nobody has picked this up'}</span>
-        <Time ms={t.updatedAt} prefix="updated" />
-      </p>
-    </li>
-  );
-}
-
 function IntentsPanel() {
   const { client, project, sessions } = useApp();
   const res = useResource(() => client.intents(project.id), [project.id], ['intents']);
+  const cols: Column<Intent>[] = [
+    {
+      key: 'agent',
+      header: COLUMNS.agent,
+      cell: (i) => <AgentName kind={sessions.get(i.sessionId)?.agentKind} />,
+    },
+    {
+      key: 'edit',
+      header: COLUMNS.edit,
+      kind: 'main',
+      title: (i) => humanizeAgentText(i.summary),
+      cell: (i) => humanizeAgentText(i.summary),
+    },
+    {
+      key: 'files',
+      header: COLUMNS.files,
+      kind: 'clip',
+      cell: (i) => <Paths paths={i.targets.files} max={1} />,
+    },
+    {
+      key: 'expires',
+      header: COLUMNS.expires,
+      kind: 'meta',
+      cell: (i) => <ExpiresIn ms={i.expiresAt} />,
+    },
+  ];
   return (
-    <Panel title="Who is editing what" count={res.data?.length} noun="edit" help="intent">
+    <Panel
+      title="Who is editing what"
+      help="intent"
+      meta={res.data ? String(res.data.length) : undefined}
+    >
       <Loaded res={res}>
-        {(intents) => {
-          if (intents.length === 0)
-            return (
-              <Empty>
-                No agent is editing anything right now. Agents say which files they are about to
-                change before they change them, and it shows up here.
-              </Empty>
-            );
-          const groups = new Map<string, Intent[]>();
-          for (const i of intents) groups.set(i.sessionId, [...(groups.get(i.sessionId) ?? []), i]);
-          return (
-            <ul className="intent-groups">
-              {[...groups].map(([sid, list]) => {
-                const s = sessions.get(sid);
-                return (
-                  <li key={sid}>
-                    <h3 className="intent-session">
-                      {s && <AgentMark kind={s.agentKind} />}
-                      {s ? sessionName(s) : 'An agent'} <span className="muted">is editing</span>
-                    </h3>
-                    <ul className="intents">
-                      {list.map((i) => (
-                        <li key={i.id}>
-                          <p>{humanizeAgentText(i.summary)}</p>
-                          <div className="file-list">
-                            {i.targets.files.map((f) => (
-                              <Mono key={f}>{f}</Mono>
-                            ))}
-                            {i.targets.symbols.map((sym) => (
-                              <Tag key={sym}>{`${sym}()`}</Tag>
-                            ))}
-                          </div>
-                          <p className="muted small">
-                            <Time ms={i.expiresAt} prefix="plan expires" /> unless the agent renews
-                            it
-                          </p>
-                        </li>
-                      ))}
-                    </ul>
-                  </li>
-                );
-              })}
-            </ul>
-          );
-        }}
+        {(intents) =>
+          intents.length === 0 ? (
+            <Empty>{EMPTY.intents}</Empty>
+          ) : (
+            <DataTable
+              label="Edits in progress"
+              columns={cols}
+              rows={intents}
+              rowKey={(i) => i.id}
+              detail={(i) => (
+                <Facts
+                  items={[
+                    ['Files', <Paths key="f" paths={i.targets.files} max={Infinity} />],
+                    [
+                      'Symbols',
+                      i.targets.symbols.length > 0 &&
+                        i.targets.symbols.map((s) => `${s}()`).join(', '),
+                    ],
+                    ['Id', <CopyId key="id" id={i.id} label="intent id" />],
+                  ]}
+                />
+              )}
+            />
+          )
+        }
       </Loaded>
     </Panel>
   );
+}
+
+/** "in 12m" for expiry times. */
+function ExpiresIn({ ms }: { ms: number | null }) {
+  if (!ms) return <span className="muted">{'—'}</span>;
+  const m = Math.max(0, Math.round((ms - Date.now()) / 60_000));
+  return <span>{m < 60 ? `in ${m}m` : `in ${Math.round(m / 60)}h`}</span>;
 }
 
 function DeliveriesPanel() {
@@ -193,12 +220,36 @@ function DeliveriesPanel() {
         ? d.status === 'pending'
         : d.status === 'delivered' || d.status === 'acked',
   );
+  const who = (sid: string | null, kind: string | null) => {
+    const s = sid ? sessions.get(sid) : undefined;
+    return s ? productName(s.agentKind) : kind ? productName(kind) : 'Mindly';
+  };
+  const cols: Column<Delivery>[] = [
+    {
+      key: 'status',
+      header: COLUMNS.status,
+      cell: (d) => <Status value={d.status} label={deliveryStatusWords(d.status)} />,
+    },
+    {
+      key: 'update',
+      header: COLUMNS.update,
+      kind: 'main',
+      title: (d) => humanizeAgentText(d.title),
+      cell: (d) => humanizeAgentText(d.title),
+    },
+    {
+      key: 'route',
+      header: COLUMNS.route,
+      kind: 'clip',
+      cell: (d) => `${who(d.sourceSessionId, null)} → ${who(d.targetSessionId, d.targetAgentKind)}`,
+    },
+    { key: 'when', header: COLUMNS.when, kind: 'meta', cell: (d) => <Age ms={d.createdAt} /> },
+  ];
   return (
     <Panel
       title="Updates for agents"
-      count={shown?.length}
-      noun="update"
       help="update"
+      meta={shown ? String(shown.length) : undefined}
       actions={
         <Segmented
           label="Show updates"
@@ -217,37 +268,27 @@ function DeliveriesPanel() {
           !shown || shown.length === 0 ? (
             <Empty>
               {status === 'all'
-                ? 'No updates yet. When one agent changes something another relies on, Mindly tells the other agent and it shows up here.'
+                ? EMPTY.deliveries
                 : status === 'unseen'
-                  ? 'Every update has been seen by its agent.'
-                  : 'No agent has seen an update yet.'}
+                  ? EMPTY.deliveriesUnseen
+                  : EMPTY.deliveriesSeen}
             </Empty>
           ) : (
-            <ul className="deliveries list">
-              {shown.map((d) => (
-                <li key={d.id} className={cx('row', `status-${statusTone(d.status)}`)}>
-                  <div className="row-top">
-                    <span className="dot" aria-hidden="true" />
-                    <span className="row-title">{humanizeAgentText(d.title)}</span>
-                    <span className="row-when">
-                      <Time ms={d.createdAt} />
-                    </span>
-                  </div>
-                  <div className="row-sub row-line">
-                    <Status value={d.status} label={deliveryStatusWords(d.status)} />
-                    <Tag>{deliveryKindWords(d.kind)}</Tag>
-                    <span className="small">
-                      from{' '}
-                      {d.sourceSessionId ? sessionName(sessions.get(d.sourceSessionId)) : 'Mindly'}{' '}
-                      to{' '}
-                      {d.targetSessionId
-                        ? sessionName(sessions.get(d.targetSessionId))
-                        : `the next ${productName(d.targetAgentKind)} session`}
-                    </span>
-                  </div>
-                </li>
-              ))}
-            </ul>
+            <DataTable
+              label="Updates for agents"
+              columns={cols}
+              rows={shown}
+              rowKey={(d) => d.id}
+              detail={(d) => (
+                <Facts
+                  items={[
+                    ['About', deliveryKindWords(d.kind)],
+                    ['Note', d.body && humanizeAgentText(d.body)],
+                    ['Id', <CopyId key="id" id={d.id} label="update id" />],
+                  ]}
+                />
+              )}
+            />
           )
         }
       </Loaded>
@@ -256,107 +297,110 @@ function DeliveriesPanel() {
 }
 
 function HandoffsPanel() {
-  const { client, project } = useApp();
+  const { client, project, sessions } = useApp();
   const res = useResource(() => client.handoffs(project.id), [project.id], ['handoffs']);
+  const cols: Column<Handoff>[] = [
+    {
+      key: 'status',
+      header: COLUMNS.status,
+      cell: (h) => (
+        <Status
+          value={h.status}
+          label={
+            h.status === 'pending'
+              ? 'waiting'
+              : handoffStatusWords(
+                  h,
+                  h.claimedBySessionId
+                    ? productName(sessions.get(h.claimedBySessionId)?.agentKind)
+                    : undefined,
+                )
+          }
+        />
+      ),
+    },
+    {
+      key: 'handoff',
+      header: COLUMNS.handoff,
+      kind: 'main',
+      title: (h) => humanizeAgentText(h.summary),
+      cell: (h) => humanizeAgentText(h.summary),
+    },
+    {
+      key: 'route',
+      header: COLUMNS.route,
+      kind: 'clip',
+      cell: (h) =>
+        `${productName(sessions.get(h.fromSessionId)?.agentKind)} → ${
+          h.toAgentKind ? productName(h.toAgentKind) : 'any agent'
+        }`,
+    },
+    { key: 'when', header: COLUMNS.when, kind: 'meta', cell: (h) => <Age ms={h.createdAt} /> },
+  ];
   return (
-    <Panel title="Handoffs" count={res.data?.length} noun="handoff" help="handoff" id="handoffs">
+    <Panel
+      title="Handoffs"
+      help="handoff"
+      id="handoffs"
+      meta={res.data ? String(res.data.length) : undefined}
+    >
       <Loaded res={res}>
         {(hs) =>
           hs.length === 0 ? (
-            <Empty>
-              No handoffs. When an agent stops in the middle of a task (for example because it hit
-              its usage limit), its progress is packaged here for the next agent.
-            </Empty>
+            <Empty>{EMPTY.handoffs}</Empty>
           ) : (
-            <ul className="handoffs list">
-              {hs.map((h) => (
-                <HandoffCard key={h.id} h={h} />
-              ))}
-            </ul>
+            <DataTable
+              label="Handoffs"
+              columns={cols}
+              rows={hs}
+              rowKey={(h) => h.id}
+              detail={(h) => {
+                const p = h.packet;
+                return (
+                  <Facts
+                    items={[
+                      ['Goal', p.goal],
+                      [
+                        'Next steps',
+                        p.nextSteps.length > 0 && (
+                          <ol className="steps">
+                            {p.nextSteps.map((s, i) => (
+                              <li key={i}>{s}</li>
+                            ))}
+                          </ol>
+                        ),
+                      ],
+                      ['Decisions', p.decisions.length > 0 && p.decisions.join('; ')],
+                      [
+                        'Files',
+                        p.filesChanged.length > 0 && (
+                          <Paths paths={p.filesChanged} max={Infinity} />
+                        ),
+                      ],
+                      ['Why', handoffReasonWords(h.reason)],
+                      [
+                        'Branch',
+                        p.branch && (
+                          <>
+                            <Mono>{p.branch}</Mono>
+                            {p.headCommit && (
+                              <span className="muted">
+                                {' '}
+                                at <Mono title={p.headCommit}>{p.headCommit.slice(0, 8)}</Mono>
+                              </span>
+                            )}
+                          </>
+                        ),
+                      ],
+                      ['Id', <CopyId key="id" id={h.id} label="handoff id" />],
+                    ]}
+                  />
+                );
+              }}
+            />
           )
         }
       </Loaded>
     </Panel>
-  );
-}
-
-function HandoffCard({ h }: { h: Handoff }) {
-  const { sessions } = useApp();
-  const p = h.packet;
-  const claimedBy = h.claimedBySessionId
-    ? sessionName(sessions.get(h.claimedBySessionId))
-    : undefined;
-  return (
-    <li className={cx('handoff', 'row', `status-${statusTone(h.status)}`)}>
-      <div className="row-top">
-        <span className="dot" aria-hidden="true" />
-        <span className="row-title handoff-title">{humanizeAgentText(h.summary)}</span>
-        <span className="row-when">
-          <Time ms={h.createdAt} />
-        </span>
-      </div>
-      <div className="row-sub row-line">
-        <Status value={h.status} label={handoffStatusWords(h, claimedBy)} />
-        <Tag tone={h.reason === 'manual' ? 'neutral' : 'warn'}>{handoffReasonWords(h.reason)}</Tag>
-      </div>
-      <p className="row-sub small">
-        from {sessionName(sessions.get(h.fromSessionId))} to{' '}
-        {h.toAgentKind ? productName(h.toAgentKind) : 'any agent'}
-        {p.branch && (
-          <>
-            {' '}
-            · <Mono>{p.branch}</Mono>
-          </>
-        )}
-        {p.headCommit && (
-          <>
-            {' '}
-            at commit <Mono title={p.headCommit}>{p.headCommit.slice(0, 8)}</Mono>
-          </>
-        )}
-      </p>
-      <div className="handoff-grid row-text">
-        <div>
-          <h4 className="sub">Goal</h4>
-          <p>{p.goal}</p>
-        </div>
-        {p.nextSteps.length > 0 && (
-          <div>
-            <h4 className="sub">Next steps</h4>
-            <ul className="bullets">
-              {p.nextSteps.map((s, i) => (
-                <li key={i}>{s}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-        {p.filesChanged.length > 0 && (
-          <div>
-            <h4 className="sub">Files changed</h4>
-            <div className="file-list">
-              {p.filesChanged.map((f) => (
-                <Mono key={f}>{f}</Mono>
-              ))}
-            </div>
-          </div>
-        )}
-        {p.decisions.length > 0 && (
-          <div>
-            <h4 className="sub">Decisions</h4>
-            <ul className="bullets">
-              {p.decisions.map((s, i) => (
-                <li key={i}>{s}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-      {h.status === 'pending' && (
-        <p className="help row-stack">
-          The next {h.toAgentKind ? productName(h.toAgentKind) : 'agent'} session started in this
-          project picks this up automatically.
-        </p>
-      )}
-    </li>
   );
 }

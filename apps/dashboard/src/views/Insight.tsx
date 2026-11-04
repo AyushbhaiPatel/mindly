@@ -1,9 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { PlainMarkdown } from '../components/markdown';
 import {
+  Age,
   Confirm,
+  DataTable,
   Empty,
   ErrorNote,
+  Facts,
   Help,
   JsonBlock,
   Loaded,
@@ -11,14 +14,17 @@ import {
   Meter,
   Mono,
   Panel,
+  Paths,
   Segmented,
   Tabs,
-  Tag,
+  TextLink,
   Time,
-  TrustBadge,
-  cx,
+  TrustMark,
+  type Column,
 } from '../components/ui';
 import {
+  COLUMNS,
+  EMPTY,
   contextItemKindWords,
   contextSizeWords,
   humanizeAgentText,
@@ -26,7 +32,6 @@ import {
   omitReasonWords,
   productName,
   relevanceWords,
-  sessionName,
   sessionStatusWords,
   sourceWords,
   xraySentence,
@@ -35,10 +40,12 @@ import { useAction, useApp, useResource } from '../state';
 import type {
   ContextItem,
   ContextPacket,
+  Memory,
   ProvenanceResult,
   Snapshot,
   SnapshotDiff,
 } from '../types';
+import { AgentName } from './Overview';
 
 type Sub = 'xray' | 'provenance' | 'standup' | 'snapshots';
 
@@ -89,12 +96,13 @@ function XRay() {
       help="xray"
       actions={
         sres.data && (
-          <label className="field field-inline">
-            <span>Agent</span>
+          <label className="line-field">
+            <span className="visually-hidden">Agent</span>
             <select value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
               {sres.data.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {sessionName(s)} · {sessionStatusWords(s.status)}
+                  {productName(s.agentKind)}
+                  {s.label ? ` (${s.label})` : ''} {'·'} {sessionStatusWords(s.status)}
                 </option>
               ))}
             </select>
@@ -102,21 +110,13 @@ function XRay() {
         )
       }
     >
-      <p className="help">
-        Each time an agent starts, gets a prompt or is about to edit a file, Mindly sends it the
-        memories, tasks and updates that matter right now. This shows exactly what it got, what was
-        left out, and why. Newest first.
-      </p>
       {sres.error ? (
         <ErrorNote error={sres.error} onRetry={sres.reload} />
       ) : (
         <Loaded res={pres}>
           {(packets) =>
             packets.length === 0 ? (
-              <Empty>
-                Mindly has not sent {current ? sessionName(current) : 'this agent'} any context yet.
-                It does so when the agent starts, gets a prompt or is about to edit a file.
-              </Empty>
+              <Empty>{EMPTY.xray}</Empty>
             ) : (
               <ol className="packets">
                 {packets.map((p) => (
@@ -132,7 +132,6 @@ function XRay() {
 }
 
 function Packet({ p, agent }: { p: ContextPacket; agent: string }) {
-  const [showOmitted, setShowOmitted] = useState(true);
   const pct =
     p.tokenBudget > 0 ? Math.min(100, Math.round((p.tokensUsed / p.tokenBudget) * 100)) : 0;
   const size = contextSizeWords(p.tokensUsed, p.tokenBudget);
@@ -140,40 +139,29 @@ function Packet({ p, agent }: { p: ContextPacket; agent: string }) {
     <li className="packet">
       <header className="packet-head">
         <p className="packet-sentence">{xraySentence(p, agent)}</p>
-        <span className="grow" />
-        <Time ms={p.createdAt} />
+        <span className="packet-time">
+          <Age ms={p.createdAt} />
+        </span>
       </header>
-      {p.query && (
-        <p className="packet-query">
-          <span className="muted">{p.trigger === 'pre_tool' ? 'About to: ' : 'Prompt: '}</span>“
-          {p.query}”
-        </p>
-      )}
-      <div className="budget" title={`${p.tokensUsed} of ${p.tokenBudget} tokens used`}>
-        <span className="budget-name">
-          context size <Help term="contextSize" />
+      <p className="line-meta packet-meta">
+        {p.query && (
+          <span className="packet-query" title={p.query}>
+            {'“'}
+            {p.query}
+            {'”'}
+          </span>
+        )}
+        <span className="budget" title={`${p.tokensUsed} of ${p.tokenBudget} tokens used`}>
+          <span className="muted">context</span>
+          <Meter value={pct} max={100} label={`Context size: ${size}, ${pct}% of the space used`} />
+          <span className="muted">
+            {size} {'·'} {pct}%
+          </span>
+          <Help term="contextSize" />
         </span>
-        <Meter value={pct} max={100} label={`Context size: ${size}, ${pct}% of the space used`} />
-        <span className="budget-label">
-          {size}, {pct}% of the space used
-        </span>
-      </div>
-      <div className="packet-cols">
-        <ItemTable title={`Included (${p.included.length})`} items={p.included} kind="in" />
-        <div>
-          <button
-            type="button"
-            className="link small"
-            aria-expanded={showOmitted}
-            onClick={() => setShowOmitted((v) => !v)}
-          >
-            {showOmitted ? 'Hide' : 'Show'} what was left out ({p.omitted.length})
-          </button>
-          {showOmitted && (
-            <ItemTable title={`Left out (${p.omitted.length})`} items={p.omitted} kind="out" />
-          )}
-        </div>
-      </div>
+      </p>
+      <ItemTable title="Included" items={p.included} kind="in" />
+      <ItemTable title="Left out" items={p.omitted} kind="out" />
     </li>
   );
 }
@@ -187,52 +175,55 @@ function ItemTable({
   items: ContextItem[];
   kind: 'in' | 'out';
 }) {
-  if (items.length === 0)
-    return (
-      <Empty>
-        {kind === 'in'
-          ? 'Nothing was relevant enough to send.'
-          : 'Nothing was left out: everything relevant fit.'}
-      </Empty>
-    );
   const sorted = [...items].sort((a, b) => b.score - a.score);
+  const cols: Column<ContextItem>[] = [
+    {
+      key: 'item',
+      header: COLUMNS.item,
+      kind: 'main',
+      title: (i) => humanizeAgentText(i.title),
+      cell: (i) => (
+        <>
+          {humanizeAgentText(i.title)}
+          <span className="muted">
+            {' '}
+            {'·'} {contextItemKindWords(i.kind)}
+          </span>
+        </>
+      ),
+    },
+    {
+      key: 'rel',
+      header: COLUMNS.relevance,
+      cell: (i) => (
+        <span title={`Relevance score ${i.score.toFixed(2)} of 1`}>{relevanceWords(i.score)}</span>
+      ),
+    },
+    {
+      key: 'why',
+      header: COLUMNS.why,
+      kind: 'clip',
+      title: (i) => i.reason,
+      cell: (i) => (kind === 'out' ? omitReasonWords(i.reason) : humanizeAgentText(i.reason)),
+    },
+  ];
   return (
-    <div className="table-wrap">
-      <table className={cx('table', 'table-compact', kind === 'out' && 'table-omitted')}>
-        <caption className="table-caption">{title}</caption>
-        <thead>
-          <tr>
-            <th scope="col">What</th>
-            <th scope="col" className="num">
-              Relevance
-            </th>
-            <th scope="col">{kind === 'in' ? 'Why it was sent' : 'Why it was left out'}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((i) => (
-            <tr key={`${i.kind}:${i.ref}`}>
-              <td>
-                <span className="tag">{contextItemKindWords(i.kind)}</span>{' '}
-                {humanizeAgentText(i.title)}
-              </td>
-              <td className="num">
-                <span className="score" title={`Relevance score ${i.score.toFixed(2)} of 1`}>
-                  <span
-                    className="score-bar"
-                    style={{ width: `${Math.round(Math.max(0, Math.min(1, i.score)) * 100)}%` }}
-                  />
-                  {relevanceWords(i.score)}
-                </span>
-              </td>
-              <td className="muted" title={kind === 'out' ? i.reason : undefined}>
-                {kind === 'out' ? omitReasonWords(i.reason) : humanizeAgentText(i.reason)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <section className="packet-table" aria-label={title}>
+      <h4 className="sub">
+        {title} <span className="count">{items.length}</span>
+      </h4>
+      {items.length === 0 ? (
+        <p className="muted small">{kind === 'in' ? EMPTY.included : EMPTY.omitted}</p>
+      ) : (
+        <DataTable
+          label={title}
+          className={kind === 'out' ? 'dt-omitted' : undefined}
+          columns={cols}
+          rows={sorted}
+          rowKey={(i) => `${i.kind}:${i.ref}`}
+        />
+      )}
+    </section>
   );
 }
 
@@ -273,14 +264,28 @@ function Provenance() {
   ]);
   const extra = r ? Object.fromEntries(Object.entries(r).filter(([k]) => !known.has(k))) : {};
   const session = r?.sessionId ? sessions.get(r.sessionId) : undefined;
+  const memCols: Column<Memory>[] = [
+    { key: 'trust', header: COLUMNS.trust, cell: (m) => <TrustMark trust={m.trust} /> },
+    { key: 'kind', header: COLUMNS.kind, cell: (m) => memoryKindWords(m.kind) },
+    {
+      key: 'title',
+      header: COLUMNS.title,
+      kind: 'main',
+      title: (m) => m.title,
+      cell: (m) => m.title,
+    },
+    {
+      key: 'from',
+      header: COLUMNS.from,
+      kind: 'clip',
+      cell: (m) => sourceWords(m.source, sessions),
+    },
+  ];
   return (
     <Panel title="Provenance" help="provenance">
-      <p className="help">
-        Type a file and line number to see which agent wrote it, when, and what it was asked to do.
-      </p>
-      <form className="filters" onSubmit={submit}>
-        <label className="field field-grow">
-          <span>File</span>
+      <form className="filter-line" onSubmit={submit}>
+        <label className="line-field line-field-grow">
+          <span className="visually-hidden">File</span>
           <input
             value={file}
             onChange={(e) => setFile(e.target.value)}
@@ -289,73 +294,60 @@ function Provenance() {
             maxLength={500}
           />
         </label>
-        <label className="field">
-          <span>Line</span>
+        <label className="line-field line-field-narrow">
+          <span className="visually-hidden">Line</span>
           <input
             type="number"
             min={1}
             value={line}
             onChange={(e) => setLine(e.target.value)}
             required
-            className="input-narrow"
+            placeholder="line"
           />
         </label>
-        <div className="field field-end">
-          <button type="submit" className="btn btn-primary" disabled={state.loading}>
-            Look up
-          </button>
-        </div>
+        <button type="submit" className="btn-primary" disabled={state.loading}>
+          Look up
+        </button>
       </form>
       {state.loading && <Loading />}
       {state.error ? <ErrorNote error={state.error} /> : null}
       {r &&
         (r.found === false ? (
-          <Empty>
-            No agent edit recorded for <Mono>{`${r.file ?? file}:${r.line ?? line}`}</Mono>. It was
-            probably written by a person or before Mindly was installed.
-          </Empty>
+          <Empty>{EMPTY.provenance}</Empty>
         ) : (
-          <div className="stack">
-            <dl className="kv">
-              <dt>Line</dt>
-              <dd>
-                <Mono>{`${r.file ?? file}:${r.line ?? line}`}</Mono>
-              </dd>
-              <dt>Agent</dt>
-              <dd>{session ? sessionName(session) : productName(r.agentKind)}</dd>
-              <dt>When</dt>
-              <dd>
-                <Time ms={r.createdAt ?? null} />
-              </dd>
-              {r.tool && (
-                <>
-                  <dt>Tool</dt>
-                  <dd>
-                    <Mono>{r.tool}</Mono>
-                  </dd>
-                </>
-              )}
-              <dt>Prompt</dt>
-              <dd>
-                {r.promptSummary ? (
-                  <q>{r.promptSummary}</q>
-                ) : (
-                  <span className="muted">not recorded</span>
-                )}
-              </dd>
-            </dl>
+          <div className="detail-stack result-block">
+            <Facts
+              items={[
+                ['Line', <Mono key="l">{`${r.file ?? file}:${r.line ?? line}`}</Mono>],
+                [
+                  'Agent',
+                  session ? (
+                    <AgentName key="a" kind={session.agentKind} />
+                  ) : (
+                    productName(r.agentKind)
+                  ),
+                ],
+                ['Tool', r.tool && <Mono>{r.tool}</Mono>],
+                ['When', <Time key="w" ms={r.createdAt ?? null} />],
+                [
+                  'Prompt',
+                  r.promptSummary ? (
+                    <q>{r.promptSummary}</q>
+                  ) : (
+                    <span className="muted">not recorded</span>
+                  ),
+                ],
+              ]}
+            />
             {r.memories && r.memories.length > 0 && (
               <section aria-label="Related memories">
                 <h4 className="sub">Related memories</h4>
-                <ul className="evidence">
-                  {r.memories.map((m) => (
-                    <li key={m.id}>
-                      <Tag>{memoryKindWords(m.kind)}</Tag>
-                      <TrustBadge trust={m.trust} by={sourceWords(m.source, sessions)} />
-                      <span>{m.title}</span>
-                    </li>
-                  ))}
-                </ul>
+                <DataTable
+                  label="Related memories"
+                  columns={memCols}
+                  rows={r.memories}
+                  rowKey={(m) => m.id}
+                />
               </section>
             )}
             {Object.keys(extra).length > 0 && (
@@ -384,6 +376,7 @@ function Standup() {
   return (
     <Panel
       title="Standup"
+      help="standup"
       actions={
         <>
           <Segmented
@@ -396,22 +389,13 @@ function Standup() {
               { key: '7', label: 'week' },
             ]}
           />
-          <button type="button" className="btn btn-small" onClick={res.reload}>
-            Refresh
-          </button>
+          <TextLink onClick={res.reload}>Refresh</TextLink>
         </>
       }
     >
       <Loaded res={res}>
         {(s) =>
-          s.markdown.trim() ? (
-            <PlainMarkdown source={s.markdown} />
-          ) : (
-            <Empty>
-              No agent activity in this period. Once agents work here, this becomes a short written
-              summary of what got done.
-            </Empty>
-          )
+          s.markdown.trim() ? <PlainMarkdown source={s.markdown} /> : <Empty>{EMPTY.standup}</Empty>
         }
       </Loaded>
     </Panel>
@@ -423,7 +407,6 @@ function Snapshots() {
   const res = useResource(() => client.snapshots(project.id), [project.id], ['snapshots']);
   const { busy, run } = useAction();
   const [label, setLabel] = useState('');
-  const [diffFor, setDiffFor] = useState<string | null>(null);
   const [restore, setRestore] = useState<Snapshot | null>(null);
   const [branch, setBranch] = useState('');
   const [restored, setRestored] = useState<string | null>(null);
@@ -443,83 +426,78 @@ function Snapshots() {
     });
   };
 
+  const cols: Column<Snapshot>[] = [
+    {
+      key: 'label',
+      header: COLUMNS.label,
+      kind: 'main',
+      title: (s) => s.label,
+      cell: (s) => s.label,
+    },
+    {
+      key: 'commit',
+      header: COLUMNS.commit,
+      cell: (s) =>
+        s.commit ? (
+          <Mono title={s.commit}>{s.commit.slice(0, 8)}</Mono>
+        ) : (
+          <span className="muted">{'—'}</span>
+        ),
+    },
+    { key: 'saved', header: COLUMNS.saved, kind: 'meta', cell: (s) => <Age ms={s.createdAt} /> },
+  ];
+
   return (
-    <Panel title="Snapshots" count={res.data?.length} noun="snapshot" help="snapshot">
-      <p className="help">
-        A snapshot captures code (tracked and untracked), memory and task state together. Restoring
-        never touches your current branch.
-      </p>
-      <form className="filters" onSubmit={create}>
-        <label className="field field-grow">
-          <span>Label</span>
+    <Panel title="Snapshots" help="snapshot" meta={res.data ? String(res.data.length) : undefined}>
+      <form className="filter-line" onSubmit={create}>
+        <label className="line-field line-field-grow">
+          <span className="visually-hidden">Label</span>
           <input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
-            placeholder="before the big refactor"
+            placeholder="Label, e.g. before the big refactor"
             maxLength={120}
           />
         </label>
-        <div className="field field-end">
-          <button type="submit" className="btn btn-primary" disabled={!!busy || !label.trim()}>
-            Create snapshot
-          </button>
-        </div>
+        <button type="submit" className="btn-primary" disabled={!!busy || !label.trim()}>
+          Save snapshot
+        </button>
       </form>
       {restored && (
         <p className="notice" role="status">
-          Restored to new branch <Mono>{restored}</Mono>. Check it out with{' '}
+          Restored to new branch <Mono>{restored}</Mono>. Switch with{' '}
           <Mono>{`git switch ${restored}`}</Mono>.
         </p>
       )}
       <Loaded res={res}>
         {(snaps) =>
           snaps.length === 0 ? (
-            <Empty>
-              No snapshots yet. Save one before a risky change; you can restore it later to a new
-              branch.
-            </Empty>
+            <Empty>{EMPTY.snapshots}</Empty>
           ) : (
-            <ul className="snapshots">
-              {snaps.map((s) => (
-                <li key={s.id} className="snapshot">
-                  <div className="row-line">
-                    <span className="grow snapshot-label">{s.label}</span>
-                    {s.commit && (
-                      <span className="muted small">
-                        at commit <Mono title={s.commit}>{s.commit.slice(0, 8)}</Mono>
-                      </span>
-                    )}
-                    <Time ms={s.createdAt} prefix="saved" />
-                    <button
-                      type="button"
-                      className="btn btn-small"
-                      aria-expanded={diffFor === s.id}
-                      onClick={() => setDiffFor(diffFor === s.id ? null : s.id)}
-                    >
-                      {diffFor === s.id ? 'Hide diff' : 'Diff'}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-small"
-                      onClick={() => {
-                        setBranch('');
-                        setRestore(s);
-                      }}
-                    >
-                      Restore…
-                    </button>
-                  </div>
-                  {diffFor === s.id && <SnapshotDiffView id={s.id} />}
-                </li>
-              ))}
-            </ul>
+            <DataTable
+              label="Snapshots"
+              columns={cols}
+              rows={snaps}
+              rowKey={(s) => s.id}
+              detail={(s) => <SnapshotDiffView id={s.id} />}
+              menu={(s) => [
+                {
+                  label: 'Restore to new branch…',
+                  onSelect: () => {
+                    setBranch('');
+                    setRestore(s);
+                  },
+                },
+              ]}
+              menuLabel={(s) => `Actions for snapshot ${s.label}`}
+            />
           )
         }
       </Loaded>
       <Confirm
         open={!!restore}
         title="Restore snapshot to a new branch?"
-        confirmLabel="Restore to new branch"
+        confirmLabel="Restore"
         onCancel={() => setRestore(null)}
         onConfirm={() => {
           const s = restore;
@@ -533,8 +511,7 @@ function Snapshots() {
         }}
       >
         <p>
-          “{restore?.label}” will be checked out into a new git branch. Your current branch and
-          working tree are not changed.
+          “{restore?.label}” is checked out into a new branch. Your current branch is not changed.
         </p>
         <label className="field">
           <span>Branch name (optional)</span>
@@ -553,43 +530,32 @@ function Snapshots() {
 function SnapshotDiffView({ id }: { id: string }) {
   const { client } = useApp();
   const res = useResource(() => client.snapshotDiff(id), [id]);
-  return (
-    <div className="snapshot-diff">
-      <Loaded res={res}>{(d) => <DiffBody d={d} />}</Loaded>
-    </div>
-  );
+  return <Loaded res={res}>{(d) => <DiffBody d={d} />}</Loaded>;
 }
 
 function DiffBody({ d }: { d: SnapshotDiff }) {
   const known = new Set(['files', 'memories', 'tasks']);
   const extra = Object.fromEntries(Object.entries(d).filter(([k]) => !known.has(k)));
-  const counts = (label: string, c?: { added?: number; changed?: number; removed?: number }) =>
+  const counts = (c?: { added?: number; changed?: number; removed?: number }) =>
     c && (
-      <span className="small">
-        {label}: <span className="add">{c.added ?? 0} added</span>,{' '}
-        <span className="chg">{c.changed ?? 0} changed</span>,{' '}
-        <span className="del">{c.removed ?? 0} removed</span>
-      </span>
+      <>
+        <span className="add">+{c.added ?? 0}</span> <span className="chg">~{c.changed ?? 0}</span>{' '}
+        <span className="del">
+          {'−'}
+          {c.removed ?? 0}
+        </span>
+      </>
     );
+  const files = d.files ?? [];
   return (
-    <div className="stack">
-      <p className="muted small">Changes since this snapshot</p>
-      <div className="row-line">
-        {counts('Memories', d.memories)}
-        {counts('Tasks', d.tasks)}
-      </div>
-      {d.files && d.files.length > 0 && (
-        <ul className="diff-files">
-          {d.files.map((f) => (
-            <li key={f.path}>
-              <span className="tag">{f.status ?? 'changed'}</span>
-              <Mono>{f.path}</Mono>
-              {f.added !== undefined && <span className="add">+{f.added}</span>}
-              {f.removed !== undefined && <span className="del">−{f.removed}</span>}
-            </li>
-          ))}
-        </ul>
-      )}
+    <div className="detail-stack">
+      <Facts
+        items={[
+          ['Memories', counts(d.memories)],
+          ['Tasks', counts(d.tasks)],
+          ['Files', files.length > 0 && <Paths paths={files.map((f) => f.path)} max={Infinity} />],
+        ]}
+      />
       {Object.keys(extra).length > 0 && <JsonBlock value={extra} />}
     </div>
   );
