@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Confirm, Empty, Loaded, Mono, Panel } from '../components/ui';
+import { Confirm, Empty, Loaded, Mono, Panel, ShortId } from '../components/ui';
 import { useAction, useApp, useResource } from '../state';
 
 export function SettingsView() {
@@ -20,7 +20,7 @@ export function SettingsView() {
           </dd>
           <dt>Id</dt>
           <dd>
-            <Mono>{project.id}</Mono>
+            <ShortId id={project.id} label="project id" />
           </dd>
         </dl>
       </Panel>
@@ -41,8 +41,8 @@ export function SettingsView() {
                   </p>
                   <p className="small">
                     {t.trusted
-                      ? 'Mindly runs the checks below during shadow merges and replays.'
-                      : 'Mindly will not run any command from this repository’s .mindly/config.json until you trust it. Shadow merges still merge, but skip checks.'}
+                      ? 'Mindly runs the checks below during merge checks and replays.'
+                      : 'Mindly will not run any command from this repository’s .mindly/config.json until you trust it. Merge checks still combine the work, but skip running commands.'}
                   </p>
                 </div>
               </div>
@@ -113,7 +113,7 @@ export function SettingsView() {
                 <div className="warn-box">
                   <p>
                     <strong>These commands will run on this machine</strong> with your user’s
-                    permissions whenever Mindly runs a shadow merge or replay. A repository can put
+                    permissions whenever Mindly runs a merge check or replay. A repository can put
                     anything in its config, so read each command above. Trust is tied to this exact
                     config; if the file changes, Mindly asks again.
                   </p>

@@ -1,7 +1,26 @@
 import { useEffect, useId, useState, type FormEvent } from 'react';
 import { RunResult } from '../components/runs';
-import { Drawer, Empty, Loaded, Mono, Panel, Segmented, Status, Time, cx } from '../components/ui';
-import { agentName, duration, runKindLabel, splitList } from '../format';
+import {
+  Drawer,
+  Empty,
+  Loaded,
+  Mono,
+  Panel,
+  Segmented,
+  ShortId,
+  Status,
+  Time,
+  cx,
+} from '../components/ui';
+import { duration, splitList } from '../format';
+import {
+  humanizeAgentText,
+  productName,
+  runKindWords,
+  runStatusWords,
+  sessionName,
+  sessionStatusWords,
+} from '../vocab';
 import { useAction, useApp, useResource } from '../state';
 import type { Run, RunKind } from '../types';
 
@@ -25,6 +44,8 @@ export function RunsView() {
       <Panel
         title="Runs"
         count={res.data?.length}
+        noun="run"
+        help="mergeCheck"
         actions={
           <>
             <Segmented
@@ -33,9 +54,9 @@ export function RunsView() {
               onChange={setKind}
               options={[
                 { key: 'all', label: 'all' },
-                { key: 'shadow_merge', label: 'shadow merge' },
-                { key: 'review', label: 'review' },
-                { key: 'replay', label: 'replay' },
+                { key: 'shadow_merge', label: 'merge checks' },
+                { key: 'review', label: 'reviews' },
+                { key: 'replay', label: 'replays' },
               ]}
             />
             <button
@@ -43,12 +64,12 @@ export function RunsView() {
               className="btn btn-small"
               disabled={!!busy}
               onClick={() =>
-                void run('sm', () => client.shadowMerge(project.id), 'Shadow merge queued').then(
+                void run('sm', () => client.shadowMerge(project.id), 'Merge check started').then(
                   (ok) => ok && res.reload(),
                 )
               }
             >
-              Shadow merge
+              Run merge check
             </button>
             <button type="button" className="btn btn-small" onClick={() => setDialog('review')}>
               Start review
@@ -67,8 +88,8 @@ export function RunsView() {
           {(runs) =>
             runs.length === 0 ? (
               <Empty>
-                No runs yet. Shadow merges run in the background; reviews and replays start from
-                here.
+                Nothing has run yet. Merge checks run in the background while agents work; start a
+                review or a replay with the buttons above.
               </Empty>
             ) : (
               <div className="split">
@@ -82,17 +103,21 @@ export function RunsView() {
                         onClick={() => navigate('runs', { run: r.id })}
                       >
                         <span className="run-row-top">
-                          <Status value={r.status} />
-                          <span className="tag">{runKindLabel(r.kind)}</span>
+                          <Status value={r.status} label={runStatusWords(r.status)} />
+                          <span className="tag">{runKindWords(r.kind)}</span>
                           <Time ms={r.createdAt} />
                         </span>
-                        <span className="run-title">{r.title}</span>
+                        <span className="run-title">{humanizeAgentText(r.title)}</span>
                       </button>
                     </li>
                   ))}
                 </ul>
                 <div className="run-detail">
-                  {selected ? <RunDetail run={selected} /> : <Empty>Select a run.</Empty>}
+                  {selected ? (
+                    <RunDetail run={selected} />
+                  ) : (
+                    <Empty>Pick a run on the left to see its result.</Empty>
+                  )}
                 </div>
               </div>
             )
@@ -126,16 +151,17 @@ function RunDetail({ run }: { run: Run }) {
   return (
     <article className="stack" aria-label={run.title}>
       <header>
-        <h3 className="detail-title">{run.title}</h3>
+        <h3 className="detail-title">{humanizeAgentText(run.title)}</h3>
         <p className="muted small">
-          {runKindLabel(run.kind)} · <Status value={run.status} /> · queued{' '}
-          <Time ms={run.createdAt} />
+          {runKindWords(run.kind)} ·{' '}
+          <Status value={run.status} label={runStatusWords(run.status)} /> ·{' '}
+          <Time ms={run.createdAt} prefix="started" />
           {run.startedAt && run.finishedAt && (
             <> · took {duration(run.finishedAt - run.startedAt)}</>
           )}{' '}
-          · <Mono>{run.id}</Mono>
+          · <ShortId id={run.id} label="run id" />
         </p>
-        {sid && <p className="small">Reviewed session: {agentName(sessions.get(sid))}</p>}
+        {sid && <p className="small">Reviewed: {sessionName(sessions.get(sid))}</p>}
         {prompt && (
           <p className="small">
             Prompt: <q>{prompt}</q>
@@ -174,7 +200,8 @@ function ReviewForm({ onDone }: { onDone(): void }) {
   return (
     <form className="form" onSubmit={submit}>
       <p className="help">
-        A different agent reads the session’s diff headlessly and reports findings by severity.
+        A different agent reads this agent’s changes in the background and reports what it finds as
+        FYI, check this or urgent.
       </p>
       <Loaded res={sres}>
         {(ss) => (
@@ -183,7 +210,7 @@ function ReviewForm({ onDone }: { onDone(): void }) {
             <select value={sessionId} onChange={(e) => setSessionId(e.target.value)} required>
               {ss.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {agentName(s)} · {s.branch ?? 'detached'} · {s.status}
+                  {sessionName(s)} · {s.branch ?? 'no branch'} · {sessionStatusWords(s.status)}
                 </option>
               ))}
             </select>
@@ -191,7 +218,7 @@ function ReviewForm({ onDone }: { onDone(): void }) {
         )}
       </Loaded>
       <label className="field">
-        <span>Reviewer agent</span>
+        <span>Reviewer agent (for example codex)</span>
         <input
           list={`${id}-agents`}
           value={reviewer}
@@ -201,7 +228,9 @@ function ReviewForm({ onDone }: { onDone(): void }) {
         />
         <datalist id={`${id}-agents`}>
           {KNOWN_AGENTS.map((a) => (
-            <option key={a} value={a} />
+            <option key={a} value={a}>
+              {productName(a)}
+            </option>
           ))}
         </datalist>
       </label>
@@ -286,11 +315,11 @@ function ReplayForm({ onDone }: { onDone(): void }) {
                 setAgents((xs) => (e.target.checked ? [...xs, a] : xs.filter((x) => x !== a)))
               }
             />
-            <label htmlFor={`${fid}-${a}`}>{a}</label>
+            <label htmlFor={`${fid}-${a}`}>{productName(a)}</label>
           </div>
         ))}
         <label className="field">
-          <span>Other agent kinds</span>
+          <span>Other agents (ids such as gemini-cli)</span>
           <input
             value={extra}
             onChange={(e) => setExtra(e.target.value)}

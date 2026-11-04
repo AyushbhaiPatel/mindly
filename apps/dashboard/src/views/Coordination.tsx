@@ -1,8 +1,17 @@
 import { useEffect, useState } from 'react';
 import { Empty, Loaded, Mono, Panel, Segmented, Status, Tag, Time, cx } from '../components/ui';
-import { agentName } from '../format';
 import { useApp, useResource } from '../state';
-import type { DeliveryStatus, Handoff, Intent, Task, TaskStatus } from '../types';
+import type { Handoff, Intent, Task, TaskStatus } from '../types';
+import {
+  deliveryKindWords,
+  deliveryStatusWords,
+  handoffReasonWords,
+  handoffStatusWords,
+  humanizeAgentText,
+  productName,
+  sessionName,
+  taskStatusWords,
+} from '../vocab';
 import { AgentMark } from './Overview';
 
 const COLUMNS: TaskStatus[] = ['open', 'in_progress', 'blocked', 'done'];
@@ -28,11 +37,14 @@ function TaskBoard() {
   const { client, project, sessions } = useApp();
   const res = useResource(() => client.tasks(project.id), [project.id], ['tasks']);
   return (
-    <Panel title="Tasks" count={res.data?.length}>
+    <Panel title="Tasks" count={res.data?.length} noun="task">
       <Loaded res={res}>
         {(tasks) =>
           tasks.length === 0 ? (
-            <Empty>No tasks yet. Agents create them through the Mindly MCP tools.</Empty>
+            <Empty>
+              No tasks yet. When an agent plans its work, the task and its steps appear here so
+              every agent can see who is doing what.
+            </Empty>
           ) : (
             <div className="board">
               {COLUMNS.map((col) => {
@@ -43,10 +55,10 @@ function TaskBoard() {
                   <section
                     key={col}
                     className={cx('board-col', `col-${col}`)}
-                    aria-label={col.replace('_', ' ')}
+                    aria-label={taskStatusWords(col)}
                   >
                     <h3 className="board-head">
-                      {col.replace('_', ' ')}
+                      {taskStatusWords(col)}
                       <span className="count">{items.length}</span>
                     </h3>
                     <ul className="board-items">
@@ -55,7 +67,7 @@ function TaskBoard() {
                           key={t.id}
                           t={t}
                           owner={
-                            t.ownerSessionId ? agentName(sessions.get(t.ownerSessionId)) : null
+                            t.ownerSessionId ? sessionName(sessions.get(t.ownerSessionId)) : null
                           }
                         />
                       ))}
@@ -76,7 +88,9 @@ function TaskCard({ t, owner }: { t: Task; owner: string | null }) {
   return (
     <li className="task">
       <p className="task-title">{t.title}</p>
-      {t.status === 'abandoned' && <Status value="abandoned" />}
+      {t.status === 'abandoned' && (
+        <Status value="abandoned" label={taskStatusWords('abandoned')} />
+      )}
       {t.plan.length > 0 && (
         <ol className="plan" aria-label={`Plan, ${done} of ${t.plan.length} done`}>
           {t.plan.map((p, i) => (
@@ -96,8 +110,8 @@ function TaskCard({ t, owner }: { t: Task; owner: string | null }) {
         </ul>
       )}
       <p className="task-foot">
-        <span className="muted">{owner ?? 'unowned'}</span>
-        <Time ms={t.updatedAt} />
+        <span className="muted">{owner ?? 'nobody has picked this up'}</span>
+        <Time ms={t.updatedAt} prefix="updated" />
       </p>
     </li>
   );
@@ -107,10 +121,16 @@ function IntentsPanel() {
   const { client, project, sessions } = useApp();
   const res = useResource(() => client.intents(project.id), [project.id], ['intents']);
   return (
-    <Panel title="Active intents" count={res.data?.length}>
+    <Panel title="Who is editing what" count={res.data?.length} noun="edit" help="intent">
       <Loaded res={res}>
         {(intents) => {
-          if (intents.length === 0) return <Empty>No agent has declared upcoming edits.</Empty>;
+          if (intents.length === 0)
+            return (
+              <Empty>
+                No agent is editing anything right now. Agents say which files they are about to
+                change before they change them, and it shows up here.
+              </Empty>
+            );
           const groups = new Map<string, Intent[]>();
           for (const i of intents) groups.set(i.sessionId, [...(groups.get(i.sessionId) ?? []), i]);
           return (
@@ -121,22 +141,23 @@ function IntentsPanel() {
                   <li key={sid}>
                     <h3 className="intent-session">
                       {s && <AgentMark kind={s.agentKind} />}
-                      {agentName(s)}
+                      {s ? sessionName(s) : 'An agent'} <span className="muted">is editing</span>
                     </h3>
                     <ul className="intents">
                       {list.map((i) => (
                         <li key={i.id}>
-                          <p>{i.summary}</p>
+                          <p>{humanizeAgentText(i.summary)}</p>
                           <div className="file-list">
                             {i.targets.files.map((f) => (
                               <Mono key={f}>{f}</Mono>
                             ))}
                             {i.targets.symbols.map((sym) => (
-                              <Tag key={sym}>{sym}</Tag>
+                              <Tag key={sym}>{`${sym}()`}</Tag>
                             ))}
                           </div>
                           <p className="muted small">
-                            expires <Time ms={i.expiresAt} />
+                            <Time ms={i.expiresAt} prefix="plan expires" /> unless the agent renews
+                            it
                           </p>
                         </li>
                       ))}
@@ -154,50 +175,59 @@ function IntentsPanel() {
 
 function DeliveriesPanel() {
   const { client, project, sessions } = useApp();
-  const [status, setStatus] = useState<DeliveryStatus | 'all'>('all');
-  const res = useResource(
-    () => client.deliveries(project.id, status === 'all' ? undefined : status),
-    [project.id, status],
-    ['deliveries'],
+  const [status, setStatus] = useState<'all' | 'unseen' | 'seen'>('all');
+  const res = useResource(() => client.deliveries(project.id), [project.id], ['deliveries']);
+  const shown = res.data?.filter((d) =>
+    status === 'all'
+      ? true
+      : status === 'unseen'
+        ? d.status === 'pending'
+        : d.status === 'delivered' || d.status === 'acked',
   );
   return (
     <Panel
-      title="Deliveries"
-      count={res.data?.length}
+      title="Updates for agents"
+      count={shown?.length}
+      noun="update"
+      help="update"
       actions={
         <Segmented
-          label="Delivery status"
+          label="Show updates"
           value={status}
           onChange={setStatus}
           options={[
             { key: 'all', label: 'all' },
-            { key: 'pending', label: 'pending' },
-            { key: 'delivered', label: 'delivered' },
-            { key: 'acked', label: 'acked' },
+            { key: 'unseen', label: 'not seen yet' },
+            { key: 'seen', label: 'seen' },
           ]}
         />
       }
     >
       <Loaded res={res}>
-        {(ds) =>
-          ds.length === 0 ? (
+        {() =>
+          !shown || shown.length === 0 ? (
             <Empty>
-              No messages between agents{status !== 'all' ? ` with status ${status}` : ''}.
+              {status === 'all'
+                ? 'No updates yet. When one agent changes something another relies on, Mindly tells the other agent and it shows up here.'
+                : status === 'unseen'
+                  ? 'Every update has been seen by its agent.'
+                  : 'No agent has seen an update yet.'}
             </Empty>
           ) : (
             <ul className="deliveries">
-              {ds.map((d) => (
+              {shown.map((d) => (
                 <li key={d.id}>
                   <div className="row-line">
-                    <Status value={d.status} />
-                    <Tag>{d.kind.replace('_', ' ')}</Tag>
-                    <span className="grow">{d.title}</span>
+                    <Status value={d.status} label={deliveryStatusWords(d.status)} />
+                    <Tag>{deliveryKindWords(d.kind)}</Tag>
+                    <span className="grow">{humanizeAgentText(d.title)}</span>
                   </div>
                   <p className="muted small">
-                    {d.sourceSessionId ? agentName(sessions.get(d.sourceSessionId)) : 'mindly'} →{' '}
+                    from{' '}
+                    {d.sourceSessionId ? sessionName(sessions.get(d.sourceSessionId)) : 'Mindly'} to{' '}
                     {d.targetSessionId
-                      ? agentName(sessions.get(d.targetSessionId))
-                      : `next ${d.targetAgentKind ?? 'agent'}`}{' '}
+                      ? sessionName(sessions.get(d.targetSessionId))
+                      : `the next ${productName(d.targetAgentKind)} session`}{' '}
                     · <Time ms={d.createdAt} />
                   </p>
                 </li>
@@ -214,12 +244,13 @@ function HandoffsPanel() {
   const { client, project } = useApp();
   const res = useResource(() => client.handoffs(project.id), [project.id], ['handoffs']);
   return (
-    <Panel title="Handoffs" count={res.data?.length} id="handoffs">
+    <Panel title="Handoffs" count={res.data?.length} noun="handoff" help="handoff" id="handoffs">
       <Loaded res={res}>
         {(hs) =>
           hs.length === 0 ? (
             <Empty>
-              No handoffs. When an agent stops mid-task, its packaged state appears here.
+              No handoffs. When an agent stops in the middle of a task (for example because it hit
+              its usage limit), its progress is packaged here for the next agent.
             </Empty>
           ) : (
             <ul className="handoffs">
@@ -237,18 +268,20 @@ function HandoffsPanel() {
 function HandoffCard({ h }: { h: Handoff }) {
   const { sessions } = useApp();
   const p = h.packet;
-  const reason = { manual: 'manual', rate_limit: 'rate limit', crash: 'crash' }[h.reason];
+  const claimedBy = h.claimedBySessionId
+    ? sessionName(sessions.get(h.claimedBySessionId))
+    : undefined;
   return (
     <li className="handoff">
       <div className="row-line">
-        <Status value={h.status} />
-        <Tag tone={h.reason === 'manual' ? 'neutral' : 'warn'}>{reason}</Tag>
-        <span className="grow handoff-title">{h.summary}</span>
+        <Status value={h.status} label={handoffStatusWords(h, claimedBy)} />
+        <Tag tone={h.reason === 'manual' ? 'neutral' : 'warn'}>{handoffReasonWords(h.reason)}</Tag>
+        <span className="grow handoff-title">{humanizeAgentText(h.summary)}</span>
         <Time ms={h.createdAt} />
       </div>
       <p className="muted small">
-        from {agentName(sessions.get(h.fromSessionId))} → {h.toAgentKind ?? 'any agent'}
-        {h.claimedBySessionId && <> · claimed by {agentName(sessions.get(h.claimedBySessionId))}</>}
+        from {sessionName(sessions.get(h.fromSessionId))} to{' '}
+        {h.toAgentKind ? productName(h.toAgentKind) : 'any agent'}
         {p.branch && (
           <>
             {' '}
@@ -258,7 +291,7 @@ function HandoffCard({ h }: { h: Handoff }) {
         {p.headCommit && (
           <>
             {' '}
-            @ <Mono>{p.headCommit}</Mono>
+            at commit <Mono title={p.headCommit}>{p.headCommit.slice(0, 8)}</Mono>
           </>
         )}
       </p>
@@ -300,8 +333,8 @@ function HandoffCard({ h }: { h: Handoff }) {
       </div>
       {h.status === 'pending' && (
         <p className="help">
-          The next {h.toAgentKind ?? 'agent'} session in this project receives this handoff when it
-          starts.
+          The next {h.toAgentKind ? productName(h.toAgentKind) : 'agent'} session started in this
+          project picks this up automatically.
         </p>
       )}
     </li>

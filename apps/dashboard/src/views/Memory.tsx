@@ -5,14 +5,16 @@ import {
   Empty,
   Loaded,
   Mono,
+  Help,
   Panel,
+  ShortId,
   Status,
   Tag,
   Time,
   TrustBadge,
   cx,
 } from '../components/ui';
-import { absTime, agentName, splitList } from '../format';
+import { splitList } from '../format';
 import { useAction, useApp, useResource } from '../state';
 import {
   MEMORY_KINDS,
@@ -20,9 +22,21 @@ import {
   type Memory,
   type MemoryDetail,
   type MemoryKind,
-  type MemorySource,
   type Trust,
 } from '../types';
+import {
+  absTime,
+  checkStateWords,
+  memoryKindPlural,
+  memoryKindWords,
+  omitReasonWords,
+  relevanceWords,
+  sessionName,
+  sourceWords,
+  triggerWords,
+  trustWords,
+  words,
+} from '../vocab';
 
 function useDebounced<T>(value: T, ms: number): T {
   const [v, setV] = useState(value);
@@ -31,17 +45,6 @@ function useDebounced<T>(value: T, ms: number): T {
     return () => window.clearTimeout(t);
   }, [value, ms]);
   return v;
-}
-
-export function sourceLabel(
-  src: MemorySource,
-  sessions: ReturnType<typeof useApp>['sessions'],
-): string {
-  if (src.type === 'user') return 'you';
-  if (src.type === 'system') return 'mindly';
-  if (src.type === 'code') return 'code';
-  const s = src.sessionId ? sessions.get(src.sessionId) : undefined;
-  return s ? agentName(s) : (src.agentKind ?? 'agent');
 }
 
 export function MemoryView() {
@@ -85,6 +88,9 @@ export function MemoryView() {
       <Panel
         title="Memory"
         count={res.data?.length}
+        noun="memory"
+        plural="memories"
+        help="memory"
         actions={
           <button
             type="button"
@@ -107,20 +113,24 @@ export function MemoryView() {
             />
           </label>
           <label className="field">
-            <span>Kind</span>
+            <span>Type</span>
             <select value={kind} onChange={(e) => setKind(e.target.value as MemoryKind | '')}>
-              <option value="">any</option>
+              <option value="">all types</option>
               {MEMORY_KINDS.map((k) => (
-                <option key={k}>{k}</option>
+                <option key={k} value={k}>
+                  {memoryKindPlural(k)}
+                </option>
               ))}
             </select>
           </label>
           <label className="field">
             <span>Trust</span>
             <select value={trust} onChange={(e) => setTrust(e.target.value as Trust | '')}>
-              <option value="">any</option>
+              <option value="">any trust</option>
               {TRUST_LEVELS.map((t) => (
-                <option key={t}>{t}</option>
+                <option key={t} value={t}>
+                  {trustWords(t)}
+                </option>
               ))}
             </select>
           </label>
@@ -129,17 +139,17 @@ export function MemoryView() {
             <input
               value={branch}
               onChange={(e) => setBranch(e.target.value)}
-              placeholder="all"
+              placeholder="all branches"
               maxLength={200}
             />
           </label>
           <label className="field">
-            <span>Status</span>
+            <span>Show</span>
             <select
               value={status}
               onChange={(e) => setStatus(e.target.value as 'active' | 'archived')}
             >
-              <option value="active">active</option>
+              <option value="active">in use</option>
               <option value="archived">archived</option>
             </select>
           </label>
@@ -149,8 +159,10 @@ export function MemoryView() {
             list.length === 0 ? (
               <Empty>
                 {dq || kind || trust || db
-                  ? 'No memories match these filters.'
-                  : 'No memories yet. Agents propose them as they work, or add one with “New memory”.'}
+                  ? 'No memories match these filters. Clear a filter to see more.'
+                  : status === 'archived'
+                    ? 'Nothing archived. Memories you archive stay here for history and are no longer given to agents.'
+                    : 'No memories yet. Agents suggest rules, decisions and known pitfalls as they work, and they appear here for you to approve. You can also add one with \u201cNew memory\u201d.'}
               </Empty>
             ) : (
               <ul className="mem-list">
@@ -162,28 +174,43 @@ export function MemoryView() {
                       onClick={() => setOpen(m.id)}
                     >
                       <span className="mem-badges">
-                        <TrustBadge trust={m.trust} />
-                        <Tag>{m.kind}</Tag>
+                        <Tag>{memoryKindWords(m.kind)}</Tag>
+                        <TrustBadge trust={m.trust} by={sourceWords(m.source, sessions)} />
                       </span>
                       <span className="mem-main">
                         <span className="mem-title">
                           {m.pinned && (
-                            <span className="pin" title="Pinned">
-                              pinned
+                            <span className="pin" title="Pinned: always given to every agent">
+                              always included
                             </span>
                           )}
                           {m.title}
-                          {m.enforce && <span className="enforced">enforced</span>}
+                          {m.enforce && (
+                            <span
+                              className="enforced"
+                              title="Enforced: Mindly may block an edit that clearly breaks this rule"
+                            >
+                              enforced
+                            </span>
+                          )}
                         </span>
                         <span className="mem-body">{m.body}</span>
                       </span>
                       <span className="mem-side">
-                        <span className="muted">by {sourceLabel(m.source, sessions)}</span>
-                        {m.scope.branch && <Mono>{m.scope.branch}</Mono>}
+                        <span className="muted">added by {sourceWords(m.source, sessions)}</span>
+                        {m.scope.branch && (
+                          <span className="muted">
+                            only on <Mono>{m.scope.branch}</Mono>
+                          </span>
+                        )}
                         {m.scope.paths.slice(0, 2).map((p) => (
-                          <Mono key={p}>{p}</Mono>
+                          <Mono key={p} title="Applies to these files">
+                            {p}
+                          </Mono>
                         ))}
-                        <Time ms={m.updatedAt} />
+                        <span className="muted">
+                          <Time ms={m.updatedAt} prefix="updated" />
+                        </span>
                       </span>
                     </button>
                   </li>
@@ -270,28 +297,30 @@ function MemoryDetailView({
     <div className="stack-lg">
       <div className="detail-head">
         <div className="mem-badges">
-          <TrustBadge trust={m.trust} />
-          <Tag>{m.kind}</Tag>
+          <Tag>{memoryKindWords(m.kind)}</Tag>
+          <TrustBadge trust={m.trust} by={sourceWords(m.source, sessions)} />
           {m.status === 'archived' && <Status value="archived" />}
-          {m.pinned && <Tag tone="accent">pinned</Tag>}
+          {m.pinned && <Tag tone="accent">always included</Tag>}
           {m.enforce && <Tag tone="warn">enforced</Tag>}
         </div>
         <h3 className="detail-title">{shown ? shown.title : m.title}</h3>
         <p className="muted small">
-          v{m.version} · by {sourceLabel(m.source, sessions)} · updated <Time ms={m.updatedAt} />
+          version {m.version} · added by {sourceWords(m.source, sessions)} ·{' '}
+          <Time ms={m.updatedAt} prefix="updated" />
           {m.lastVerifiedAt && (
             <>
               {' '}
-              · verified <Time ms={m.lastVerifiedAt} />
+              · <Time ms={m.lastVerifiedAt} prefix="last confirmed in the code" />
             </>
           )}{' '}
-          · <Mono>{m.id}</Mono>
+          · <ShortId id={m.id} label="memory id" />
         </p>
       </div>
 
       {shown && (
         <div className="time-travel" role="status">
-          Viewing version {shown.version} from {absTime(shown.createdAt)} (trust {shown.trust}).{' '}
+          Viewing version {shown.version} from {absTime(shown.createdAt)} ({trustWords(shown.trust)}
+          ).{' '}
           <button type="button" className="link" onClick={() => setViewVersion(null)}>
             Back to current
           </button>
@@ -358,10 +387,10 @@ function MemoryDetailView({
       </div>
 
       <dl className="kv">
-        <dt>Scope</dt>
+        <dt>Applies to</dt>
         <dd className="file-list">
           {m.scope.paths.length === 0 ? (
-            <span className="muted">whole project</span>
+            <span className="muted">the whole project</span>
           ) : (
             m.scope.paths.map((p) => <Mono key={p}>{p}</Mono>)
           )}
@@ -398,10 +427,10 @@ function MemoryDetailView({
                 onClick={() => setViewVersion(v.version === m.version ? null : v.version)}
                 aria-pressed={v.version === (viewVersion ?? m.version)}
               >
-                <span className="tl-ver">v{v.version}</span>
-                <TrustBadge trust={v.trust} />
+                <span className="tl-ver">version {v.version}</span>
+                <TrustBadge trust={v.trust} by={sourceWords(v.changedBy, sessions)} />
                 <span className="tl-reason">{v.reason ?? 'changed'}</span>
-                <span className="muted">by {sourceLabel(v.changedBy, sessions)}</span>
+                <span className="muted">by {sourceWords(v.changedBy, sessions)}</span>
                 <Time ms={v.createdAt} />
               </button>
             </li>
@@ -412,19 +441,22 @@ function MemoryDetailView({
       <section aria-label="Evidence">
         <h4 className="sub">Evidence</h4>
         {d.evidence.length === 0 ? (
-          <Empty>No evidence linked. Without evidence this memory can’t self-heal.</Empty>
+          <Empty>
+            No evidence linked. When a memory points at code (a file, a commit, a test), Mindly
+            notices when that code changes and marks the memory “may be outdated”.
+          </Empty>
         ) : (
           <ul className="evidence">
             {d.evidence.map((e) => (
               <li key={e.id}>
                 <span className={cx('tag', e.valid ? 'tone-good' : 'tone-bad')}>
-                  {e.valid ? 'valid' : 'changed'}
+                  {e.valid ? 'still matches the code' : 'code changed since'}
                 </span>
                 <Tag>{e.type}</Tag>
                 <Mono>{e.ref}</Mono>
                 {e.checkedAt && (
                   <span className="muted small">
-                    checked <Time ms={e.checkedAt} />
+                    <Time ms={e.checkedAt} prefix="checked" />
                   </span>
                 )}
                 {e.excerpt && <pre className="pre pre-inline">{e.excerpt}</pre>}
@@ -434,24 +466,31 @@ function MemoryDetailView({
         )}
       </section>
 
-      <section aria-label="Contracts">
-        <h4 className="sub">Contracts</h4>
+      <section aria-label="Checks">
+        <h4 className="sub">
+          Checks <Help term="check" />
+        </h4>
         {d.contracts.length === 0 ? (
-          <Empty>No executable checks bound to this memory.</Empty>
+          <Empty>
+            No checks tied to this memory. Add one from the CLI to have Mindly test it after every
+            change.
+          </Empty>
         ) : (
           <ul className="evidence">
             {d.contracts.map((c) => (
               <li key={c.id}>
-                <Status value={c.state} />
-                <Tag>{c.kind.replace(/_/g, ' ')}</Tag>
+                <Status value={c.state} label={checkStateWords(c.state)} />
+                <Tag>{words(c.kind)}</Tag>
                 <Mono>{c.spec.path ?? c.spec.argv?.join(' ') ?? ''}</Mono>
                 {c.spec.pattern && <Mono>/{c.spec.pattern}/</Mono>}
                 {c.spec.symbol && <Mono>{c.spec.symbol}</Mono>}
                 {c.spec.key && <Mono>{c.spec.key}</Mono>}
-                {c.kind === 'command' && !c.approvedHash && <Tag tone="warn">needs approval</Tag>}
+                {c.kind === 'command' && !c.approvedHash && (
+                  <Tag tone="warn">needs your approval to run</Tag>
+                )}
                 {c.lastMessage && <span className="small">{c.lastMessage}</span>}
                 <span className="muted small">
-                  <Time ms={c.lastRunAt} />
+                  <Time ms={c.lastRunAt} prefix="last run" />
                 </span>
               </li>
             ))}
@@ -459,10 +498,14 @@ function MemoryDetailView({
         )}
       </section>
 
-      <section aria-label="Where it was served">
-        <h4 className="sub">Served in context</h4>
+      <section aria-label="Given to agents">
+        <h4 className="sub">
+          Given to agents <Help term="xray" />
+        </h4>
         {d.xray.length === 0 ? (
-          <Empty>Not served to any agent yet.</Empty>
+          <Empty>
+            No agent has received this memory yet. It is sent when an agent works on matching files.
+          </Empty>
         ) : (
           <ul className="evidence">
             {d.xray.map((p) => {
@@ -472,13 +515,14 @@ function MemoryDetailView({
               return (
                 <li key={p.id}>
                   <span className={cx('tag', inc ? 'tone-good' : 'tone-warn')}>
-                    {inc ? 'included' : 'omitted'}
+                    {inc ? 'included' : 'left out'}
                   </span>
-                  <span>{agentName(sessions.get(p.sessionId))}</span>
-                  <Tag>{p.trigger.replace(/_/g, ' ')}</Tag>
+                  <span>{sessionName(sessions.get(p.sessionId))}</span>
+                  <span className="muted small">{triggerWords(p.trigger)}</span>
                   {it && (
-                    <span className="small">
-                      score {it.score.toFixed(2)} · {it.reason}
+                    <span className="small" title={`Relevance score ${it.score.toFixed(2)}`}>
+                      {relevanceWords(it.score)} relevance ·{' '}
+                      {inc ? it.reason : `left out because ${omitReasonWords(it.reason)}`}
                     </span>
                   )}
                   <Time ms={p.createdAt} />
@@ -551,10 +595,12 @@ function MemoryForm({ existing, onDone }: { existing?: Memory; onDone(m?: Memory
     <form className="form" onSubmit={submit}>
       {!existing && (
         <label className="field">
-          <span>Kind</span>
+          <span>Type</span>
           <select value={kind} onChange={(e) => setKind(e.target.value as MemoryKind)}>
             {MEMORY_KINDS.map((k) => (
-              <option key={k}>{k}</option>
+              <option key={k} value={k}>
+                {memoryKindWords(k)}
+              </option>
             ))}
           </select>
         </label>
@@ -584,7 +630,7 @@ function MemoryForm({ existing, onDone }: { existing?: Memory; onDone(m?: Memory
         <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="tooling, ci" />
       </label>
       <label className="field">
-        <span>Scope globs</span>
+        <span>Applies to files (optional)</span>
         <textarea
           rows={3}
           value={paths}
@@ -616,7 +662,7 @@ function MemoryForm({ existing, onDone }: { existing?: Memory; onDone(m?: Memory
           checked={pinned}
           onChange={(e) => setPinned(e.target.checked)}
         />
-        <label htmlFor={`${fid}-pin`}>Pin (always include in context)</label>
+        <label htmlFor={`${fid}-pin`}>Always include (give it to every agent, every time)</label>
       </div>
       <div className="btn-row">
         <button
