@@ -1,6 +1,7 @@
 import { systemClock, type Clock } from '@mindly/core';
 import { openDatabase, transaction, type Db, type OpenOptions } from './db.js';
 import { EventRepo, ProjectRepo, SessionRepo } from './repos/core.js';
+import { IdRepo } from './repos/ids.js';
 import { MemoryRepo } from './repos/memories.js';
 import {
   ContextPacketRepo,
@@ -15,6 +16,7 @@ import { ConflictRepo, DeliveryRepo, FileChangeRepo, IntentRepo, TaskRepo } from
 export * from './db.js';
 export { MIGRATIONS } from './migrations.js';
 export * from './repos/core.js';
+export * from './repos/ids.js';
 export * from './repos/memories.js';
 export * from './repos/misc.js';
 export * from './repos/work.js';
@@ -39,6 +41,8 @@ export class Store {
   readonly snapshots: SnapshotRepo;
   readonly runs: RunRepo;
   readonly kv: KvRepo;
+  /** Resolves full, short and prefix ids typed by people (CLI, dashboard search). */
+  readonly ids: IdRepo;
 
   constructor(
     readonly db: Db,
@@ -59,6 +63,7 @@ export class Store {
     this.snapshots = new SnapshotRepo(db, clock);
     this.runs = new RunRepo(db, clock);
     this.kv = new KvRepo(db, clock);
+    this.ids = new IdRepo(db);
   }
 
   static open(path: string, options: OpenOptions & { clock?: Clock } = {}): Store {
