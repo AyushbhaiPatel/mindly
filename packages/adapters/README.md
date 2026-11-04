@@ -1,6 +1,7 @@
 # @mindly/adapters
 
-Per-agent hook translators and installers for Claude Code, Codex and Cursor. Each adapter
+Per-agent hook translators and installers for Claude Code, Codex and Cursor, plus MCP-only
+installers for a catalog of other MCP clients (see [MCP-only clients](#mcp-only-clients)). Each adapter
 implements `AgentAdapter` from `@mindly/core` (`packages/core/src/hooks.ts`):
 
 - `parse(nativeEvent, payload)` turns a native hook payload into a `NormalizedHookEvent`, or
@@ -46,6 +47,53 @@ project-level `.codex/` config only for trusted projects.
 
 No adapter ever emits an `allow` decision: it would skip the agent's own permission prompt.
 
+## MCP-only clients
+
+`src/mcp-clients/catalog.ts` describes every other client as data: user and project config paths
+(home-relative, per platform), file format, a JSON pointer to the servers map, the entry shape and
+detection paths. One generic `McpClientAdapter` turns each entry into an `AgentAdapter`: `parse`
+returns null, `render` prints nothing, and install/uninstall add or remove only the `mindly`
+server entry, launching `<command> mcp --agent <kind>`.
+
+Edits are made in place (`src/mcp-clients/jsonc-edit.ts`, using `jsonc-parser` 3.3.1 for parsing
+and scanning): the new property is inserted as new lines after the last existing one, with the
+file's own indentation and line endings, so comments, trailing commas, ordering and other servers
+stay byte-for-byte; uninstall removes exactly those lines and restores the original text.
+Invalid files, comments in strict-JSON files and non-object containers are refused with an
+`invalid_input` error and never overwritten.
+
+| Kind             | User config (macOS / Linux)                                                                                       | Project config            | Servers key       | Format |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------- | ----------------- | ------ |
+| `windsurf`       | `~/.codeium/windsurf/mcp_config.json`                                                                             | none                      | `mcpServers`      | JSONC  |
+| `kiro`           | `~/.kiro/settings/mcp.json`                                                                                       | `.kiro/settings/mcp.json` | `mcpServers`      | JSON   |
+| `gemini`         | `~/.gemini/settings.json`                                                                                         | `.gemini/settings.json`   | `mcpServers`      | JSONC  |
+| `vscode`         | `~/Library/Application Support/Code/User/mcp.json` / `~/.config/Code/User/mcp.json`                               | `.vscode/mcp.json`        | `servers`         | JSONC  |
+| `cline`          | `~/.cline/data/settings/cline_mcp_settings.json`                                                                  | none                      | `mcpServers`      | JSON   |
+| `roo-code`       | `<VS Code User>/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json`                              | `.roo/mcp.json`           | `mcpServers`      | JSON   |
+| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` / `~/.config/Claude/claude_desktop_config.json` | none                      | `mcpServers`      | JSON   |
+| `opencode`       | `~/.config/opencode/opencode.json` (or an existing `opencode.jsonc`)                                              | `opencode.json(c)`        | `mcp`             | JSONC  |
+| `zed`            | `~/.config/zed/settings.json`                                                                                     | `.zed/settings.json`      | `context_servers` | JSONC  |
+| `amp`            | `~/.config/amp/settings.json` (or an existing `settings.jsonc`)                                                   | `.amp/settings.json(c)`   | `amp.mcpServers`  | JSONC  |
+| `augment`        | `~/.augment/settings.json` (Auggie CLI)                                                                           | none                      | `mcpServers`      | JSON   |
+| `lm-studio`      | `~/.lmstudio/mcp.json`                                                                                            | none                      | `mcpServers`      | JSON   |
+
+Entries are `{ "command", "args" }`, except VS Code (`{ "type": "stdio", "command", "args" }`)
+and OpenCode (`{ "type": "local", "command": [argv...], "enabled": true }`). Amp's key is a literal
+top-level `"amp.mcpServers"`, not a nested path. Windows paths use `%APPDATA%` where the
+client does, but are untested.
+
+Not in the catalog (users can paste the generic snippet from the main README):
+
+- **Continue** and **Goose**: YAML configs (`~/.continue/config.yaml` `mcpServers:` list,
+  `~/.config/goose/config.yaml` `extensions:` map). Editing YAML without losing comments would need
+  a YAML round-trip library; not worth a new dependency yet.
+- **Trae**: the official MCP docs page could not be read and secondary sources disagree on the
+  user config path.
+- **Augment IDE extensions**: configured through the settings panel; no file path is documented
+  (the Auggie CLI is covered as `augment`).
+
+Docs for each client are listed below and in each catalog entry's `docs` field.
+
 ## Documentation used
 
 - Claude Code hooks: https://code.claude.com/docs/en/hooks
@@ -54,6 +102,23 @@ No adapter ever emits an `allow` decision: it would skip the agent's own permiss
 - Codex MCP: https://developers.openai.com/codex/mcp (redirects to https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 - Cursor hooks: https://cursor.com/docs/agent/hooks
 - Cursor MCP: https://cursor.com/docs/context/mcp
+- Windsurf: https://docs.windsurf.com/windsurf/cascade/mcp (now redirects to https://docs.devin.ai/desktop/cascade/mcp)
+- Kiro: https://kiro.dev/docs/mcp/configuration/
+- Gemini CLI: https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md
+- VS Code: https://code.visualstudio.com/docs/agents/reference/mcp-configuration,
+  https://code.visualstudio.com/docs/copilot/customization/mcp-servers,
+  https://code.visualstudio.com/docs/configure/settings (User directory per OS)
+- Cline: https://docs.cline.bot/mcp/configuring-mcp-servers (path from the extension source,
+  `apps/vscode/src/core/storage/disk.ts`)
+- Roo Code: https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo
+- Claude Desktop: https://modelcontextprotocol.io/docs/develop/connect-local-servers
+- OpenCode: https://opencode.ai/docs/mcp-servers/, https://opencode.ai/docs/config/
+- Zed: https://zed.dev/docs/ai/mcp
+- Amp: https://ampcode.com/docs/customize/mcp, https://ampcode.com/docs/cli/settings
+- Augment (Auggie CLI): https://docs.augmentcode.com/cli/integrations
+- LM Studio: https://lmstudio.ai/docs/app/mcp
+- Continue (skipped): https://docs.continue.dev/customize/deep-dives/mcp
+- Goose (skipped): https://goose-docs.ai/docs/guides/config-files
 
 Read in November 2026. Where the docs were silent, the parsers accept both plausible spellings
 (e.g. Codex `apply_patch` input as a string or argv array; Cursor `conversation_id` or
@@ -68,3 +133,14 @@ Read in November 2026. Where the docs were silent, the parsers accept both plaus
 - Cursor tool names in `preToolUse` and the payload of `postToolUseFailure` (we read
   `error_message` / `error`) are not fully specified.
 - Codex hook commands are assumed to run through a shell (the docs' examples use shell syntax).
+- Windsurf: its docs now redirect to Devin Desktop, which documents `~/.config/devin/mcp_config.json`.
+  Mindly writes the long-standing Windsurf path `~/.codeium/windsurf/mcp_config.json`, which the
+  current page no longer mentions.
+- VS Code: the docs name the user `mcp.json` ("MCP: Open User Configuration") but not its OS path;
+  the path is the documented User settings directory plus `mcp.json`. VS Code's guided flow now
+  labels these files as kept for compatibility.
+- Gemini CLI, Windsurf and VS Code are treated as JSONC (comments kept) because their examples or
+  settings loaders accept comments; the docs do not say so explicitly.
+- LM Studio follows "Cursor's mcp.json notation" per its docs; the stdio entry shape is assumed
+  from that.
+- Roo Code's repository has been archived; the config location is unchanged.
