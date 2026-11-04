@@ -1,0 +1,24 @@
+{
+  "name": "@synapse/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Domain types, schemas and shared utilities for Synapse.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@synapse/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "zod": "4.1.12"
+  }
+}
