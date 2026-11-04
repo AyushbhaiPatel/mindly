@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './quiet-warnings.js';
 import { processIo } from './io.js';
 import { run } from './run.js';
 
