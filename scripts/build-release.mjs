@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Builds the publishable `mindly` npm package into release/mindly/.
+// Builds the publishable `mindly-cli` npm package into release/mindly-cli/.
 //
 // Workspace code (`@mindly/*`) is bundled from source with esbuild; real third-party runtime
 // dependencies stay external and are declared, with their exact versions, in the generated
@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 const cliDir = join(repo, 'apps', 'cli');
-const out = join(repo, 'release', 'mindly');
+const out = join(repo, 'release', 'mindly-cli');
 const dist = join(out, 'dist');
 
 const requireFromCli = createRequire(join(cliDir, 'package.json'));
@@ -70,9 +70,9 @@ const walk = (name) => {
     thirdParty.set(dep, range);
   }
 };
-const cli = workspace.get('mindly');
-if (!cli) fail('apps/cli (mindly) not found');
-walk('mindly');
+const cli = workspace.get('mindly-cli');
+if (!cli) fail('apps/cli (mindly-cli) not found');
+walk('mindly-cli');
 
 const core = readFileSync(join(repo, 'packages', 'core', 'src', 'index.ts'), 'utf8');
 const coreVersion = /MINDLY_VERSION = '([^']+)'/.exec(core)?.[1];
