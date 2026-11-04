@@ -75,14 +75,14 @@ scheduled background work.
 | ------------------- | ------------------------------------------------------------------------------ |
 | `packages/core`     | Domain types and runtime schemas, ids, errors, config, paths, secret redaction |
 | `packages/store`    | SQLite access, migrations, repositories, full-text search                      |
-| `packages/engine`   | All domain services; the `Mindly` facade used by every entry point            |
+| `packages/engine`   | All domain services; the `Mindly` facade used by every entry point             |
 | `packages/git`      | Safe git invocation, shadow merge, diff/export analysis, import graph          |
 | `packages/llm`      | Optional model providers (local Ollama, BYOK Anthropic/OpenAI), never required |
 | `packages/notify`   | Pager channels (desktop, ntfy, webhook); off by default                        |
 | `packages/runners`  | Headless agent runs for replay, cross-agent review and opt-in failover         |
-| `packages/mcp`      | MCP server exposing Mindly tools to any MCP client                            |
+| `packages/mcp`      | MCP server exposing Mindly tools to any MCP client                             |
 | `packages/adapters` | Per-agent installers and hook translators (Claude Code, Codex, Cursor)         |
-| `apps/cli`          | `mindly` command; the only published package (`mindly-agents`)               |
+| `apps/cli`          | `mindly` command; the only published package (`mindly-agents`)                 |
 | `apps/daemon`       | Local HTTP/WebSocket server for Mission Control and background jobs            |
 | `apps/dashboard`    | Mission Control single-page app, served by the daemon                          |
 
@@ -186,7 +186,7 @@ dropped with an event.
 | Executable memory         | `contracts` table; declarative checks; command checks need user approval     |
 | Say-it-once rules         | correction detector on prompts, path-scoped rules                            |
 | Mistake memory            | failed attempts recorded and surfaced before similar edits                   |
-| Code provenance           | `file_changes` hunk hashes; `mindly why file:line`                          |
+| Code provenance           | `file_changes` hunk hashes; `mindly why file:line`                           |
 | Context X-Ray             | `context_packets` with included/omitted items and scores                     |
 | Cross-agent review        | `runners` headless review of a diff by a different agent                     |
 | Agent A/B replay          | `runners` in isolated worktrees at the same base commit                      |

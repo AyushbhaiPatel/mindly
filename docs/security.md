@@ -16,7 +16,7 @@ them. Report vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 
 | Boundary                       | Trusted side          | Untrusted side                                |
 | ------------------------------ | --------------------- | --------------------------------------------- |
-| User ↔ Mindly CLI             | the local user        | —                                             |
+| User ↔ Mindly CLI              | the local user        | —                                             |
 | Agent hook payloads            | shape validated       | content (prompts, tool output, file contents) |
 | Repository contents and config | after explicit trust  | any freshly cloned repository                 |
 | Memory content                 | never                 | always treated as data                        |
