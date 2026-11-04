@@ -1,0 +1,40 @@
+{
+  "name": "@mindly/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Optional local Mindly daemon: Mission Control API, live feed and background jobs.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@mindly/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "mindly-daemon": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@fastify/static": "10.1.6",
+    "@fastify/websocket": "11.3.4",
+    "@mindly/core": "workspace:*",
+    "@mindly/engine": "workspace:*",
+    "@mindly/git": "workspace:*",
+    "@mindly/runners": "workspace:*",
+    "@mindly/runtime": "workspace:*",
+    "@mindly/store": "workspace:*",
+    "fastify": "5.12.7",
+    "ws": "8.22.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.2"
+  }
+}
