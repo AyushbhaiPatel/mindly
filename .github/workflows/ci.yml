@@ -73,7 +73,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm release:build
       - run: npm pack --dry-run
-        working-directory: release/mindly-agents
+        working-directory: release/mindly
       - run: npm pack --pack-destination "$RUNNER_TEMP"
-        working-directory: release/mindly-agents
-      - run: node scripts/smoke-release.mjs "$RUNNER_TEMP"/mindly-agents-*.tgz
+        working-directory: release/mindly
+      - run: node scripts/smoke-release.mjs "$RUNNER_TEMP"/mindly-*.tgz

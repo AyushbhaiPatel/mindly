@@ -9,7 +9,7 @@ declare const __MINDLY_RELEASE__: boolean | undefined;
 
 /** Where the installable pieces of Mindly live on disk. */
 export interface InstallLayout {
-  /** `release`: the bundled `mindly-agents` npm package; `dev`: a monorepo checkout. */
+  /** `release`: the bundled `mindly` npm package; `dev`: a monorepo checkout. */
   kind: 'release' | 'dev';
   /** Entry point of the `mindly` CLI (what agent hooks run with `node`). */
   cliMain: string;
@@ -25,7 +25,7 @@ export function isReleaseBuild(): boolean {
 }
 
 /**
- * Release layout of the `mindly-agents` package: every bundled file sits in `<root>/dist/`
+ * Release layout of the `mindly` package: every bundled file sits in `<root>/dist/`
  * (`main.js`, `daemon.js` and shared chunks) and the dashboard in `<root>/dashboard/`.
  */
 export function releaseLayout(bundleFile: string): InstallLayout {

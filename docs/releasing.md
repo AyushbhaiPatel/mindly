@@ -1,13 +1,13 @@
-# Releasing `mindly-agents`
+# Releasing `mindly`
 
-Mindly ships to users as one npm package, `mindly-agents`, which installs the `mindly` command.
+Mindly ships to users as one npm package, `mindly`, which installs the `mindly` command.
 The workspace packages (`@mindly/*`) stay private: their code is bundled into the release, and
 only real third-party runtime dependencies are installed from the registry.
 
 ## Package layout
 
 ```
-mindly-agents/
+mindly/
   package.json      generated: name/version/description from apps/cli, exact runtime deps
   dist/main.js      the `mindly` binary (bin), plus shared chunk-*.js files and source maps
   dist/daemon.js    the daemon process started by `mindly daemon start`
@@ -44,7 +44,7 @@ pnpm release:build
 
 1. bundles `apps/cli/src/main.ts` and `apps/daemon/src/main.ts` with esbuild (ESM,
    `platform: node`, `target: node22`, the `@mindly/source` condition, code splitting, source
-   maps) into `release/mindly-agents/dist/`;
+   maps) into `release/mindly/dist/`;
 2. keeps every third-party dependency external and writes those the bundle imports, with the
    exact versions pinned in the workspace, to the generated `package.json` (no scripts, no
    devDependencies);
@@ -59,11 +59,11 @@ pnpm release:build
 ## Pack and smoke test
 
 ```sh
-cd release/mindly-agents
+cd release/mindly
 npm pack --dry-run                       # review the file list
 npm pack --pack-destination /tmp/mindly-release
 cd ../..
-node scripts/smoke-release.mjs /tmp/mindly-release/mindly-agents-<version>.tgz
+node scripts/smoke-release.mjs /tmp/mindly-release/mindly-<version>.tgz
 ```
 
 The smoke test installs the tarball in a fresh temp directory with a temp `HOME` and
@@ -92,7 +92,7 @@ steps:
   - run: pnpm check
   - run: pnpm release:build
   - run: npm publish --provenance --access public
-    working-directory: release/mindly-agents
+    working-directory: release/mindly
 ```
 
 Prefer npm trusted publishing (OIDC) for the repository and workflow; otherwise use an
