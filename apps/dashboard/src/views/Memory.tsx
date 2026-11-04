@@ -38,7 +38,7 @@ export function sourceLabel(
   sessions: ReturnType<typeof useApp>['sessions'],
 ): string {
   if (src.type === 'user') return 'you';
-  if (src.type === 'system') return 'synapse';
+  if (src.type === 'system') return 'mindly';
   if (src.type === 'code') return 'code';
   const s = src.sessionId ? sessions.get(src.sessionId) : undefined;
   return s ? agentName(s) : (src.agentKind ?? 'agent');
@@ -603,7 +603,7 @@ function MemoryForm({ existing, onDone }: { existing?: Memory; onDone(m?: Memory
           />
           <label htmlFor={`${fid}-enf`}>Enforce this rule</label>
           <p id={`${fid}-enf-help`} className="help">
-            When on, Synapse may block an agent’s file edit or command that clearly violates this
+            When on, Mindly may block an agent’s file edit or command that clearly violates this
             rule (the agent sees why and can adjust). Leave off for guidance agents should weigh,
             not obey.
           </p>

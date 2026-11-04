@@ -24,7 +24,7 @@ import type {
   Snapshot,
   SnapshotDiff,
   StandupResult,
-  SynapseEvent,
+  MindlyEvent,
   Task,
   TaskStatus,
   TrustStatus,
@@ -55,14 +55,14 @@ const STATUS_CODES: Record<number, string> = {
 };
 
 const FRIENDLY: Record<string, string> = {
-  unauthenticated: 'Your dashboard session has expired. Run `synapse dashboard` to sign in again.',
+  unauthenticated: 'Your dashboard session has expired. Run `mindly dashboard` to sign in again.',
   forbidden: 'The daemon refused this request.',
   untrusted_project:
     'This project’s config is not trusted yet. Review it under Settings before running checks.',
   not_found: 'That item no longer exists.',
   too_large: 'The request is too large.',
   bad_host: 'The daemon rejected the address this page was opened from. Use 127.0.0.1.',
-  network: 'Cannot reach the Synapse daemon. Is it still running?',
+  network: 'Cannot reach the Mindly daemon. Is it still running?',
 };
 
 /** Maps a status code and a (possibly malformed) JSON error body to an ApiError. Pure. */
@@ -102,7 +102,7 @@ export function buildQuery(params: Record<string, string | number | undefined | 
 const enc = encodeURIComponent;
 
 /** Everything the UI needs from the daemon. Implemented over HTTP and by the mock fixtures. */
-export interface SynapseClient {
+export interface MindlyClient {
   readonly mock: boolean;
   health(): Promise<Health>;
   exchangeLogin(code: string): Promise<void>;
@@ -110,7 +110,7 @@ export interface SynapseClient {
   projects(): Promise<Project[]>;
   overview(projectId: string): Promise<Overview>;
   sessions(projectId: string, limit?: number): Promise<Session[]>;
-  events(projectId: string, query?: EventQuery): Promise<SynapseEvent[]>;
+  events(projectId: string, query?: EventQuery): Promise<MindlyEvent[]>;
   memories(projectId: string, query?: MemoryQuery): Promise<Memory[]>;
   createMemory(projectId: string, input: NewMemoryInput): Promise<Memory>;
   memory(id: string): Promise<MemoryDetail>;
@@ -144,7 +144,7 @@ type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' };
-  if (method !== 'GET') headers['X-Synapse-CSRF'] = '1';
+  if (method !== 'GET') headers['X-Mindly-CSRF'] = '1';
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   let res: Response;
   try {
@@ -173,7 +173,7 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
   return parsed as T;
 }
 
-export function createHttpClient(): SynapseClient {
+export function createHttpClient(): MindlyClient {
   const get = <T>(p: string) => request<T>('GET', p);
   const post = <T>(p: string, b: unknown = {}) => request<T>('POST', p, b);
   const proj = (id: string) => `/api/projects/${enc(id)}`;

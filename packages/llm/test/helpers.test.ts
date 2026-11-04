@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 import {
   NoneProvider,
   createLlmHelpers,
@@ -67,7 +67,7 @@ describe('classifyCorrection', () => {
 
   it('returns null when the provider is unavailable or errors', async () => {
     expect(await createLlmHelpers(new NoneProvider()).classifyCorrection('x')).toBeNull();
-    const failing = new FakeProvider(new SynapseError('timeout', 'slow'));
+    const failing = new FakeProvider(new MindlyError('timeout', 'slow'));
     expect(await createLlmHelpers(failing).classifyCorrection('x')).toBeNull();
   });
 });

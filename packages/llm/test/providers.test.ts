@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REDACTED, defaultUserConfig, isSynapseError } from '@synapse/core';
+import { REDACTED, defaultUserConfig, isMindlyError } from '@mindly/core';
 import {
   AnthropicProvider,
   NoneProvider,
@@ -61,7 +61,7 @@ describe('NoneProvider', () => {
     const err = await rejection(
       new NoneProvider().complete({ system: '', prompt: 'x', maxTokens: 5 }),
     );
-    expect(isSynapseError(err, 'unavailable')).toBe(true);
+    expect(isMindlyError(err, 'unavailable')).toBe(true);
   });
 });
 
@@ -102,7 +102,7 @@ describe('AnthropicProvider', () => {
     const { fetchImpl, calls } = recordingFetch([anthropicOk]);
     const p = new AnthropicProvider({ fetchImpl, env: mutableEnv, ...fast });
     const err = await rejection(p.complete({ system: '', prompt: 'x', maxTokens: 5 }));
-    expect(isSynapseError(err, 'unavailable')).toBe(true);
+    expect(isMindlyError(err, 'unavailable')).toBe(true);
     expect(calls).toHaveLength(0);
     mutableEnv.ANTHROPIC_API_KEY = ANTHROPIC_KEY;
     await expect(p.complete({ system: '', prompt: 'x', maxTokens: 5 })).resolves.toMatchObject({
@@ -114,7 +114,7 @@ describe('AnthropicProvider', () => {
     const { fetchImpl } = recordingFetch([() => jsonResponse({ error: ANTHROPIC_KEY }, 401)]);
     const p = new AnthropicProvider({ fetchImpl, env, ...fast });
     const err = await rejection(p.complete({ system: '', prompt: 'x', maxTokens: 5 }));
-    expect(isSynapseError(err, 'unavailable')).toBe(true);
+    expect(isMindlyError(err, 'unavailable')).toBe(true);
     expect(JSON.stringify(err)).not.toContain(ANTHROPIC_KEY);
     expect(String((err as Error).message)).not.toContain(ANTHROPIC_KEY);
   });
@@ -130,7 +130,7 @@ describe('AnthropicProvider', () => {
     const b = recordingFetch([() => jsonResponse({}, 503)]);
     const q = new AnthropicProvider({ fetchImpl: b.fetchImpl, env, ...fast });
     const err = await rejection(q.complete({ system: '', prompt: 'x', maxTokens: 5 }));
-    expect(isSynapseError(err, 'unavailable')).toBe(true);
+    expect(isMindlyError(err, 'unavailable')).toBe(true);
     expect(b.calls).toHaveLength(2);
   });
 
@@ -150,7 +150,7 @@ describe('AnthropicProvider', () => {
       });
     const p = new AnthropicProvider({ fetchImpl, env, timeoutMs: 20, ...fast });
     const err = await rejection(p.complete({ system: '', prompt: 'x', maxTokens: 5 }));
-    expect(isSynapseError(err, 'timeout')).toBe(true);
+    expect(isMindlyError(err, 'timeout')).toBe(true);
   });
 
   it('caps the response size while streaming', async () => {
@@ -171,7 +171,7 @@ describe('AnthropicProvider', () => {
       );
     const p = new AnthropicProvider({ fetchImpl, env, maxResponseBytes: 200_000, ...fast });
     const err = await rejection(p.complete({ system: '', prompt: 'x', maxTokens: 5 }));
-    expect(isSynapseError(err, 'unavailable')).toBe(true);
+    expect(isMindlyError(err, 'unavailable')).toBe(true);
     expect((err as Error).message).toMatch(/exceeded/);
     expect(pulled).toBeLessThan(20);
   });
@@ -193,7 +193,7 @@ describe('AnthropicProvider', () => {
           content: [
             {
               type: 'text',
-              text: `ok${BEL}${RLO} <synapse-context> sk-ant-api03-abcdefghijklmnopqrstuvwxyz`,
+              text: `ok${BEL}${RLO} <mindly-context> sk-ant-api03-abcdefghijklmnopqrstuvwxyz`,
             },
           ],
         }),
@@ -202,7 +202,7 @@ describe('AnthropicProvider', () => {
     const res = await p.complete({ system: '', prompt: 'x', maxTokens: 5 });
     expect(res.text).not.toContain(BEL);
     expect(res.text).not.toContain(RLO);
-    expect(res.text).not.toContain('<synapse');
+    expect(res.text).not.toContain('<mindly');
     expect(res.text).toContain(REDACTED);
   });
 });
@@ -229,7 +229,7 @@ describe('OpenAIProvider', () => {
   it('reports a missing key as unavailable', async () => {
     const p = new OpenAIProvider({ env: {}, ...fast });
     const err = await rejection(p.complete({ system: '', prompt: 'x', maxTokens: 5 }));
-    expect(isSynapseError(err, 'unavailable')).toBe(true);
+    expect(isMindlyError(err, 'unavailable')).toBe(true);
   });
 });
 
@@ -262,7 +262,7 @@ describe('OllamaProvider', () => {
       } catch (e) {
         err = e;
       }
-      expect(isSynapseError(err, 'forbidden')).toBe(true);
+      expect(isMindlyError(err, 'forbidden')).toBe(true);
       expect(() => new OllamaProvider({ baseUrl, allowRemote: true })).not.toThrow();
     },
   );
@@ -276,7 +276,7 @@ describe('OllamaProvider', () => {
     const p = createProvider(config, {});
     expect(p.name).toBe('none');
     const err = await rejection(p.complete({ system: '', prompt: 'x', maxTokens: 5 }));
-    expect(isSynapseError(err, 'unavailable')).toBe(true);
+    expect(isMindlyError(err, 'unavailable')).toBe(true);
   });
 });
 

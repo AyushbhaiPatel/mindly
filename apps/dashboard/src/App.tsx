@@ -4,7 +4,7 @@ import {
   createHttpClient,
   describeError,
   takeLoginCode,
-  type SynapseClient,
+  type MindlyClient,
 } from './api';
 import { Tabs, cx, type TabDef } from './components/ui';
 import {
@@ -17,7 +17,7 @@ import {
 } from './live';
 import { AppContext, type AppState, type Toast } from './state';
 import { applyTheme, loadString, loadTheme, nextTheme, saveString, type ThemePref } from './theme';
-import type { Project, Session, SynapseEvent } from './types';
+import type { Project, Session, MindlyEvent } from './types';
 import { CoordinationView } from './views/Coordination';
 import { InsightView } from './views/Insight';
 import { MemoryView } from './views/Memory';
@@ -36,8 +36,8 @@ const TABS: TabDef<TabKey>[] = [
 ];
 const TAB_KEYS = new Set<string>(TABS.map((t) => t.key));
 
-const MOCK = import.meta.env.VITE_SYNAPSE_MOCK === '1';
-const PROJECT_KEY = 'synapse.project';
+const MOCK = import.meta.env.VITE_MINDLY_MOCK === '1';
+const PROJECT_KEY = 'mindly.project';
 const MAX_EVENTS = 400;
 
 interface Route {
@@ -62,14 +62,14 @@ type Boot =
   | { state: 'loading' }
   | { state: 'unauth'; reason: string | null }
   | { state: 'error'; message: string }
-  | { state: 'ready'; client: SynapseClient; live: LiveFactory; projects: Project[] };
+  | { state: 'ready'; client: MindlyClient; live: LiveFactory; projects: Project[] };
 
 export function App() {
   const [boot, setBoot] = useState<Boot>({ state: 'loading' });
 
   const start = useCallback(async () => {
     setBoot({ state: 'loading' });
-    let client: SynapseClient;
+    let client: MindlyClient;
     let live: LiveFactory = createLiveFeed;
     if (MOCK) {
       const mock = await import('./mock');
@@ -110,7 +110,7 @@ export function App() {
     return (
       <div className="splash" role="status">
         <Logo />
-        <p>Connecting to the Synapse daemon…</p>
+        <p>Connecting to the Mindly daemon…</p>
       </div>
     );
   }
@@ -121,10 +121,10 @@ export function App() {
         <h1>Sign in from your terminal</h1>
         {boot.reason && <p className="splash-warn">{boot.reason}</p>}
         <p>Mission Control opens with a one-time link. In the project you want to watch, run:</p>
-        <pre className="splash-cmd">synapse dashboard</pre>
+        <pre className="splash-cmd">mindly dashboard</pre>
         <p className="muted">
           The link signs this browser in for 12 hours. Nothing is sent anywhere except this
-          machine’s Synapse daemon.
+          machine’s Mindly daemon.
         </p>
       </main>
     );
@@ -136,8 +136,8 @@ export function App() {
         <h1>Can’t reach the daemon</h1>
         <p>{boot.message}</p>
         <p className="muted">
-          Start it with <code className="mono">synapse daemon</code> or reopen with{' '}
-          <code className="mono">synapse dashboard</code>.
+          Start it with <code className="mono">mindly daemon</code> or reopen with{' '}
+          <code className="mono">mindly dashboard</code>.
         </p>
         <button type="button" className="btn btn-primary" onClick={() => void start()}>
           Try again
@@ -151,7 +151,7 @@ export function App() {
         <Logo />
         <h1>No projects yet</h1>
         <p>
-          Run <code className="mono">synapse init</code> inside a git repository, then start an
+          Run <code className="mono">mindly init</code> inside a git repository, then start an
           agent there. It will show up here.
         </p>
       </main>
@@ -162,7 +162,7 @@ export function App() {
 
 function Logo() {
   return (
-    <div className="logo" aria-label="Synapse">
+    <div className="logo" aria-label="Mindly">
       <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
         <path
           d="M3 17h7l3-9 5 16 3-10 2 3h6"
@@ -173,7 +173,7 @@ function Logo() {
           strokeLinejoin="round"
         />
       </svg>
-      <span>synapse</span>
+      <span>mindly</span>
     </div>
   );
 }
@@ -197,7 +197,7 @@ function Shell({
   liveFactory,
   projects,
 }: {
-  client: SynapseClient;
+  client: MindlyClient;
   liveFactory: LiveFactory;
   projects: Project[];
 }) {
@@ -210,7 +210,7 @@ function Shell({
   const project = projects.find((p) => p.id === projectId) ?? projects[0]!;
   const [theme, setTheme] = useState<ThemePref>(loadTheme);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
-  const [events, setEvents] = useState<SynapseEvent[]>([]);
+  const [events, setEvents] = useState<MindlyEvent[]>([]);
   const [sessionList, setSessionList] = useState<Session[]>([]);
   const [versions, setVersions] = useState<Record<Topic, number>>(EMPTY_VERSIONS);
   const [toasts, setToasts] = useState<Toast[]>([]);

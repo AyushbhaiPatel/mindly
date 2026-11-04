@@ -39,7 +39,7 @@ importers:
         specifier: 19.3.1
         version: 19.3.1(react@19.3.1)
     devDependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../../packages/core
       '@types/react':
@@ -63,7 +63,7 @@ importers:
 
   packages/llm:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
       zod:
@@ -72,7 +72,7 @@ importers:
 
   packages/notify:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
 

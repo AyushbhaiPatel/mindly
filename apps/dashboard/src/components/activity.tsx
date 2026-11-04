@@ -1,11 +1,11 @@
 import { useMemo } from 'react';
 import { clockTime, describeEvent } from '../format';
 import { useApp } from '../state';
-import type { SynapseEvent } from '../types';
+import type { MindlyEvent } from '../types';
 import { cx } from './ui';
 
 /** Terminal-style log of live events rendered as plain sentences. Newest first. */
-export function ActivityStream({ events, limit = 60 }: { events: SynapseEvent[]; limit?: number }) {
+export function ActivityStream({ events, limit = 60 }: { events: MindlyEvent[]; limit?: number }) {
   const { sessions } = useApp();
   const rows = useMemo(
     () =>

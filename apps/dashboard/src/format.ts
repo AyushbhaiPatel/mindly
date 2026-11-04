@@ -1,4 +1,4 @@
-import type { Run, Session, Severity, SynapseEvent } from './types';
+import type { Run, Session, Severity, MindlyEvent } from './types';
 
 export function relTime(ms: number | null | undefined, now = Date.now()): string {
   if (!ms) return '—';
@@ -84,7 +84,7 @@ export interface EventLine {
  * Renders an event as a short human sentence ("codex started editing src/auth.ts"). Payload
  * fields are untrusted and optional; every branch has a generic fallback.
  */
-export function describeEvent(ev: SynapseEvent, sessions: ReadonlyMap<string, Session>): EventLine {
+export function describeEvent(ev: MindlyEvent, sessions: ReadonlyMap<string, Session>): EventLine {
   const p = ev.payload ?? {};
   const s = ev.sessionId ? sessions.get(ev.sessionId) : undefined;
   const actor = s

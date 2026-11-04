@@ -41,14 +41,14 @@ export function SettingsView() {
                   </p>
                   <p className="small">
                     {t.trusted
-                      ? 'Synapse runs the checks below during shadow merges and replays.'
-                      : 'Synapse will not run any command from this repository’s .synapse/config.json until you trust it. Shadow merges still merge, but skip checks.'}
+                      ? 'Mindly runs the checks below during shadow merges and replays.'
+                      : 'Mindly will not run any command from this repository’s .mindly/config.json until you trust it. Shadow merges still merge, but skip checks.'}
                   </p>
                 </div>
               </div>
               {t.configError && (
                 <p className="error-note" role="alert">
-                  .synapse/config.json is invalid: {t.configError}
+                  .mindly/config.json is invalid: {t.configError}
                 </p>
               )}
               <dl className="kv">
@@ -75,7 +75,7 @@ export function SettingsView() {
                 </dd>
               </dl>
               <section aria-label="Checks">
-                <h3 className="sub">Checks defined in .synapse/config.json</h3>
+                <h3 className="sub">Checks defined in .mindly/config.json</h3>
                 {t.checks.length === 0 ? (
                   <Empty>No checks defined.</Empty>
                 ) : (
@@ -113,9 +113,9 @@ export function SettingsView() {
                 <div className="warn-box">
                   <p>
                     <strong>These commands will run on this machine</strong> with your user’s
-                    permissions whenever Synapse runs a shadow merge or replay. A repository can put
+                    permissions whenever Mindly runs a shadow merge or replay. A repository can put
                     anything in its config, so read each command above. Trust is tied to this exact
-                    config; if the file changes, Synapse asks again.
+                    config; if the file changes, Mindly asks again.
                   </p>
                   <button
                     type="button"
@@ -142,7 +142,7 @@ export function SettingsView() {
               >
                 <p>
                   {t.checks.length} command{t.checks.length === 1 ? '' : 's'} from{' '}
-                  <Mono>{project.root}/.synapse/config.json</Mono> will be allowed to run on this
+                  <Mono>{project.root}/.mindly/config.json</Mono> will be allowed to run on this
                   machine.
                 </p>
               </Confirm>

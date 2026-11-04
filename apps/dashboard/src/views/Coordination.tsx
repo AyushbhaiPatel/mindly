@@ -32,7 +32,7 @@ function TaskBoard() {
       <Loaded res={res}>
         {(tasks) =>
           tasks.length === 0 ? (
-            <Empty>No tasks yet. Agents create them through the Synapse MCP tools.</Empty>
+            <Empty>No tasks yet. Agents create them through the Mindly MCP tools.</Empty>
           ) : (
             <div className="board">
               {COLUMNS.map((col) => {
@@ -194,7 +194,7 @@ function DeliveriesPanel() {
                     <span className="grow">{d.title}</span>
                   </div>
                   <p className="muted small">
-                    {d.sourceSessionId ? agentName(sessions.get(d.sourceSessionId)) : 'synapse'} →{' '}
+                    {d.sourceSessionId ? agentName(sessions.get(d.sourceSessionId)) : 'mindly'} →{' '}
                     {d.targetSessionId
                       ? agentName(sessions.get(d.targetSessionId))
                       : `next ${d.targetAgentKind ?? 'agent'}`}{' '}

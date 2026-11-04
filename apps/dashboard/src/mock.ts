@@ -1,8 +1,8 @@
 /*
- * In-memory fixtures for `VITE_SYNAPSE_MOCK=1`. Implements the same SynapseClient and LiveFeed
+ * In-memory fixtures for `VITE_MINDLY_MOCK=1`. Implements the same MindlyClient and LiveFeed
  * interfaces as the real daemon client so the UI can be built and screenshotted without one.
  */
-import { ApiError, type SynapseClient } from './api';
+import { ApiError, type MindlyClient } from './api';
 import type { LiveFactory } from './live';
 import type {
   Conflict,
@@ -23,7 +23,7 @@ import type {
   Run,
   Session,
   Snapshot,
-  SynapseEvent,
+  MindlyEvent,
   Task,
   Trust,
 } from './types';
@@ -864,7 +864,7 @@ const snapshots: Snapshot[] = [
     id: uid(),
     projectId: P1,
     label: 'before session-token migration',
-    gitRef: 'refs/synapse/snapshots/0193a1',
+    gitRef: 'refs/mindly/snapshots/0193a1',
     commit: '7d1e2aa',
     createdAt: NOW - 3 * HOUR,
   },
@@ -872,23 +872,23 @@ const snapshots: Snapshot[] = [
     id: uid(),
     projectId: P1,
     label: 'nightly',
-    gitRef: 'refs/synapse/snapshots/0193a0',
+    gitRef: 'refs/mindly/snapshots/0193a0',
     commit: '52ce019',
     createdAt: NOW - 20 * HOUR,
   },
 ];
 
 let seq = 0;
-const events: SynapseEvent[] = [];
+const events: MindlyEvent[] = [];
 function emit(
   projectId: string,
   s: Session | null,
   type: EventType,
   payload: Record<string, unknown>,
   ago = 0,
-): SynapseEvent {
+): MindlyEvent {
   seq += 1;
-  const ev: SynapseEvent = {
+  const ev: MindlyEvent = {
     seq,
     id: uid(),
     projectId,
@@ -958,7 +958,7 @@ emit(P2, sP2Claude, 'intent.declared', { files: ['app/pricing/page.tsx'] }, 20 *
 
 /* ------------------------------------------------------------------------------------------ */
 
-type Listener = (projectId: string, evs: SynapseEvent[]) => void;
+type Listener = (projectId: string, evs: MindlyEvent[]) => void;
 const listeners = new Set<Listener>();
 function publish(
   projectId: string,
@@ -1038,7 +1038,7 @@ function queueRun(
   return run;
 }
 
-export function createMockClient(): SynapseClient {
+export function createMockClient(): MindlyClient {
   return {
     mock: true,
     health: () => delay({ ok: true as const, version: '0.1.0-mock' }),
@@ -1347,7 +1347,7 @@ export function createMockClient(): SynapseClient {
         id: uid(),
         projectId: id,
         label,
-        gitRef: `refs/synapse/snapshots/${uid().slice(0, 6)}`,
+        gitRef: `refs/mindly/snapshots/${uid().slice(0, 6)}`,
         commit: 'e3b0c44',
         createdAt: Date.now(),
       };
@@ -1370,7 +1370,7 @@ export function createMockClient(): SynapseClient {
     restoreSnapshot: (id, branch) => {
       const s = snapshots.find((x) => x.id === id);
       if (!s) return notFound();
-      const b = branch || `synapse/restore-${s.id.slice(-6)}`;
+      const b = branch || `mindly/restore-${s.id.slice(-6)}`;
       publish(s.projectId, null, 'snapshot.restored', { branch: b });
       return delay({ branch: b, commit: s.commit });
     },

@@ -1,4 +1,4 @@
-import { redactText, sanitizeLine, SynapseError, truncate } from '@synapse/core';
+import { redactText, sanitizeLine, MindlyError, truncate } from '@mindly/core';
 import type { Notification, SafePayload } from './types.js';
 
 /** Maximum title length in characters. */
@@ -16,7 +16,7 @@ export function safeLine(text: string, max: number, extraPatterns: readonly stri
 
 /** Produces the minimal payload every channel sends. */
 export function toSafePayload(n: Notification, extraPatterns: readonly string[] = []): SafePayload {
-  const title = safeLine(n.title, MAX_TITLE_CHARS, extraPatterns) || 'Synapse';
+  const title = safeLine(n.title, MAX_TITLE_CHARS, extraPatterns) || 'Mindly';
   const project =
     n.projectName === undefined ? null : safeLine(n.projectName, MAX_PROJECT_CHARS, extraPatterns);
   return {
@@ -57,12 +57,12 @@ export function requireSecureUrl(raw: string, channel: string): URL {
   try {
     url = new URL(raw);
   } catch {
-    throw new SynapseError('invalid_input', `${channel} url is not valid`);
+    throw new MindlyError('invalid_input', `${channel} url is not valid`);
   }
   if (url.username || url.password) {
-    throw new SynapseError('forbidden', `${channel} url must not contain credentials`);
+    throw new MindlyError('forbidden', `${channel} url must not contain credentials`);
   }
   if (url.protocol === 'https:') return url;
   if (url.protocol === 'http:' && isLoopbackHostname(url.hostname)) return url;
-  throw new SynapseError('forbidden', `${channel} url must use https (http only for localhost)`);
+  throw new MindlyError('forbidden', `${channel} url must use https (http only for localhost)`);
 }

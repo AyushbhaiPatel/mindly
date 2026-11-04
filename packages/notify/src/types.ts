@@ -1,4 +1,4 @@
-import type { NOTIFY_TRIGGERS } from '@synapse/core';
+import type { NOTIFY_TRIGGERS } from '@mindly/core';
 
 /** A notification trigger name, as configured in `UserConfig.notify.triggers`. */
 export type NotifyTrigger = (typeof NOTIFY_TRIGGERS)[number];

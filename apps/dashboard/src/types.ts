@@ -1,5 +1,5 @@
 /*
- * Response shapes of the daemon API (see docs/api.md). Entity types come from @synapse/core as
+ * Response shapes of the daemon API (see docs/api.md). Entity types come from @mindly/core as
  * types only; nothing from core is bundled into the browser build.
  */
 import type {
@@ -17,7 +17,7 @@ import type {
   Session,
   Task,
   Trust,
-} from '@synapse/core';
+} from '@mindly/core';
 
 export type {
   AgentKind,
@@ -43,11 +43,11 @@ export type {
   Session,
   Severity,
   Snapshot,
-  SynapseEvent,
+  MindlyEvent,
   Task,
   TaskStatus,
   Trust,
-} from '@synapse/core';
+} from '@mindly/core';
 
 /* Duplicated as runtime values because core runtime code must never reach the bundle. */
 export const TRUST_LEVELS: readonly Trust[] = [

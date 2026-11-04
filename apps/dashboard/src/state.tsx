@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { describeError, type SynapseClient } from './api';
+import { describeError, type MindlyClient } from './api';
 import type { Topic } from './live';
-import type { Project, Session, SynapseEvent } from './types';
+import type { Project, Session, MindlyEvent } from './types';
 
 export interface Toast {
   id: number;
@@ -10,12 +10,12 @@ export interface Toast {
 }
 
 export interface AppState {
-  client: SynapseClient;
+  client: MindlyClient;
   project: Project;
   /** All recent sessions of the project, keyed by id, for naming actors. */
   sessions: ReadonlyMap<string, Session>;
   /** Live events received since the page loaded (newest last), plus the initial backlog. */
-  events: SynapseEvent[];
+  events: MindlyEvent[];
   versions: Readonly<Record<Topic, number>>;
   notify(text: string, tone?: Toast['tone']): void;
   navigate(tab: string, params?: Record<string, string>): void;

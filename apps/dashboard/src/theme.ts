@@ -1,6 +1,6 @@
 export type ThemePref = 'system' | 'light' | 'dark';
 
-const KEY = 'synapse.theme';
+const KEY = 'mindly.theme';
 
 export function loadTheme(): ThemePref {
   try {

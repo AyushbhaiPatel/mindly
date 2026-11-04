@@ -1,9 +1,9 @@
-import type { EventType, SynapseEvent } from './types';
+import type { EventType, MindlyEvent } from './types';
 
 export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline';
 
 export interface LiveHandlers {
-  onEvents(projectId: string, events: SynapseEvent[]): void;
+  onEvents(projectId: string, events: MindlyEvent[]): void;
   onStatus(status: LiveStatus): void;
 }
 
@@ -18,9 +18,9 @@ export type LiveFactory = (handlers: LiveHandlers) => LiveFeed;
 const MIN_BACKOFF = 1_000;
 const MAX_BACKOFF = 30_000;
 
-function isEvent(v: unknown): v is SynapseEvent {
+function isEvent(v: unknown): v is MindlyEvent {
   if (!v || typeof v !== 'object') return false;
-  const e = v as Partial<SynapseEvent>;
+  const e = v as Partial<MindlyEvent>;
   return (
     typeof e.seq === 'number' &&
     typeof e.id === 'string' &&

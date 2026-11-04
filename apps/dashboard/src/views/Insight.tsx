@@ -88,7 +88,7 @@ function XRay() {
         )
       }
     >
-      <p className="help">Exactly what Synapse gave this agent, what it left out, and why.</p>
+      <p className="help">Exactly what Mindly gave this agent, what it left out, and why.</p>
       {sres.error ? (
         <ErrorNote error={sres.error} onRetry={sres.reload} />
       ) : (
@@ -273,7 +273,7 @@ function Provenance() {
         (r.found === false ? (
           <Empty>
             No agent edit recorded for <Mono>{`${r.file ?? file}:${r.line ?? line}`}</Mono>. It was
-            probably written by a person or before Synapse was installed.
+            probably written by a person or before Mindly was installed.
           </Empty>
         ) : (
           <div className="stack">
@@ -494,7 +494,7 @@ function Snapshots() {
           <input
             value={branch}
             onChange={(e) => setBranch(e.target.value)}
-            placeholder="synapse/restore-…"
+            placeholder="mindly/restore-…"
             pattern="[0-9A-Za-z._\/\-]{0,100}"
           />
         </label>

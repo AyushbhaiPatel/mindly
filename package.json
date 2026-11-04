@@ -1,5 +1,5 @@
 {
-  "name": "synapse-monorepo",
+  "name": "mindly-monorepo",
   "private": true,
   "description": "Shared memory and live coordination for coding agents.",
   "license": "Apache-2.0",
