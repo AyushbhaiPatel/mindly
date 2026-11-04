@@ -1,0 +1,269 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { z } from 'zod';
+import type {
+  AgentAdapter,
+  HookEventName,
+  HookResult,
+  InstallOptions,
+  InstallStep,
+  NormalizedHookEvent,
+  RenderedHookOutput,
+} from '@synapse/core';
+import { hookCommand, MCP_SERVER_NAME, mcpLaunch } from '../shared/command.js';
+import { ensureRecord } from '../shared/config-files.js';
+import { detectAgent } from '../shared/detect.js';
+import {
+  baseEvent,
+  contextText,
+  jsonOutput,
+  lookupEvent,
+  reasonText,
+  SILENT,
+  userMessageText,
+} from '../shared/event.js';
+import type { HookSpec } from '../shared/json-hooks.js';
+import { addFlatHooks, dropIfEmpty, hooksObject, removeFlatHooks } from '../shared/json-hooks.js';
+import type { PlanMode } from '../shared/plan.js';
+import { compactSteps, planJsonFile, validateInstallOptions } from '../shared/plan.js';
+import {
+  asRecord,
+  isRecord,
+  MAX_PATH_CHARS,
+  readNonEmptyString,
+  readString,
+} from '../shared/payload.js';
+import { buildTool } from '../shared/tools.js';
+
+const KIND = 'cursor';
+
+/** How a native Cursor event maps to Synapse. */
+interface CursorEventSpec {
+  event: HookEventName;
+  /** How the tool section is built for tool events. */
+  tool?: 'generic' | 'shell' | 'file_edit';
+  failed?: boolean;
+  /** Whether Cursor reads `additional_context` from this event's output. */
+  acceptsContext?: boolean;
+}
+
+/** Native Cursor hook events Synapse understands. */
+export const CURSOR_EVENTS: Readonly<Record<string, CursorEventSpec>> = {
+  sessionStart: { event: 'session_start', acceptsContext: true },
+  beforeSubmitPrompt: { event: 'prompt' },
+  preToolUse: { event: 'pre_tool', tool: 'generic' },
+  beforeShellExecution: { event: 'pre_tool', tool: 'shell' },
+  postToolUse: { event: 'post_tool', tool: 'generic', acceptsContext: true },
+  postToolUseFailure: { event: 'post_tool', tool: 'generic', failed: true, acceptsContext: true },
+  afterFileEdit: { event: 'post_tool', tool: 'file_edit' },
+  afterShellExecution: { event: 'post_tool', tool: 'shell' },
+  stop: { event: 'stop' },
+  sessionEnd: { event: 'session_end' },
+};
+
+/** Events the installer registers. `postToolUse` is left out: `afterFileEdit` and
+ * `afterShellExecution` already report the changes, and both would double-count edits. */
+export const CURSOR_INSTALLED_EVENTS = [
+  'sessionStart',
+  'beforeSubmitPrompt',
+  'preToolUse',
+  'afterFileEdit',
+  'afterShellExecution',
+  'postToolUseFailure',
+  'stop',
+  'sessionEnd',
+] as const;
+
+const RequiredSchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  cwd: z.string().min(1).max(MAX_PATH_CHARS),
+});
+
+function firstRoot(payload: Record<string, unknown>): string | null {
+  const roots = payload['workspace_roots'] ?? payload['workspaceRoots'];
+  if (Array.isArray(roots)) {
+    for (const r of roots) if (typeof r === 'string' && r.trim() !== '') return r;
+  }
+  return readNonEmptyString(payload, ['cwd'], MAX_PATH_CHARS + 1);
+}
+
+function parseCursor(nativeEvent: string, payload: unknown): NormalizedHookEvent | null {
+  try {
+    const found = lookupEvent(CURSOR_EVENTS, nativeEvent);
+    if (found === null || !isRecord(payload)) return null;
+    const [name, spec] = found;
+    const required = RequiredSchema.safeParse({
+      id: readNonEmptyString(payload, ['conversation_id', 'session_id', 'conversationId'], 513),
+      cwd: firstRoot(payload),
+    });
+    if (!required.success) return null;
+    const ev = baseEvent(KIND, spec.event, name, required.data.id, required.data.cwd);
+    ev.transcriptPath = readNonEmptyString(payload, ['transcript_path'], MAX_PATH_CHARS);
+    switch (spec.event) {
+      case 'session_start':
+        ev.startSource = readNonEmptyString(payload, ['source', 'composer_mode'], 64);
+        break;
+      case 'prompt':
+        ev.prompt = readString(payload, ['prompt']);
+        break;
+      case 'pre_tool':
+      case 'post_tool': {
+        const isPost = spec.event === 'post_tool';
+        if (spec.tool === 'shell') {
+          ev.tool = buildTool({
+            name: 'Shell',
+            input: { command: payload['command'] },
+            ...(isPost ? { response: { output: payload['output'] } } : {}),
+            shell: true,
+            writes: false,
+          });
+        } else if (spec.tool === 'file_edit') {
+          ev.tool = buildTool({
+            name: 'afterFileEdit',
+            input: { file_path: payload['file_path'], edits: payload['edits'] },
+            writes: true,
+          });
+        } else {
+          const toolName = readNonEmptyString(payload, ['tool_name'], 200);
+          if (toolName === null) return null;
+          const input = asRecord(payload['tool_input']);
+          ev.tool = buildTool({
+            name: toolName,
+            input,
+            ...(isPost
+              ? {
+                  response:
+                    payload['tool_output'] ?? payload['error'] ?? payload['error_message'] ?? null,
+                }
+              : {}),
+            ...(spec.failed === true ? { failed: true } : {}),
+          });
+        }
+        break;
+      }
+      case 'stop':
+      case 'session_end':
+        break;
+    }
+    return ev;
+  } catch {
+    return null;
+  }
+}
+
+function renderCursor(event: NormalizedHookEvent, result: HookResult): RenderedHookOutput {
+  try {
+    const spec =
+      event.nativeEvent !== undefined
+        ? lookupEvent(CURSOR_EVENTS, event.nativeEvent)?.[1]
+        : undefined;
+    const context = contextText(result);
+    const notice = userMessageText(result);
+    switch (event.event) {
+      case 'session_start':
+        return jsonOutput(context !== null ? { additional_context: context } : {});
+      case 'pre_tool': {
+        const out: Record<string, unknown> = {};
+        const messages: string[] = [];
+        if (result.decision === 'deny' || result.decision === 'ask') {
+          out['permission'] = result.decision;
+          const reason = reasonText(result);
+          out['user_message'] = notice ?? reason;
+          messages.push(reason);
+        } else if (notice !== null) {
+          out['user_message'] = notice;
+        }
+        if (context !== null) messages.push(context);
+        if (messages.length > 0) out['agent_message'] = messages.join('\n\n');
+        return jsonOutput(out);
+      }
+      case 'post_tool':
+        if (context !== null && (spec === undefined || spec.acceptsContext === true)) {
+          return jsonOutput({ additional_context: context });
+        }
+        return SILENT;
+      default:
+        // beforeSubmitPrompt cannot add context; stop's followup_message would start a new
+        // turn; sessionEnd has no output. Context reaches Cursor through MCP instead.
+        return SILENT;
+    }
+  } catch {
+    return SILENT;
+  }
+}
+
+/** Options for {@link createCursorAdapter}; mainly for tests. */
+export interface CursorAdapterOptions {
+  homeDir?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+/** Config files touched by the Cursor installer. */
+export function cursorPaths(options: InstallOptions): { hooks: string; mcp: string } {
+  const dir =
+    options.projectRoot !== null
+      ? join(options.projectRoot, '.cursor')
+      : join(options.homeDir, '.cursor');
+  return { hooks: join(dir, 'hooks.json'), mcp: join(dir, 'mcp.json') };
+}
+
+async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallStep[]> {
+  validateInstallOptions(options);
+  const paths = cursorPaths(options);
+  const install = mode === 'install';
+  const specs: HookSpec[] = CURSOR_INSTALLED_EVENTS.map((event) => ({
+    event,
+    command: hookCommand(options.command, KIND, event),
+  }));
+  const hooks = await planJsonFile(
+    paths.hooks,
+    install ? 'Register Synapse hooks for Cursor' : 'Remove Synapse hooks from Cursor',
+    mode,
+    (config) => {
+      if (!install && !isRecord(config['hooks'])) return;
+      if (install && config['version'] === undefined) config['version'] = 1;
+      const h = hooksObject(config, paths.hooks);
+      removeFlatHooks(h, KIND);
+      if (install) addFlatHooks(h, specs, paths.hooks);
+      dropIfEmpty(config, 'hooks');
+    },
+  );
+  const mcp = await planJsonFile(
+    paths.mcp,
+    install
+      ? 'Register the Synapse MCP server for Cursor'
+      : 'Remove the Synapse MCP server from Cursor',
+    mode,
+    (config) => {
+      if (install) {
+        const servers = ensureRecord(config, 'mcpServers', paths.mcp);
+        const launch = mcpLaunch(options.command, KIND);
+        servers[MCP_SERVER_NAME] = { type: 'stdio', command: launch.command, args: launch.args };
+      } else if (isRecord(config['mcpServers']) && MCP_SERVER_NAME in config['mcpServers']) {
+        Reflect.deleteProperty(config['mcpServers'], MCP_SERVER_NAME);
+      }
+    },
+  );
+  return compactSteps([hooks, mcp]);
+}
+
+/**
+ * Creates the Cursor adapter. Hooks go in `.cursor/hooks.json` and the MCP server in
+ * `.cursor/mcp.json`, under the home directory or the project root.
+ */
+export function createCursorAdapter(opts: CursorAdapterOptions = {}): AgentAdapter {
+  return {
+    kind: KIND,
+    displayName: 'Cursor',
+    detect(): Promise<boolean> {
+      return detectAgent([join(opts.homeDir ?? homedir(), '.cursor')], ['cursor'], opts.env);
+    },
+    parse: parseCursor,
+    render: renderCursor,
+    planInstall: (options) => plan(options, 'install'),
+    planUninstall: (options) => plan(options, 'uninstall'),
+  };
+}
+
+/** Default Cursor adapter. */
+export const cursorAdapter: AgentAdapter = createCursorAdapter();

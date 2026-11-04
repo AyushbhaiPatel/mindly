@@ -1,0 +1,14 @@
+{
+  "session_id": "019a3b2c-7f10-7d42-9a51-0c1d2e3f4a5b",
+  "transcript_path": "/Users/dev/.codex/sessions/2026/11/04/rollout-2026-11-04T10-00-00.jsonl",
+  "cwd": "/Users/dev/shop",
+  "model": "gpt-5-codex",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "turn_id": "turn-1",
+  "tool_name": "apply_patch",
+  "tool_use_id": "call_abc123",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: src/checkout.ts\n@@ export interface Checkout {\n   total: number;\n-  currency: string;\n+  currency: Currency;\n+  discount: number;\n*** Add File: src/discount.ts\n+export function applyDiscount(total: number, pct: number): number {\n+  return total * (1 - pct);\n+}\n*** Delete File: src/legacy.ts\n*** End Patch\n"
+  }
+}
