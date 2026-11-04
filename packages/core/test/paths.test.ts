@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ensureHome, isDeniedPath, resolveInsideRoot, synapseHome } from '../src/paths.js';
+import { ensureHome, isDeniedPath, resolveInsideRoot, mindlyHome } from '../src/paths.js';
 
 describe('resolveInsideRoot', () => {
   const root = mkdtempSync(join(tmpdir(), 'syn-root-'));
@@ -26,9 +26,9 @@ describe('resolveInsideRoot', () => {
 });
 
 describe('home', () => {
-  it('requires an absolute SYNAPSE_HOME', () => {
-    expect(() => synapseHome({ SYNAPSE_HOME: 'rel' })).toThrow();
-    expect(synapseHome({ SYNAPSE_HOME: '/tmp/x' })).toBe('/tmp/x');
+  it('requires an absolute MINDLY_HOME', () => {
+    expect(() => mindlyHome({ MINDLY_HOME: 'rel' })).toThrow();
+    expect(mindlyHome({ MINDLY_HOME: '/tmp/x' })).toBe('/tmp/x');
   });
 
   it.skipIf(process.platform === 'win32')('creates owner-only directories', () => {
@@ -46,5 +46,19 @@ describe('isDeniedPath', () => {
   it('allows normal source and custom deny-lists', () => {
     expect(isDeniedPath('src/env.ts')).toBe(false);
     expect(isDeniedPath('vault/x.txt', ['vault/**'])).toBe(true);
+  });
+});
+
+describe('security regressions', () => {
+  it('matches the deny-list case-insensitively', () => {
+    expect(isDeniedPath('.ENV')).toBe(true);
+    expect(isDeniedPath('SECRETS/k.txt')).toBe(true);
+    expect(isDeniedPath('Keys/Server.PEM')).toBe(true);
+  });
+
+  it('rejects paths with control or bidi characters', () => {
+    const root = mkdtempSync(join(tmpdir(), 'syn-ctl-'));
+    expect(() => resolveInsideRoot(root, 'a\nb')).toThrow(/control/);
+    expect(() => resolveInsideRoot(root, `a${String.fromCharCode(0x202e)}b`)).toThrow(/control/);
   });
 });

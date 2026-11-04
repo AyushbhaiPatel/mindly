@@ -10,10 +10,10 @@ export type ErrorCode =
   | 'internal';
 
 /**
- * Error type used across Synapse. `code` is stable and safe to show to users and to return from
+ * Error type used across Mindly. `code` is stable and safe to show to users and to return from
  * APIs; `message` must never contain secrets or raw user content.
  */
-export class SynapseError extends Error {
+export class MindlyError extends Error {
   readonly code: ErrorCode;
   readonly details: Readonly<Record<string, unknown>> | undefined;
 
@@ -23,27 +23,27 @@ export class SynapseError extends Error {
     options?: { cause?: unknown; details?: Record<string, unknown> },
   ) {
     super(message, options?.cause === undefined ? undefined : { cause: options.cause });
-    this.name = 'SynapseError';
+    this.name = 'MindlyError';
     this.code = code;
     this.details = options?.details;
   }
 }
 
-export function isSynapseError(err: unknown, code?: ErrorCode): err is SynapseError {
-  return err instanceof SynapseError && (code === undefined || err.code === code);
+export function isMindlyError(err: unknown, code?: ErrorCode): err is MindlyError {
+  return err instanceof MindlyError && (code === undefined || err.code === code);
 }
 
-export function notFound(what: string, id: string): SynapseError {
-  return new SynapseError('not_found', `${what} not found`, { details: { id } });
+export function notFound(what: string, id: string): MindlyError {
+  return new MindlyError('not_found', `${what} not found`, { details: { id } });
 }
 
-export function invalidInput(message: string, details?: Record<string, unknown>): SynapseError {
-  return new SynapseError('invalid_input', message, details ? { details } : undefined);
+export function invalidInput(message: string, details?: Record<string, unknown>): MindlyError {
+  return new MindlyError('invalid_input', message, details ? { details } : undefined);
 }
 
 /** Converts any thrown value into a short, safe description for logs. */
 export function describeError(err: unknown): string {
-  if (err instanceof SynapseError) return `${err.code}: ${err.message}`;
+  if (err instanceof MindlyError) return `${err.code}: ${err.message}`;
   if (err instanceof Error) return `${err.name}: ${err.message}`;
   return 'unknown error';
 }

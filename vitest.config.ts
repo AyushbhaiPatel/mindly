@@ -2,11 +2,11 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   resolve: {
-    conditions: ['@synapse/source'],
+    conditions: ['@mindly/source'],
   },
   ssr: {
     resolve: {
-      conditions: ['@synapse/source'],
+      conditions: ['@mindly/source'],
     },
   },
   test: {

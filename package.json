@@ -1,5 +1,5 @@
 {
-  "name": "synapse-monorepo",
+  "name": "mindly-monorepo",
   "private": true,
   "description": "Shared memory and live coordination for coding agents.",
   "license": "Apache-2.0",
@@ -16,7 +16,8 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test"
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
+    "release:build": "pnpm --filter @mindly/dashboard run build && node scripts/build-release.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

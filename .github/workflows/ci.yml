@@ -23,10 +23,10 @@ jobs:
           - { os: ubuntu-latest, node: 24 }
           - { os: macos-latest, node: 24 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
@@ -46,13 +46,34 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --prod --audit-level high
+
+  release:
+    # Builds and packs the npm package without publishing it, then installs the tarball in a
+    # temp directory and smoke-tests it on the oldest supported Node.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm release:build
+      - run: npm pack --dry-run
+        working-directory: release/mindly-agents
+      - run: npm pack --pack-destination "$RUNNER_TEMP"
+        working-directory: release/mindly-agents
+      - run: node scripts/smoke-release.mjs "$RUNNER_TEMP"/mindly-agents-*.tgz

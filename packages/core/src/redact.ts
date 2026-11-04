@@ -16,6 +16,49 @@ interface Rule {
   re: RegExp;
   /** Replacement; `$1` style groups keep non-secret context such as the variable name. */
   replace: string;
+  /** Returns true for matches that are clearly not secrets (receives the capture groups). */
+  skip?: (groups: readonly string[]) => boolean;
+}
+
+/** Type names that follow `password:` in code (TypeScript, Python, Go, …), never secrets. */
+const TYPE_WORDS = new Set([
+  'string',
+  'number',
+  'boolean',
+  'bool',
+  'any',
+  'unknown',
+  'never',
+  'void',
+  'null',
+  'undefined',
+  'none',
+  'true',
+  'false',
+  'str',
+  'int',
+  'bytes',
+  'optional',
+  'secretstr',
+  'char',
+  'object',
+]);
+
+/**
+ * True when an assignment's value is a type annotation or a reference to where the secret lives
+ * (`process.env.X`, `config.password`), not a literal secret. Redacting those only garbles code.
+ */
+function isNonSecretValue(prefix: string, raw: string): boolean {
+  const value = raw.replace(/[)\]}>.;,]+$/, '');
+  // Type names only count after an unquoted `:` (an annotation), never after `=` or a quote.
+  const annotation = /:\s*$/.test(prefix);
+  if (annotation && TYPE_WORDS.has(value.toLowerCase())) return true;
+  if (annotation && /^[A-Z][A-Za-z0-9]*(?:[<[(|].*)?$/.test(value) && !/\d/.test(value)) {
+    return true;
+  }
+  return /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|env\.|config\.|settings\.|this\.|self\.|options\.|opts\.|props\.|req\.|args\.)/.test(
+    value,
+  );
 }
 
 const RULES: Rule[] = [
@@ -68,6 +111,7 @@ const RULES: Rule[] = [
     // NAME=value / "name": "value" where NAME looks secret-bearing.
     re: /\b([A-Za-z0-9_.-]{0,60}(?:secret|token|passwd|password|pwd|api[_-]?key|apikey|private[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?key|credentials?)[A-Za-z0-9_.-]{0,60}["']?\s{0,5}[:=]\s{0,5}["']?)([^\s"'`,;]{6,4000})/gi,
     replace: `$1${REDACTED}`,
+    skip: (g) => isNonSecretValue(g[1] ?? '', g[2] ?? ''),
   },
 ];
 
@@ -103,19 +147,20 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
   let count = 0;
   const kinds = new Set<string>();
 
-  const apply = (kind: string, re: RegExp, replace: string): void => {
+  const apply = (kind: string, re: RegExp, replace: string, skip?: Rule['skip']): void => {
     re.lastIndex = 0;
     text = text.replace(re, (...args: unknown[]) => {
       // Do not double-count already-redacted values.
       const match = String(args[0]);
       if (match.endsWith(REDACTED) || match === REDACTED) return match;
+      if (skip?.(args.map((a) => (typeof a === 'string' ? a : '')))) return match;
       count++;
       kinds.add(kind);
       return replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? ''));
     });
   };
 
-  for (const rule of RULES) apply(rule.kind, rule.re, rule.replace);
+  for (const rule of RULES) apply(rule.kind, rule.re, rule.replace, rule.skip);
   for (const source of options.extraPatterns ?? []) {
     const re = compileExtra(source);
     if (re) apply('custom', re, REDACTED);
@@ -144,7 +189,7 @@ export function redactDeep<T>(value: T, options?: RedactOptions, depth = 0): T {
 }
 
 /**
- * Paths whose content Synapse never reads or captures. Patterns are project-relative globs.
+ * Paths whose content Mindly never reads or captures. Patterns are project-relative globs.
  */
 export const DEFAULT_DENY_PATHS: readonly string[] = [
   '**/.env',

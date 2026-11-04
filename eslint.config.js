@@ -6,6 +6,7 @@ export default tseslint.config(
     ignores: [
       '.claude/**',
       '**/dist/**',
+      'release/**',
       '**/coverage/**',
       '**/node_modules/**',
       'apps/dashboard/**',
@@ -39,6 +40,18 @@ export default tseslint.config(
           ],
         },
       ],
+    },
+  },
+  {
+    files: ['**/test/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-non-null-assertion': 'off',
+    },
+  },
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: { console: 'readonly', fetch: 'readonly', process: 'readonly' },
     },
   },
 );
