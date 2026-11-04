@@ -1,0 +1,7 @@
+---
+description: Testing conventions
+globs: src/**/*.test.ts, test/**/*.ts
+alwaysApply: false
+---
+
+- Use `describe`/`it` blocks, one behaviour per test.

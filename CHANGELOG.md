@@ -17,6 +17,13 @@ All notable changes to `mindly-cli` are documented here. The project follows
   for the session's project. `mindly init` adds it unless you already have a status line (then it
   explains how to chain one into the other; `--no-statusline` skips it), `mindly doctor` reports
   it and `mindly uninstall` removes it. Read-only, no daemon needed, falls back to `mindly`.
+- `mindly init` imports the rules you already wrote for your agents: it reads `CLAUDE.md`,
+  `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.cursor/rules/`, `.windsurfrules`, Copilot, Cline,
+  Roo Code, Kiro, Zed and Augment rule files at the repository root, shows each rule with its file
+  and line, and asks before storing the new ones as approved rules (with `--yes` or without a
+  terminal they are added as suggestions to approve). `--no-import` skips the step;
+  `mindly rules import [--dry-run] [--yes]` runs it again later and only adds rules Mindly does not
+  have yet.
 
 ## 0.1.3 — 2026-11-04
 
