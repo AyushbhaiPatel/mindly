@@ -1,48 +1,57 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { describeError } from '../api';
-import { absTime, relTime, type Tone } from '../format';
 import type { Severity, Trust } from '../types';
+import {
+  TERMS,
+  absTime,
+  relTime,
+  severityWords,
+  shortId,
+  splitCode,
+  trustHelp,
+  trustWords,
+  words,
+  type Term,
+  type Tone,
+} from '../vocab';
 
 export function cx(...xs: (string | false | null | undefined)[]): string {
   return xs.filter(Boolean).join(' ');
 }
 
-const TRUST_HINT: Record<Trust, string> = {
-  verified: 'Checked against the repository',
-  approved: 'Stated or approved by you',
-  proposed: 'Asserted by an agent, not yet confirmed',
-  stale: 'Evidence changed; kept for history',
-  rejected: 'Rejected; never injected again',
-};
-
 const TRUST_GLYPH: Record<Trust, string> = {
-  verified: '✓',
-  approved: '●',
+  verified: '\u2713',
+  approved: '\u25cf',
   proposed: '?',
-  stale: '◌',
-  rejected: '✕',
+  stale: '\u25cc',
+  rejected: '\u2715',
 };
 
-export function TrustBadge({ trust }: { trust: Trust }) {
+/**
+ * Trust level in words ("approved by you", "suggested by Codex, waiting for you"), with a
+ * tooltip explaining what it means. `by` names who suggested a proposed memory.
+ */
+export function TrustBadge({ trust, by }: { trust: Trust; by?: string | undefined }) {
   return (
-    <span className={`badge trust-${trust}`} title={TRUST_HINT[trust]}>
+    <span className={`badge trust-${trust}`} title={trustHelp(trust)}>
       <span aria-hidden="true" className="badge-glyph">
         {TRUST_GLYPH[trust]}
       </span>
-      {trust}
+      {trustWords(trust, by)}
     </span>
   );
 }
 
 const SEV_GLYPH: Record<Severity, string> = { critical: '!!', warning: '!', info: 'i' };
 
+/** Severity in words: FYI / check this / urgent. */
 export function SeverityBadge({ severity }: { severity: Severity }) {
   return (
     <span className={`badge sev-${severity}`}>
       <span aria-hidden="true" className="badge-glyph">
         {SEV_GLYPH[severity]}
       </span>
-      {severity}
+      {severityWords(severity)}
     </span>
   );
 }
@@ -83,16 +92,126 @@ export function statusTone(status: string): Tone {
   }
 }
 
-export function Status({ value }: { value: string }) {
-  return <Tag tone={statusTone(value)}>{value.replace(/_/g, ' ')}</Tag>;
+/** A status tag. `label` is the plain-words text; the raw value only picks the colour. */
+export function Status({ value, label }: { value: string; label?: string }) {
+  return <Tag tone={statusTone(value)}>{label ?? words(value)}</Tag>;
 }
 
-export function Time({ ms }: { ms: number | null | undefined }) {
-  if (!ms) return <span className="muted">—</span>;
+/* One shared ticker keeps every relative time fresh without one timer per element. */
+const tickers = new Set<() => void>();
+let tickTimer: number | undefined;
+function useNow(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const fn = () => setNow(Date.now());
+    tickers.add(fn);
+    if (tickTimer === undefined) {
+      tickTimer = window.setInterval(() => {
+        for (const t of tickers) t();
+      }, 20_000);
+    }
+    return () => {
+      tickers.delete(fn);
+      if (tickers.size === 0 && tickTimer !== undefined) {
+        window.clearInterval(tickTimer);
+        tickTimer = undefined;
+      }
+    };
+  }, []);
+  return now;
+}
+
+/** Relative time ("3m ago") with the absolute local time in a tooltip. */
+export function Time({ ms, prefix }: { ms: number | null | undefined; prefix?: string }) {
+  const now = useNow();
+  if (!ms) return <span className="muted">{prefix ? `${prefix} never` : 'never'}</span>;
   return (
     <time dateTime={new Date(ms).toISOString()} title={absTime(ms)}>
-      {relTime(ms)}
+      {prefix ? `${prefix} ` : ''}
+      {relTime(ms, now)}
     </time>
+  );
+}
+
+/**
+ * An 8-character short id with the full id in a tooltip and a button that copies the full id.
+ */
+export function ShortId({ id, label = 'id' }: { id: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  const short = shortId(id);
+  const copy = () => {
+    void navigator.clipboard?.writeText(id).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      },
+      () => undefined,
+    );
+  };
+  return (
+    <span className="short-id">
+      <code className="mono" title={`Full ${label}: ${id}`}>
+        {short}
+      </code>
+      <button
+        type="button"
+        className="copy-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          copy();
+        }}
+        aria-label={copied ? `Copied ${label}` : `Copy full ${label} ${short}`}
+        title={copied ? 'Copied' : `Copy full ${label}`}
+      >
+        <span aria-hidden="true">{copied ? '\u2713' : '\u29c9'}</span>
+      </button>
+    </span>
+  );
+}
+
+/**
+ * A small "?" that explains a term on hover or keyboard focus. The explanation is also the
+ * button's accessible description.
+ */
+export function Help({ term }: { term: Term }) {
+  const id = useId();
+  const text = TERMS[term];
+  const name = text.split(':')[0] ?? term;
+  return (
+    <span className="help-tip">
+      <button
+        type="button"
+        className="help-btn"
+        aria-label={`What is ${name.toLowerCase()}?`}
+        aria-describedby={id}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') e.currentTarget.blur();
+        }}
+      >
+        ?
+      </button>
+      <span role="tooltip" id={id} className="help-pop">
+        {text}
+      </span>
+    </span>
+  );
+}
+
+/** Renders text containing `backtick` spans as text with inline code. Never parses HTML. */
+export function CodeText({ text }: { text: string }) {
+  return (
+    <>
+      {splitCode(text).map((p, i) =>
+        p.code ? (
+          <code key={i} className="mono">
+            {p.text}
+          </code>
+        ) : (
+          <span key={i}>{p.text}</span>
+        ),
+      )}
+    </>
   );
 }
 
@@ -104,9 +223,16 @@ export function Mono({ children, title }: { children: ReactNode; title?: string 
   );
 }
 
+/**
+ * A titled panel. `count` is labelled with `noun` ("3 agents") for tooltips and screen readers;
+ * `help` adds a "?" explaining the panel's term.
+ */
 export function Panel({
   title,
   count,
+  noun = 'item',
+  plural = `${noun}s`,
+  help,
   actions,
   children,
   className,
@@ -114,19 +240,31 @@ export function Panel({
 }: {
   title: ReactNode;
   count?: number | undefined;
+  noun?: string;
+  plural?: string;
+  help?: Term;
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
   id?: string;
 }) {
   const hid = useId();
+  const countText = count !== undefined ? `${count} ${count === 1 ? noun : plural}` : '';
   return (
     <section className={cx('panel', className)} aria-labelledby={hid} id={id}>
       <header className="panel-head">
-        <h2 id={hid}>
-          {title}
-          {count !== undefined && <span className="count">{count}</span>}
-        </h2>
+        <div className="panel-title">
+          <h2 id={hid}>
+            {title}
+            {count !== undefined && (
+              <span className="count" title={countText}>
+                <span aria-hidden="true">{count}</span>
+                <span className="visually-hidden">, {countText}</span>
+              </span>
+            )}
+          </h2>
+          {help && <Help term={help} />}
+        </div>
         {actions && <div className="panel-actions">{actions}</div>}
       </header>
       <div className="panel-body">{children}</div>
