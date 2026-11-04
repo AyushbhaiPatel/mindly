@@ -102,6 +102,16 @@ Use `--project` to set up only the current repository and `--dry-run` to preview
 agents as usual; there is nothing else to run. `mindly doctor` checks the setup and
 `mindly uninstall` removes it.
 
+Run inside a repository, `init` also reads the instruction files you already wrote for your
+agents (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.cursor/rules/`, `.windsurfrules`,
+`.github/copilot-instructions.md`, `.clinerules`, `.roo/rules/`, `.kiro/steering/` and similar),
+lists each bullet or sentence as a rule with its file and line, and asks before importing the new
+ones as approved rules, so every agent starts with them on day one. Headings, code blocks and
+boilerplate are skipped; rules Mindly already has (including ones you archived or rejected) are not
+imported again, and Cursor/Copilot/Kiro path globs become the rule's scope. When you later remove a
+line from the file, its rule is marked as possibly outdated. Skip the step with `--no-import` and
+re-run it any time with `mindly rules import`.
+
 | Agent                    | Integration | Status                                           |
 | ------------------------ | ----------- | ------------------------------------------------ |
 | Claude Code              | hooks + MCP | tested end to end                                |
@@ -241,6 +251,7 @@ simply continues. More in [docs/architecture.md](docs/architecture.md).
 mindly status                       # agents, tasks, intents, conflicts, what needs you
 mindly dashboard                    # open Mission Control in the browser
 mindly rules [--approve <id>]       # project rules, approved and proposed
+mindly rules import [--dry-run]     # import rules from CLAUDE.md, AGENTS.md, .cursorrules, …
 mindly memory list|search <q>|show <id>|add|approve|reject|archive|forget
 mindly why <file>:<line>            # who wrote a line, and why
 mindly xray [--session <id>]        # what context an agent got

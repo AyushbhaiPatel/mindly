@@ -10,7 +10,14 @@ export {
 export { HookHandler } from './hooks/handler.js';
 export * from './kernel.js';
 export { commandKey, MistakeService } from './memory/mistakes.js';
-export { detectRules, ruleTitle, RuleService, type DetectedRule } from './memory/rules.js';
+export {
+  detectRules,
+  ruleTitle,
+  RuleService,
+  type DetectedRule,
+  type InstructionImportPlan,
+} from './memory/rules.js';
+export * from './memory/instructions.js';
 export * from './memory/service.js';
 export * from './ports.js';
 export { ProjectService, type ProjectContext } from './projects.js';

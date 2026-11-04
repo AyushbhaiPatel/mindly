@@ -1,6 +1,21 @@
 import { sanitizeLine, type Memory, type Session } from '@mindly/core';
 import { DELIVERY_TTL_MS, LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
-import type { MemoryService } from './service.js';
+import {
+  dedupeRules,
+  scanInstructionFiles,
+  type InstructionFile,
+  type InstructionRule,
+} from './instructions.js';
+import { USER, type MemoryService } from './service.js';
+
+/** What importing the project's instruction files would do. */
+export interface InstructionImportPlan {
+  files: InstructionFile[];
+  /** Rules Mindly does not have yet. */
+  fresh: InstructionRule[];
+  /** Rules Mindly already has (by title, in any state) or that repeat an earlier file. */
+  known: InstructionRule[];
+}
 
 /*
  * "Say it once": detects durable corrections in user prompts ("no, we use pnpm", "never edit
@@ -144,6 +159,65 @@ export class RuleService {
         payload: { memoryId: rule.id, title: rule.title, trust: rule.trust },
       });
       this.broadcast(input.projectId, input.session, rule);
+    }
+    return out;
+  }
+
+  /**
+   * Reads the project's agent instruction files (CLAUDE.md, AGENTS.md, .cursorrules, …) and
+   * returns the rules they contain that Mindly does not know yet. Rules the user archived or
+   * rejected count as known, so a re-import never brings them back. Writes nothing.
+   */
+  planImport(
+    projectId: string,
+    projectRoot: string,
+    ignore: readonly string[] = [],
+  ): InstructionImportPlan {
+    const files = scanInstructionFiles(projectRoot, [
+      ...this.k.config.redaction.denyPaths,
+      ...ignore,
+    ]);
+    const known = [
+      ...this.memory.list(projectId, { kinds: ['rule'], status: 'active', limit: 1000 }),
+      ...this.memory.list(projectId, { kinds: ['rule'], status: 'archived', limit: 1000 }),
+    ].map((m) => m.title);
+    return {
+      files,
+      ...dedupeRules(
+        files.flatMap((f) => f.rules),
+        known,
+      ),
+    };
+  }
+
+  /**
+   * Stores rules from {@link planImport} as approved user rules: the user wrote the files and
+   * confirmed the import. Each rule keeps its source line as evidence, so it is marked stale when
+   * that line is edited out of the file. Returns the rules stored.
+   */
+  importRules(projectId: string, projectRoot: string, rules: readonly InstructionRule[]): Memory[] {
+    const out: Memory[] = [];
+    for (const r of rules) {
+      const where = `Imported from ${r.file}, line ${r.line}.`;
+      try {
+        out.push(
+          this.memory.remember({
+            projectId,
+            projectRoot,
+            kind: 'rule',
+            title: r.title,
+            body: r.title.endsWith('…') ? `${r.text}\n\n${where}` : where,
+            tags: ['imported'],
+            scopePaths: r.scopePaths,
+            source: USER,
+            trust: 'approved',
+            evidence: [{ path: r.file, excerpt: r.excerpt }],
+            reason: `imported from ${r.file}`,
+          }),
+        );
+      } catch {
+        // The file changed since it was read, or the path is now denied: skip that rule.
+      }
     }
     return out;
   }

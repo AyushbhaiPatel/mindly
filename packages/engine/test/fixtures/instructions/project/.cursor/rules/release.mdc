@@ -1,0 +1,6 @@
+---
+description: How to cut a release
+alwaysApply: false
+---
+
+- Bump the version in package.json before tagging.

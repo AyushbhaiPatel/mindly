@@ -92,6 +92,7 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
   )
     .option('--list-agents', 'list supported agents and their integration level')
     .option('--no-statusline', "don't add Mindly's status line to Claude Code")
+    .option('--no-import', 'do not import rules from CLAUDE.md, AGENTS.md and similar files')
     .action(act((o: object) => async (out) => (await import('./commands/setup.js')).init(out, o)));
   setupOptions(
     program.command('uninstall').description('Remove Mindly hooks and MCP entries from agents'),
@@ -243,13 +244,24 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
       ),
     );
 
-  program
+  const rules = program
     .command('rules')
     .description('List approved and proposed rules')
     .option('--approve <id>', 'approve a proposed rule')
     .option('--json', 'machine-readable output')
     .action(
       act((o: object) => async (out) => (await import('./commands/memory.js')).rules(out, o)),
+    );
+  rules
+    .command('import')
+    .description('Import rules from CLAUDE.md, AGENTS.md, .cursorrules and similar files')
+    .option('-y, --yes', 'import without asking')
+    .option('--dry-run', 'show the rules without importing them')
+    .action(
+      act(
+        (o: object) => async (out) =>
+          (await import('./commands/import.js')).offerRuleImport(out, o, 'rules'),
+      ),
     );
 
   program

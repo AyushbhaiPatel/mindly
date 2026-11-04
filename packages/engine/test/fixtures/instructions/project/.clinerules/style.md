@@ -1,0 +1,1 @@
+- Prefer early returns over nested if statements.

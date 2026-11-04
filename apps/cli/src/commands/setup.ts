@@ -30,6 +30,7 @@ import { diffSummary } from '../diff.js';
 import { confirm, type CliIo } from '../io.js';
 import { splitList, UsageError, type Out } from '../util.js';
 import { renderInitSummary } from '../views/setup.js';
+import { offerRuleImport } from './import.js';
 
 /** Agents `mindly init` knows how to connect: hook agents first, then MCP-only clients. */
 export const SUPPORTED_AGENTS: readonly string[] = Object.freeze([
@@ -218,6 +219,8 @@ interface SetupOptions {
   listAgents?: boolean;
   /** `--no-statusline` sets this to false. */
   statusline?: boolean;
+  /** `--no-import`: skip importing rules from CLAUDE.md, AGENTS.md and similar files. */
+  import?: boolean;
 }
 
 /** `mindly init`. */
@@ -275,6 +278,7 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
     );
   }
   if (o.dryRun) {
+    if (o.import !== false) await offerRuleImport(out, { dryRun: true }, 'init');
     out.line();
     out.line('Dry run: nothing was written.');
     return 0;
@@ -294,6 +298,7 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
     }
   }
   const home = initHome(out.io);
+  if (o.import !== false) await offerRuleImport(out, { yes: o.yes === true }, 'init');
   renderInitSummary(out.screen(), {
     home,
     connected: plans.filter((p) => p.steps.length > 0).map((p) => p.adapter.displayName),

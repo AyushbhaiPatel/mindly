@@ -5,3 +5,4 @@ pnpm-lock.yaml
 release
 packages/adapters/test/fixtures/mcp-clients
 packages/adapters/test/fixtures/gemini/*.jsonc
+packages/engine/test/fixtures/instructions

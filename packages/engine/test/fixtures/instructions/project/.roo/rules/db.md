@@ -1,0 +1,1 @@
+- Every SQL statement must be parameterised.
