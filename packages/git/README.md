@@ -17,7 +17,7 @@ reports `{ supported: false }` on older versions instead of failing.
 | Capture         | `captureWorktreeCommit` – tracked + untracked work as a commit, without touching the index, working tree or refs                         |
 | Shadow merge    | `shadowMerge` (in-memory `merge-tree --write-tree`), `materializeTree` (temporary detached worktree with `dispose()`)                    |
 | Checks          | `runChecks` – trusted commands against a materialized tree                                                                               |
-| Snapshots       | `createSnapshotRef`, `listSnapshotRefs`, `restoreSnapshotToBranch`, `deleteSnapshotRef` (`refs/mindly/snapshots/<id>`)                  |
+| Snapshots       | `createSnapshotRef`, `listSnapshotRefs`, `restoreSnapshotToBranch`, `deleteSnapshotRef` (`refs/mindly/snapshots/<id>`)                   |
 | Analysis        | `languageOf`, `extractExports`, `diffExportSurface`, `extractImports`, `buildImportGraph`, `hunkHashes`, `diffLines`                     |
 
 Analysis is regex/lexer based (comments, strings, template and regex literals are masked first) and

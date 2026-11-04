@@ -1,0 +1,24 @@
+{
+  "name": "@mindly/store",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SQLite storage, migrations and repositories for Mindly.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@mindly/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@mindly/core": "workspace:*"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@mindly/engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Domain services and the Mindly facade.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@mindly/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@mindly/core": "workspace:*",
+    "@mindly/store": "workspace:*",
+    "zod": "4.6.7"
+  }
+}
