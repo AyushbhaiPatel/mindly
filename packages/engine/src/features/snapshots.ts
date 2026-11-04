@@ -114,7 +114,11 @@ function samePlan(a: readonly TaskPlanStep[], b: readonly TaskPlanStep[]): boole
 
 /** Creates, diffs and restores snapshots. */
 export class SnapshotService {
-  constructor(private readonly k: Kernel) {}
+  constructor(
+    private readonly k: Kernel,
+    /** Called after a restore changed the project's memories. */
+    private readonly onRestored: (projectId: string) => void = () => {},
+  ) {}
 
   private captureState(projectId: string): SnapshotState {
     const s = this.k.store;
@@ -368,6 +372,7 @@ export class SnapshotService {
         },
       });
     });
+    this.onRestored(pid);
     return result;
   }
 
@@ -402,7 +407,7 @@ const registered = new WeakSet<Mindly>();
 export function snapshotService(mindly: Mindly): SnapshotService {
   let svc = services.get(mindly);
   if (!svc) {
-    svc = new SnapshotService(mindly.kernel);
+    svc = new SnapshotService(mindly.kernel, (pid) => mindly.rulesFile.refresh(pid));
     services.set(mindly, svc);
   }
   return svc;

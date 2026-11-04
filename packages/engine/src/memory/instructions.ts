@@ -1,6 +1,7 @@
 import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { isDeniedPath, sanitizeLine, tryResolveInsideRoot } from '@mindly/core';
+import { findSection } from './managed-section.js';
 import { cleanScopePaths, MAX_TITLE } from './service.js';
 
 /*
@@ -10,7 +11,8 @@ import { cleanScopePaths, MAX_TITLE } from './service.js';
  *
  * Parsing is deterministic and conservative: headings, code blocks, tables, comments, imports and
  * the usual "This file provides guidance to …" preamble are skipped; a lead-in such as "When
- * writing tests:" is folded into the bullets under it.
+ * writing tests:" is folded into the bullets under it. The section Mindly writes its own rules
+ * into is skipped too, so synced rules are never imported back.
  */
 
 /** Where an instruction file lives (relative to the project root) and which agents read it. */
@@ -222,7 +224,7 @@ const BOILERPLATE = [
 
 /** Splits an instruction file into rules. Pure; exported for tests. */
 export function parseInstructions(content: string): ParsedInstructions {
-  const lines = content.replace(/^\uFEFF/, '').split(/\r?\n/);
+  const lines = withoutManagedSection(content.replace(/^\uFEFF/, '')).split(/\r?\n/);
   const meta = frontMatter(lines);
   const items: Item[] = [];
   let current: Item | null = null;
@@ -353,6 +355,14 @@ export function parseInstructions(content: string): ParsedInstructions {
     }
   }
   return { rules, scopePaths: meta.scopePaths, manual: meta.manual };
+}
+
+/** Blanks Mindly's own rules section, keeping its line breaks so line numbers stay right. */
+function withoutManagedSection(content: string): string {
+  const bounds = findSection(content);
+  if (bounds === null || bounds === 'damaged') return content;
+  const section = content.slice(bounds.start, bounds.end).replace(/[^\n]/g, '');
+  return content.slice(0, bounds.start) + section + content.slice(bounds.end);
 }
 
 /** Lead-ins of the list items a nested item sits under, outermost first. */

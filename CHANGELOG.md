@@ -24,6 +24,10 @@ All notable changes to `mindly-cli` are documented here. The project follows
   terminal they are added as suggestions to approve). `--no-import` skips the step;
   `mindly rules import [--dry-run] [--yes]` runs it again later and only adds rules Mindly does not
   have yet.
+- `mindly rules sync` keeps your approved rules in a marked section of `AGENTS.md`, `CLAUDE.md`
+  and `GEMINI.md`, so agents that are not connected to Mindly follow them too. Opt-in: `init`
+  offers it and `rules sync` asks before the first write (`--dry-run` previews). Only the text
+  between the `mindly:rules` markers changes; `rules sync --off` and `mindly uninstall` remove it.
 
 ### Fixed
 

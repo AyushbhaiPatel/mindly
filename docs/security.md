@@ -121,6 +121,10 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - Rules imported from a repository's instruction files (`CLAUDE.md`, `AGENTS.md`, …) are approved
   only when the user confirms the list on a terminal; with `--yes` or without a terminal they are
   added as suggestions that wait for approval, and they are never `enforce` rules.
+- Rules sync is opt-in per project and asks before its first write. It writes only approved rules,
+  only between Mindly's markers in `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` inside the project, and
+  rule text cannot close the section. Rule import and evidence checks ignore that section, so
+  Mindly never treats its own output as the user's instructions or as proof of a rule.
 - Failed command output is never stored or replayed; mistake memories keep only the command.
 - Trusting a project config requires the hash the user reviewed; a changed file is refused.
 - Config files are read with `lstat` + `O_NOFOLLOW | O_NONBLOCK` and a byte cap, so a config that

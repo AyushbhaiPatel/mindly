@@ -117,6 +117,21 @@ and Cursor/Copilot/Kiro path globs become the rule's scope. When you later remov
 file, its rule is marked as possibly outdated. Skip the step with `--no-import` and re-run it any
 time with `mindly rules import`.
 
+Mindly can also write the rules back. `mindly rules sync` keeps your approved rules in a marked
+section of `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` (the ones the checkout has, or a new
+`AGENTS.md`), so agents that are not connected to Mindly follow them too and the rules are
+versioned with your code. It is off until you turn it on: `init` offers it on a terminal, and
+`mindly rules sync` shows the change and asks first (`--dry-run` previews, `--yes` skips the
+question). From then on the section is rewritten whenever a rule is approved, edited or archived,
+so review the diff before you commit. Mindly writes only between `<!-- mindly:rules:start -->` and
+`<!-- mindly:rules:end -->`, and everything else in the file stays exactly as you wrote it. Each
+rule is one bullet with its details, path-scoped rules are grouped under the paths they apply to,
+and re-syncing unchanged rules changes nothing. A rule imported from a file is not repeated in that
+file. Edits inside the section are replaced (with a warning), so change rules with `mindly rules`
+or in Mission Control. Each linked git worktree is turned on separately and gets its own copy.
+`mindly rules sync --off` removes the section from the current checkout; `mindly uninstall`
+removes it everywhere.
+
 | Agent                    | Integration | Status                                           |
 | ------------------------ | ----------- | ------------------------------------------------ |
 | Claude Code              | hooks + MCP | tested end to end                                |
@@ -257,6 +272,7 @@ mindly status                       # agents, tasks, intents, conflicts, what ne
 mindly dashboard                    # open Mission Control in the browser
 mindly rules [--approve <id>]       # project rules, approved and proposed
 mindly rules import [--dry-run]     # import rules from CLAUDE.md, AGENTS.md, .cursorrules, …
+mindly rules sync [--dry-run|--off] # keep approved rules in AGENTS.md, CLAUDE.md, GEMINI.md
 mindly memory list|search <q>|show <id>|add|approve|reject|archive|forget
 mindly why <file>:<line>            # who wrote a line, and why
 mindly xray [--session <id>]        # what context an agent got
