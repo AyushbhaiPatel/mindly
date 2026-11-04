@@ -3,6 +3,21 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## 0.1.2 — 2026-11-04
+
+### Changed
+
+- Every command is easier to read: a one-line summary first, plain words instead of internal
+  terms ("suggested by Codex, waiting for you" instead of `proposed`), agent names like
+  "Claude Code · 4409d433", relative times, no empty sections, and the exact next command to run.
+  `mindly doctor` groups checks into Setup, Agents and Optional and tells you how to fix each one.
+- Commands that take an id accept the 8-character short id shown in the output (or any unique
+  prefix), instead of the full id.
+- Mission Control: a summary bar, "Needs you" first with one action per item, conflicts written as
+  problem statements, trust in words, explanations in every empty panel and help for each term.
+
+`--json` output is unchanged.
+
 ## 0.1.1 — 2026-11-04
 
 ### Added
