@@ -1,22 +1,60 @@
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { InstallStep } from '@mindly/core';
-import { MindlyError } from '@mindly/core';
+import { MindlyError, resolveInsideRoot } from '@mindly/core';
 
 /** Result of applying one install step. */
 export interface AppliedStep {
   file: string;
   /** Path of the backup of the previous content, or null when the file was new. */
   backup: string | null;
+  /** File actually written when `file` is a symlink (followed to the end of the chain), else null. */
+  target: string | null;
+  /** True when `file` was a symlink to a missing file and that file was created. */
+  createdTarget: boolean;
+}
+
+/** Options for `applyInstallSteps`. */
+export interface ApplyOptions {
+  /** Timestamp used in backup names. */
+  now?: Date;
+  /** Project root of a project-level install: files inside it must not link outside it. */
+  projectRoot?: string | null;
+}
+
+const MAX_LINK_HOPS = 40;
+
+/**
+ * Follows `file` through any chain of symlinks and returns the path that should be written, so
+ * links kept by dotfile managers (stow, chezmoi, yadm, …) survive. A link to a missing file
+ * resolves to that missing path.
+ */
+function resolveLinkTarget(file: string): { target: string; dangling: boolean } {
+  let current = file;
+  for (let hop = 0; hop <= MAX_LINK_HOPS; hop++) {
+    let isLink: boolean;
+    try {
+      isLink = lstatSync(current).isSymbolicLink();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      return { target: current, dangling: current !== file };
+    }
+    if (!isLink) return { target: current, dangling: false };
+    current = resolve(realpathSync(dirname(current)), readlinkSync(current));
+  }
+  throw new MindlyError('invalid_input', `${file} is a symlink loop or too long a symlink chain`);
 }
 
 function timestamp(now: Date): string {
@@ -40,6 +78,11 @@ function ensureParentDirs(file: string): void {
     mkdirSync(d, { mode: 0o700 });
     if (process.platform !== 'win32') chmodSync(d, 0o700);
   }
+}
+
+function isInside(root: string, file: string): boolean {
+  const rel = relative(resolve(root), file);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
 function uniqueBackupPath(file: string, stamp: string): string {
@@ -68,7 +111,8 @@ function writeAtomic(file: string, content: string, mode: number): void {
  * Applies install steps produced by `planInstall` / `planUninstall`.
  *
  * Each file is written atomically (temp file + rename), keeping its existing permission bits (new
- * files get 0600). When a file existed, its previous content is first saved next to it as
+ * files get 0600). A file that is a symlink stays a symlink: the file at the end of the link chain
+ * is written instead (through a temp file next to it), and a link to a missing file creates it. When a file existed, its previous content is first saved next to it as
  * `<file>.<UTC timestamp>.bak`. Missing parent directories are created with mode 0700.
  *
  * Before writing, the current on-disk content must still equal `step.previous`; otherwise the
@@ -77,9 +121,10 @@ function writeAtomic(file: string, content: string, mode: number): void {
  */
 export function applyInstallSteps(
   steps: readonly InstallStep[],
-  now: Date = new Date(),
+  options: ApplyOptions = {},
 ): AppliedStep[] {
-  const stamp = timestamp(now);
+  const stamp = timestamp(options.now ?? new Date());
+  const projectRoot = options.projectRoot ?? null;
   const applied: AppliedStep[] = [];
   for (const step of steps) {
     if (!isAbsolute(step.file) || step.file.includes('\0')) {
@@ -96,16 +141,32 @@ export function applyInstallSteps(
         `${file} changed since the install plan was made; re-run the command`,
       );
     }
-    ensureParentDirs(file);
+    const { target, dangling } = resolveLinkTarget(file);
+    if (projectRoot !== null && target !== file && isInside(projectRoot, file)) {
+      try {
+        resolveInsideRoot(projectRoot, target);
+      } catch {
+        throw new MindlyError(
+          'path_outside_project',
+          `${file} links outside the project; edit ${target} directly instead`,
+        );
+      }
+    }
+    ensureParentDirs(target);
     let backup: string | null = null;
     let mode = 0o600;
     if (exists && current !== null) {
-      mode = statSync(file).mode & 0o777;
+      mode = statSync(target).mode & 0o777;
       backup = uniqueBackupPath(file, stamp);
       writeFileSync(backup, current, { mode: 0o600, flag: 'wx' });
     }
-    writeAtomic(file, step.content, mode);
-    applied.push({ file, backup });
+    writeAtomic(target, step.content, mode);
+    applied.push({
+      file,
+      backup,
+      target: target === file ? null : target,
+      createdTarget: dangling,
+    });
   }
   return applied;
 }

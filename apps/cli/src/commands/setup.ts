@@ -14,6 +14,7 @@ import {
   integrationOf,
   MCP_CLIENTS,
   McpClientAdapter,
+  type AppliedStep,
 } from '@mindly/adapters';
 import {
   defaultUserConfig,
@@ -292,8 +293,8 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
       return 1;
     }
     for (const p of plans) {
-      for (const applied of applyInstallSteps(p.steps)) {
-        out.line(`Wrote ${applied.file}${applied.backup ? ` (backup: ${applied.backup})` : ''}`);
+      for (const applied of applyInstallSteps(p.steps, { projectRoot })) {
+        out.line(describeApplied(applied));
       }
     }
   }
@@ -318,6 +319,16 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
     rule: MCP_ONLY_RULE,
   });
   return 0;
+}
+
+/** One line per written file; a symlinked config names the file the link points to. */
+function describeApplied(a: AppliedStep): string {
+  const backup = a.backup ? ` (backup: ${a.backup})` : '';
+  if (a.target === null) return `Wrote ${a.file}${backup}`;
+  if (a.createdTarget) {
+    return `Created ${a.target}: ${a.file} links to it, but it did not exist yet`;
+  }
+  return `Wrote ${a.target} (linked from ${a.file})${backup}`;
 }
 
 function supportsProject(adapter: AgentAdapter): boolean {
@@ -357,8 +368,8 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
     return 1;
   }
   for (const p of plans) {
-    for (const applied of applyInstallSteps(p.steps)) {
-      out.line(`Wrote ${applied.file}${applied.backup ? ` (backup: ${applied.backup})` : ''}`);
+    for (const applied of applyInstallSteps(p.steps, { projectRoot })) {
+      out.line(describeApplied(applied));
     }
   }
   const sc = out.screen();

@@ -100,7 +100,8 @@ mindly init
 `init` detects your agents, shows every file and line it will change, and asks before writing.
 Use `--project` to set up only the current repository and `--dry-run` to preview. Then open your
 agents as usual; there is nothing else to run. `mindly doctor` checks the setup and
-`mindly uninstall` removes it.
+`mindly uninstall` removes it. Settings files managed by stow, chezmoi or other dotfile managers
+stay symlinks: Mindly edits the file they point to (and creates it if it is missing).
 
 Run inside a repository, `init` also reads the instruction files you already wrote for your
 agents (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.cursor/rules/`, `.windsurfrules`,

@@ -25,6 +25,13 @@ All notable changes to `mindly-cli` are documented here. The project follows
   `mindly rules import [--dry-run] [--yes]` runs it again later and only adds rules Mindly does not
   have yet.
 
+### Fixed
+
+- `mindly init`, `mindly uninstall` and other config edits no longer replace a symlinked agent
+  settings file with a regular file, so configs managed by stow, chezmoi and other dotfile
+  managers keep working. Mindly writes the file at the end of the link (creating it if the link
+  points to a missing file), and the output names both paths.
+
 ## 0.1.3 — 2026-11-04
 
 ### Changed

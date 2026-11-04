@@ -1,5 +1,14 @@
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { shortId } from '@mindly/core';
@@ -56,6 +65,27 @@ describe('init / uninstall', () => {
     expect(second.code).toBe(0);
     expect(second.stdout).toContain('already configured');
     expect(readFileSync(join(sb.home, '.claude', 'settings.json'), 'utf8')).toBe(settings);
+  });
+
+  it('keeps a symlinked settings file a symlink through init and uninstall', async () => {
+    const sb = sandbox();
+    const dotfiles = tempDir('mindly-cli-dotfiles-');
+    const real = join(dotfiles, 'settings.json');
+    const settings = join(sb.home, '.claude', 'settings.json');
+    write(dotfiles, 'settings.json', '{ "model": "opus" }\n');
+    mkdirSync(join(sb.home, '.claude'));
+    symlinkSync(real, settings);
+
+    const init = await cli(sb, ['init', '--agents', 'claude-code', '--yes', '--no-import']);
+    expect(init.code).toBe(0);
+    expect(init.stdout).toContain(`Wrote ${real} (linked from ${settings})`);
+    expect(lstatSync(settings).isSymbolicLink()).toBe(true);
+    expect(readFileSync(real, 'utf8')).toContain('hook claude-code SessionStart');
+
+    const removed = await cli(sb, ['uninstall', '--agents', 'claude-code', '--yes']);
+    expect(removed.code).toBe(0);
+    expect(lstatSync(settings).isSymbolicLink()).toBe(true);
+    expect(json(readFileSync(real, 'utf8'))).toEqual({ model: 'opus' });
   });
 
   it('dry-run and unconfirmed runs write nothing', async () => {
