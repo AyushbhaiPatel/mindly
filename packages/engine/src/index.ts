@@ -15,3 +15,4 @@ export * from './memory/service.js';
 export * from './ports.js';
 export { ProjectService, type ProjectContext } from './projects.js';
 export { Synapse, type SynapseModule, type SynapseOptions } from './synapse.js';
+export * from './features/index.js';

@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@synapse/core": "workspace:*",
-    "@synapse/store": "workspace:*"
+    "@synapse/store": "workspace:*",
+    "zod": "4.6.7"
   }
 }
