@@ -1,5 +1,5 @@
 /**
- * `mindly`: the `mindly` command. `run(argv, io)` is the whole CLI as a function (used by
+ * `mindly-cli`: the `mindly` command. `run(argv, io)` is the whole CLI as a function (used by
  * `main.ts` and by tests); `runHook` is the agent hook hot path.
  */
 export { run } from './run.js';

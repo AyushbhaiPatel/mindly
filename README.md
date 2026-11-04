@@ -57,7 +57,7 @@ that overhead.
 Requires Node.js 22.13 or newer and git.
 
 ```bash
-npx mindly init
+npx mindly-cli init
 ```
 
 `init` detects installed agents (or take `--agents claude-code,codex,cursor`), shows every file

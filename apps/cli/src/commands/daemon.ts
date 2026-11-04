@@ -124,7 +124,7 @@ export async function daemonRequest<T>(
 }
 
 /**
- * Absolute path of the daemon's entry point: `dist/daemon.js` of the installed `mindly`
+ * Absolute path of the daemon's entry point: `dist/daemon.js` of the installed `mindly-cli`
  * package, or `apps/daemon/dist/main.js` in a monorepo checkout.
  */
 export function daemonMainPath(): string {
@@ -134,7 +134,7 @@ export function daemonMainPath(): string {
       'unavailable',
       layout.kind === 'dev'
         ? 'the Mindly daemon is not built (run pnpm build)'
-        : 'the Mindly daemon entry point is missing; reinstall mindly',
+        : 'the Mindly daemon entry point is missing; reinstall mindly-cli',
     );
   }
   return layout.daemonMain;

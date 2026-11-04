@@ -35,7 +35,7 @@ describe('install layout', () => {
   });
 
   it('resolves the release layout from the bundle or any chunk in dist/', () => {
-    const pkg = join(sep, 'usr', 'lib', 'node_modules', 'mindly');
+    const pkg = join(sep, 'usr', 'lib', 'node_modules', 'mindly-cli');
     const expected = {
       kind: 'release',
       cliMain: join(pkg, 'dist', 'main.js'),
@@ -48,7 +48,7 @@ describe('install layout', () => {
   });
 
   it('picks the layout from a module URL', () => {
-    const pkg = join(sep, 'tmp', 'node_modules', 'mindly');
+    const pkg = join(sep, 'tmp', 'node_modules', 'mindly-cli');
     const bundle = pathToFileURL(join(pkg, 'dist', 'main.js')).href;
     expect(resolveLayout(bundle, true).dashboardDir).toBe(join(pkg, 'dashboard'));
     const source = pathToFileURL(join(root, 'apps', 'daemon', 'src', 'server.ts')).href;
