@@ -126,7 +126,7 @@ export async function runChecks(out: Out): Promise<Check[]> {
   const adapters = adaptersFor(env);
   const command = await installCommand(env);
   // Mindly may be installed user-wide or only for this project (`init --project`).
-  let projectRoot: string | null = null;
+  let projectRoot: string | null;
   try {
     const { findRepoRoot } = await import('@mindly/git');
     projectRoot = await findRepoRoot(out.io.cwd);
