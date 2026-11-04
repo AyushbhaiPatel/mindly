@@ -49,7 +49,14 @@ export function memoryLine(m: Memory, bodyChars = 280): string {
   const body = sanitizeForContext(m.body, bodyChars).replace(/\s*\n\s*/g, ' ');
   const title = sanitizeLine(m.title, 160);
   const labels = [m.kind, trustLabel(m.trust), sourceLabel(m)];
-  if (m.scope.paths.length) labels.push(`applies to ${m.scope.paths.slice(0, 3).join(', ')}`);
+  if (m.scope.paths.length) {
+    labels.push(
+      `applies to ${m.scope.paths
+        .slice(0, 3)
+        .map((p) => sanitizeLine(p, 80))
+        .join(', ')}`,
+    );
+  }
   return `- [${labels.join(' · ')}] ${title}${body && body !== title ? ` — ${body}` : ''}`;
 }
 

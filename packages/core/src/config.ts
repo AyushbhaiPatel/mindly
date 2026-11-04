@@ -1,4 +1,15 @@
-import { existsSync, readFileSync, statSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { z } from 'zod';
 import { AgentKindSchema } from './domain.js';
 import { MindlyError } from './errors.js';
@@ -110,13 +121,39 @@ export function defaultUserConfig(): UserConfig {
   return UserConfigSchema.parse({});
 }
 
-function readBoundedJson(path: string): unknown {
-  const size = statSync(path).size;
-  if (size > MAX_CONFIG_BYTES) {
-    throw new MindlyError('invalid_input', `config file too large: ${path}`);
-  }
+/**
+ * Reads a small regular file safely: refuses symlinks, FIFOs, devices and directories (a hostile
+ * repository could point its config at `/dev/zero` or a FIFO to hang every hook), opens without
+ * following links and without blocking, and never reads more than `max` bytes.
+ */
+export function readRegularFileBounded(path: string, max: number): string {
+  const st = lstatSync(path);
+  if (!st.isFile()) throw new MindlyError('invalid_input', 'config path is not a regular file');
+  const noFollow = constants.O_NOFOLLOW ?? 0;
+  const nonBlock = constants.O_NONBLOCK ?? 0;
+  const fd = openSync(path, constants.O_RDONLY | noFollow | nonBlock);
   try {
-    return JSON.parse(readFileSync(path, 'utf8'));
+    if (!fstatSync(fd).isFile()) {
+      throw new MindlyError('invalid_input', 'config path is not a regular file');
+    }
+    const buf = Buffer.alloc(max + 1);
+    let total = 0;
+    for (;;) {
+      const n = readSync(fd, buf, total, buf.length - total, null);
+      if (n === 0) break;
+      total += n;
+      if (total > max) throw new MindlyError('invalid_input', 'config file too large');
+    }
+    return buf.subarray(0, total).toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function readBoundedJson(path: string): unknown {
+  const raw = readRegularFileBounded(path, MAX_CONFIG_BYTES);
+  try {
+    return JSON.parse(raw);
   } catch (cause) {
     throw new MindlyError('invalid_input', `config file is not valid JSON: ${path}`, { cause });
   }
@@ -177,11 +214,7 @@ export interface LoadedProjectConfig {
 
 export function loadProjectConfig(path: string): LoadedProjectConfig {
   if (!existsSync(path)) return { config: ProjectConfigSchema.parse({}), hash: null };
-  const size = statSync(path).size;
-  if (size > MAX_CONFIG_BYTES) {
-    throw new MindlyError('invalid_input', 'project config too large');
-  }
-  const raw = readFileSync(path, 'utf8');
+  const raw = readRegularFileBounded(path, MAX_CONFIG_BYTES);
   let json: unknown;
   try {
     json = JSON.parse(raw);

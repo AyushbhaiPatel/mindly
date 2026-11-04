@@ -137,7 +137,8 @@ export interface MindlyClient {
   snapshotDiff(id: string): Promise<SnapshotDiff>;
   restoreSnapshot(id: string, branch?: string): Promise<RestoreResult>;
   trust(projectId: string): Promise<TrustStatus>;
-  trustConfig(projectId: string): Promise<TrustStatus>;
+  /** `configHash` must be the hash shown to the user; the daemon rejects a mismatch. */
+  trustConfig(projectId: string, configHash: string): Promise<TrustStatus>;
 }
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
@@ -237,7 +238,7 @@ export function createHttpClient(): MindlyClient {
     restoreSnapshot: (id, branch) =>
       post(`/api/snapshots/${enc(id)}/restore`, branch ? { branch } : {}),
     trust: (id) => get(`${proj(id)}/trust`),
-    trustConfig: (id) => post(`${proj(id)}/trust`),
+    trustConfig: (id, configHash) => post(`${proj(id)}/trust`, { configHash }),
   };
 }
 

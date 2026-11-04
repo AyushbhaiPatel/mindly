@@ -1,5 +1,6 @@
 import {
   fingerprint,
+  hasUnsafeChars,
   sanitizeLine,
   shortId,
   type Conflict,
@@ -135,7 +136,7 @@ export class IntentService {
       taskId: session.currentTaskId,
       summary: sanitizeLine(summary, 300),
       targets: {
-        files: files.slice(0, 100),
+        files: files.filter((f) => !hasUnsafeChars(f) && f.length <= 1024).slice(0, 100),
         symbols: symbols.slice(0, 100).map((s) => sanitizeLine(s, 120)),
       },
       ttlMs: INTENT_TTL_MS,

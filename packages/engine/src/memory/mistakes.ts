@@ -39,15 +39,14 @@ export class MistakeService {
     const key = commandKey(input.command);
     if (!key) return null;
     const command = sanitizeLine(redactText(input.command), 200);
-    const output = input.output
-      ? sanitizeLine(redactText(input.output), 300)
-      : 'no output captured';
     return this.memory.remember({
       projectId: input.projectId,
       projectRoot: input.projectRoot,
       kind: 'mistake',
       title: `Command fails: ${key}`,
-      body: `\`${command}\` failed in a ${input.session.agentKind} session: ${output}`,
+      // Tool output is attacker-influenced (it can echo file contents), so it is never stored or
+      // replayed to other agents; the command and the fact that it failed are enough.
+      body: `\`${command}\` failed in a ${input.session.agentKind} session.`,
       tags: ['mistake', 'command', `cmd-${fingerprint(key).slice(0, 10)}`],
       source: { type: 'agent', sessionId: input.session.id, agentKind: input.session.agentKind },
       reason: 'command failed',

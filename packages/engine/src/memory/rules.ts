@@ -18,6 +18,8 @@ export interface DetectedRule {
 }
 
 const MAX_SENTENCE = 220;
+/** Rules from prompts longer than this are proposed rather than approved. */
+export const MAX_APPROVABLE_PROMPT = 500;
 
 const TEMPORARY =
   /\b(for now|this time|right now|for this (task|change|pr|commit)|temporar(y|ily)|just (for|this)|today|until|for the moment|in this (step|message))\b/i;
@@ -86,8 +88,12 @@ export class RuleService {
     session: Session;
     prompt: string;
   }): Promise<Memory[]> {
-    if (!this.k.config.rules.autoCapture) return [];
+    if (!this.k.config.rules.autoCapture || this.k.headless) return [];
     const detected = detectRules(input.prompt);
+    // Long prompts and prompts with code blocks often contain pasted, untrusted text; rules found
+    // there are only ever proposed, never auto-approved.
+    const mayApprove =
+      input.prompt.length <= MAX_APPROVABLE_PROMPT && !input.prompt.includes('```');
     const out: Memory[] = [];
     for (const d of detected) {
       let strength = d.strength;
@@ -110,7 +116,7 @@ export class RuleService {
           scopePaths: scopeGlobs,
           // The user said it, but medium-strength phrasing may be situational: keep it proposed.
           source: { type: 'user', sessionId: input.session.id, agentKind: input.session.agentKind },
-          trust: strength === 'strong' ? 'approved' : 'proposed',
+          trust: strength === 'strong' && mayApprove ? 'approved' : 'proposed',
           reason: 'captured from prompt',
         });
       } catch {

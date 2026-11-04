@@ -24,6 +24,7 @@ export function openMindly(options: RuntimeOptions = {}): Mindly {
     ...options,
     home,
     config,
+    headless: options.headless ?? env['MINDLY_HEADLESS_RUN'] === '1',
     ports: {
       git: createGitPort(),
       ...(options.disableLlm ? {} : { llm: createLlmPort(config.llm, env) }),
