@@ -18,6 +18,8 @@ export {
   type InstructionImportPlan,
 } from './memory/rules.js';
 export * from './memory/instructions.js';
+export * from './memory/managed-section.js';
+export * from './memory/rules-file.js';
 export * from './memory/service.js';
 export * from './ports.js';
 export { ProjectService, type ProjectContext } from './projects.js';

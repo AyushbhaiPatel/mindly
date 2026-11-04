@@ -19,6 +19,7 @@ import { IntentService, TaskService } from './coordination/work.js';
 import { HookHandler } from './hooks/handler.js';
 import { EngineBus, type Kernel } from './kernel.js';
 import { MistakeService } from './memory/mistakes.js';
+import { RulesFileService } from './memory/rules-file.js';
 import { RuleService } from './memory/rules.js';
 import { MemoryService } from './memory/service.js';
 import { nullGit, nullLlm, nullNotifier, type Ports } from './ports.js';
@@ -51,6 +52,7 @@ export class Mindly {
   readonly projects: ProjectService;
   readonly memory: MemoryService;
   readonly rules: RuleService;
+  readonly rulesFile: RulesFileService;
   readonly mistakes: MistakeService;
   readonly telepathy: TelepathyService;
   readonly tasks: TaskService;
@@ -67,6 +69,8 @@ export class Mindly {
     this.projects = new ProjectService(kernel);
     this.memory = new MemoryService(kernel);
     this.rules = new RuleService(kernel, this.memory);
+    this.rulesFile = new RulesFileService(kernel, this.memory);
+    this.memory.onRulesChanged((projectId) => this.rulesFile.refresh(projectId));
     this.mistakes = new MistakeService(kernel, this.memory);
     this.telepathy = new TelepathyService(kernel);
     this.tasks = new TaskService(kernel);

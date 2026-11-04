@@ -263,6 +263,19 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
           (await import('./commands/import.js')).offerRuleImport(out, o, 'rules'),
       ),
     );
+  rules
+    .command('sync')
+    .description(
+      'Keep the approved rules in a marked section of AGENTS.md, CLAUDE.md and GEMINI.md',
+    )
+    .option('--dry-run', 'show the changes without writing anything')
+    .option('--off', 'remove the section and stop keeping it updated')
+    .option('-y, --yes', 'write without asking')
+    .action(
+      act(
+        (o: object) => async (out) => (await import('./commands/rules-file.js')).rulesSync(out, o),
+      ),
+    );
 
   program
     .command('contract')

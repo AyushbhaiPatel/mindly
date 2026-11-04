@@ -2,6 +2,7 @@ import { statSync } from 'node:fs';
 import { sha256, type MemoryEvidence, type Session } from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
+import { stripManagedSection } from '../memory/managed-section.js';
 import { normalizeBlock, readBounded, type MemoryService } from '../memory/service.js';
 import type { Mindly } from '../mindly.js';
 import {
@@ -139,7 +140,10 @@ export class SelfHealingService {
     }
     if (!isFile) return { kind: 'missing' };
     const content = readBounded(p.abs);
-    return content === null ? { kind: 'unreadable' } : { kind: 'present', content };
+    // Rules Mindly wrote into an instruction file are not evidence for those same rules.
+    return content === null
+      ? { kind: 'unreadable' }
+      : { kind: 'present', content: stripManagedSection(content) };
   }
 
   private check(

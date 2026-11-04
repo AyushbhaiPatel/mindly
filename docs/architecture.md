@@ -186,6 +186,7 @@ dropped with an event.
 | Executable memory         | `contracts` table; declarative checks; command checks need user approval     |
 | Say-it-once rules         | correction detector on prompts, path-scoped rules                            |
 | Rule import               | `engine/memory/instructions` parses CLAUDE.md, AGENTS.md, .cursorrules, …    |
+| Rules file sync           | `engine/memory/rules-file` rewrites a marked section on every rule change    |
 | Mistake memory            | failed attempts recorded and surfaced before similar edits                   |
 | Code provenance           | `file_changes` hunk hashes; `mindly why file:line`                           |
 | Context X-Ray             | `context_packets` with included/omitted items and scores                     |

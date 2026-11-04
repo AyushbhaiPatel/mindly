@@ -33,6 +33,12 @@ import { confirm, type CliIo } from '../io.js';
 import { clean, splitList, UsageError, type Out } from '../util.js';
 import { renderInitSummary } from '../views/setup.js';
 import { offerRuleImport } from './import.js';
+import {
+  offerRulesSync,
+  planRulesSyncRemoval,
+  printRulesFileChanges,
+  removeRulesSync,
+} from './rules-file.js';
 
 /** Agents `mindly init` knows how to connect: hook agents first, then MCP-only clients. */
 export const SUPPORTED_AGENTS: readonly string[] = Object.freeze([
@@ -338,6 +344,12 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
       out.line(`Rules were not imported (${why}). Try again with: mindly rules import`);
     }
   }
+  try {
+    await offerRulesSync(out, { yes: o.yes === true });
+  } catch (err) {
+    const why = clean(err instanceof Error ? err.message : String(err), 200);
+    out.line(`The rules section was not written (${why}). Try again with: mindly rules sync`);
+  }
   renderInitSummary(out.screen(), {
     home,
     connected: plans.filter((p) => p.steps.length > 0).map((p) => p.adapter.displayName),
@@ -383,7 +395,17 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
     planned.push({ agent, adapter, steps });
   }
   const plans = skipReadOnly(out, planned, 'disconnect');
-  const total = printPlan(out, plans, 'nothing to remove');
+  let total = printPlan(out, plans, 'nothing to remove');
+  // Without --agents, Mindly is removed entirely: its rules section goes too.
+  const rulesFile = explicit === null ? planRulesSyncRemoval(out.io) : null;
+  if (rulesFile !== null) {
+    out.line(out.style.bold('Rules in agent instruction files'));
+    out.line("  Remove Mindly's rules section and stop keeping it updated");
+    for (const { root, changes } of rulesFile) {
+      out.line(`  ${out.style.dim(root)}`);
+      total += Math.max(1, printRulesFileChanges(out, changes));
+    }
+  }
   if (o.dryRun) {
     out.line();
     out.line('Dry run: nothing was written.');
@@ -404,12 +426,26 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
       out.line(describeApplied(applied));
     }
   }
+  if (rulesFile !== null) {
+    for (const { root, changes } of removeRulesSync(out.io)) {
+      for (const c of changes) {
+        if (c.skipped === null && c.next !== c.previous) {
+          out.line(`${c.next === null ? 'Deleted' : 'Wrote'} ${join(root, c.target)}`);
+        }
+      }
+    }
+  }
   const sc = out.screen();
   const names = plans.filter((p) => p.steps.length > 0).map((p) => p.adapter.displayName);
   sc.blank();
-  sc.text(
-    `${sc.mark('ok')} Disconnected ${names.join(', ')}. Restart running agent sessions so they stop using Mindly.`,
-  );
+  if (names.length > 0) {
+    sc.text(
+      `${sc.mark('ok')} Disconnected ${names.join(', ')}. Restart running agent sessions so they stop using Mindly.`,
+    );
+  }
+  if (rulesFile !== null) {
+    sc.text(`${sc.mark('ok')} Removed Mindly's rules section from your agent instruction files.`);
+  }
   sc.note(`Your Mindly data in ${mindlyHome(env)} is kept.`, 2);
   sc.next([{ cmd: 'mindly forget --project', why: "delete this project's Mindly data too" }]);
   return 0;

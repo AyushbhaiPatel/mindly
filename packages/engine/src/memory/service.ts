@@ -18,6 +18,7 @@ import {
 } from '@mindly/core';
 import type { MemoryFilter, MemoryPatch, MemorySearchHit } from '@mindly/store';
 import type { Kernel } from '../kernel.js';
+import { stripManagedSection } from './managed-section.js';
 
 export const MAX_TITLE = 160;
 export const MAX_BODY = 4000;
@@ -108,7 +109,49 @@ export function cleanScopePaths(paths: readonly string[] | undefined): string[] 
 }
 
 export class MemoryService {
+  private readonly ruleListeners: ((projectId: string) => void)[] = [];
+  private batchDepth = 0;
+  private readonly pendingRuleChanges = new Set<string>();
+
   constructor(private readonly k: Kernel) {}
+
+  /** Calls `fn` with the project id after any rule of that project is created or changed. */
+  onRulesChanged(fn: (projectId: string) => void): void {
+    this.ruleListeners.push(fn);
+  }
+
+  /** Runs `fn`, reporting rule changes made inside it once per project when it returns. */
+  batchRuleChanges<T>(fn: () => T): T {
+    this.batchDepth++;
+    try {
+      return fn();
+    } finally {
+      this.batchDepth--;
+      if (this.batchDepth === 0) {
+        const projects = [...this.pendingRuleChanges];
+        this.pendingRuleChanges.clear();
+        for (const p of projects) this.notifyRules(p);
+      }
+    }
+  }
+
+  private rulesChanged(m: Memory): void {
+    if (m.kind !== 'rule') return;
+    if (this.batchDepth > 0) this.pendingRuleChanges.add(m.projectId);
+    else this.notifyRules(m.projectId);
+  }
+
+  private notifyRules(projectId: string): void {
+    for (const fn of this.ruleListeners) {
+      try {
+        fn(projectId);
+      } catch (err) {
+        this.k.logger.warn('rule change listener failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
 
   private clean(text: string, max: number): string {
     return sanitizeForContext(
@@ -215,6 +258,7 @@ export class MemoryService {
       });
       return m;
     });
+    this.rulesChanged(memory);
     return memory;
   }
 
@@ -247,7 +291,8 @@ export class MemoryService {
     if (!excerpt) return { rel: resolved.rel, excerpt: null, hash: null, valid: true };
     const content = readBounded(resolved.abs);
     const normExcerpt = normalizeBlock(excerpt);
-    const valid = content !== null && normalizeBlock(content).includes(normExcerpt);
+    const valid =
+      content !== null && normalizeBlock(stripManagedSection(content)).includes(normExcerpt);
     return {
       rel: resolved.rel,
       excerpt: this.clean(excerpt, 2000),
@@ -282,6 +327,7 @@ export class MemoryService {
       type: m.status === 'archived' ? 'memory.archived' : 'memory.updated',
       payload: { memoryId: m.id, version: m.version, trust: m.trust, reason },
     });
+    this.rulesChanged(m);
     return m;
   }
 
@@ -306,6 +352,7 @@ export class MemoryService {
       type: 'memory.stale',
       payload: { memoryId: m.id, title: m.title, reason },
     });
+    this.rulesChanged(m);
     return m;
   }
 
@@ -319,6 +366,7 @@ export class MemoryService {
       type: 'memory.archived',
       payload: { memoryId: id, deleted: true },
     });
+    this.rulesChanged(m);
   }
 
   search(projectId: string, query: string, filter: MemoryFilter = {}): MemorySearchHit[] {

@@ -206,6 +206,17 @@ export class RuleService {
     rules: readonly InstructionRule[],
     trust: 'approved' | 'proposed',
   ): Memory[] {
+    return this.memory.batchRuleChanges(() =>
+      this.storeImported(projectId, projectRoot, rules, trust),
+    );
+  }
+
+  private storeImported(
+    projectId: string,
+    projectRoot: string,
+    rules: readonly InstructionRule[],
+    trust: 'approved' | 'proposed',
+  ): Memory[] {
     const out: Memory[] = [];
     for (const r of rules) {
       const where = `Imported from ${r.file}, line ${r.line}.`;
