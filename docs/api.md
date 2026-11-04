@@ -20,12 +20,20 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
   `Origin: http://127.0.0.1:<port>` (or `localhost`) and header `X-Mindly-CSRF: 1` → else 403.
 - WebSocket upgrade requires a valid cookie or bearer token and a matching `Origin` (cookie case).
 - Unauthenticated: `GET /api/health`, static dashboard assets, `POST /api/auth/exchange`.
+- Any request that carries an `Origin` header must carry an allowed one (else 403), whatever the
+  authentication. `POST /api/auth/exchange` also needs `X-Mindly-CSRF: 1`.
+- `POST /api/auth/codes` is only honoured for the bearer token (403 for a cookie session).
+  `POST /api/auth/exchange` answers `{ ok: true, expiresAt }` plus the cookie, or 401 for an
+  unknown, expired or already used code. `POST /api/auth/logout` answers 204.
+- Request bodies must be `application/json` (any other content type is a 400); an empty body is
+  treated as `{}`. Unknown body keys are rejected.
 
 ## Errors
 
 `{ "error": { "code": "<ErrorCode from @mindly/core>", "message": "..." } }` with status
-400 invalid_input · 401 unauthenticated · 403 forbidden/untrusted_project · 404 not_found ·
-409 conflict · 413 too large · 421 bad host · 500 internal (generic message only).
+400 invalid_input/path_outside_project · 401 unauthenticated · 403 forbidden/untrusted_project ·
+404 not_found · 409 conflict · 413 too_large · 421 bad_host · 500 internal (generic message only) ·
+503 unavailable (e.g. restoring a snapshot that has no git ref) · 504 timeout.
 
 ## Endpoints
 
@@ -43,7 +51,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 | POST   | `/api/memories/:id/approve` · `/reject` · `/archive`                             | `Memory`                                                                                                          |
 | DELETE | `/api/memories/:id`                                                              | hard delete → `204`                                                                                               |
 | GET    | `/api/projects/:projectId/conflicts?status`                                      | `Conflict[]`                                                                                                      |
-| POST   | `/api/conflicts/:id/status`                                                      | `{ status: 'acknowledged'                                                                                         | 'resolved' | 'dismissed' }`→`Conflict` |
+| POST   | `/api/conflicts/:id/status`                                                      | `{ status: 'acknowledged' \| 'resolved' \| 'dismissed' }` → `Conflict`                                            |
 | GET    | `/api/projects/:projectId/tasks?status`                                          | `Task[]`                                                                                                          |
 | GET    | `/api/projects/:projectId/intents`                                               | active `Intent[]`                                                                                                 |
 | GET    | `/api/projects/:projectId/deliveries?status`                                     | `Delivery[]`                                                                                                      |
@@ -60,7 +68,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 | GET    | `/api/snapshots/:id/diff`                                                        | snapshot diff                                                                                                     |
 | POST   | `/api/snapshots/:id/restore`                                                     | `{ branch? }` → result                                                                                            |
 | GET    | `/api/projects/:projectId/trust`                                                 | `{ trusted, configHash, configError, checks: {name, argv}[] }`                                                    |
-| POST   | `/api/projects/:projectId/trust`                                                 | trust current config (cookie/bearer + CSRF) → same shape                                                          |
+| POST   | `/api/projects/:projectId/trust`                                                 | `{ configHash }` (the hash the user reviewed) → trust that config → same shape; 409 if the file changed           |
 
 `Overview`:
 
@@ -79,6 +87,71 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 }
 ```
 
+### Result shapes
+
+These are the shapes the dashboard (`apps/dashboard/src/format.ts`, `views/Insight.tsx`) reads.
+
+`Run.result` by kind (`null` while queued or running):
+
+```ts
+// shadow_merge: passed | failed (conflicts or failing checks) | cancelled (< 2 live worktrees) | error
+{
+  clean: boolean;
+  conflictedPaths: string[];
+  conflicts: { sessionIds: string[]; paths: string[] }[];
+  checks: {
+    name: string;
+    ok: boolean;
+    status: 'pass' | 'fail' | 'timeout' | 'error';
+    exitCode: number | null;
+    durationMs: number;
+    outputTail: string; // redacted, last 4000 characters
+  }[];
+  checksSkipped: 'untrusted' | 'none_configured' | 'conflicts' | null;
+  sessionIds: string[];
+  merged: string[];
+  skipped: string[];
+  mergedTree: string | null;
+  note?: string;
+}
+// review: passed (review completed) | error
+{
+  reviewer: string;
+  sessionId: string;
+  summary: string;
+  findings: { severity: 'critical' | 'warning' | 'info'; file: string | null; line: number | null; message: string }[];
+  parsed: boolean; status: string; redactions: number; diffTruncated: boolean;
+  durationMs: number; costUsd: number | null; error: string | null;
+}
+// replay: passed (every agent completed) | failed | error
+{
+  baseCommit: string;
+  checksSkipped: 'untrusted' | null;
+  agents: {
+    agent: string; status: string; filesChanged: number; addedLines: number; removedLines: number;
+    checksPassed: number | null; checksTotal: number | null; durationMs: number; costUsd: number | null;
+    summary: string; shortstat: string; resultRef: string | null; resultCommit: string | null; error: string | null;
+  }[];
+}
+// contract_sweep (approved command contracts of trusted projects)
+{ contracts: { contractId: string; memoryId: string; state: string; exitCode: number | null; durationMs: number; outputTail: string }[] }
+```
+
+Provenance (`GET …/provenance`): `{ file, line, text, found, sessionId, agentKind, createdAt, tool,
+promptSummary, memories: Memory[], changes: ProvenanceChange[] }`. The flat fields describe the
+most recent recorded edit (`found: false` and nulls when none is on record).
+
+Snapshot diff: `{ snapshot, memories: { added, changed, removed }, tasks: { added, changed, removed },
+conflicts: { opened, closed }, files?: { path, status: 'changed', added?, removed? }[], details }`.
+The counts are numbers, `details` holds the engine's full lists, and `files` compares the snapshot
+commit with the project's current working tree (omitted when git cannot answer).
+
+Restore: the engine's `RestoreResult` `{ snapshot, memoriesRestored, memoriesArchived,
+memoriesMissing, tasksRestored, branch: string | null }`.
+
+Review requests need a runner agent (`claude-code`, `codex`) different from the session's agent;
+replay takes 1-4 distinct runner agents. Replay checks only come from a trusted project config.
+
 ## Live feed
 
 `GET /api/live` upgrades to WebSocket. Server → client messages:
@@ -91,4 +164,5 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 
 The server polls `events.maxSeq()` every 500 ms (cheap) and pushes new rows. Client → server:
 `{ type: 'subscribe', projectId: string, afterSeq?: number }`. Max 16 connections; idle sockets are
-pinged every 25 s and closed if they don't answer.
+pinged every 25 s (a JSON `ping` message plus a protocol ping) and closed if they don't answer. A
+connection beyond the limit is closed with code 1013; shutdown closes sockets with 1001.
