@@ -404,74 +404,273 @@ export type Term =
   | 'check'
   | 'contextSize'
   | 'snapshot'
-  | 'provenance';
+  | 'provenance'
+  | 'needsYou'
+  | 'agents'
+  | 'tasks'
+  | 'runs'
+  | 'standup'
+  | 'configTrust';
 
-/** One-sentence definitions shown the first time a term appears. */
+/**
+ * Explanations shown only in the "?" tooltip next to a section label. The page itself states
+ * facts; anything that explains a concept belongs here.
+ */
 export const TERMS: Record<Term, string> = {
   intent:
-    'Intent: what an agent says it is about to edit, so other agents can stay out of the way.',
+    'Intent: what an agent says it is about to edit, so other agents can stay out of the way. An intent expires unless the agent renews it.',
   conflict:
-    'Conflict: two agents whose work collides, or a change that breaks something another agent relies on.',
+    'Conflict: two agents whose work collides, or a change that breaks something another agent relies on. Decide which change wins, then mark it resolved.',
   handoff:
-    'Handoff: unfinished work packaged up by an agent that stopped, so the next agent can continue it.',
+    'Handoff: unfinished work packaged up by an agent that stopped (for example at its usage limit). The next session of the agent it names picks it up and continues.',
   mergeCheck:
     "Merge check: Mindly merges every agent's work in a scratch copy and runs the project's checks, without touching your branches.",
-  xray: 'Context X-Ray: exactly what Mindly gave an agent, what it left out, and why.',
+  xray: 'Context X-Ray: each time an agent starts, gets a prompt or is about to edit a file, Mindly sends it what matters right now. This shows what it got, what was left out, and why. Newest first.',
   memory:
-    'Memory: rules, decisions, facts and known pitfalls that Mindly gives to every agent working in this project.',
+    'Memory: rules, decisions, facts and known pitfalls that Mindly gives to every agent working in this project. Approved rules apply to every agent.',
   trust:
-    'Trust: whether a memory was approved by you, confirmed in the code, only suggested by an agent, or may be outdated.',
+    'Trust: whether a memory was approved by you, confirmed in the code, only suggested by an agent (a hint until you approve it), or may be outdated because the code it relied on changed.',
   update:
     'Update: a note Mindly passes to an agent, for example that another agent changed a file it uses.',
   check:
     'Check: a small test tied to a memory (a file exists, a pattern is present) that keeps the memory honest.',
   contextSize:
     'Context size: how much of the space Mindly reserves in the agent’s prompt this context used. When it is full, the least relevant items are left out.',
-  snapshot: 'Snapshot: code, memory and tasks saved together so you can go back to this point.',
-  provenance: 'Provenance: which agent wrote a line, when, and in response to what.',
+  snapshot:
+    'Snapshot: code (tracked and untracked), memory and tasks saved together. Restoring creates a new branch and never touches your current one.',
+  provenance:
+    'Provenance: which agent wrote a line, when, and in response to what. Lines written by a person or before Mindly was installed have no record.',
+  needsYou:
+    'Needs you: decisions only you can make. Suggested rules and memories are hints to agents until you approve them; a handoff is picked up by the next session of the agent it names.',
+  agents:
+    'Agents: Claude Code, Codex and Cursor sessions active in this project in the last 30 minutes. Editing lists the files each agent said it is about to change.',
+  tasks:
+    'Tasks: what each agent is working on and its plan, shared so agents do not duplicate work.',
+  runs: 'Runs: merge checks, cross-agent reviews (another agent reads the changes) and replays (several agents get the same prompt in separate copies, compared side by side). Reviews and replays launch agents on this machine and may use paid API quota.',
+  standup: 'Standup: a short written summary of what agents did in the chosen period.',
+  configTrust:
+    "Config trust: Mindly runs no command from this repository's .mindly/config.json until you trust that exact file. If the file changes, Mindly asks again. Without trust, merge checks combine the work but skip the commands.",
 };
 
 /* ------------------------------------------------------------------------------------------ */
-/* Summary bar and "Needs you"                                                                 */
+/* Stat row and "Needs you"                                                                    */
 /* ------------------------------------------------------------------------------------------ */
 
-export interface SummaryInput {
+export interface StatInput {
   sessions: readonly Pick<Session, 'status'>[];
   needsYou: number;
   lastMergeCheck: { status: string; at: number | null } | null;
-  now?: number;
 }
 
-/** "2 agents working · 2 things need you · last merge check passed 3m ago". */
-export function summaryLine(input: SummaryInput): string {
-  const now = input.now ?? Date.now();
-  const parts: string[] = [];
-  const working = input.sessions.filter((s) => s.status === 'active').length;
-  const idle = input.sessions.filter((s) => s.status === 'idle').length;
-  const limited = input.sessions.filter((s) => s.status === 'rate_limited').length;
-  if (working + idle + limited === 0) parts.push('No agents running');
-  else {
-    if (working > 0) parts.push(`${count(working, 'agent')} working`);
-    if (idle > 0) parts.push(`${idle} idle`);
-    if (limited > 0) parts.push(`${limited} hit ${limited === 1 ? 'its' : 'their'} usage limit`);
-  }
-  parts.push(
-    input.needsYou === 0
-      ? 'nothing needs you'
-      : `${count(input.needsYou, 'thing')} ${input.needsYou === 1 ? 'needs' : 'need'} you`,
-  );
+export interface Stat {
+  /** A count, or one word for the merge check ("failed"). */
+  value: string;
+  label: string;
+  tone: Tone;
+  /** For the merge check: when it finished, shown after the label. */
+  at?: number | null;
+}
+
+/**
+ * The Mission Control stat row: counts as numbers with a label underneath, and the last merge
+ * check as one word ("failed").
+ */
+export function overviewStats(input: StatInput): Stat[] {
+  const by = (st: Session['status']) => input.sessions.filter((s) => s.status === st).length;
+  const out: Stat[] = [
+    { value: String(by('active')), label: 'working', tone: 'good' },
+    { value: String(by('idle')), label: 'idle', tone: 'warn' },
+  ];
+  const limited = by('rate_limited');
+  if (limited > 0) out.push({ value: String(limited), label: 'at usage limit', tone: 'bad' });
+  out.push({
+    value: String(input.needsYou),
+    label: 'need you',
+    tone: input.needsYou > 0 ? 'bad' : 'neutral',
+  });
   const m = input.lastMergeCheck;
-  if (m) {
-    if (m.status === 'queued' || m.status === 'running') parts.push('merge check running');
-    else parts.push(`last merge check ${runStatusWords(m.status)} ${relTime(m.at, now)}`);
+  if (!m) {
+    out.push({ value: 'none', label: 'merge check', tone: 'neutral' });
+    return out;
   }
-  return parts.join(' · ');
+  const running = m.status === 'queued' || m.status === 'running';
+  out.push({
+    value: running ? 'running' : runStatusWords(m.status),
+    label: 'merge check',
+    tone:
+      m.status === 'passed'
+        ? 'good'
+        : m.status === 'failed' || m.status === 'error'
+          ? 'bad'
+          : 'info',
+    at: m.at,
+  });
+  return out;
 }
 
-/** True when the overview has nothing going on at all. */
-export function isAllQuiet(input: SummaryInput): boolean {
-  return input.needsYou === 0 && !input.sessions.some((s) => s.status !== 'ended');
+/** What a "Needs you" row is about. */
+export type NeedKind = 'conflict' | 'rule' | 'memory' | 'handoff';
+
+/** Kind label at the start of a "Needs you" row: "Conflict", "Rule", "Memory", "Handoff". */
+export function needKindWords(kind: NeedKind): string {
+  return kind[0]!.toUpperCase() + kind.slice(1);
 }
+
+/** The one action of a "Needs you" row. */
+export function needActionWords(kind: NeedKind): string {
+  switch (kind) {
+    case 'conflict':
+      return 'Resolve';
+    case 'handoff':
+      return 'Details';
+    default:
+      return 'Review';
+  }
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Tables                                                                                      */
+/* ------------------------------------------------------------------------------------------ */
+
+/**
+ * Short age for time columns: "now", "12s", "3m", "2h", "4d", then a date. No "ago": the column
+ * says what it is.
+ */
+export function shortAge(ms: number | null | undefined, now = Date.now()): string {
+  if (!ms) return '—';
+  const d = Math.max(0, Math.round((now - ms) / 1000));
+  if (d < 10) return 'now';
+  if (d < 60) return `${d}s`;
+  if (d < 3600) return `${Math.floor(d / 60)}m`;
+  if (d < 86_400) return `${Math.floor(d / 3600)}h`;
+  if (d < 7 * 86_400) return `${Math.floor(d / 86_400)}d`;
+  const date = new Date(ms);
+  return `${date.getDate()} ${MONTHS[date.getMonth()]}`;
+}
+
+/** "+2 more" after a truncated list. */
+export function moreWords(n: number): string {
+  return `+${n} more`;
+}
+
+/** Trust in one or two words, for a table column. */
+export function trustShort(trust: Trust): string {
+  switch (trust) {
+    case 'approved':
+      return 'approved';
+    case 'verified':
+      return 'confirmed in code';
+    case 'proposed':
+      return 'waiting for you';
+    case 'stale':
+      return 'may be outdated';
+    case 'rejected':
+      return 'rejected';
+    default:
+      return String(trust);
+  }
+}
+
+/** Order of the one-line memory summary on Mission Control. */
+export const MEMORY_SUMMARY_ORDER: readonly Trust[] = ['approved', 'verified', 'proposed', 'stale'];
+
+/** The one-line memory summary: "3 approved", "1 confirmed in code", … (zero counts left out). */
+export function memorySummary(
+  counts: Partial<Record<Trust, number>>,
+): { trust: Trust; n: number; text: string }[] {
+  return MEMORY_SUMMARY_ORDER.filter((t) => (counts[t] ?? 0) > 0).map((t) => ({
+    trust: t,
+    n: counts[t] ?? 0,
+    text: trustShort(t),
+  }));
+}
+
+/** Task progress as "1/3", or an empty string when the task has no plan. */
+export function progressWords(done: number, total: number): string {
+  return total > 0 ? `${done}/${total}` : '';
+}
+
+/** Column headers, shared by every table. */
+export const COLUMNS = {
+  agent: 'Agent',
+  task: 'Task',
+  editing: 'Editing',
+  active: 'Active',
+  severity: 'Severity',
+  what: 'What',
+  agents: 'Agents',
+  age: 'Age',
+  check: 'Check',
+  result: 'Result',
+  time: 'Time',
+  trust: 'Trust',
+  kind: 'Kind',
+  title: 'Title',
+  from: 'From',
+  updated: 'Updated',
+  status: 'Status',
+  owner: 'Owner',
+  progress: 'Progress',
+  edit: 'Edit',
+  files: 'Files',
+  expires: 'Expires',
+  update: 'Update',
+  route: 'From → to',
+  when: 'When',
+  handoff: 'Handoff',
+  item: 'Item',
+  relevance: 'Relevance',
+  why: 'Why',
+  version: 'Version',
+  change: 'Change',
+  by: 'By',
+  type: 'Type',
+  ref: 'Ref',
+  checked: 'Checked',
+  spec: 'Spec',
+  lastRun: 'Last run',
+  fileLine: 'File:line',
+  finding: 'Finding',
+  label: 'Label',
+  commit: 'Commit',
+  saved: 'Saved',
+  name: 'Name',
+  command: 'Command',
+} as const;
+
+/** Empty states: the fact only. Explanations live in the "?" tooltips (TERMS). */
+export const EMPTY = {
+  needsYou: 'Nothing needs you.',
+  agents: 'No agents active in the last 30 minutes.',
+  conflicts: 'No open conflicts.',
+  mergeCheck: 'No merge check yet.',
+  memory: 'No memories yet.',
+  memoryFiltered: 'No memories match these filters.',
+  memoryArchived: 'Nothing archived.',
+  activity: 'No activity yet.',
+  tasks: 'No tasks.',
+  intents: 'No agent is editing anything.',
+  deliveries: 'No updates.',
+  deliveriesUnseen: 'Every update has been seen.',
+  deliveriesSeen: 'No update has been seen yet.',
+  handoffs: 'No handoffs.',
+  runs: 'Nothing has run yet.',
+  runWaiting: 'Waiting to start.',
+  runRunning: 'Running.',
+  runResult: 'No result yet.',
+  findings: 'No findings.',
+  replay: 'No agent reported a result.',
+  xray: 'No context sent to this agent yet.',
+  included: 'Nothing included.',
+  omitted: 'Nothing left out.',
+  standup: 'No agent activity in this period.',
+  snapshots: 'No snapshots yet.',
+  evidence: 'No evidence linked.',
+  checks: 'No checks.',
+  givenTo: 'Not given to any agent yet.',
+  provenance: 'No agent edit recorded for this line.',
+  configChecks: 'No checks defined.',
+} as const;
 
 /* ------------------------------------------------------------------------------------------ */
 /* Conflicts as problem statements                                                             */
@@ -516,6 +715,52 @@ export function conflictHeadline(
       return `${a ? `${possessive(a)} change` : 'A change'} goes against a recorded decision`;
   }
   return humanizeAgentText(c.title);
+}
+
+/**
+ * The short "What" column of a conflict row: no agent names (they have their own column).
+ * "Both editing `src/auth.ts`", "Change broke a check in `src/x.ts`".
+ */
+export function conflictWhat(
+  c: Pick<Conflict, 'kind' | 'title' | 'sessionIds' | 'paths'>,
+  sessions: ReadonlyMap<string, Pick<Session, 'agentKind' | 'id'>>,
+): string {
+  const path = c.paths[0];
+  const where = path ? code(path) : 'the same code';
+  switch (c.kind) {
+    case 'intent_overlap':
+    case 'file_overlap':
+      return `Both editing ${where}`;
+    case 'impact': {
+      const a = agentOf(sessions.get(c.sessionIds[0] ?? ''));
+      return `${a === 'an agent' ? 'A change to' : `${a} changed`} ${where}`;
+    }
+    case 'contract_broken':
+      return `Change broke a check${path ? ` in ${where}` : ''}`;
+    case 'merge_conflict':
+      return `Changes don't merge cleanly in ${where}`;
+    case 'check_failed':
+      return 'Checks fail when the work is merged';
+    case 'decision_contradiction':
+      return 'Change goes against a recorded decision';
+  }
+  return humanizeAgentText(c.title);
+}
+
+/**
+ * The "Agents" column of a conflict row: "Claude Code, Codex", or "Codex → Cursor" when one
+ * agent's change affects another's work.
+ */
+export function conflictAgents(
+  c: Pick<Conflict, 'kind' | 'sessionIds'>,
+  sessions: ReadonlyMap<string, Pick<Session, 'agentKind' | 'id'>>,
+): string {
+  const names = [...new Set(c.sessionIds.map((id) => agentOf(sessions.get(id))))].filter(
+    (n) => n !== 'an agent',
+  );
+  if (names.length === 0) return '—';
+  if (c.kind === 'impact' && names.length === 2) return `${names[0]} → ${names[1]}`;
+  return names.join(', ');
 }
 
 /** Splits text with `backtick` spans into plain and code parts for rendering as text nodes. */
@@ -625,7 +870,7 @@ export function xraySentence(
 export type Tone = 'neutral' | 'good' | 'warn' | 'bad' | 'info' | 'accent';
 
 export interface EventLine {
-  /** Who did it, already in plain words ("Claude Code · 4409d433"), or null for Mindly itself. */
+  /** Who did it, as a product name ("Claude Code"), or null for Mindly itself. */
   actor: string | null;
   /** The rest of the sentence, starting lowercase after an actor or capitalised without one. */
   text: string;
@@ -655,7 +900,8 @@ function payloadFiles(payload: Record<string, unknown>): string | null {
 const quote = (s: string) => `“${s}”`;
 
 /**
- * Renders an event as a plain sentence ("Codex · f57f6d10 started editing src/auth.ts"). Never
+ * Renders an event as an actor ("Codex") and the rest of a plain sentence ("started editing
+ * src/auth.ts"). Ids never appear in the line. Never
  * shows the event type name. Payload fields are untrusted and optional; every branch has a
  * fallback.
  */
@@ -667,11 +913,11 @@ export function describeEvent(
   const s = ev.sessionId ? sessions.get(ev.sessionId) : undefined;
   const kind = str(p, 'agentKind', 'agent');
   const actor = s
-    ? sessionName(s)
+    ? productName(s.agentKind)
     : kind
       ? productName(kind)
       : ev.sessionId
-        ? `An agent · ${shortId(ev.sessionId)}`
+        ? 'An agent'
         : null;
   const rawTitle = str(p, 'title', 'summary');
   const title = rawTitle ? humanizeAgentText(rawTitle) : null;
@@ -699,8 +945,8 @@ export function describeEvent(
     case 'file.changed': {
       const add = typeof p.addedLines === 'number' ? p.addedLines : null;
       const rem = typeof p.removedLines === 'number' ? p.removedLines : null;
-      const lines =
-        add !== null || rem !== null ? ` (${count((add ?? 0) + (rem ?? 0), 'line')} changed)` : '';
+      const diff = [add ? `+${add}` : '', rem ? `−${rem}` : ''].filter(Boolean).join(' ');
+      const lines = diff ? ` (${diff})` : '';
       return line(`edited ${f ?? 'a file'}${lines}`);
     }
     case 'memory.created':

@@ -1,19 +1,24 @@
 import { useEffect, useId, useState, type FormEvent } from 'react';
 import { RunResult } from '../components/runs';
 import {
+  Age,
+  CopyId,
+  DataTable,
   Drawer,
   Empty,
+  Facts,
   Loaded,
   Mono,
   Panel,
   Segmented,
-  ShortId,
   Status,
-  Time,
-  cx,
+  TextLink,
+  type Column,
 } from '../components/ui';
 import { duration, splitList } from '../format';
 import {
+  COLUMNS,
+  EMPTY,
   humanizeAgentText,
   productName,
   runKindWords,
@@ -38,30 +43,35 @@ export function RunsView() {
   );
   const selectedId = params.get('run') ?? res.data?.[0]?.id ?? null;
   const selected = res.data?.find((r) => r.id === selectedId) ?? null;
+  const cols: Column<Run>[] = [
+    { key: 'kind', header: COLUMNS.kind, cell: (r) => runKindWords(r.kind) },
+    {
+      key: 'result',
+      header: COLUMNS.result,
+      cell: (r) => <Status value={r.status} label={runStatusWords(r.status)} />,
+    },
+    {
+      key: 'what',
+      header: COLUMNS.what,
+      kind: 'main',
+      title: (r) => humanizeAgentText(r.title),
+      cell: (r) => humanizeAgentText(r.title),
+    },
+    { key: 'when', header: COLUMNS.when, kind: 'meta', cell: (r) => <Age ms={r.createdAt} /> },
+  ];
 
   return (
     <div className="view">
       <Panel
         title="Runs"
-        count={res.data?.length}
-        noun="run"
-        help="mergeCheck"
+        help="runs"
         actions={
           <>
-            <Segmented
-              label="Run kind"
-              value={kind}
-              onChange={setKind}
-              options={[
-                { key: 'all', label: 'all' },
-                { key: 'shadow_merge', label: 'merge checks' },
-                { key: 'review', label: 'reviews' },
-                { key: 'replay', label: 'replays' },
-              ]}
-            />
+            <TextLink onClick={() => setDialog('review')}>Start review</TextLink>
+            <TextLink onClick={() => setDialog('replay')}>Start replay</TextLink>
             <button
               type="button"
-              className="btn btn-small"
+              className="btn-primary"
               disabled={!!busy}
               onClick={() =>
                 void run('sm', () => client.shadowMerge(project.id), 'Merge check started').then(
@@ -71,59 +81,40 @@ export function RunsView() {
             >
               Run merge check
             </button>
-            <button type="button" className="btn btn-small" onClick={() => setDialog('review')}>
-              Start review
-            </button>
-            <button
-              type="button"
-              className="btn btn-small btn-primary"
-              onClick={() => setDialog('replay')}
-            >
-              Start replay
-            </button>
           </>
         }
       >
+        <div className="filters">
+          <Segmented
+            label="Run kind"
+            value={kind}
+            onChange={setKind}
+            options={[
+              { key: 'all', label: 'all' },
+              { key: 'shadow_merge', label: 'merge checks' },
+              { key: 'review', label: 'reviews' },
+              { key: 'replay', label: 'replays' },
+            ]}
+          />
+        </div>
         <Loaded res={res}>
           {(runs) =>
             runs.length === 0 ? (
-              <Empty>
-                Nothing has run yet. Merge checks run in the background while agents work; start a
-                review or a replay with the buttons above.
-              </Empty>
+              <Empty>{EMPTY.runs}</Empty>
             ) : (
-              <div className="split">
-                <ul className="run-list" aria-label="Runs">
-                  {runs.map((r) => (
-                    <li key={r.id}>
-                      <button
-                        type="button"
-                        className={cx('run-row', r.id === selectedId && 'is-open')}
-                        aria-current={r.id === selectedId}
-                        onClick={() => navigate('runs', { run: r.id })}
-                      >
-                        <span className="run-row-top">
-                          <Status value={r.status} label={runStatusWords(r.status)} />
-                          <span className="tag">{runKindWords(r.kind)}</span>
-                          <Time ms={r.createdAt} />
-                        </span>
-                        <span className="run-title">{humanizeAgentText(r.title)}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                <div className="run-detail">
-                  {selected ? (
-                    <RunDetail run={selected} />
-                  ) : (
-                    <Empty>Pick a run on the left to see its result.</Empty>
-                  )}
-                </div>
-              </div>
+              <DataTable
+                label="Runs"
+                columns={cols}
+                rows={runs}
+                rowKey={(r) => r.id}
+                onOpen={(r) => navigate('runs', { run: r.id })}
+                isCurrent={(r) => r.id === selectedId}
+              />
             )
           }
         </Loaded>
       </Panel>
+      {selected && <RunDetail run={selected} />}
       <Drawer
         open={dialog === 'review'}
         onClose={() => setDialog(null)}
@@ -149,33 +140,29 @@ function RunDetail({ run }: { run: Run }) {
   const prompt = typeof input.prompt === 'string' ? input.prompt : null;
   const base = typeof input.baseCommit === 'string' ? input.baseCommit : null;
   return (
-    <article className="stack" aria-label={run.title}>
-      <header>
-        <h3 className="detail-title">{humanizeAgentText(run.title)}</h3>
-        <p className="muted small">
-          {runKindWords(run.kind)} ·{' '}
-          <Status value={run.status} label={runStatusWords(run.status)} /> ·{' '}
-          <Time ms={run.createdAt} prefix="started" />
-          {run.startedAt && run.finishedAt && (
-            <> · took {duration(run.finishedAt - run.startedAt)}</>
-          )}{' '}
-          · <ShortId id={run.id} label="run id" />
-        </p>
-        {sid && <p className="small">Reviewed: {sessionName(sessions.get(sid))}</p>}
-        {prompt && (
-          <p className="small">
-            Prompt: <q>{prompt}</q>
-            {base && (
-              <>
-                {' '}
-                at <Mono>{base}</Mono>
-              </>
-            )}
-          </p>
-        )}
-      </header>
-      <RunResult run={run} />
-    </article>
+    <Panel
+      title={humanizeAgentText(run.title)}
+      className="run-detail"
+      meta={<Status value={run.status} label={runStatusWords(run.status)} />}
+    >
+      <div className="detail-stack">
+        <Facts
+          items={[
+            ['Kind', runKindWords(run.kind)],
+            ['Started', <Age key="s" ms={run.startedAt ?? run.createdAt} />],
+            [
+              'Took',
+              run.startedAt && run.finishedAt ? duration(run.finishedAt - run.startedAt) : null,
+            ],
+            ['Reviewed', sid && sessionName(sessions.get(sid))],
+            ['Prompt', prompt && <q>{prompt}</q>],
+            ['Base', base && <Mono>{base}</Mono>],
+            ['Id', <CopyId key="id" id={run.id} label="run id" />],
+          ]}
+        />
+        <RunResult run={run} />
+      </div>
+    </Panel>
   );
 }
 
@@ -199,10 +186,6 @@ function ReviewForm({ onDone }: { onDone(): void }) {
   };
   return (
     <form className="form" onSubmit={submit}>
-      <p className="help">
-        A different agent reads this agent’s changes in the background and reports what it finds as
-        FYI, check this or urgent.
-      </p>
       <Loaded res={sres}>
         {(ss) => (
           <label className="field">
@@ -242,11 +225,11 @@ function ReviewForm({ onDone }: { onDone(): void }) {
       <p className="help">
         This launches the reviewer agent on this machine and may use its paid API quota.
       </p>
-      <div className="btn-row">
-        <button type="submit" className="btn btn-primary" disabled={!!busy || !sessionId}>
+      <div className="action-row">
+        <button type="submit" className="btn-primary" disabled={!!busy || !sessionId}>
           Start review
         </button>
-        <button type="button" className="btn" onClick={onDone}>
+        <button type="button" className="tlink" onClick={onDone}>
           Cancel
         </button>
       </div>
@@ -279,10 +262,6 @@ function ReplayForm({ onDone }: { onDone(): void }) {
   };
   return (
     <form className="form" onSubmit={submit}>
-      <p className="help">
-        Each agent gets the same prompt in its own isolated worktree at the same commit; results are
-        compared side by side.
-      </p>
       <label className="field">
         <span>Prompt</span>
         <textarea
@@ -331,15 +310,15 @@ function ReplayForm({ onDone }: { onDone(): void }) {
         This launches {all.length} agent run{all.length === 1 ? '' : 's'} on this machine and may
         use paid API quota.
       </p>
-      <div className="btn-row">
+      <div className="action-row">
         <button
           type="submit"
-          className="btn btn-primary"
+          className="btn-primary"
           disabled={!!busy || !prompt.trim() || all.length === 0}
         >
           Start replay
         </button>
-        <button type="button" className="btn" onClick={onDone}>
+        <button type="button" className="tlink" onClick={onDone}>
           Cancel
         </button>
       </div>

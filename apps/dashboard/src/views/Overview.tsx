@@ -1,43 +1,58 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { ActivityStream } from '../components/activity';
-import { ShadowMergeResult } from '../components/runs';
+import { ChecksTable } from '../components/runs';
 import {
+  Age,
   CodeText,
+  CopyId,
+  DataTable,
+  Dot,
+  DotWord,
   Empty,
-  Help,
+  Facts,
   Loaded,
   Mono,
   Panel,
-  SeverityBadge,
-  ShortId,
-  Status,
-  Time,
-  TrustBadge,
-  cx,
+  Paths,
+  SeverityMark,
+  StatRow,
+  TextLink,
+  statusTone,
+  type Column,
+  type MenuItem,
 } from '../components/ui';
+import { readShadowMerge } from '../format';
 import { useAction, useApp, useResource } from '../state';
 import {
   CONFLICT_ACTIONS,
-  TRUST_LEVELS,
   type Conflict,
+  type Handoff,
   type Intent,
+  type Memory,
   type Overview,
   type Session,
   type Task,
 } from '../types';
 import {
+  COLUMNS,
+  EMPTY,
   conflictActionWords,
+  conflictAgents,
   conflictHeadline,
   conflictStatusWords,
-  count,
+  conflictWhat,
   humanizeAgentText,
-  isAllQuiet,
+  memorySummary,
+  needActionWords,
+  needKindWords,
+  overviewStats,
   productName,
+  progressWords,
   runStatusWords,
-  sessionName,
   sessionStatusWords,
   shortId,
-  summaryLine,
+  sourceWords,
+  type NeedKind,
 } from '../vocab';
 
 export function OverviewView() {
@@ -47,34 +62,39 @@ export function OverviewView() {
     [project.id],
     ['overview', 'sessions', 'intents', 'conflicts', 'runs'],
   );
+  const waiting = useResource(
+    () =>
+      Promise.all([
+        client.memories(project.id, { trust: 'proposed', status: 'active', limit: 20 }),
+        client.handoffs(project.id),
+      ]),
+    [project.id],
+    ['memories', 'handoffs'],
+  );
   return (
     <Loaded res={res}>
       {(ov) => (
-        <div className="overview">
-          <SummaryBar ov={ov} />
-          <NeedsYou ov={ov} onChange={res.reload} />
-          <div className="grid-main">
-            <div className="col">
-              <Panel title="Agents" count={ov.sessions.length} noun="agent">
-                <AgentCards sessions={ov.sessions} tasks={ov.tasks} intents={ov.intents} />
-              </Panel>
-              <Panel
-                title="Open conflicts"
-                count={ov.conflicts.length}
-                noun="conflict"
-                help="conflict"
-              >
-                <ConflictList conflicts={ov.conflicts} onChange={res.reload} />
-              </Panel>
-            </div>
-            <div className="col">
-              <ShadowMergePanel ov={ov} onQueued={res.reload} />
-              <MemoryCounts ov={ov} />
-              <Panel title="Activity" className="panel-activity">
-                <ActivityStream events={events} />
-              </Panel>
-            </div>
-          </div>
+        <div className="overview view">
+          <Stats ov={ov} />
+          <NeedsYou
+            ov={ov}
+            memories={waiting.data?.[0] ?? []}
+            handoffs={(waiting.data?.[1] ?? []).filter((h) => h.status === 'pending')}
+            onChange={res.reload}
+          />
+          <Panel title="Agents" help="agents">
+            <AgentsTable sessions={ov.sessions} tasks={ov.tasks} intents={ov.intents} />
+          </Panel>
+          <Panel
+            title="Conflicts"
+            help="conflict"
+            meta={ov.conflicts.length > 0 ? `${ov.conflicts.length} open` : undefined}
+          >
+            <ConflictTable conflicts={ov.conflicts} onChange={res.reload} />
+          </Panel>
+          <MergeCheckPanel ov={ov} onQueued={res.reload} />
+          <MemoryLine ov={ov} />
+          <ActivityPanel events={events} />
         </div>
       )}
     </Loaded>
@@ -86,215 +106,170 @@ function needsTotal(ov: Overview): number {
   return n.proposedRules + n.proposedMemories + n.criticalConflicts + n.pendingHandoffs;
 }
 
-function SummaryBar({ ov }: { ov: Overview }) {
+function Stats({ ov }: { ov: Overview }) {
   const last = ov.lastShadowMerge;
-  const input = {
-    sessions: ov.sessions,
-    needsYou: needsTotal(ov),
-    lastMergeCheck: last
-      ? { status: last.status, at: last.finishedAt ?? last.startedAt ?? last.createdAt }
-      : null,
-  };
-  const quiet = isAllQuiet(input);
   return (
-    <p className={cx('summary-bar', input.needsYou > 0 && 'summary-attn')} role="status">
-      <span className="summary-project">{ov.project.name}</span>
-      <span aria-hidden="true" className="summary-sep">
-        {'·'}
-      </span>
-      <span>
-        {quiet ? 'All quiet. No agents are running and nothing needs you.' : summaryLine(input)}
-      </span>
-    </p>
+    <StatRow
+      stats={overviewStats({
+        sessions: ov.sessions,
+        needsYou: needsTotal(ov),
+        lastMergeCheck: last
+          ? { status: last.status, at: last.finishedAt ?? last.startedAt ?? last.createdAt }
+          : null,
+      })}
+    />
   );
 }
 
 interface NeedItem {
   key: string;
+  kind: NeedKind;
   tone: 'warn' | 'bad';
   text: ReactNode;
-  actions: ReactNode;
+  action: ReactNode;
 }
 
-function NeedsYou({ ov, onChange }: { ov: Overview; onChange(): void }) {
+const quoted = (s: string) => `“${s}”`;
+
+function NeedsYou({
+  ov,
+  memories,
+  handoffs,
+  onChange,
+}: {
+  ov: Overview;
+  memories: Memory[];
+  handoffs: Handoff[];
+  onChange(): void;
+}) {
   const { navigate, sessions, client } = useApp();
   const { busy, run } = useAction();
-  const n = ov.needsYou;
   const items: NeedItem[] = [];
 
-  const urgent = ov.conflicts.filter((c) => c.severity === 'critical' && c.status === 'open');
-  for (const c of urgent) {
+  for (const c of ov.conflicts.filter((x) => x.severity === 'critical' && x.status === 'open')) {
     items.push({
       key: `c:${c.id}`,
+      kind: 'conflict',
       tone: 'bad',
-      text: (
-        <>
-          <strong>Urgent conflict:</strong> <CodeText text={conflictHeadline(c, sessions)} />.
-          Decide which change wins, then mark it resolved.
-        </>
-      ),
-      actions: (
-        <>
-          <button
-            type="button"
-            className="btn btn-small btn-primary"
-            disabled={busy !== null}
-            onClick={() =>
-              void run(
-                `${c.id}:resolved`,
-                () => client.setConflictStatus(c.id, 'resolved'),
-                'Conflict marked resolved',
-              ).then((ok) => ok && onChange())
-            }
-          >
-            Mark resolved
-          </button>
-          <button
-            type="button"
-            className="btn btn-small"
-            onClick={() => document.getElementById(`conflict-${c.id}`)?.focus()}
-          >
-            See details
-          </button>
-        </>
-      ),
-    });
-  }
-  // The overview counts urgent conflicts too; cover any the list above did not include.
-  const missingUrgent = n.criticalConflicts - urgent.length;
-  if (missingUrgent > 0) {
-    items.push({
-      key: 'crit',
-      tone: 'bad',
-      text: (
-        <>
-          <strong>{count(missingUrgent, 'urgent conflict')}</strong> between agents{' '}
-          {missingUrgent === 1 ? 'needs' : 'need'} a decision.
-        </>
-      ),
-      actions: (
+      text: <CodeText text={conflictHeadline(c, sessions)} />,
+      action: (
         <button
           type="button"
-          className="btn btn-small"
-          onClick={() => document.getElementById('conflicts-list')?.focus()}
+          className="btn-primary"
+          disabled={busy !== null}
+          aria-label={`Resolve conflict ${shortId(c.id)}`}
+          onClick={() =>
+            void run(
+              `${c.id}:resolved`,
+              () => client.setConflictStatus(c.id, 'resolved'),
+              'Conflict marked resolved',
+            ).then((ok) => ok && onChange())
+          }
         >
-          See conflicts
+          {needActionWords('conflict')}
         </button>
       ),
     });
   }
-  if (n.proposedRules > 0) {
+  for (const m of memories) {
+    const kind: NeedKind = m.kind === 'rule' ? 'rule' : 'memory';
     items.push({
-      key: 'rules',
+      key: `m:${m.id}`,
+      kind,
       tone: 'warn',
       text: (
         <>
-          <strong>{count(n.proposedRules, 'suggested rule')}</strong>{' '}
-          {n.proposedRules === 1 ? 'is' : 'are'} waiting for you. Approved rules apply to every
-          agent.
+          {quoted(m.title)}
+          <span className="muted">
+            {' '}
+            {'—'} from {sourceWords(m.source, sessions)}
+          </span>
         </>
       ),
-      actions: (
+      action: (
         <button
           type="button"
-          className="btn btn-small btn-primary"
-          onClick={() => navigate('memory', { kind: 'rule', trust: 'proposed' })}
+          className="btn-primary"
+          aria-label={`Review ${kind}: ${m.title}`}
+          onClick={() => navigate('memory', { trust: 'proposed', m: m.id })}
         >
-          Review {n.proposedRules === 1 ? 'rule' : 'rules'}
+          {needActionWords(kind)}
         </button>
       ),
     });
   }
-  if (n.proposedMemories > 0) {
+  for (const h of handoffs) {
     items.push({
-      key: 'mem',
+      key: `h:${h.id}`,
+      kind: 'handoff',
       tone: 'warn',
       text: (
         <>
-          <strong>{count(n.proposedMemories, 'suggested memory', 'suggested memories')}</strong>{' '}
-          {n.proposedMemories === 1 ? 'is' : 'are'} waiting for you. Until you approve them, agents
-          treat them as hints only.
+          {quoted(humanizeAgentText(h.packet.goal || h.summary))}
+          <span className="muted">
+            {' → '}
+            {h.toAgentKind ? productName(h.toAgentKind) : 'any agent'}
+          </span>
         </>
       ),
-      actions: (
-        <button
-          type="button"
-          className="btn btn-small"
-          onClick={() => navigate('memory', { trust: 'proposed' })}
-        >
-          Review {n.proposedMemories === 1 ? 'memory' : 'memories'}
-        </button>
-      ),
-    });
-  }
-  if (n.pendingHandoffs > 0) {
-    items.push({
-      key: 'hand',
-      tone: 'warn',
-      text: (
-        <>
-          <strong>{count(n.pendingHandoffs, 'handoff')}</strong>{' '}
-          {n.pendingHandoffs === 1 ? 'is' : 'are'} waiting to be picked up. Start the agent it is
-          meant for in this project and it continues where the last one stopped.
-        </>
-      ),
-      actions: (
-        <button
-          type="button"
-          className="btn btn-small"
-          onClick={() => navigate('coordination', { focus: 'handoffs' })}
-        >
-          See {n.pendingHandoffs === 1 ? 'handoff' : 'handoffs'}
-        </button>
+      action: (
+        <TextLink go onClick={() => navigate('coordination', { focus: 'handoffs' })}>
+          {needActionWords('handoff')}
+        </TextLink>
       ),
     });
   }
 
   return (
-    <section
-      className={cx('needs', items.length === 0 && 'needs-clear')}
-      aria-labelledby="needs-title"
+    <Panel
+      title="Needs you"
+      help="needsYou"
+      meta={items.length > 0 ? String(items.length) : undefined}
+      className="needs"
     >
-      <h2 className="needs-title" id="needs-title">
-        Needs you
-      </h2>
       {items.length === 0 ? (
-        <p className="needs-none">
-          Nothing needs you right now. Suggested memories, urgent conflicts and handoffs will show
-          up here.
-        </p>
+        <Empty>{EMPTY.needsYou}</Empty>
       ) : (
-        <ul className="needs-items">
+        <ul className="needs-list">
           {items.map((i) => (
-            <li key={i.key} className={cx('needs-item', `needs-${i.tone}`)}>
-              <span className="needs-mark" aria-hidden="true">
-                {i.tone === 'bad' ? '✗' : '!'}
-              </span>
-              <p className="needs-text">{i.text}</p>
-              <div className="needs-actions">{i.actions}</div>
+            <li key={i.key} className="need">
+              <Dot tone={i.tone} />
+              <span className="need-kind">{needKindWords(i.kind)}</span>
+              <span className="need-text">{i.text}</span>
+              <span className="need-action">{i.action}</span>
             </li>
           ))}
         </ul>
       )}
-    </section>
+    </Panel>
   );
 }
 
-const AGENT_MARK: Record<string, string> = {
-  'claude-code': 'CC',
-  codex: 'CX',
-  cursor: 'CU',
-};
-
+/**
+ * The agent's stable colour dot (Claude Code violet, Codex blue, Cursor pink, others grey).
+ * Decorative: the agent's name is always written next to it.
+ */
 export function AgentMark({ kind }: { kind: string }) {
+  return <Dot agent={kind} />;
+}
+
+/** Agent name with its colour dot. */
+export function AgentName({ kind }: { kind: string | null | undefined }) {
   return (
-    <span className={cx('agent-mark', `agent-${kind}`)} aria-hidden="true">
-      {AGENT_MARK[kind] ?? kind.slice(0, 2).toUpperCase()}
+    <span className="dot-word">
+      <Dot agent={kind ?? 'other'} />
+      <span>{productName(kind)}</span>
     </span>
   );
 }
 
-function AgentCards({
+interface AgentRow {
+  s: Session;
+  task: Task | undefined;
+  files: string[];
+}
+
+function AgentsTable({
   sessions,
   tasks,
   intents,
@@ -303,241 +278,287 @@ function AgentCards({
   tasks: Task[];
   intents: Intent[];
 }) {
-  if (sessions.length === 0)
-    return (
-      <Empty>
-        No agents have been active in the last 30 minutes. Start Claude Code, Codex or Cursor in
-        this repository and it appears here within a few seconds.
-      </Empty>
-    );
-  let helpShown = false;
+  if (sessions.length === 0) return <Empty>{EMPTY.agents}</Empty>;
+  const rows: AgentRow[] = sessions.map((s) => ({
+    s,
+    task: tasks.find((t) => t.id === s.currentTaskId),
+    files: [
+      ...new Set(intents.filter((i) => i.sessionId === s.id).flatMap((i) => i.targets.files)),
+    ],
+  }));
+  const cols: Column<AgentRow>[] = [
+    { key: 'agent', header: COLUMNS.agent, cell: (r) => <AgentName kind={r.s.agentKind} /> },
+    {
+      key: 'task',
+      header: COLUMNS.task,
+      kind: 'main',
+      title: (r) => r.task?.title,
+      cell: (r) =>
+        r.task ? (
+          <>
+            {r.task.title}
+            <span className="muted num">
+              {' '}
+              {progressWords(r.task.plan.filter((p) => p.done).length, r.task.plan.length)}
+            </span>
+          </>
+        ) : (
+          <span className="muted">{'—'}</span>
+        ),
+    },
+    {
+      key: 'editing',
+      header: COLUMNS.editing,
+      kind: 'clip',
+      cell: (r) => <Paths paths={r.files} max={1} />,
+    },
+    {
+      key: 'active',
+      header: COLUMNS.active,
+      kind: 'meta',
+      cell: (r) =>
+        r.s.status === 'active' ? (
+          <Age ms={r.s.lastSeenAt} />
+        ) : (
+          <>
+            {sessionStatusWords(r.s.status)} {'·'} <Age ms={r.s.lastSeenAt} />
+          </>
+        ),
+    },
+  ];
   return (
-    <ul className="agents">
-      {sessions.map((s) => {
-        const task = tasks.find((t) => t.id === s.currentTaskId);
-        const files = [
-          ...new Set(intents.filter((i) => i.sessionId === s.id).flatMap((i) => i.targets.files)),
-        ];
-        const done = task?.plan.filter((p) => p.done).length ?? 0;
-        const showHelp = files.length > 0 && !helpShown;
-        if (showHelp) helpShown = true;
-        return (
-          <li key={s.id} className={cx('agent', `agent-status-${s.status}`)}>
-            <div className="agent-head">
-              <AgentMark kind={s.agentKind} />
-              <div className="agent-id">
-                <span className="agent-kind">
-                  {productName(s.agentKind)}
-                  <span className="agent-sep" aria-hidden="true">
-                    {' · '}
-                  </span>
-                  <ShortId id={s.id} label="session id" />
-                </span>
-                {s.label && <span className="agent-label">{s.label}</span>}
-              </div>
-              <Status value={s.status} label={sessionStatusWords(s.status)} />
-            </div>
-            <ul className="agent-lines">
-              <li>
-                {task ? (
-                  <>
-                    <span className="muted">working on</span> {task.title}
-                    {task.plan.length > 0 && (
-                      <span className="muted">
-                        {' '}
-                        ({done} of {count(task.plan.length, 'step')} done)
-                      </span>
-                    )}
-                  </>
-                ) : (
-                  <span className="muted">no task recorded</span>
-                )}
-              </li>
-              <li className="file-list">
-                {files.length === 0 ? (
-                  <span className="muted">not editing anything right now</span>
-                ) : (
-                  <>
-                    <span className="muted">editing</span>
-                    {files.map((f) => (
-                      <Mono key={f}>{f}</Mono>
-                    ))}
-                    {showHelp && <Help term="intent" />}
-                  </>
-                )}
-              </li>
-              <li>
-                <span className="muted">on branch</span> <Mono>{s.branch ?? 'no branch'}</Mono>
-              </li>
-              <li>
-                <span className="muted">
-                  <Time ms={s.lastSeenAt} prefix="last active" />
-                </span>
-              </li>
-            </ul>
-          </li>
-        );
-      })}
-    </ul>
+    <DataTable
+      label="Agents"
+      columns={cols}
+      rows={rows}
+      rowKey={(r) => r.s.id}
+      detail={(r) => (
+        <Facts
+          items={[
+            ['Status', sessionStatusWords(r.s.status)],
+            ['Branch', r.s.branch ? <Mono>{r.s.branch}</Mono> : 'no branch'],
+            ['Label', r.s.label],
+            [
+              'Plan',
+              r.task && r.task.plan.length > 0 && (
+                <ol className="steps">
+                  {r.task.plan.map((p, i) => (
+                    <li key={i} className={p.done ? 'step-done' : undefined}>
+                      <span className="visually-hidden">{p.done ? 'done: ' : 'to do: '}</span>
+                      {p.text}
+                    </li>
+                  ))}
+                </ol>
+              ),
+            ],
+            ['Editing', r.files.length > 0 && <Paths paths={r.files} max={Infinity} />],
+            ['Session', <CopyId key="id" id={r.s.id} label="session id" />],
+          ]}
+        />
+      )}
+    />
   );
 }
 
-export function ConflictList({ conflicts, onChange }: { conflicts: Conflict[]; onChange(): void }) {
+const SEV_RANK = { critical: 0, warning: 1, info: 2 } as const;
+
+export function ConflictTable({
+  conflicts,
+  onChange,
+}: {
+  conflicts: Conflict[];
+  onChange(): void;
+}) {
   const { client, sessions } = useApp();
   const { busy, run } = useAction();
-  if (conflicts.length === 0)
-    return (
-      <Empty>
-        No open conflicts. If two agents edit the same code or one breaks something another relies
-        on, it shows up here.
-      </Empty>
-    );
-  const sorted = [...conflicts].sort(
-    (a, b) =>
-      ({ critical: 0, warning: 1, info: 2 })[a.severity] -
-      { critical: 0, warning: 1, info: 2 }[b.severity],
-  );
-  return (
-    <ul className="conflicts" id="conflicts-list" tabIndex={-1}>
-      {sorted.map((c) => (
-        <li
-          key={c.id}
-          id={`conflict-${c.id}`}
-          tabIndex={-1}
-          className={cx('conflict', `sev-row-${c.severity}`)}
-        >
-          <div className="conflict-head">
-            <SeverityBadge severity={c.severity} />
-            <span className="conflict-title">
-              <CodeText text={conflictHeadline(c, sessions)} />
+  if (conflicts.length === 0) return <Empty>{EMPTY.conflicts}</Empty>;
+  const sorted = [...conflicts].sort((a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity]);
+  const cols: Column<Conflict>[] = [
+    {
+      key: 'sev',
+      header: COLUMNS.severity,
+      cell: (c) => (
+        <>
+          <SeverityMark severity={c.severity} />
+          {c.status !== 'open' && (
+            <span className="muted">
+              {' '}
+              {'·'} {conflictStatusWords(c.status)}
             </span>
-            {c.status !== 'open' && (
-              <Status value={c.status} label={conflictStatusWords(c.status)} />
-            )}
-          </div>
-          <p className="conflict-detail">
+          )}
+        </>
+      ),
+    },
+    {
+      key: 'what',
+      header: COLUMNS.what,
+      kind: 'main',
+      title: (c) => conflictWhat(c, sessions).replace(/`/g, ''),
+      cell: (c) => <CodeText text={conflictWhat(c, sessions)} />,
+    },
+    {
+      key: 'agents',
+      header: COLUMNS.agents,
+      kind: 'clip',
+      cell: (c) => conflictAgents(c, sessions),
+    },
+    { key: 'age', header: COLUMNS.age, kind: 'meta', cell: (c) => <Age ms={c.createdAt} /> },
+  ];
+  const menu = (c: Conflict): MenuItem[] =>
+    [...CONFLICT_ACTIONS]
+      .sort((a, b) => (a === 'resolved' ? -1 : b === 'resolved' ? 1 : 0))
+      .filter((a) => !(a === 'acknowledged' && c.status === 'acknowledged'))
+      .map((a) => ({
+        label: conflictActionWords(a),
+        danger: a === 'dismissed',
+        disabled: busy !== null,
+        onSelect: () =>
+          void run(
+            `${c.id}:${a}`,
+            () => client.setConflictStatus(c.id, a),
+            `Conflict marked ${conflictStatusWords(a)}`,
+          ).then((ok) => ok && onChange()),
+      }));
+  return (
+    <DataTable
+      label="Conflicts"
+      columns={cols}
+      rows={sorted}
+      rowKey={(c) => c.id}
+      menu={menu}
+      menuLabel={(c) => `Actions for conflict ${shortId(c.id)}`}
+      detail={(c) => (
+        <div className="detail-stack">
+          <p className="detail-text">
             <CodeText text={humanizeAgentText(c.detail)} />
           </p>
-          <div className="conflict-meta">
-            {c.paths.map((p) => (
-              <Mono key={p}>{p}</Mono>
-            ))}
-            {c.sessionIds.length > 0 && (
-              <span className="muted">
-                involves {c.sessionIds.map((id) => sessionName(sessions.get(id))).join(', ')}
-              </span>
-            )}
-            <span className="muted">
-              <Time ms={c.updatedAt} prefix="updated" />
-            </span>
-            <ShortId id={c.id} label="conflict id" />
-          </div>
-          <div className="btn-row">
-            {CONFLICT_ACTIONS.filter(
-              (a) => !(a === 'acknowledged' && c.status === 'acknowledged'),
-            ).map((a) => (
-              <button
-                key={a}
-                type="button"
-                className={cx('btn btn-small', a === 'resolved' && 'btn-primary')}
-                disabled={busy !== null}
-                aria-label={`${conflictActionWords(a)}: conflict ${shortId(c.id)}`}
-                onClick={() =>
-                  void run(
-                    `${c.id}:${a}`,
-                    () => client.setConflictStatus(c.id, a),
-                    `Conflict marked ${conflictStatusWords(a)}`,
-                  ).then((ok) => ok && onChange())
-                }
-              >
-                {busy === `${c.id}:${a}` ? '…' : conflictActionWords(a)}
-              </button>
-            ))}
-          </div>
-        </li>
-      ))}
-    </ul>
+          <Facts
+            items={[
+              ['Files', <Paths key="p" paths={c.paths} max={Infinity} />],
+              ['Updated', <Age key="u" ms={c.updatedAt} />],
+              ['Id', <CopyId key="id" id={c.id} label="conflict id" />],
+            ]}
+          />
+        </div>
+      )}
+    />
   );
 }
 
-function ShadowMergePanel({ ov, onQueued }: { ov: Overview; onQueued(): void }) {
+function MergeCheckPanel({ ov, onQueued }: { ov: Overview; onQueued(): void }) {
   const { client, project, navigate } = useApp();
   const { busy, run } = useAction();
   const last = ov.lastShadowMerge;
   const running = last?.status === 'queued' || last?.status === 'running';
+  const result = last ? readShadowMerge(last) : null;
   return (
     <Panel
       title="Merge check"
       help="mergeCheck"
+      meta={
+        last ? (
+          <>
+            <DotWord tone={statusTone(last.status)}>{runStatusWords(last.status)}</DotWord>
+            {' · '}
+            <Age ms={last.finishedAt ?? last.startedAt ?? last.createdAt} />
+          </>
+        ) : undefined
+      }
       actions={
-        <>
-          {last && <Status value={last.status} label={runStatusWords(last.status)} />}
-          <button
-            type="button"
-            className="btn btn-small btn-primary"
-            disabled={busy !== null || running}
-            onClick={() =>
-              void run('sm', () => client.shadowMerge(project.id), 'Merge check started').then(
-                (ok) => ok && onQueued(),
-              )
-            }
-          >
-            {running ? 'Running…' : 'Run merge check'}
-          </button>
-        </>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={busy !== null || running}
+          onClick={() =>
+            void run('sm', () => client.shadowMerge(project.id), 'Merge check started').then(
+              (ok) => ok && onQueued(),
+            )
+          }
+        >
+          {running ? 'Running…' : last ? 'Run again' : 'Run merge check'}
+        </button>
       }
     >
-      {last ? (
-        <>
-          <p className="muted small">
-            <CodeText text={humanizeAgentText(last.title)} /> {'·'}{' '}
-            <Time ms={last.finishedAt ?? last.startedAt ?? last.createdAt} />{' '}
-            <button
-              type="button"
-              className="link"
-              onClick={() => navigate('runs', { run: last.id })}
-            >
-              full details
-            </button>
-          </p>
-          <ShadowMergeResult run={last} compact />
-        </>
+      {!last || !result ? (
+        <Empty>{EMPTY.mergeCheck}</Empty>
       ) : (
-        <Empty>
-          No merge check yet. Run one to combine every agent&rsquo;s work in a scratch copy and run
-          the project&rsquo;s checks. Your branches are not touched.
-        </Empty>
+        <div className="detail-stack">
+          {last.result ? (
+            <ChecksTable checks={result.checks} />
+          ) : (
+            <Empty>{last.status === 'queued' ? EMPTY.runWaiting : EMPTY.runRunning}</Empty>
+          )}
+          <p className="line-meta">
+            <span className="muted">overlapping changes: </span>
+            {result.conflictedPaths.length === 0 ? (
+              <span className="muted">none</span>
+            ) : (
+              <Paths paths={result.conflictedPaths} max={3} />
+            )}
+            <span className="grow" />
+            <TextLink go onClick={() => navigate('runs', { run: last.id })}>
+              Details
+            </TextLink>
+          </p>
+        </div>
       )}
     </Panel>
   );
 }
 
-function MemoryCounts({ ov }: { ov: Overview }) {
+function MemoryLine({ ov }: { ov: Overview }) {
   const { navigate } = useApp();
-  const total = TRUST_LEVELS.reduce((a, t) => a + (ov.memoryCounts[t] ?? 0), 0);
+  const parts = memorySummary(ov.memoryCounts);
   return (
-    <Panel title="Memory" count={total} noun="memory" plural="memories" help="trust">
-      {total === 0 ? (
-        <Empty>
-          No memories yet. Agents suggest rules, decisions and known pitfalls as they work; you
-          approve them in Memory.
-        </Empty>
+    <Panel
+      title="Memory"
+      help="trust"
+      actions={
+        <TextLink go onClick={() => navigate('memory')}>
+          Open memory
+        </TextLink>
+      }
+    >
+      {parts.length === 0 ? (
+        <Empty>{EMPTY.memory}</Empty>
       ) : (
-        <ul className="trust-counts">
-          {TRUST_LEVELS.filter((t) => (ov.memoryCounts[t] ?? 0) > 0).map((t) => (
-            <li key={t}>
+        <p className="summary-line">
+          {parts.map((p, i) => (
+            <span key={p.trust} className="summary-part">
+              {i > 0 && (
+                <span className="summary-sep" aria-hidden="true">
+                  {'·'}
+                </span>
+              )}
               <button
                 type="button"
-                className="trust-count-btn"
-                onClick={() => navigate('memory', { trust: t })}
+                className="num-link"
+                onClick={() => navigate('memory', { trust: p.trust })}
               >
-                <span className="trust-count">{ov.memoryCounts[t] ?? 0}</span>
-                <TrustBadge trust={t} />
+                <span className="num-link-n">{p.n}</span> {p.text}
               </button>
-            </li>
+            </span>
           ))}
-        </ul>
+        </p>
       )}
+    </Panel>
+  );
+}
+
+function ActivityPanel({ events }: { events: Parameters<typeof ActivityStream>[0]['events'] }) {
+  const [all, setAll] = useState(false);
+  return (
+    <Panel
+      title="Activity"
+      actions={
+        events.length > 8 ? (
+          <TextLink onClick={() => setAll((v) => !v)} expanded={all}>
+            {all ? 'Show fewer' : 'Show all'}
+          </TextLink>
+        ) : undefined
+      }
+    >
+      <ActivityStream events={events} limit={all ? 60 : 8} />
     </Panel>
   );
 }

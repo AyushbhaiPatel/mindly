@@ -1,15 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import type { ContextItem, MindlyEvent, Session } from '../src/types';
 import {
+  conflictAgents,
   conflictHeadline,
   conflictStatusWords,
   count,
   describeEvent,
   handoffStatusWords,
   humanizeAgentText,
-  isAllQuiet,
+  memorySummary,
+  moreWords,
+  needActionWords,
+  needKindWords,
   memoryKindWords,
   omitReasonWords,
+  overviewStats,
+  progressWords,
   productName,
   relTime,
   runKindWords,
@@ -19,8 +25,10 @@ import {
   shortId,
   sourceWords,
   splitCode,
-  summaryLine,
+  shortAge,
+  trustShort,
   trustWords,
+  conflictWhat,
   xraySentence,
 } from '../src/vocab';
 
@@ -130,34 +138,84 @@ describe('relTime', () => {
   });
 });
 
-describe('summaryLine', () => {
-  const now = 1_000_000_000;
-  it('summarises agents, things that need you and the last merge check', () => {
-    expect(
-      summaryLine({
-        sessions: [{ status: 'active' }, { status: 'active' }],
-        needsYou: 2,
-        lastMergeCheck: { status: 'passed', at: now - 3 * 60_000 },
-        now,
-      }),
-    ).toBe('2 agents working · 2 things need you · last merge check passed 3m ago');
+describe('overviewStats', () => {
+  it('puts counts in numbers and the merge check in one word', () => {
+    const stats = overviewStats({
+      sessions: [{ status: 'active' }, { status: 'active' }, { status: 'idle' }],
+      needsYou: 4,
+      lastMergeCheck: { status: 'failed', at: 123 },
+    });
+    expect(stats.map((s) => `${s.value} ${s.label}`)).toEqual([
+      '2 working',
+      '1 idle',
+      '4 need you',
+      'failed merge check',
+    ]);
+    expect(stats.at(-1)?.at).toBe(123);
+    expect(stats.at(-1)?.tone).toBe('bad');
   });
 
-  it('handles singular, idle and no merge check', () => {
-    expect(
-      summaryLine({
-        sessions: [{ status: 'active' }, { status: 'idle' }],
-        needsYou: 1,
-        lastMergeCheck: null,
-        now,
-      }),
-    ).toBe('1 agent working · 1 idle · 1 thing needs you');
+  it('adds usage limits and handles no merge check', () => {
+    const stats = overviewStats({
+      sessions: [{ status: 'rate_limited' }],
+      needsYou: 0,
+      lastMergeCheck: null,
+    });
+    expect(stats.map((s) => `${s.value} ${s.label}`)).toEqual([
+      '0 working',
+      '0 idle',
+      '1 at usage limit',
+      '0 need you',
+      'none merge check',
+    ]);
   });
 
-  it('knows when all is quiet', () => {
-    const input = { sessions: [], needsYou: 0, lastMergeCheck: null };
-    expect(isAllQuiet(input)).toBe(true);
-    expect(summaryLine(input)).toBe('No agents running · nothing needs you');
+  it('names needs-you kinds and their one action', () => {
+    expect(needKindWords('rule')).toBe('Rule');
+    expect(needActionWords('conflict')).toBe('Resolve');
+    expect(needActionWords('memory')).toBe('Review');
+  });
+});
+
+describe('table wording', () => {
+  const now = 10_000_000_000;
+  it('writes short ages without "ago"', () => {
+    expect(shortAge(now - 3_000, now)).toBe('now');
+    expect(shortAge(now - 12_000, now)).toBe('12s');
+    expect(shortAge(now - 3 * 60_000, now)).toBe('3m');
+    expect(shortAge(now - 2 * 3_600_000, now)).toBe('2h');
+    expect(shortAge(now - 3 * 86_400_000, now)).toBe('3d');
+    expect(shortAge(null, now)).toBe('—');
+  });
+
+  it('summarises memory in one line, skipping zeros', () => {
+    expect(
+      memorySummary({ approved: 3, verified: 1, proposed: 2, stale: 0, rejected: 1 }).map(
+        (p) => `${p.n} ${p.text}`,
+      ),
+    ).toEqual(['3 approved', '1 confirmed in code', '2 waiting for you']);
+    expect(trustShort('stale')).toBe('may be outdated');
+    expect(moreWords(2)).toBe('+2 more');
+    expect(progressWords(1, 3)).toBe('1/3');
+    expect(progressWords(0, 0)).toBe('');
+  });
+
+  it('writes the conflict columns without repeating agent names', () => {
+    const overlap = {
+      kind: 'intent_overlap' as const,
+      title: 'raw',
+      sessionIds: [CLAUDE.id, CODEX.id],
+      paths: ['src/auth.ts'],
+    };
+    expect(conflictWhat(overlap, sessions)).toBe('Both editing `src/auth.ts`');
+    expect(conflictAgents(overlap, sessions)).toBe('Claude Code, Codex');
+    const impact = { ...overlap, kind: 'impact' as const };
+    expect(conflictWhat(impact, sessions)).toBe('Claude Code changed `src/auth.ts`');
+    expect(conflictAgents(impact, sessions)).toBe('Claude Code → Codex');
+    expect(
+      conflictWhat({ ...overlap, kind: 'contract_broken', sessionIds: [CLAUDE.id] }, sessions),
+    ).toBe('Change broke a check in `src/auth.ts`');
+    expect(conflictAgents({ kind: 'impact', sessionIds: [] }, sessions)).toBe('—');
   });
 });
 
@@ -248,7 +306,7 @@ describe('describeEvent', () => {
       ev('intent.declared', { files: ['src/dash.ts'] }, CODEX.id),
       sessions,
     );
-    expect(line.actor).toBe('Codex · f57f6d10');
+    expect(line.actor).toBe('Codex');
     expect(line.text).toBe('plans to edit src/dash.ts');
   });
 

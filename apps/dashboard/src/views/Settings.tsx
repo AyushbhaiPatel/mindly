@@ -1,6 +1,32 @@
 import { useState } from 'react';
-import { Confirm, Empty, Loaded, Mono, Panel, ShortId } from '../components/ui';
+import {
+  Confirm,
+  CopyId,
+  DataTable,
+  DotWord,
+  Empty,
+  Facts,
+  Loaded,
+  Mono,
+  Panel,
+  type Column,
+} from '../components/ui';
 import { useAction, useApp, useResource } from '../state';
+import type { TrustStatus } from '../types';
+import { COLUMNS, EMPTY } from '../vocab';
+
+type CheckDef = TrustStatus['checks'][number];
+
+const checkCols: Column<CheckDef>[] = [
+  { key: 'name', header: COLUMNS.name, cell: (c) => <Mono>{c.name}</Mono> },
+  {
+    key: 'cmd',
+    header: COLUMNS.command,
+    kind: 'main',
+    title: (c) => c.argv.join(' '),
+    cell: (c) => <Mono>{c.argv.join(' ')}</Mono>,
+  },
+];
 
 export function SettingsView() {
   const { client, project } = useApp();
@@ -11,122 +37,92 @@ export function SettingsView() {
   return (
     <div className="view">
       <Panel title="Project">
-        <dl className="kv">
-          <dt>Name</dt>
-          <dd>{project.name}</dd>
-          <dt>Root</dt>
-          <dd>
-            <Mono>{project.root}</Mono>
-          </dd>
-          <dt>Id</dt>
-          <dd>
-            <ShortId id={project.id} label="project id" />
-          </dd>
-        </dl>
+        <Facts
+          items={[
+            ['Name', project.name],
+            ['Root', <Mono key="r">{project.root}</Mono>],
+            ['Id', <CopyId key="id" id={project.id} label="project id" />],
+          ]}
+        />
       </Panel>
-      <Panel title="Config trust">
-        <Loaded res={res}>
-          {(t) => (
-            <div className="stack-lg">
-              <div
-                className={t.trusted ? 'trust-state trust-ok' : 'trust-state trust-no'}
-                role="status"
-              >
-                <span className="trust-state-mark" aria-hidden="true">
-                  {t.trusted ? '✓' : '!'}
-                </span>
-                <div>
-                  <p className="trust-state-title">
-                    {t.trusted ? 'This config is trusted' : 'This config is not trusted'}
-                  </p>
-                  <p className="small">
-                    {t.trusted
-                      ? 'Mindly runs the checks below during merge checks and replays.'
-                      : 'Mindly will not run any command from this repository’s .mindly/config.json until you trust it. Merge checks still combine the work, but skip running commands.'}
-                  </p>
-                </div>
-              </div>
-              {t.configError && (
-                <p className="error-note" role="alert">
-                  .mindly/config.json is invalid: {t.configError}
-                </p>
-              )}
-              <dl className="kv">
-                <dt>Config hash</dt>
-                <dd>
-                  {t.configHash ? (
-                    <Mono>{t.configHash}</Mono>
-                  ) : (
-                    <span className="muted">no config file</span>
-                  )}
-                </dd>
-                <dt>Trusted hash</dt>
-                <dd>
-                  {project.trustedConfigHash ? (
-                    <Mono>{project.trustedConfigHash}</Mono>
-                  ) : (
-                    <span className="muted">none</span>
-                  )}
-                  {project.trustedConfigHash &&
-                    t.configHash &&
-                    project.trustedConfigHash !== t.configHash && (
-                      <span className="tag tone-warn">config changed since you trusted it</span>
-                    )}
-                </dd>
-              </dl>
-              <section aria-label="Checks">
-                <h3 className="sub">Checks defined in .mindly/config.json</h3>
-                {t.checks.length === 0 ? (
-                  <Empty>No checks defined.</Empty>
-                ) : (
-                  <div className="table-wrap">
-                    <table className="table">
-                      <thead>
-                        <tr>
-                          <th scope="col">Name</th>
-                          <th scope="col">Command (argv, no shell)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {t.checks.map((c) => (
-                          <tr key={c.name}>
-                            <th scope="row">
-                              <Mono>{c.name}</Mono>
-                            </th>
-                            <td>
-                              <span className="argv">
-                                {c.argv.map((a, i) => (
-                                  <code key={i} className="mono argv-part">
-                                    {a}
-                                  </code>
-                                ))}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
-              {!t.trusted && (
-                <div className="warn-box">
-                  <p>
-                    <strong>These commands will run on this machine</strong> with your user’s
-                    permissions whenever Mindly runs a merge check or replay. A repository can put
-                    anything in its config, so read each command above. Trust is tied to this exact
-                    config; if the file changes, Mindly asks again.
-                  </p>
+      <Loaded res={res}>
+        {(t) => {
+          const changed =
+            !!project.trustedConfigHash &&
+            !!t.configHash &&
+            project.trustedConfigHash !== t.configHash;
+          return (
+            <Panel
+              title="Config trust"
+              help="configTrust"
+              meta={
+                <DotWord tone={t.trusted ? 'good' : 'bad'}>
+                  {t.trusted ? 'trusted' : 'not trusted'}
+                </DotWord>
+              }
+              actions={
+                !t.trusted ? (
                   <button
                     type="button"
-                    className="btn btn-danger"
+                    className="btn-primary"
                     disabled={!!busy || !!t.configError}
                     onClick={() => setConfirm(true)}
                   >
                     Trust this config
                   </button>
-                </div>
-              )}
+                ) : undefined
+              }
+            >
+              <div className="detail-stack">
+                {t.configError && (
+                  <p className="error-note" role="alert">
+                    .mindly/config.json is invalid: {t.configError}
+                  </p>
+                )}
+                <Facts
+                  items={[
+                    [
+                      'Config hash',
+                      t.configHash ? (
+                        <Mono>{t.configHash}</Mono>
+                      ) : (
+                        <span className="muted">no config file</span>
+                      ),
+                    ],
+                    [
+                      'Trusted hash',
+                      project.trustedConfigHash ? (
+                        <>
+                          <Mono>{project.trustedConfigHash}</Mono>
+                          {changed && (
+                            <span className="warn-text"> {'·'} config changed since</span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="muted">none</span>
+                      ),
+                    ],
+                  ]}
+                />
+                <section aria-label="Checks">
+                  <h3 className="sub">Checks in .mindly/config.json</h3>
+                  {t.checks.length === 0 ? (
+                    <Empty>{EMPTY.configChecks}</Empty>
+                  ) : (
+                    <DataTable
+                      label="Checks"
+                      columns={checkCols}
+                      rows={t.checks}
+                      rowKey={(c) => c.name}
+                    />
+                  )}
+                </section>
+                {!t.trusted && (
+                  <p className="warn-text small">
+                    Trusting lets these commands run on this machine with your permissions.
+                  </p>
+                )}
+              </div>
               <Confirm
                 open={confirm}
                 title="Trust this config and allow its commands to run?"
@@ -145,13 +141,13 @@ export function SettingsView() {
                 <p>
                   {t.checks.length} command{t.checks.length === 1 ? '' : 's'} from{' '}
                   <Mono>{project.root}/.mindly/config.json</Mono> will be allowed to run on this
-                  machine.
+                  machine. Read each one first.
                 </p>
               </Confirm>
-            </div>
-          )}
-        </Loaded>
-      </Panel>
+            </Panel>
+          );
+        }}
+      </Loaded>
     </div>
   );
 }

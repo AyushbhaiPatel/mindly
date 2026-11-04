@@ -1,16 +1,28 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
 import { describeError } from '../api';
 import type { Severity, Trust } from '../types';
 import {
   TERMS,
   absTime,
+  moreWords,
   relTime,
   severityWords,
+  shortAge,
   shortId,
   splitCode,
   trustHelp,
-  trustWords,
+  trustShort,
   words,
+  type Stat,
   type Term,
   type Tone,
 } from '../vocab';
@@ -19,45 +31,57 @@ export function cx(...xs: (string | false | null | undefined)[]): string {
   return xs.filter(Boolean).join(' ');
 }
 
-const TRUST_GLYPH: Record<Trust, string> = {
-  verified: '\u2713',
-  approved: '\u25cf',
-  proposed: '?',
-  stale: '\u25cc',
-  rejected: '\u2715',
-};
+/* ------------------------------------------------------------------------------------------ */
+/* Dots and status words                                                                       */
+/* ------------------------------------------------------------------------------------------ */
+
+const KNOWN_AGENT_KINDS = new Set(['claude-code', 'codex', 'cursor']);
 
 /**
- * Trust level in words ("approved by you", "suggested by Codex, waiting for you"), with a
- * tooltip explaining what it means. `by` names who suggested a proposed memory.
+ * The 6px dot that starts a row. Colour carries meaning (tone, trust or agent) and is always
+ * paired with a word in the same row, so it is hidden from assistive technology.
  */
-export function TrustBadge({ trust, by }: { trust: Trust; by?: string | undefined }) {
+export function Dot({ tone, agent }: { tone?: Tone | `trust-${Trust}`; agent?: string }) {
+  const cls = agent
+    ? `agent-${KNOWN_AGENT_KINDS.has(agent) ? agent : 'other'}`
+    : tone?.startsWith('trust-')
+      ? tone
+      : `tone-${tone ?? 'neutral'}`;
+  return <span className={cx('dot', cls)} aria-hidden="true" />;
+}
+
+/** A dot followed by its word: the one status element a row may have. */
+export function DotWord({
+  tone,
+  children,
+  title,
+}: {
+  tone: Tone | `trust-${Trust}`;
+  children: ReactNode;
+  title?: string | undefined;
+}) {
   return (
-    <span className={`badge trust-${trust}`} title={trustHelp(trust)}>
-      <span aria-hidden="true" className="badge-glyph">
-        {TRUST_GLYPH[trust]}
-      </span>
-      {trustWords(trust, by)}
+    <span className="dot-word" title={title}>
+      <Dot tone={tone} />
+      <span>{children}</span>
     </span>
   );
 }
 
-const SEV_GLYPH: Record<Severity, string> = { critical: '!!', warning: '!', info: 'i' };
-
-/** Severity in words: FYI / check this / urgent. */
-export function SeverityBadge({ severity }: { severity: Severity }) {
+/** Trust as dot + short word ("approved", "waiting for you"); the meaning is in the tooltip. */
+export function TrustMark({ trust }: { trust: Trust }) {
   return (
-    <span className={`badge sev-${severity}`}>
-      <span aria-hidden="true" className="badge-glyph">
-        {SEV_GLYPH[severity]}
-      </span>
-      {severityWords(severity)}
-    </span>
+    <DotWord tone={`trust-${trust}`} title={trustHelp(trust)}>
+      {trustShort(trust)}
+    </DotWord>
   );
 }
 
-export function Tag({ children, tone = 'neutral' }: { children: ReactNode; tone?: Tone }) {
-  return <span className={`tag tone-${tone}`}>{children}</span>;
+const SEV_TONE: Record<Severity, Tone> = { critical: 'bad', warning: 'warn', info: 'info' };
+
+/** Severity as dot + word: urgent / check this / FYI. */
+export function SeverityMark({ severity }: { severity: Severity }) {
+  return <DotWord tone={SEV_TONE[severity]}>{severityWords(severity)}</DotWord>;
 }
 
 export function statusTone(status: string): Tone {
@@ -92,10 +116,14 @@ export function statusTone(status: string): Tone {
   }
 }
 
-/** A status tag. `label` is the plain-words text; the raw value only picks the colour. */
+/** A status as dot + word. `label` is the plain-words text; the raw value only picks the colour. */
 export function Status({ value, label }: { value: string; label?: string }) {
-  return <Tag tone={statusTone(value)}>{label ?? words(value)}</Tag>;
+  return <DotWord tone={statusTone(value)}>{label ?? words(value)}</DotWord>;
 }
+
+/* ------------------------------------------------------------------------------------------ */
+/* Time                                                                                        */
+/* ------------------------------------------------------------------------------------------ */
 
 /* One shared ticker keeps every relative time fresh without one timer per element. */
 const tickers = new Set<() => void>();
@@ -133,14 +161,207 @@ export function Time({ ms, prefix }: { ms: number | null | undefined; prefix?: s
   );
 }
 
+/** Short age for time columns ("12s", "3m"), absolute time in the tooltip. */
+export function Age({ ms }: { ms: number | null | undefined }) {
+  const now = useNow();
+  if (!ms) return <span className="muted">{'—'}</span>;
+  return (
+    <time dateTime={new Date(ms).toISOString()} title={absTime(ms)}>
+      {shortAge(ms, now)}
+    </time>
+  );
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Actions: gel primary, text links, icon buttons, overflow menu                               */
+/* ------------------------------------------------------------------------------------------ */
+
 /**
- * An 8-character short id with the full id in a tooltip and a button that copies the full id.
+ * A quiet text action. `go` adds "→" for actions that navigate ("Details →").
+ * Secondary actions are always text links; the gel pill is reserved for the one primary action.
  */
-export function ShortId({ id, label = 'id' }: { id: string; label?: string }) {
+export function TextLink({
+  children,
+  onClick,
+  go,
+  danger,
+  disabled,
+  type = 'button',
+  label,
+  expanded,
+  controls,
+}: {
+  children: ReactNode;
+  onClick?: (e: MouseEvent<HTMLButtonElement>) => void;
+  go?: boolean;
+  danger?: boolean;
+  disabled?: boolean;
+  type?: 'button' | 'submit';
+  label?: string;
+  expanded?: boolean;
+  controls?: string;
+}) {
+  return (
+    <button
+      type={type}
+      className={cx('tlink', danger && 'tlink-danger')}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      aria-expanded={expanded}
+      aria-controls={controls}
+    >
+      {children}
+      {go && (
+        <span className="tlink-arrow" aria-hidden="true">
+          {' →'}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** Borderless 28px icon button (copy, close, expand). */
+export function IconBtn({
+  label,
+  onClick,
+  children,
+  expanded,
+  controls,
+  className,
+}: {
+  label: string;
+  onClick: (e: MouseEvent<HTMLButtonElement>) => void;
+  children: ReactNode;
+  expanded?: boolean | undefined;
+  controls?: string | undefined;
+  className?: string | undefined;
+}) {
+  return (
+    <button
+      type="button"
+      className={cx('icon-btn', className)}
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      aria-expanded={expanded}
+      aria-controls={controls}
+    >
+      <span aria-hidden="true">{children}</span>
+    </button>
+  );
+}
+
+export interface MenuItem {
+  label: string;
+  onSelect(): void;
+  danger?: boolean;
+  disabled?: boolean;
+}
+
+/**
+ * The "⋯" overflow menu for rare and destructive actions. Menu-button pattern: arrow keys
+ * move, Escape or Tab closes and returns focus, clicking outside closes.
+ */
+export function Overflow({ items, label }: { items: MenuItem[]; label: string }) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLSpanElement>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const id = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    refs.current.find((r) => r && !r.disabled)?.focus();
+    const onDown = (e: PointerEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown);
+    return () => document.removeEventListener('pointerdown', onDown);
+  }, [open]);
+
+  const close = (focus: boolean) => {
+    setOpen(false);
+    if (focus) btn.current?.focus();
+  };
+  const onKey = (e: KeyboardEvent) => {
+    const enabled = refs.current.filter((r): r is HTMLButtonElement => !!r && !r.disabled);
+    const i = enabled.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close(true);
+    } else if (e.key === 'Tab') {
+      close(false);
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const n = enabled.length;
+      if (n === 0) return;
+      const next = e.key === 'ArrowDown' ? (i + 1) % n : (i - 1 + n) % n;
+      enabled[next]?.focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      (e.key === 'Home' ? enabled[0] : enabled.at(-1))?.focus();
+    }
+  };
+
+  return (
+    <span className="menu-wrap" ref={wrap}>
+      <button
+        ref={btn}
+        type="button"
+        className="icon-btn menu-btn"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        aria-label={label}
+        title="More actions"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((o) => !o);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown' && !open) {
+            e.preventDefault();
+            setOpen(true);
+          }
+        }}
+      >
+        <span aria-hidden="true">{'⋯'}</span>
+      </button>
+      {open && (
+        <span role="menu" id={id} className="menu" aria-label={label} onKeyDown={onKey}>
+          {items.map((it, i) => (
+            <button
+              key={it.label}
+              ref={(el) => {
+                refs.current[i] = el;
+              }}
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              disabled={it.disabled}
+              className={cx('menu-item', it.danger && 'menu-danger')}
+              onClick={(e) => {
+                e.stopPropagation();
+                close(true);
+                it.onSelect();
+              }}
+            >
+              {it.label}
+            </button>
+          ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Copies text to the clipboard; returns whether the last copy just succeeded. */
+function useCopy(): [boolean, (text: string) => void] {
   const [copied, setCopied] = useState(false);
-  const short = shortId(id);
-  const copy = () => {
-    void navigator.clipboard?.writeText(id).then(
+  const copy = (text: string) => {
+    void navigator.clipboard?.writeText(text).then(
       () => {
         setCopied(true);
         window.setTimeout(() => setCopied(false), 1500);
@@ -148,30 +369,41 @@ export function ShortId({ id, label = 'id' }: { id: string; label?: string }) {
       () => undefined,
     );
   };
+  return [copied, copy];
+}
+
+/**
+ * An id for expanded details only: the 8-character short id, the full id in a tooltip, and a
+ * borderless copy icon that copies the full id.
+ */
+export function CopyId({ id, label = 'id' }: { id: string; label?: string }) {
+  const [copied, copy] = useCopy();
+  const short = shortId(id);
   return (
-    <span className="short-id">
+    <span className="copy-id">
       <code className="mono" title={`Full ${label}: ${id}`}>
         {short}
       </code>
-      <button
-        type="button"
-        className="copy-btn"
+      <IconBtn
+        label={copied ? `Copied ${label}` : `Copy full ${label}`}
         onClick={(e) => {
           e.stopPropagation();
-          copy();
+          copy(id);
         }}
-        aria-label={copied ? `Copied ${label}` : `Copy full ${label} ${short}`}
-        title={copied ? 'Copied' : `Copy full ${label}`}
       >
-        <span aria-hidden="true">{copied ? '\u2713' : '\u29c9'}</span>
-      </button>
+        {copied ? '✓' : '⧉'}
+      </IconBtn>
     </span>
   );
 }
 
+/* ------------------------------------------------------------------------------------------ */
+/* Text                                                                                        */
+/* ------------------------------------------------------------------------------------------ */
+
 /**
  * A small "?" that explains a term on hover or keyboard focus. The explanation is also the
- * button's accessible description.
+ * button's accessible description. Explanations live here, never in the page body.
  */
 export function Help({ term }: { term: Term }) {
   const id = useId();
@@ -215,7 +447,7 @@ export function CodeText({ text }: { text: string }) {
   );
 }
 
-export function Mono({ children, title }: { children: ReactNode; title?: string }) {
+export function Mono({ children, title }: { children: ReactNode; title?: string | undefined }) {
   return (
     <code className="mono" title={title}>
       {children}
@@ -223,52 +455,108 @@ export function Mono({ children, title }: { children: ReactNode; title?: string 
   );
 }
 
+/** File paths as plain mono text, comma separated, truncated with "+2 more". */
+export function Paths({ paths, max = 2 }: { paths: readonly string[]; max?: number }) {
+  if (paths.length === 0) return <span className="muted">{'—'}</span>;
+  const shown = paths.slice(0, max);
+  const rest = paths.length - shown.length;
+  return (
+    <span className="paths" title={rest > 0 ? paths.join(', ') : undefined}>
+      {shown.map((p, i) => (
+        <Fragment key={p}>
+          {i > 0 && ', '}
+          <code className="mono">{p}</code>
+        </Fragment>
+      ))}
+      {rest > 0 && <span className="paths-more"> {moreWords(rest)}</span>}
+    </span>
+  );
+}
+
+/** A definition list of label/value pairs; falsy values are skipped. */
+export function Facts({ items }: { items: [label: string, value: ReactNode][] }) {
+  return (
+    <dl className="facts">
+      {items
+        .filter(([, v]) => v !== null && v !== undefined && v !== false && v !== '')
+        .map(([k, v]) => (
+          <div key={k} className="fact">
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+    </dl>
+  );
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Layout                                                                                      */
+/* ------------------------------------------------------------------------------------------ */
+
 /**
- * A titled panel. `count` is labelled with `noun` ("3 agents") for tooltips and screen readers;
- * `help` adds a "?" explaining the panel's term.
+ * A section: label, optional "?" tooltip, a quiet meta value on the right ("3 open") and at most
+ * one action area.
  */
 export function Panel({
   title,
-  count,
-  noun = 'item',
-  plural = `${noun}s`,
   help,
+  meta,
   actions,
   children,
   className,
   id,
 }: {
   title: ReactNode;
-  count?: number | undefined;
-  noun?: string;
-  plural?: string;
   help?: Term;
+  meta?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
   id?: string;
 }) {
   const hid = useId();
-  const countText = count !== undefined ? `${count} ${count === 1 ? noun : plural}` : '';
   return (
     <section className={cx('panel', className)} aria-labelledby={hid} id={id}>
       <header className="panel-head">
         <div className="panel-title">
-          <h2 id={hid}>
-            {title}
-            {count !== undefined && (
-              <span className="count" title={countText}>
-                <span aria-hidden="true">{count}</span>
-                <span className="visually-hidden">, {countText}</span>
-              </span>
-            )}
-          </h2>
+          <h2 id={hid}>{title}</h2>
           {help && <Help term={help} />}
         </div>
-        {actions && <div className="panel-actions">{actions}</div>}
+        {(meta !== undefined || actions) && (
+          <div className="panel-actions">
+            {meta !== undefined && <span className="panel-meta">{meta}</span>}
+            {actions}
+          </div>
+        )}
       </header>
       <div className="panel-body">{children}</div>
     </section>
+  );
+}
+
+/** Large serif numerals with a small label underneath. */
+export function StatRow({ stats }: { stats: Stat[] }) {
+  return (
+    <dl className="stats">
+      {stats.map((s) => {
+        const word = !/^\d+$/.test(s.value);
+        return (
+          <div key={s.label} className={cx('stat', word && 'stat-word')}>
+            <dt>
+              {word && <Dot tone={s.tone} />}
+              {s.label}
+              {s.at !== undefined && s.at !== null && (
+                <>
+                  {' · '}
+                  <Age ms={s.at} />
+                </>
+              )}
+            </dt>
+            <dd>{s.value}</dd>
+          </div>
+        );
+      })}
+    </dl>
   );
 }
 
@@ -280,11 +568,7 @@ export function ErrorNote({ error, onRetry }: { error: unknown; onRetry?: () => 
   return (
     <div className="error-note" role="alert">
       <span>{describeError(error)}</span>
-      {onRetry && (
-        <button type="button" className="btn btn-small" onClick={onRetry}>
-          Retry
-        </button>
-      )}
+      {onRetry && <TextLink onClick={onRetry}>Retry</TextLink>}
     </div>
   );
 }
@@ -310,6 +594,180 @@ export function Loaded<T>({
   if (res.error) return <ErrorNote error={res.error} onRetry={res.reload} />;
   return <Loading />;
 }
+
+/* ------------------------------------------------------------------------------------------ */
+/* Tables                                                                                      */
+/* ------------------------------------------------------------------------------------------ */
+
+export interface Column<T> {
+  key: string;
+  /** Header text; also the label of the value when the table stacks on phones. */
+  header: string;
+  cell(row: T): ReactNode;
+  /**
+   * main: takes the remaining width and truncates to one line; clip: truncates at a fixed max
+   * width; meta: right-aligned quiet text (times, counts); plain: as is.
+   */
+  kind?: 'main' | 'clip' | 'meta' | 'plain';
+  /** Full text for the tooltip of a truncated cell. */
+  title?(row: T): string | undefined;
+}
+
+/**
+ * The one table used everywhere: a quiet header row, one-line rows, details only when a row is
+ * expanded (click the row or its chevron), an optional "⋯" menu per row. On phones it
+ * stacks into label/value rows (see styles.css).
+ */
+export function DataTable<T>({
+  label,
+  columns,
+  rows,
+  rowKey,
+  detail,
+  menu,
+  onOpen,
+  isCurrent,
+  menuLabel,
+  className,
+  head = true,
+}: {
+  label: string;
+  columns: Column<T>[];
+  rows: readonly T[];
+  rowKey(row: T): string;
+  detail?: (row: T) => ReactNode;
+  menu?: (row: T) => MenuItem[];
+  /** Opens the row elsewhere (drawer, panel) instead of expanding it. */
+  onOpen?: (row: T) => void;
+  isCurrent?: (row: T) => boolean;
+  menuLabel?: (row: T) => string;
+  className?: string | undefined;
+  head?: boolean;
+}) {
+  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set());
+  const base = useId();
+  const toggle = (k: string) =>
+    setOpen((s) => {
+      const n = new Set(s);
+      if (n.has(k)) n.delete(k);
+      else n.add(k);
+      return n;
+    });
+  const extra = (detail ? 1 : 0) + (menu ? 1 : 0);
+  // With onOpen, the main column's content is a real button so the row is keyboard reachable.
+  const openCol = Math.max(
+    0,
+    columns.findIndex((c) => c.kind === 'main'),
+  );
+  const span = columns.length + extra;
+  const interactive = (t: EventTarget | null) =>
+    t instanceof Element && !!t.closest('button, a, input, select, textarea, [role="menu"]');
+
+  return (
+    <table className={cx('dt', className)} aria-label={label}>
+      {head && (
+        <thead>
+          <tr>
+            {columns.map((c) => (
+              <th key={c.key} scope="col" className={`c-${c.kind ?? 'plain'}`}>
+                {c.header}
+              </th>
+            ))}
+            {menu && (
+              <th scope="col" className="c-icon">
+                <span className="visually-hidden">Actions</span>
+              </th>
+            )}
+            {detail && (
+              <th scope="col" className="c-icon">
+                <span className="visually-hidden">Details</span>
+              </th>
+            )}
+          </tr>
+        </thead>
+      )}
+      <tbody>
+        {rows.map((r) => {
+          const k = rowKey(r);
+          const isOpen = open.has(k);
+          const did = `${base}-${k}`;
+          const content = detail ? detail(r) : null;
+          const canExpand = content !== null && content !== undefined && content !== false;
+          return (
+            <Fragment key={k}>
+              <tr
+                className={cx(
+                  'dt-row',
+                  isOpen && 'is-open',
+                  isCurrent?.(r) && 'is-current',
+                  canExpand && 'can-expand',
+                  onOpen && 'can-open',
+                )}
+                aria-current={isCurrent?.(r) ? 'true' : undefined}
+                onClick={(e) => {
+                  if (interactive(e.target)) return;
+                  if (canExpand) toggle(k);
+                  else onOpen?.(r);
+                }}
+              >
+                {columns.map((c, ci) => (
+                  <td
+                    key={c.key}
+                    className={`c-${c.kind ?? 'plain'}`}
+                    data-label={c.header}
+                    title={c.title?.(r)}
+                  >
+                    <span className="cell">
+                      {onOpen && ci === openCol ? (
+                        <button type="button" className="row-open" onClick={() => onOpen(r)}>
+                          {c.cell(r)}
+                        </button>
+                      ) : (
+                        c.cell(r)
+                      )}
+                    </span>
+                  </td>
+                ))}
+                {menu && (
+                  <td className="c-icon c-menu">
+                    <Overflow items={menu(r)} label={menuLabel?.(r) ?? 'More actions'} />
+                  </td>
+                )}
+                {detail && (
+                  <td className="c-icon c-toggle">
+                    {canExpand && (
+                      <IconBtn
+                        label={isOpen ? 'Hide details' : 'Show details'}
+                        expanded={isOpen}
+                        controls={isOpen ? did : undefined}
+                        className="chev"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggle(k);
+                        }}
+                      >
+                        {'▸'}
+                      </IconBtn>
+                    )}
+                  </td>
+                )}
+              </tr>
+              {isOpen && canExpand && (
+                <tr className="dt-detail" id={did}>
+                  <td colSpan={span}>{content}</td>
+                </tr>
+              )}
+            </Fragment>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Dialogs                                                                                     */
+/* ------------------------------------------------------------------------------------------ */
 
 /** Modal side drawer built on <dialog>: focus trap, Escape and backdrop click close it. */
 export function Drawer({
@@ -347,9 +805,9 @@ export function Drawer({
         <div className="drawer-inner">
           <header className="drawer-head">
             <h2 id={hid}>{title}</h2>
-            <button type="button" className="btn btn-ghost" onClick={onClose} aria-label="Close">
-              Esc
-            </button>
+            <IconBtn label="Close" onClick={onClose}>
+              {'✕'}
+            </IconBtn>
           </header>
           <div className="drawer-body">{children}</div>
         </div>
@@ -397,10 +855,10 @@ export function Confirm({
           <h2 id={hid}>{title}</h2>
           <div className="confirm-body">{children}</div>
           <div className="confirm-actions">
-            <button type="button" className="btn" onClick={onCancel} autoFocus>
+            <button type="button" className="tlink" onClick={onCancel} autoFocus>
               Cancel
             </button>
-            <button type="submit" className={cx('btn', danger ? 'btn-danger' : 'btn-primary')}>
+            <button type="submit" className={cx('btn-primary', danger && 'btn-primary-danger')}>
               {confirmLabel}
             </button>
           </div>
@@ -409,6 +867,10 @@ export function Confirm({
     </dialog>
   );
 }
+
+/* ------------------------------------------------------------------------------------------ */
+/* Navigation                                                                                  */
+/* ------------------------------------------------------------------------------------------ */
 
 export interface TabDef<K extends string> {
   key: K;
@@ -466,7 +928,7 @@ export function Tabs<K extends string>({
   );
 }
 
-/** A small segmented filter (radio group semantics). */
+/** A quiet segmented filter: text options with an underline (radio group semantics). */
 export function Segmented<K extends string>({
   options,
   value,
@@ -478,16 +940,32 @@ export function Segmented<K extends string>({
   onChange(k: NoInfer<K>): void;
   label: string;
 }) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const onKey = (e: KeyboardEvent, i: number) => {
+    let n = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') n = (i + 1) % options.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp')
+      n = (i - 1 + options.length) % options.length;
+    if (n < 0) return;
+    e.preventDefault();
+    onChange(options[n]!.key);
+    refs.current[n]?.focus();
+  };
   return (
     <div className="segmented" role="radiogroup" aria-label={label}>
-      {options.map((o) => (
+      {options.map((o, i) => (
         <button
           key={o.key}
+          ref={(el) => {
+            refs.current[i] = el;
+          }}
           type="button"
           role="radio"
           aria-checked={o.key === value}
+          tabIndex={o.key === value ? 0 : -1}
           className="seg"
           onClick={() => onChange(o.key)}
+          onKeyDown={(e) => onKey(e, i)}
         >
           {o.label}
         </button>
@@ -510,15 +988,6 @@ export function Meter({ value, max, label }: { value: number; max: number; label
       <div className={cx('meter-fill', pct > 90 && 'meter-hot')} style={{ width: `${pct}%` }} />
     </div>
   );
-}
-
-export function useConfirm() {
-  const [state, setState] = useState<{ key: string } | null>(null);
-  return {
-    pending: state?.key ?? null,
-    ask: (key: string) => setState({ key }),
-    clear: () => setState(null),
-  };
 }
 
 /** Pretty JSON of untrusted data, rendered as text. */
