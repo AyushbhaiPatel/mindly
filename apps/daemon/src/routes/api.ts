@@ -412,12 +412,9 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     api.post('/api/projects/:projectId/trust', async (req) => {
       const pid = projectOf(req).id;
       const { configHash } = parse(TrustBody, req.body ?? {});
-      // Only the exact config the user reviewed may be trusted. The engine on fix/security-hardening
-      // takes this hash as `trust(projectId, expectedHash)`; until that lands it is checked here.
-      if (mindly.projects.byId(pid).configHash !== configHash.toLowerCase()) {
-        throw new ApiError('conflict', 'The project config changed since it was reviewed.');
-      }
-      mindly.projects.trust(pid);
+      // Only the exact config the user reviewed may be trusted; the engine refuses a changed file
+      // with a `conflict` error (409).
+      mindly.projects.trust(pid, configHash.toLowerCase());
       return trustStatus(pid);
     });
   });

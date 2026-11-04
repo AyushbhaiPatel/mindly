@@ -137,7 +137,10 @@ describe('shadow merge job', () => {
       { name: 'ok', argv: [node, '-e', 'process.exit(0)'] },
       { name: 'fail', argv: [node, '-e', 'console.log("b.txt is wrong"); process.exit(1)'] },
     ]);
-    s.d.mindly.projects.trust(s.project.id);
+    s.d.mindly.projects.trust(
+      s.project.id,
+      s.d.mindly.projects.byId(s.project.id).configHash ?? '',
+    );
     const run = await merge(s);
     expect(run.status).toBe('failed');
     const result = run.result as {
@@ -156,7 +159,10 @@ describe('shadow merge job', () => {
     expect(git(s.root, 'worktree', 'list').trim().split('\n')).toHaveLength(2);
 
     setChecks(s.root, [{ name: 'fail', argv: [node, '-e', 'process.exit(0)'] }]);
-    s.d.mindly.projects.trust(s.project.id);
+    s.d.mindly.projects.trust(
+      s.project.id,
+      s.d.mindly.projects.byId(s.project.id).configHash ?? '',
+    );
     const fixed = await merge(s);
     expect(fixed.status).toBe('passed');
     expect(s.d.mindly.store.conflicts.get(c!.id).status).toBe('resolved');
@@ -194,7 +200,7 @@ describe('command contracts', () => {
     // Untrusted project: nothing runs.
     expect(await runCommandContracts(d.jobs, pid)).toBeNull();
     write(root, '.mindly/config.json', '{}');
-    d.mindly.projects.trust(pid);
+    d.mindly.projects.trust(pid, d.mindly.projects.byId(pid).configHash ?? '');
 
     const first = await runCommandContracts(d.jobs, pid);
     expect(first?.status).toBe('passed');
