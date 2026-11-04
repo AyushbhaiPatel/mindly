@@ -5,6 +5,7 @@ import { provenanceModule, ProvenanceService } from './provenance.js';
 import { selfHealingModule, SelfHealingService } from './self-healing.js';
 import { serviceOf } from './shared.js';
 import { xrayModule, XRayService } from './xray.js';
+import { continuityModules } from './continuity.js';
 
 export * from './contracts.js';
 export * from './impact.js';
@@ -19,6 +20,7 @@ export const defaultModules: readonly MindlyModule[] = [
   contractsModule,
   provenanceModule,
   xrayModule,
+  continuityModules,
 ];
 
 /** Installs `defaultModules` on a `Mindly` instance. Call once per instance. */
