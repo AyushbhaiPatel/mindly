@@ -291,13 +291,15 @@ export function setJsoncValue(
 
 /**
  * Removes the property at `path` from a JSON/JSONC document. Returns the new text, or the
- * original text when the property is absent. Parent objects are left in place.
+ * original text when the property is absent. With `pruneEmptyParent`, a parent object that becomes
+ * empty is removed too (never the document root).
  */
 export function removeJsoncValue(
   file: string,
   text: string,
   format: McpConfigFormat,
   path: readonly string[],
+  options: { pruneEmptyParent?: boolean } = {},
 ): string {
   if (path.length === 0) throw new Error('removeJsoncValue needs a non-empty path');
   const parsed = parseText(file, text, format);
@@ -311,9 +313,23 @@ export function removeJsoncValue(
   const edits =
     (prop !== undefined && obj !== undefined ? removeEdits(body, obj, prop) : null) ??
     modify(body, [...path], undefined, {});
-  const result = bom + applyEdits(body, edits);
+  let result = bom + applyEdits(body, edits);
   if (readJsoncValue(file, result, format, path) !== undefined) {
     throw new MindlyError('internal', `could not update ${file} safely`);
+  }
+  // A servers object left empty (typically created by our own install) is removed as well, so
+  // install followed by uninstall restores the original file. The document root is never removed.
+  const parent = path.slice(0, -1);
+  if (options.pruneEmptyParent && parent.length > 0) {
+    const value = readJsoncValue(file, result, format, parent);
+    if (
+      value !== null &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 0
+    ) {
+      result = removeJsoncValue(file, result, format, parent);
+    }
   }
   return result;
 }

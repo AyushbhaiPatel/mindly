@@ -169,7 +169,8 @@ describe.each(MCP_CLIENTS.map((spec) => [spec.kind, spec] as const))('%s', (kind
     applyInstallSteps(await adapter.planInstall(opts(home)));
     expect(Object.keys(servers(spec, readFileSync(file, 'utf8')))).toEqual(['mindly']);
     applyInstallSteps(await adapter.planUninstall(opts(home)));
-    expect(servers(spec, readFileSync(file, 'utf8'))).toEqual({});
+    // The servers object created by install is removed again, leaving an empty document.
+    expect(JSON.parse(readFileSync(file, 'utf8') || '{}')).toEqual({});
   });
 
   it('preserves other servers and keys byte-for-byte; uninstall removes only mindly', async () => {
@@ -356,5 +357,25 @@ describe('jsonc edits', () => {
       command: 'mindly',
       args: ['mcp', '--agent', 'other'],
     });
+  });
+});
+
+describe('install then uninstall restores the original file', () => {
+  it('removes a servers object that install created', async () => {
+    const { mkdtempSync, mkdirSync, readFileSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { applyInstallSteps, getAdapter } = await import('../src/index.js');
+    const home = mkdtempSync(join(tmpdir(), 'mindly-zed-'));
+    const file = join(home, '.config', 'zed', 'settings.json');
+    mkdirSync(join(home, '.config', 'zed'), { recursive: true });
+    const original = '// Zed settings\n{\n  "vim_mode": true\n}\n';
+    writeFileSync(file, original);
+    const adapter = getAdapter('zed')!;
+    const opts = { command: ['/usr/bin/node', '/x/main.js'], projectRoot: null, homeDir: home };
+    applyInstallSteps(await adapter.planInstall(opts));
+    expect(readFileSync(file, 'utf8')).toContain('context_servers');
+    applyInstallSteps(await adapter.planUninstall(opts));
+    expect(readFileSync(file, 'utf8')).toBe(original);
   });
 });

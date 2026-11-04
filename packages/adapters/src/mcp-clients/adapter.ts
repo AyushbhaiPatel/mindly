@@ -130,7 +130,9 @@ export class McpClientAdapter implements AgentAdapter {
       );
     } else {
       if (previous === null) return [];
-      content = removeJsoncValue(file, previous, this.spec.format, path);
+      content = removeJsoncValue(file, previous, this.spec.format, path, {
+        pruneEmptyParent: true,
+      });
     }
     const step = stepIfChanged(
       file,
