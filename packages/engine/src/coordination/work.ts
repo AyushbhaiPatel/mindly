@@ -13,8 +13,10 @@ import type { TaskPatch } from '@mindly/store';
 import { INTENT_TTL_MS, OVERLAP_WINDOW_MS, type Kernel } from '../kernel.js';
 import type { TelepathyService } from './telepathy.js';
 
+/** Short human label for a session; a stored label is sanitised so it cannot forge delimiters. */
 export function sessionLabel(s: Session): string {
-  return s.label ? `${s.agentKind} "${s.label}"` : `${s.agentKind} #${shortId(s.id)}`;
+  const label = s.label ? sanitizeLine(s.label, 60) : '';
+  return label ? `${s.agentKind} "${label}"` : `${s.agentKind} #${shortId(s.id)}`;
 }
 
 // ---------------------------------------------------------------------------------------------
