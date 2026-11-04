@@ -63,8 +63,11 @@ export interface InstructionRule {
   text: string;
   /** Title Mindly stores (the text, shortened when long). */
   title: string;
-  /** The first source line, kept as evidence so the rule goes stale when the line is removed. */
-  excerpt: string;
+  /**
+   * The first source line, kept as evidence so the rule goes stale when the line is removed; null
+   * for UTF-16 files, which keep only the file as evidence.
+   */
+  excerpt: string | null;
   /** Path globs the file applies to (Cursor `globs`, Copilot `applyTo`, Kiro `fileMatchPattern`). */
   scopePaths: string[];
 }
@@ -149,18 +152,45 @@ function listFiles(dir: string, ext: readonly string[], depth: number): string[]
 
 function readInstructionFile(abs: string, rel: string, agents: string): InstructionFile {
   const base = { path: rel, agents, rules: [] };
-  let content: string;
+  let content: string | null;
+  let utf16: boolean;
   try {
     const st = statSync(abs);
     if (!st.isFile()) return { ...base, skipped: 'unreadable' };
     if (st.size > MAX_FILE_BYTES) return { ...base, skipped: 'too_large' };
-    content = readFileSync(abs, 'utf8');
+    const buf = readFileSync(abs);
+    utf16 = (buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff);
+    content = decodeText(buf);
   } catch {
     return { ...base, skipped: 'unreadable' };
   }
+  if (content === null) return { ...base, skipped: 'unreadable' };
   const parsed = parseInstructions(content);
   if (parsed.manual) return { ...base, skipped: 'manual' };
-  return { ...base, rules: parsed.rules.map((r) => ({ ...r, file: rel })), skipped: null };
+  // Evidence excerpts are matched against the file read as UTF-8, so UTF-16 files keep only the
+  // file and line as provenance.
+  return {
+    ...base,
+    rules: parsed.rules.map((r) => ({ ...r, file: rel, ...(utf16 ? { excerpt: null } : {}) })),
+    skipped: null,
+  };
+}
+
+/**
+ * Decodes UTF-8, or UTF-16 with a byte order mark (common from Windows editors). Returns null for
+ * anything else that is not clean text, so a binary or mis-encoded file is never imported.
+ */
+export function decodeText(buf: Buffer): string | null {
+  let text: string;
+  if (buf[0] === 0xff && buf[1] === 0xfe) {
+    text = buf.subarray(2).toString('utf16le');
+  } else if (buf[0] === 0xfe && buf[1] === 0xff) {
+    const body = Buffer.from(buf.subarray(2, 2 + ((buf.length - 2) & ~1)));
+    text = body.swap16().toString('utf16le');
+  } else {
+    text = buf.toString('utf8');
+  }
+  return text.includes('\0') || text.includes('\uFFFD') ? null : text;
 }
 
 interface Item {
@@ -171,10 +201,15 @@ interface Item {
   indent: number;
   /** Paragraphs: where each source line starts in `text`, for per-sentence provenance. */
   rows?: { at: number; line: number; excerpt: string }[];
+  /** Block breaks: the heading (or bold label, level 7) that starts a section. */
+  heading?: { level: number; text: string };
 }
 
 const FENCE = /^\s*(```|~~~)/;
-const HEADING = /^\s{0,3}#{1,6}(\s|$)/;
+const HEADING = /^\s{0,3}(#{1,6})(\s|$)/;
+/** Wording that turns the items under it into prohibitions ("Don'ts", "Never:", "Avoid"). */
+const NEGATION =
+  /\b(don'?ts?|do not|never|avoid|must not|should not|shouldn'?t|forbidden|prohibited|banned|not allowed|anti-?patterns?|pitfalls?)\b|^no\b/i;
 const SETEXT = /^\s{0,3}(=+|-+)\s*$/;
 const THEMATIC_BREAK = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
 const BULLET = /^(\s*)(?:[-*+]|\d{1,3}[.)])\s+(.*)$/;
@@ -197,9 +232,9 @@ export function parseInstructions(content: string): ParsedInstructions {
     if (current) items.push(current);
     current = null;
   };
-  const breakBlock = (): void => {
+  const breakBlock = (heading?: { level: number; text: string }): void => {
     flush();
-    items.push({ line: 0, excerpt: '', text: '', indent: -2 });
+    items.push({ line: 0, excerpt: '', text: '', indent: -2, ...(heading ? { heading } : {}) });
   };
   for (let i = meta.bodyStart; i < lines.length; i++) {
     const raw = lines[i] ?? '';
@@ -225,9 +260,25 @@ export function parseInstructions(content: string): ParsedInstructions {
       continue;
     }
     const setext = current === null && SETEXT.test(lines[i + 1] ?? '') && !BULLET.test(line);
-    if (HEADING.test(line) || THEMATIC_BREAK.test(line) || BOLD_ONLY.test(line) || setext) {
+    const atx = HEADING.exec(line);
+    if (atx) {
+      breakBlock({ level: (atx[1] ?? '#').length, text: trimmed.replace(/^#+\s*|\s*#+$/g, '') });
+      continue;
+    }
+    if (setext) {
+      breakBlock({ level: (lines[i + 1] ?? '').trim().startsWith('=') ? 1 : 2, text: trimmed });
+      i++;
+      continue;
+    }
+    if (BOLD_ONLY.test(line)) {
+      breakBlock({
+        level: 7,
+        text: trimmed.replace(/^(\*\*|__)|(\*\*|__)$|(\*\*|__)?:?(\*\*|__)?$/g, ''),
+      });
+      continue;
+    }
+    if (THEMATIC_BREAK.test(line)) {
       breakBlock();
-      if (setext) i++;
       continue;
     }
     if (/^\s*\|/.test(line) || /^@\S+$/.test(trimmed) || /^<\/?[a-z][^>]*>$/i.test(trimmed)) {
@@ -257,21 +308,35 @@ export function parseInstructions(content: string): ParsedInstructions {
   flush();
 
   const rules: Omit<InstructionRule, 'file'>[] = [];
+  const headings: { level: number; text: string }[] = [];
+  let paragraphLeadIn: string | null = null;
   for (let i = 0; i < items.length && rules.length < MAX_RULES_PER_FILE; i++) {
     const item = items[i] as Item;
-    if (item.indent === -2) continue;
-    const text = inline(item.text);
-    const next = items[i + 1];
-    // A lead-in ("When writing tests:", "Commands") is folded into the items under it.
-    if (
-      next !== undefined &&
-      next.indent > item.indent &&
-      (text.endsWith(':') || words(text) < 4)
-    ) {
+    if (item.indent === -2) {
+      if (item.heading) {
+        const level = item.heading.level;
+        while ((headings.at(-1)?.level ?? 0) >= level) headings.pop();
+        headings.push({ level, text: inline(item.heading.text) });
+      }
+      paragraphLeadIn = null;
       continue;
     }
-    const parent = item.indent >= 0 ? parentOf(items, i) : null;
-    const prefix = parent ? leadIn(inline(parent.text)) : null;
+    const text = inline(item.text);
+    const next = items[i + 1];
+    // A lead-in ("When writing tests:", "Never do these:") is folded into the items under it.
+    if (next !== undefined && next.indent > item.indent && isLeadIn(text)) {
+      if (item.indent === -1) paragraphLeadIn = bare(text);
+      continue;
+    }
+    if (item.indent === -1) paragraphLeadIn = null;
+    // Context that changes the meaning of an item is kept with it: a negating section heading
+    // ("Don'ts") and every lead-in above the item. Topic headings ("Code style") are dropped.
+    const context = [
+      ...headings.filter((h) => negating(h.text)).map((h) => bare(h.text)),
+      ...(item.indent >= 0 && paragraphLeadIn ? [paragraphLeadIn] : []),
+      ...ancestorLeadIns(items, i),
+    ];
+    const prefix = context.length > 0 ? `${context.join(': ')}:` : null;
     const pieces = item.rows ? sentences(item.text) : [{ text: item.text, at: 0 }];
     for (const piece of pieces) {
       const body = inline(piece.text);
@@ -290,20 +355,33 @@ export function parseInstructions(content: string): ParsedInstructions {
   return { rules, scopePaths: meta.scopePaths, manual: meta.manual };
 }
 
-/** The list item a nested item belongs to, if any. */
-function parentOf(items: readonly Item[], index: number): Item | null {
-  const item = items[index] as Item;
-  for (let j = index - 1; j >= 0; j--) {
+/** Lead-ins of the list items a nested item sits under, outermost first. */
+function ancestorLeadIns(items: readonly Item[], index: number): string[] {
+  const out: string[] = [];
+  let indent = (items[index] as Item).indent;
+  for (let j = index - 1; j >= 0 && indent > 0; j--) {
     const p = items[j] as Item;
-    if (p.indent < 0) return null;
-    if (p.indent < item.indent) return p;
+    if (p.indent < 0) break;
+    if (p.indent >= indent) continue;
+    indent = p.indent;
+    const text = inline(p.text);
+    if (isLeadIn(text)) out.unshift(bare(text));
   }
-  return null;
+  return out;
 }
 
-function leadIn(text: string): string | null {
-  if (text.endsWith(':')) return text;
-  return words(text) < 4 ? `${text.replace(/[.]$/, '')}:` : null;
+/** Text that introduces the items below it rather than stating a rule of its own. */
+function isLeadIn(text: string): boolean {
+  if (text.endsWith(':') || words(text) < 4) return true;
+  return negating(text) && !/[.!]$/.test(text);
+}
+
+function negating(text: string): boolean {
+  return NEGATION.test(text.replace(/[‘’]/g, "'"));
+}
+
+function bare(text: string): string {
+  return text.replace(/[:.]+$/, '').trim();
 }
 
 function lowerFirst(text: string): string {
@@ -422,18 +500,23 @@ export function ruleKey(title: string): string {
     .trim();
 }
 
-/** Splits `rules` into new ones and ones already known by title or repeated in another file. */
+/**
+ * Splits `rules` into new ones and ones already known: an existing rule with the same title, or the
+ * same full text earlier in this import (titles of long rules are shortened, so they are not used
+ * to compare rules with each other).
+ */
 export function dedupeRules(
   rules: readonly InstructionRule[],
   knownTitles: Iterable<string>,
 ): { fresh: InstructionRule[]; known: InstructionRule[] } {
+  const existing = new Set<string>();
+  for (const t of knownTitles) existing.add(ruleKey(t));
   const seen = new Set<string>();
-  for (const t of knownTitles) seen.add(ruleKey(t));
   const fresh: InstructionRule[] = [];
   const known: InstructionRule[] = [];
   for (const r of rules) {
-    const key = ruleKey(r.title);
-    if (seen.has(key)) {
+    const key = ruleKey(r.text);
+    if (existing.has(ruleKey(r.title)) || seen.has(key)) {
       known.push(r);
     } else {
       seen.add(key);

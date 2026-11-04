@@ -166,10 +166,11 @@ export class RuleService {
   /**
    * Reads the project's agent instruction files (CLAUDE.md, AGENTS.md, .cursorrules, …) and
    * returns the rules they contain that Mindly does not know yet. Rules the user archived or
-   * rejected count as known, so a re-import never brings them back. Writes nothing.
+   * rejected count as known, so a re-import never brings them back. Writes nothing; pass a null
+   * project id for a project Mindly has not registered yet.
    */
   planImport(
-    projectId: string,
+    projectId: string | null,
     projectRoot: string,
     ignore: readonly string[] = [],
   ): InstructionImportPlan {
@@ -177,10 +178,13 @@ export class RuleService {
       ...this.k.config.redaction.denyPaths,
       ...ignore,
     ]);
-    const known = [
-      ...this.memory.list(projectId, { kinds: ['rule'], status: 'active', limit: 1000 }),
-      ...this.memory.list(projectId, { kinds: ['rule'], status: 'archived', limit: 1000 }),
-    ].map((m) => m.title);
+    const known =
+      projectId === null
+        ? []
+        : [
+            ...this.memory.list(projectId, { kinds: ['rule'], status: 'active', limit: 1000 }),
+            ...this.memory.list(projectId, { kinds: ['rule'], status: 'archived', limit: 1000 }),
+          ].map((m) => m.title);
     return {
       files,
       ...dedupeRules(
@@ -191,11 +195,17 @@ export class RuleService {
   }
 
   /**
-   * Stores rules from {@link planImport} as approved user rules: the user wrote the files and
-   * confirmed the import. Each rule keeps its source line as evidence, so it is marked stale when
-   * that line is edited out of the file. Returns the rules stored.
+   * Stores rules from {@link planImport}. They are `approved` only when the user read the list and
+   * confirmed it; otherwise they are `proposed` and wait for approval like any suggested rule.
+   * Each rule keeps its source line as evidence, so it is marked stale when that line is edited
+   * out of the file. Returns the rules stored.
    */
-  importRules(projectId: string, projectRoot: string, rules: readonly InstructionRule[]): Memory[] {
+  importRules(
+    projectId: string,
+    projectRoot: string,
+    rules: readonly InstructionRule[],
+    trust: 'approved' | 'proposed',
+  ): Memory[] {
     const out: Memory[] = [];
     for (const r of rules) {
       const where = `Imported from ${r.file}, line ${r.line}.`;
@@ -210,8 +220,10 @@ export class RuleService {
             tags: ['imported'],
             scopePaths: r.scopePaths,
             source: USER,
-            trust: 'approved',
-            evidence: [{ path: r.file, excerpt: r.excerpt }],
+            trust,
+            evidence: [
+              r.excerpt === null ? { path: r.file } : { path: r.file, excerpt: r.excerpt },
+            ],
             reason: `imported from ${r.file}`,
           }),
         );

@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { defaultUserConfig, homePaths, mindlyHome } from '@mindly/core';
 import {
   dedupeRules,
@@ -7,6 +7,7 @@ import {
   type InstructionImportPlan,
 } from '@mindly/engine';
 import { findRepoRoot } from '@mindly/git';
+import { openMindly } from '@mindly/runtime';
 import { withProject } from '../context.js';
 import { confirm } from '../io.js';
 import { count, listWords } from '../present/index.js';
@@ -18,48 +19,59 @@ export interface RuleImportOptions {
   dryRun?: boolean;
 }
 
+type Importer = (trust: 'approved' | 'proposed') => readonly unknown[];
+
 /**
- * Finds rules in the project's agent instruction files (CLAUDE.md, AGENTS.md, .cursorrules, …),
- * shows them and imports the new ones as approved rules once the user confirms. `from` decides
- * the wording: inside `mindly init` nothing is printed when the project has no such files, and
- * outside a git repository the step is skipped. Returns the exit code.
+ * Finds rules in the project's agent instruction files (CLAUDE.md, AGENTS.md, .cursorrules, …) and
+ * imports the new ones. They are approved only when the user confirms the list on a terminal; with
+ * `--yes` or without a terminal they are added as suggestions waiting for approval. `from` decides
+ * the wording: inside `mindly init` the step stays silent when there is nothing new, and is skipped
+ * outside a git repository. Returns the exit code.
  */
 export async function offerRuleImport(
   out: Out,
   o: RuleImportOptions,
   from: 'init' | 'rules',
 ): Promise<number> {
-  if (from === 'init') {
-    let root: string;
-    try {
-      root = await findRepoRoot(out.io.cwd);
-    } catch {
-      return 0;
-    }
-    // Most repositories have none of these files: do not register the project for nothing.
-    if (scanInstructionFiles(root).length === 0) return 0;
+  let root: string;
+  try {
+    root = realpathSync(await findRepoRoot(out.io.cwd));
+  } catch {
+    if (from === 'init') return 0;
+    root = realpathSync(out.io.cwd);
   }
-  const home = homePaths(mindlyHome(out.io.env));
-  if (o.dryRun && !existsSync(home.db)) {
-    // A dry run must not create the database just to look for duplicates: nothing is known yet.
-    const root = await findRepoRoot(out.io.cwd).catch(() => out.io.cwd);
+  // Most repositories have none of these files: do not open storage or register anything for them.
+  if (from === 'init' && scanInstructionFiles(root).length === 0) return 0;
+  if (o.dryRun) return present(out, dryRunPlan(out, root), o, from, null);
+  return withProject(out.io, ({ mindly, project }) => {
+    const pid = project.project.id;
+    const plan = mindly.rules.planImport(pid, project.root, project.config.ignore);
+    return present(out, plan, o, from, (trust) =>
+      mindly.rules.importRules(pid, project.root, plan.fresh, trust),
+    );
+  });
+}
+
+/** The plan for a dry run, read without creating the database or registering the project. */
+function dryRunPlan(out: Out, root: string): InstructionImportPlan {
+  if (!existsSync(homePaths(mindlyHome(out.io.env)).db)) {
     const files = scanInstructionFiles(root, defaultUserConfig().redaction.denyPaths);
-    const plan = {
+    return {
       files,
       ...dedupeRules(
         files.flatMap((f) => f.rules),
         [],
       ),
     };
-    return present(out, plan, o, from, () => []);
   }
-  return withProject(out.io, ({ mindly, project }) => {
-    const pid = project.project.id;
-    const plan = mindly.rules.planImport(pid, project.root, project.config.ignore);
-    return present(out, plan, o, from, () =>
-      mindly.rules.importRules(pid, project.root, plan.fresh),
-    );
-  });
+  const mindly = openMindly({ env: out.io.env, disableNotify: true, disableLlm: true });
+  try {
+    const project = mindly.store.projects.findByRoot(root);
+    const ignore = project ? mindly.projects.byId(project.id).config.ignore : [];
+    return mindly.rules.planImport(project?.id ?? null, root, ignore);
+  } finally {
+    mindly.close();
+  }
 }
 
 async function present(
@@ -67,17 +79,18 @@ async function present(
   plan: InstructionImportPlan,
   o: RuleImportOptions,
   from: 'init' | 'rules',
-  apply: () => readonly unknown[],
+  apply: Importer | null,
 ): Promise<number> {
   const sc = out.screen();
   if (plan.files.length === 0) {
-    if (from === 'init') return 0;
     sc.summary('No agent instruction files in this project.');
     sc.note(
       'Mindly imports rules from CLAUDE.md, AGENTS.md, GEMINI.md, .cursorrules, .cursor/rules and similar files at the project root.',
     );
     return 0;
   }
+  // Re-running init on a project whose rules are already imported says nothing about them.
+  if (from === 'init' && plan.fresh.length === 0) return 0;
   const total = plan.fresh.length + plan.known.length;
   const names = plan.files.map((f) => f.path);
   if (from === 'init') sc.section('Rules from your agent instruction files');
@@ -102,10 +115,10 @@ async function present(
     );
   }
   if (plan.fresh.length === 0) {
-    if (from === 'rules') sc.text(`${sc.mark('ok')} Nothing new to import.`);
+    sc.text(`${sc.mark('ok')} Nothing new to import.`);
     return 0;
   }
-  if (o.dryRun) {
+  if (apply === null) {
     if (from === 'rules') {
       sc.blank();
       sc.text('Dry run: no rules were imported.');
@@ -114,12 +127,20 @@ async function present(
   }
   sc.blank();
   const n = count(plan.fresh.length, 'rule');
-  if (!(await confirm(out.io, `Import ${n} as approved project rules?`, o.yes === true))) {
+  if (o.yes === true || out.io.prompt === null) {
+    // Nobody read the list: the rules are suggestions until the user approves them.
+    const stored = apply('proposed');
+    sc.text(`${sc.mark('ok')} Added ${count(stored.length, 'suggested rule')}, waiting for you.`);
+    sc.note('Agents do not follow them as project rules until you approve them.', 2);
+    sc.next([{ cmd: 'mindly rules', why: 'review and approve them' }]);
+    return 0;
+  }
+  if (!(await confirm(out.io, `Import ${n} as approved project rules?`, false))) {
     sc.text('No rules were imported.');
     sc.next([{ cmd: 'mindly rules import', why: 'import them later' }]);
     return from === 'rules' ? 1 : 0;
   }
-  const stored = apply();
+  const stored = apply('approved');
   sc.text(`${sc.mark('ok')} Imported ${count(stored.length, 'rule')}.`);
   sc.note(
     'Every agent in this project follows them from now on. A rule is marked as possibly outdated when its line is removed from the file.',
@@ -135,9 +156,9 @@ function fileWords(f: InstructionFile): string {
     case 'manual':
       return `${f.agents} · skipped: only used when you ask for it`;
     case 'too_large':
-      return `${f.agents} · skipped: larger than 256 KB`;
+      return `${f.agents} · skipped: file is too large`;
     case 'unreadable':
-      return `${f.agents} · skipped: could not be read`;
+      return `${f.agents} · skipped: not readable as text`;
     case null:
       return `${f.agents} · ${count(f.rules.length, 'rule')}${scope.length ? ` for ${scope.join(', ')}` : ''}`;
   }

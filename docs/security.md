@@ -116,11 +116,11 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - Any path, glob or id containing control, line-break or bidi characters is rejected at input and
   sanitised again at render time, so structure in a context block cannot be forged.
 - Rules are auto-approved only from short prompts without code blocks; anything else (typically
-  pasted, untrusted text) is proposed.
-- Rules imported from a repository's agent instruction files (`CLAUDE.md`, `AGENTS.md`, …) are
-  approved only after the user saw the list and confirmed it (or passed `--yes`), and they are
-  never `enforce` rules. Agents Mindly launches itself carry `MINDLY_HEADLESS_RUN=1`,
+  pasted, untrusted text) is proposed. Agents Mindly launches itself carry `MINDLY_HEADLESS_RUN=1`,
   and their prompts are never captured as rules. Headless Claude Code runs load only user settings.
+- Rules imported from a repository's instruction files (`CLAUDE.md`, `AGENTS.md`, …) are approved
+  only when the user confirms the list on a terminal; with `--yes` or without a terminal they are
+  added as suggestions that wait for approval, and they are never `enforce` rules.
 - Failed command output is never stored or replayed; mistake memories keep only the command.
 - Trusting a project config requires the hash the user reviewed; a changed file is refused.
 - Config files are read with `lstat` + `O_NOFOLLOW | O_NONBLOCK` and a byte cap, so a config that

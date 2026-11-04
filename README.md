@@ -106,11 +106,13 @@ Run inside a repository, `init` also reads the instruction files you already wro
 agents (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.cursor/rules/`, `.windsurfrules`,
 `.github/copilot-instructions.md`, `.clinerules`, `.roo/rules/`, `.kiro/steering/` and similar),
 lists each bullet or sentence as a rule with its file and line, and asks before importing the new
-ones as approved rules, so every agent starts with them on day one. Headings, code blocks and
-boilerplate are skipped; rules Mindly already has (including ones you archived or rejected) are not
-imported again, and Cursor/Copilot/Kiro path globs become the rule's scope. When you later remove a
-line from the file, its rule is marked as possibly outdated. Skip the step with `--no-import` and
-re-run it any time with `mindly rules import`.
+ones as approved rules, so every agent starts with them on day one. With `--yes`, or without a
+terminal to ask on, they are added as suggestions that you approve with `mindly rules`. Headings,
+code blocks and boilerplate are skipped, and context such as a "Don'ts" heading stays with its
+items. Rules Mindly already has (including ones you archived or rejected) are not imported again,
+and Cursor/Copilot/Kiro path globs become the rule's scope. When you later remove a line from the
+file, its rule is marked as possibly outdated. Skip the step with `--no-import` and re-run it any
+time with `mindly rules import`.
 
 | Agent                    | Integration | Status                                           |
 | ------------------------ | ----------- | ------------------------------------------------ |

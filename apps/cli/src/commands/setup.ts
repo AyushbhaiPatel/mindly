@@ -28,7 +28,7 @@ import { findRepoRoot } from '@mindly/git';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary } from '../diff.js';
 import { confirm, type CliIo } from '../io.js';
-import { splitList, UsageError, type Out } from '../util.js';
+import { clean, splitList, UsageError, type Out } from '../util.js';
 import { renderInitSummary } from '../views/setup.js';
 import { offerRuleImport } from './import.js';
 
@@ -298,7 +298,15 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
     }
   }
   const home = initHome(out.io);
-  if (o.import !== false) await offerRuleImport(out, { yes: o.yes === true }, 'init');
+  if (o.import !== false) {
+    try {
+      await offerRuleImport(out, { yes: o.yes === true }, 'init');
+    } catch (err) {
+      // The agents are connected already: a failed import must not fail init.
+      const why = clean(err instanceof Error ? err.message : String(err), 200);
+      out.line(`Rules were not imported (${why}). Try again with: mindly rules import`);
+    }
+  }
   renderInitSummary(out.screen(), {
     home,
     connected: plans.filter((p) => p.steps.length > 0).map((p) => p.adapter.displayName),
