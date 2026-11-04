@@ -31,6 +31,17 @@ Context goes out as `hookSpecificOutput.additionalContext` (capped at 10 000 cha
 documented limit); `deny`/`ask` as `permissionDecision`; user notices as `systemMessage`. Stop never
 gets `additionalContext` because that would keep Claude working.
 
+**Claude Code status line** (`src/claude-code/statusline.ts`): `planStatusLineInstall` adds
+`"statusLine": { "type": "command", "command": "<command> statusline" }` to the same
+`settings.json`, keeping every other key. A statusLine counts as Mindly's only when its command is
+exactly `<…/mindly> statusline`, `<node> <…mindly…/dist/main.js> statusline` or the command being
+installed; anything else (a script, a chain such as `my.sh; mindly statusline`) is the user's and
+is never changed or removed. `effectiveStatusLine` reads project `settings.local.json`, project
+`settings.json`, then the user's, for `mindly doctor`. Contract from
+https://code.claude.com/docs/en/statusline: session JSON on stdin, each stdout line is a row, ANSI
+colours allowed, runs after each assistant message (300 ms debounce), in-flight runs are cancelled,
+and a non-zero exit or empty output blanks the line.
+
 **Codex** events: `SessionStart`, `UserPromptSubmit`, `PreToolUse` / `PostToolUse` (matcher
 `^(Bash|apply_patch)$`), `Stop`, `SessionEnd` (3 s timeout, the documented maximum). `apply_patch`
 envelopes are parsed into per-file edits (bounded to 2 MB input). Codex has no `ask` decision, so
@@ -98,6 +109,7 @@ Docs for each client are listed below and in each catalog entry's `docs` field.
 
 - Claude Code hooks: https://code.claude.com/docs/en/hooks
 - Claude Code MCP: https://code.claude.com/docs/en/mcp
+- Claude Code status line: https://code.claude.com/docs/en/statusline
 - Codex hooks: https://developers.openai.com/codex/hooks (redirects to https://learn.chatgpt.com/docs/hooks)
 - Codex MCP: https://developers.openai.com/codex/mcp (redirects to https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 - Cursor hooks: https://cursor.com/docs/agent/hooks

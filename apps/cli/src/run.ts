@@ -68,6 +68,18 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
       }),
     );
 
+  program
+    .command('statusline')
+    .description(
+      "Print Mindly's Claude Code status line (called by Claude Code; reads JSON on stdin)",
+    )
+    .action(
+      act(() => async () => {
+        const { runStatusLine } = await import('./statusline.js');
+        return runStatusLine(io);
+      }),
+    );
+
   // ---- setup ---------------------------------------------------------------------------------
   const setupOptions = (cmd: Command): Command =>
     cmd
@@ -79,6 +91,7 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     program.command('init').description('Connect your agents to Mindly and initialise storage'),
   )
     .option('--list-agents', 'list supported agents and their integration level')
+    .option('--no-statusline', "don't offer Mindly's Claude Code status line")
     .action(act((o: object) => async (out) => (await import('./commands/setup.js')).init(out, o)));
   setupOptions(
     program.command('uninstall').description('Remove Mindly hooks and MCP entries from agents'),

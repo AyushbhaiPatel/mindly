@@ -13,6 +13,16 @@ export {
 } from './claude-code/index.js';
 export type { ClaudeCodeAdapterOptions } from './claude-code/index.js';
 export {
+  chainedStatusLineScript,
+  effectiveStatusLine,
+  isMindlyStatusLineCommand,
+  planStatusLineInstall,
+  statusLineCommand,
+  statusLineLauncherExists,
+  STATUSLINE_SUBCOMMAND,
+} from './claude-code/statusline.js';
+export type { StatusLinePlan, StatusLineState } from './claude-code/statusline.js';
+export {
   CODEX_EVENTS,
   CODEX_TOOL_MATCHER,
   codexAdapter,

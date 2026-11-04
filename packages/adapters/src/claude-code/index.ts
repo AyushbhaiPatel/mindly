@@ -24,6 +24,7 @@ import {
 import type { PlanMode } from '../shared/plan.js';
 import { compactSteps, planJsonFile, validateInstallOptions } from '../shared/plan.js';
 import { isRecord } from '../shared/payload.js';
+import { removeMindlyStatusLine } from './statusline.js';
 
 const KIND = 'claude-code';
 
@@ -101,6 +102,7 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
     install ? 'Register Mindly hooks for Claude Code' : 'Remove Mindly hooks from Claude Code',
     mode,
     (config) => {
+      if (!install) removeMindlyStatusLine(config, options.command);
       if (!install && !isRecord(config['hooks'])) return;
       const hooks = hooksObject(config, paths.settings);
       removeGroupedHooks(hooks, KIND);

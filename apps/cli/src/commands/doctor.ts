@@ -10,6 +10,7 @@ import { McpClientAdapter } from '@mindly/adapters';
 import { adapterOf, adaptersFor, installCommand, SUPPORTED_AGENTS, userHome } from './setup.js';
 import type { Step } from '../present/index.js';
 import { renderDoctor, type DoctorItem } from '../views/doctor.js';
+import { statusLineCheck } from './statusline-setup.js';
 
 /** Result of one doctor check (the `--json` shape; keep it stable). */
 export interface Check {
@@ -371,6 +372,14 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
       );
     }
   }
+
+  const statusLine = await statusLineCheck(
+    env,
+    adapterOf(adapters, 'claude-code'),
+    command,
+    projectRoot,
+  );
+  if (statusLine !== null) items.push(statusLine);
 
   const daemon = await runningDaemon(env);
   items.push(

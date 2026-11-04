@@ -28,6 +28,7 @@ import { diffSummary } from '../diff.js';
 import { confirm, type CliIo } from '../io.js';
 import { splitList, UsageError, type Out } from '../util.js';
 import { renderInitSummary } from '../views/setup.js';
+import { offerStatusLine } from './statusline-setup.js';
 
 /** Agents `mindly init` knows how to connect: hook agents first, then MCP-only clients. */
 export const SUPPORTED_AGENTS: readonly string[] = Object.freeze([
@@ -162,13 +163,13 @@ async function projectRootOf(cwd: string): Promise<string> {
   }
 }
 
-interface AgentPlan {
+export interface AgentPlan {
   agent: SupportedAgent;
   adapter: AgentAdapter;
   steps: InstallStep[];
 }
 
-function printPlan(out: Out, plans: readonly AgentPlan[], none: string): number {
+export function printPlan(out: Out, plans: readonly AgentPlan[], none: string): number {
   const s = out.style;
   let total = 0;
   for (const p of plans) {
@@ -203,6 +204,7 @@ interface SetupOptions {
   yes?: boolean;
   dryRun?: boolean;
   listAgents?: boolean;
+  statusline?: boolean;
 }
 
 /** `mindly init`. */
@@ -249,6 +251,7 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
   out.line();
   const total = printPlan(out, plans, 'already configured');
   if (o.dryRun) {
+    await offerStatusLine(out, o, plans, command, projectRoot);
     out.line();
     out.line('Dry run: nothing was written.');
     return 0;
@@ -267,6 +270,7 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
       }
     }
   }
+  await offerStatusLine(out, o, plans, command, projectRoot);
   const home = initHome(out.io);
   renderInitSummary(out.screen(), {
     home,

@@ -102,6 +102,8 @@ Use `--project` to set up only the current repository and `--dry-run` to preview
 agents as usual; there is nothing else to run. `mindly doctor` checks the setup and
 `mindly uninstall` removes it.
 
+When it connects Claude Code, `init` also offers a [status line](#claude-code-status-line).
+
 | Agent                    | Integration | Status                                           |
 | ------------------------ | ----------- | ------------------------------------------------ |
 | Claude Code              | hooks + MCP | tested end to end                                |
@@ -230,6 +232,32 @@ mindly doctor | config | daemon start|stop|status
 ```
 
 Every read command takes `--json`. Run `mindly <command> --help` for options.
+
+### Claude Code status line
+
+`mindly init` offers to show Mindly in Claude Code's
+[status line](https://code.claude.com/docs/en/statusline) (`--yes` adds it, `--no-statusline`
+skips it):
+
+```
+mindly · 3 rules · 1 update · 0 conflicts
+```
+
+- **rules**: approved or verified rules in effect for this session's project: shared ones and
+  those scoped to the session's git branch (path-scoped rules included).
+- **updates**: messages from other agents queued for this session (or for any Claude Code
+  session) that it has not received yet. They arrive with its next turn.
+- **conflicts**: open conflicts in the project that need you (anything more than FYI), the same
+  count as `mindly status`.
+
+`mindly statusline` reads Mindly's database directly (read-only, no daemon needed) and answers in
+about 40 ms. It never fails: if the data cannot be read it prints `mindly · offline`, and
+`mindly · no project` means Mindly has not seen this folder yet. Colours follow `NO_COLOR`.
+
+If you already have a status line, `init` leaves it alone and prints a small wrapper script that
+shows yours and Mindly's on two rows; or pipe the same JSON into `mindly statusline` from your own
+script. `mindly uninstall` removes only a status line Mindly added, and `mindly doctor` reports
+which one Claude Code uses.
 
 ## Privacy and security
 

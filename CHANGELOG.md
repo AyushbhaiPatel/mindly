@@ -3,6 +3,15 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## Unreleased
+
+### Added
+
+- Claude Code status line: `mindly statusline` prints `mindly · 3 rules · 1 update · 0 conflicts`
+  for the session's project in about 40 ms and never fails. `mindly init` offers to add it
+  (`--no-statusline` to skip) without replacing a status line you already have, `mindly uninstall`
+  removes it, and `mindly doctor` reports it.
+
 ## 0.1.3 — 2026-11-04
 
 ### Changed
