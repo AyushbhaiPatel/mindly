@@ -1,5 +1,7 @@
 import {
+  accessSync,
   chmodSync,
+  constants,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -30,7 +32,7 @@ export interface AppliedStep {
 export interface ApplyOptions {
   /** Timestamp used in backup names. */
   now?: Date;
-  /** Project root of a project-level install: files inside it must not link outside it. */
+  /** Project root of a project-level install: files inside it must resolve inside it. */
   projectRoot?: string | null;
 }
 
@@ -52,9 +54,36 @@ function resolveLinkTarget(file: string): { target: string; dangling: boolean } 
       return { target: current, dangling: current !== file };
     }
     if (!isLink) return { target: current, dangling: false };
-    current = resolve(realpathSync(dirname(current)), readlinkSync(current));
+    const link = readlinkSync(current);
+    // `..` in a relative link is resolved by the OS from the real directory, not the path we took.
+    const base =
+      isAbsolute(link) || !link.split(/[\\/]/).includes('..')
+        ? dirname(current)
+        : realpathSync(dirname(current));
+    current = resolve(base, link);
   }
-  throw new MindlyError('invalid_input', `${file} is a symlink loop or too long a symlink chain`);
+  throw new MindlyError('invalid_input', `${file} is a symlink loop`);
+}
+
+function canWrite(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns the file Mindly would write for `file` (after following symlinks) when it cannot be
+ * written, e.g. a link into a read-only store managed by another tool; null when it is writable.
+ */
+export function readOnlyTarget(file: string): string | null {
+  const { target } = resolveLinkTarget(resolve(file));
+  let dir = dirname(target);
+  while (!existsSync(dir) && dirname(dir) !== dir) dir = dirname(dir);
+  const writable = canWrite(dir) && (!existsSync(target) || canWrite(target));
+  return writable ? null : target;
 }
 
 function timestamp(now: Date): string {
@@ -107,60 +136,85 @@ function writeAtomic(file: string, content: string, mode: number): void {
   }
 }
 
+interface CheckedStep {
+  file: string;
+  target: string;
+  dangling: boolean;
+  current: string | null;
+  content: string;
+}
+
+function checkStep(step: InstallStep, projectRoot: string | null): CheckedStep {
+  if (!isAbsolute(step.file) || step.file.includes('\0')) {
+    throw new MindlyError('invalid_input', 'install step path must be absolute');
+  }
+  const file = resolve(step.file);
+  if (file.endsWith(sep))
+    throw new MindlyError('invalid_input', 'install step path is a directory');
+  const { target, dangling } = resolveLinkTarget(file);
+  const current = existsSync(file) ? readFileSync(file, 'utf8') : null;
+  if (current !== step.previous) {
+    throw new MindlyError(
+      'conflict',
+      `${file} changed since the install plan was made; re-run the command`,
+    );
+  }
+  if (projectRoot !== null && isInside(projectRoot, file)) {
+    try {
+      resolveInsideRoot(projectRoot, target);
+    } catch {
+      throw new MindlyError(
+        'path_outside_project',
+        `${file} resolves outside the project; edit it directly instead`,
+      );
+    }
+  }
+  const readOnly = readOnlyTarget(file);
+  if (readOnly !== null) {
+    throw new MindlyError(
+      'forbidden',
+      `${readOnly} is read-only${readOnly === file ? '' : ` (linked from ${file})`}`,
+    );
+  }
+  return { file, target, dangling, current, content: step.content };
+}
+
 /**
  * Applies install steps produced by `planInstall` / `planUninstall`.
  *
  * Each file is written atomically (temp file + rename), keeping its existing permission bits (new
  * files get 0600). A file that is a symlink stays a symlink: the file at the end of the link chain
- * is written instead (through a temp file next to it), and a link to a missing file creates it. When a file existed, its previous content is first saved next to it as
+ * is written instead (through a temp file next to it), and a link to a missing file creates it.
+ * When a file existed, its previous content is first saved next to it as
  * `<file>.<UTC timestamp>.bak`. Missing parent directories are created with mode 0700.
  *
- * Before writing, the current on-disk content must still equal `step.previous`; otherwise the
- * step is refused with a `conflict` error so concurrent edits (e.g. the agent rewriting its own
- * config) are never clobbered. Steps already applied stay applied.
+ * Every step is checked before anything is written: the current on-disk content must still equal
+ * `step.previous` (otherwise a `conflict` error, so concurrent edits such as the agent rewriting
+ * its own config are never clobbered), the file must be writable, and with `projectRoot` set a
+ * file inside the project must resolve inside it.
  */
 export function applyInstallSteps(
   steps: readonly InstallStep[],
   options: ApplyOptions = {},
 ): AppliedStep[] {
   const stamp = timestamp(options.now ?? new Date());
-  const projectRoot = options.projectRoot ?? null;
+  const checked = steps.map((step) => checkStep(step, options.projectRoot ?? null));
   const applied: AppliedStep[] = [];
-  for (const step of steps) {
-    if (!isAbsolute(step.file) || step.file.includes('\0')) {
-      throw new MindlyError('invalid_input', 'install step path must be absolute');
-    }
-    const file = resolve(step.file);
-    if (file.endsWith(sep))
-      throw new MindlyError('invalid_input', 'install step path is a directory');
-    const exists = existsSync(file);
-    const current = exists ? readFileSync(file, 'utf8') : null;
-    if (current !== step.previous) {
-      throw new MindlyError(
-        'conflict',
-        `${file} changed since the install plan was made; re-run the command`,
-      );
-    }
-    const { target, dangling } = resolveLinkTarget(file);
-    if (projectRoot !== null && target !== file && isInside(projectRoot, file)) {
-      try {
-        resolveInsideRoot(projectRoot, target);
-      } catch {
-        throw new MindlyError(
-          'path_outside_project',
-          `${file} links outside the project; edit ${target} directly instead`,
-        );
-      }
-    }
+  for (const { file, target, dangling, current, content } of checked) {
     ensureParentDirs(target);
     let backup: string | null = null;
     let mode = 0o600;
-    if (exists && current !== null) {
+    if (current !== null) {
       mode = statSync(target).mode & 0o777;
       backup = uniqueBackupPath(file, stamp);
       writeFileSync(backup, current, { mode: 0o600, flag: 'wx' });
     }
-    writeAtomic(target, step.content, mode);
+    try {
+      writeAtomic(target, content, mode);
+    } catch (err) {
+      if (backup !== null) unlinkSync(backup);
+      throw err;
+    }
     applied.push({
       file,
       backup,

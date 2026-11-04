@@ -18,7 +18,9 @@ export async function readConfigText(
   try {
     info = await stat(path);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    if (code === 'ELOOP') throw new MindlyError('invalid_input', `${path} is a symlink loop`);
     throw new MindlyError('unavailable', `cannot read agent config: ${path}`, { cause: err });
   }
   if (!info.isFile()) {

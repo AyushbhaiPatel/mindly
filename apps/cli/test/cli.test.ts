@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   statSync,
   symlinkSync,
@@ -86,6 +88,47 @@ describe('init / uninstall', () => {
     expect(removed.code).toBe(0);
     expect(lstatSync(settings).isSymbolicLink()).toBe(true);
     expect(json(readFileSync(real, 'utf8'))).toEqual({ model: 'opus' });
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'skips an agent whose settings file is read-only and connects the rest',
+    async () => {
+      const sb = sandbox();
+      const store = tempDir('mindly-cli-store-');
+      const real = join(store, 'settings.json');
+      const settings = join(sb.home, '.claude', 'settings.json');
+      write(store, 'settings.json', '{}\n');
+      mkdirSync(join(sb.home, '.claude'));
+      symlinkSync(real, settings);
+      chmodSync(real, 0o444);
+      chmodSync(store, 0o555);
+      try {
+        const r = await cli(sb, ['init', '--agents', 'claude-code,gemini', '--yes', '--no-import']);
+        expect(r.code).toBe(0);
+        expect(r.stdout).toContain(`${settings} links to ${real}, which is read-only`);
+        expect(r.stdout).toContain('hook claude-code SessionStart');
+        expect(readFileSync(real, 'utf8')).toBe('{}\n');
+        expect(readdirSync(join(sb.home, '.claude'))).toEqual(['settings.json']);
+        expect(existsSync(join(sb.home, '.claude.json'))).toBe(false);
+        expect(readFileSync(join(sb.home, '.gemini', 'settings.json'), 'utf8')).toContain(
+          'hook gemini',
+        );
+      } finally {
+        chmodSync(store, 0o755);
+      }
+    },
+  );
+
+  it('explains a symlink loop in a settings file', async () => {
+    const sb = sandbox();
+    const settings = join(sb.home, '.claude', 'settings.json');
+    const other = join(sb.home, '.claude', 'other.json');
+    mkdirSync(join(sb.home, '.claude'));
+    symlinkSync(other, settings);
+    symlinkSync(settings, other);
+    const r = await cli(sb, ['init', '--agents', 'claude-code', '--yes', '--no-import']);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain(`${settings} is a symlink loop`);
   });
 
   it('dry-run and unconfirmed runs write nothing', async () => {

@@ -24,6 +24,7 @@ import {
   createGeminiAdapter,
   createMcpClientAdapter,
   MCP_CLIENTS,
+  readOnlyTarget,
 } from '../src/index.js';
 import { tempDir as rawTempDir } from './helpers.js';
 
@@ -120,6 +121,63 @@ describe.skipIf(process.platform === 'win32')('symlinked config files', () => {
       applyInstallSteps([{ file: a, description: 'x', content: '{}', previous: null }]),
     ).toThrowError(/symlink/);
     expect(isLink(a) && isLink(b)).toBe(true);
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'refuses a read-only link target before writing anything, leaving no backup',
+    async () => {
+      const home = tempDir();
+      const store = tempDir();
+      const real = join(store, 'settings.json');
+      const settings = join(home, '.claude', 'settings.json');
+      write(real, '{}\n');
+      link(real, settings);
+      chmodSync(real, 0o444);
+      chmodSync(store, 0o555);
+      try {
+        expect(readOnlyTarget(settings)).toBe(real);
+        let error: unknown;
+        try {
+          applyInstallSteps(await claude.planInstall(opts(home)));
+        } catch (err) {
+          error = err;
+        }
+        expect(isMindlyError(error, 'forbidden')).toBe(true);
+        expect((error as Error).message).toContain('read-only');
+        expect(readFileSync(real, 'utf8')).toBe('{}\n');
+        expect(readdirSync(join(home, '.claude'))).toEqual(['settings.json']);
+        expect(existsSync(join(home, '.claude.json'))).toBe(false);
+      } finally {
+        chmodSync(store, 0o755);
+      }
+      expect(readOnlyTarget(join(home, '.claude.json'))).toBeNull();
+    },
+  );
+
+  it('reports a symlink loop while planning', async () => {
+    const home = tempDir();
+    const settings = join(home, '.claude', 'settings.json');
+    const other = join(home, '.claude', 'other.json');
+    link(other, settings);
+    symlinkSync(settings, other);
+    await expect(claude.planInstall(opts(home))).rejects.toThrowError(/is a symlink loop/);
+  });
+
+  it('keeps a project directory that links outside the project untouched', async () => {
+    const home = tempDir();
+    const project = tempDir();
+    const outside = tempDir();
+    symlinkSync(outside, join(project, '.claude'));
+    const steps = await claude.planInstall(opts(home, project));
+    let error: unknown;
+    try {
+      applyInstallSteps(steps, { projectRoot: project });
+    } catch (err) {
+      error = err;
+    }
+    expect(isMindlyError(error, 'path_outside_project')).toBe(true);
+    expect(readdirSync(outside)).toEqual([]);
+    expect(existsSync(join(project, '.mcp.json'))).toBe(false);
   });
 
   it('keeps project files that link outside the project untouched', async () => {
