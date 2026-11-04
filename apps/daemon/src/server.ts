@@ -1,9 +1,9 @@
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { resolveLayout } from '@mindly/core';
 import type { Mindly } from '@mindly/engine';
 import type { AuthState } from './auth.js';
 import { errorHandler, sendError } from './http/errors.js';
@@ -15,9 +15,12 @@ import { registerApi } from './routes/api.js';
 /** Maximum request body size (256 KB). */
 export const BODY_LIMIT = 256 * 1024;
 
-/** Default location of the built dashboard: `apps/dashboard/dist` next to this package. */
+/**
+ * Default location of the built dashboard: `dashboard/` in the installed `mindly-agents` package,
+ * or `apps/dashboard/dist` in a monorepo checkout.
+ */
 export function defaultDashboardDir(): string {
-  return fileURLToPath(new URL('../../dashboard/dist', import.meta.url));
+  return resolveLayout(import.meta.url).dashboardDir;
 }
 
 /** Everything the HTTP server is built from. */

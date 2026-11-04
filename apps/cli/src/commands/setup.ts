@@ -2,7 +2,6 @@ import { constants, existsSync, realpathSync } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   applyInstallSteps,
   createClaudeCodeAdapter,
@@ -13,6 +12,7 @@ import {
   defaultUserConfig,
   ensureHome,
   mindlyHome,
+  resolveLayout,
   writeJsonFile,
   type AgentAdapter,
   type InstallStep,
@@ -82,10 +82,12 @@ function sameFile(a: string, b: string): boolean {
   }
 }
 
-/** Absolute path of this package's built entry point. */
+/**
+ * Absolute path of the CLI's entry point: `dist/main.js` of the installed `mindly-agents` package,
+ * or `apps/cli/dist/main.js` in a monorepo checkout.
+ */
 export function cliEntry(): string {
-  // src/commands/setup.ts and dist/commands/setup.js both sit two levels below the package.
-  return fileURLToPath(new URL('../../dist/main.js', import.meta.url));
+  return resolveLayout(import.meta.url).cliMain;
 }
 
 /**
