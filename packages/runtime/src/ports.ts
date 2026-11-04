@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import type { UserConfig } from '@mindly/core';
 import type { GitPort, LlmPort, NotifierPort } from '@mindly/engine';
 import {
@@ -64,6 +65,18 @@ export function createGitPort(): GitPort {
 
   return {
     findRepoRoot: (cwd) => safe(async () => realpathSync(await findRepoRoot(cwd)), null),
+    projectRoot: (cwd) =>
+      safe(async () => {
+        const top = realpathSync(await findRepoRoot(cwd));
+        const res = await runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+          cwd: top,
+          timeoutMs: 5_000,
+        });
+        const common = realpathSync(res.stdout.trim());
+        // A normal repository's common dir is `<main worktree>/.git`; linked worktrees share it.
+        // Bare repositories (no main worktree) fall back to the worktree's own top level.
+        return basename(common) === '.git' ? dirname(common) : top;
+      }, null),
     currentBranch: (cwd) => safe(() => currentBranch(cwd), null),
     headCommit: (cwd) => safe(() => headCommit(cwd), null),
     changedFiles: (cwd) => safe(async () => (await changedFiles(cwd)).map((f) => f.path), []),

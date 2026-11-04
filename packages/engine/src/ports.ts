@@ -13,6 +13,12 @@ export interface ExportSurfaceDiff {
 export interface GitPort {
   /** Canonical (realpath) top-level directory of the repository containing `cwd`, or null. */
   findRepoRoot(cwd: string): Promise<string | null>;
+  /**
+   * Root of the repository's *main* working tree, shared by every linked worktree (derived from
+   * the git common dir). Sessions in different worktrees of one repository belong to one project.
+   * Optional; falls back to `findRepoRoot`.
+   */
+  projectRoot?(cwd: string): Promise<string | null>;
   currentBranch(cwd: string): Promise<string | null>;
   headCommit(cwd: string): Promise<string | null>;
   /** Project-relative paths with uncommitted changes (staged, unstaged, untracked). */

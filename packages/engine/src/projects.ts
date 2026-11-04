@@ -34,7 +34,8 @@ export class ProjectService {
     }
     const cached = this.cache.get(real);
     if (cached) return cached;
-    const root = (await this.k.ports.git.findRepoRoot(real)) ?? real;
+    const git = this.k.ports.git;
+    const root = (await git.projectRoot?.(real)) ?? (await git.findRepoRoot(real)) ?? real;
     const project = this.k.store.projects.upsertByRoot(root, basename(root) || root);
     const ctx = this.load(project);
     this.cache.set(real, ctx);
