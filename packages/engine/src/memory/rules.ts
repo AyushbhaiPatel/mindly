@@ -32,6 +32,9 @@ const STRONG = [
   /\bmake sure (to )?(always|never)\b/i,
   /\b(remember|note) (that|to)\b/i,
 ];
+const CORRECTION_START = /^(no|nope|wrong|not that)\b/i;
+/** Imperatives about "anything/this/it" describe the current task, not a project convention. */
+const VAGUE_OBJECT = /\b(anything|everything|nothing|it|this|that|these|those|them|yet)\s*[.!]?$/i;
 const MEDIUM = [
   /^(no|nope|wrong|not that)[,.!:]?\s+(use|we|it|the|this|don't|do not)\b/i,
   /\buse \S+ (instead of|rather than|not) \S+/i,
@@ -52,12 +55,23 @@ function sentences(prompt: string): string[] {
 export function detectRules(prompt: string): DetectedRule[] {
   if (prompt.length > 8000) return [];
   const out: DetectedRule[] = [];
-  for (const s of sentences(prompt)) {
+  const all = sentences(prompt);
+  // Medium-strength phrasing ("don't touch X", "use A instead of B") is only a standing rule when
+  // the message is itself a short correction. Inside a longer task request it is almost always an
+  // instruction for that task ("…, do not run anything").
+  const correctionMessage = all.length <= 2 && prompt.length <= 240;
+  for (const s of all) {
     if (s.endsWith('?') || TEMPORARY.test(s)) continue;
     // Conditional and hypothetical sentences are not standing rules.
     if (/^(if|when|what if|could|can|should|would|why|how)\b/i.test(s)) continue;
     if (STRONG.some((re) => re.test(s))) out.push({ text: s, strength: 'strong' });
-    else if (MEDIUM.some((re) => re.test(s))) out.push({ text: s, strength: 'medium' });
+    else if (
+      MEDIUM.some((re) => re.test(s)) &&
+      (correctionMessage || CORRECTION_START.test(s)) &&
+      !VAGUE_OBJECT.test(s)
+    ) {
+      out.push({ text: s, strength: 'medium' });
+    }
     if (out.length >= 3) break;
   }
   return out;

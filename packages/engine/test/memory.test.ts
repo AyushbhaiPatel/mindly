@@ -114,6 +114,8 @@ describe('rule detection', () => {
     'If it fails, never mind.',
     'Fix the login bug please.',
     'Just this time, use npm.',
+    'I want to add lodash. Give me the install command. Do not run anything.',
+    "Don't commit yet.",
   ])('ignores %s', (text) => {
     expect(detectRules(text)).toEqual([]);
   });
