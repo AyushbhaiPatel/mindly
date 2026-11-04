@@ -18,7 +18,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: Synapse version (`synapse --version`)
+      label: Mindly version (`mindly --version`)
   - type: input
     id: env
     attributes:

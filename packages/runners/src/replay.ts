@@ -1,4 +1,4 @@
-import { SynapseError, describeError, redact, sanitizeForContext, uuidv7 } from '@synapse/core';
+import { MindlyError, describeError, redact, sanitizeForContext, uuidv7 } from '@mindly/core';
 import {
   assertValidRefName,
   assertValidRevision,
@@ -8,15 +8,15 @@ import {
   resolveCommit,
   runChecks,
   runGit,
-} from '@synapse/git';
-import type { CheckResult, CheckSpec, MaterializedTree } from '@synapse/git';
+} from '@mindly/git';
+import type { CheckResult, CheckSpec, MaterializedTree } from '@mindly/git';
 import { assertRunnerAgentKind, detectAgent } from './agents.js';
 import type { AgentUsage, RunnerAgentKind } from './agents.js';
 import { assertPrompt, assertTimeoutSec, runAgent } from './run.js';
 import type { RunnerOptions } from './run.js';
 
 /** Hidden ref namespace holding replay results. */
-export const REPLAY_REF_PREFIX = 'refs/synapse/replays/';
+export const REPLAY_REF_PREFIX = 'refs/mindly/replays/';
 const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MAX_REPLAY_AGENTS = 4;
 const MAX_SUMMARY_CHARS = 4000;
@@ -24,11 +24,11 @@ const MAX_SUMMARY_CHARS = 4000;
 /** Throws `invalid_input` unless `id` is a safe run id (letters, digits, `_` and `-`). */
 export function assertValidRunId(id: unknown): asserts id is string {
   if (typeof id !== 'string' || !RUN_ID_RE.test(id)) {
-    throw new SynapseError('invalid_input', 'invalid run id');
+    throw new MindlyError('invalid_input', 'invalid run id');
   }
 }
 
-/** `refs/synapse/replays/<runId>/<agent>`, validated. */
+/** `refs/mindly/replays/<runId>/<agent>`, validated. */
 export function replayRefName(runId: string, agent: string): string {
   assertValidRunId(runId);
   assertRunnerAgentKind(agent);
@@ -162,7 +162,7 @@ async function replayOne(
 
     // Capture whatever the agent left behind, even after a failure or timeout.
     const captured = await captureWorktreeCommit(tree.path, {
-      message: `synapse replay ${runId} ${agent}`,
+      message: `mindly replay ${runId} ${agent}`,
     });
     result.skipped = captured.skipped;
     const ref = replayRefName(runId, agent);
@@ -212,7 +212,7 @@ async function replayOne(
 /**
  * A/B replay: gives the same prompt to several agents, each in its own detached temporary
  * worktree at `baseCommit`, in `task` mode. Each result is captured as a commit kept under
- * `refs/synapse/replays/<runId>/<agent>`, compared with the base (numstat/shortstat) and, when
+ * `refs/mindly/replays/<runId>/<agent>`, compared with the base (numstat/shortstat) and, when
  * trusted checks are provided, checked. Worktrees are always removed, also when an agent fails.
  */
 export async function runReplay(
@@ -227,26 +227,26 @@ export async function runReplay(
     input.agents.length === 0 ||
     input.agents.length > MAX_REPLAY_AGENTS
   ) {
-    throw new SynapseError('invalid_input', `replay needs 1 to ${MAX_REPLAY_AGENTS} agents`);
+    throw new MindlyError('invalid_input', `replay needs 1 to ${MAX_REPLAY_AGENTS} agents`);
   }
   for (const a of input.agents) assertRunnerAgentKind(a);
   const agents = input.agents as readonly RunnerAgentKind[];
   if (new Set(agents).size !== agents.length) {
-    throw new SynapseError('invalid_input', 'duplicate agent in replay');
+    throw new MindlyError('invalid_input', 'duplicate agent in replay');
   }
   if (input.checks !== null && !Array.isArray(input.checks)) {
-    throw new SynapseError('invalid_input', 'checks must be an array or null');
+    throw new MindlyError('invalid_input', 'checks must be an array or null');
   }
   const runId = input.runId ?? uuidv7();
   assertValidRunId(runId);
   const concurrency = input.concurrency ?? 1;
   if (concurrency !== 1 && concurrency !== 2) {
-    throw new SynapseError('invalid_input', 'concurrency must be 1 or 2');
+    throw new MindlyError('invalid_input', 'concurrency must be 1 or 2');
   }
 
   const root = await findRepoRoot(input.repoRoot);
   const base = await resolveCommit(root, input.baseCommit);
-  if (!base) throw new SynapseError('not_found', 'base commit not found');
+  if (!base) throw new MindlyError('not_found', 'base commit not found');
   const prompt = redact(input.prompt).text;
   const startedAt = Date.now();
 

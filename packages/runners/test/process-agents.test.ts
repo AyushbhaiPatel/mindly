@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isSynapseError } from '@synapse/core';
+import { isMindlyError } from '@mindly/core';
 import {
   AGENT_PROFILES,
   buildAgentEnv,
@@ -225,7 +225,7 @@ describe('runAgent', () => {
     expect(res.exitCode).toBe(3);
     await expect(
       runAgent('codex', 'task', tempDir(), 'x', 20, { env: { PATH: bin.dir } }),
-    ).rejects.toSatisfy((e: unknown) => isSynapseError(e, 'unavailable'));
+    ).rejects.toSatisfy((e: unknown) => isMindlyError(e, 'unavailable'));
   });
 
   it('rejects invalid prompts and timeouts', async () => {

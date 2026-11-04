@@ -1,8 +1,8 @@
 import { accessSync, constants, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 
-/** Agents Synapse can run headlessly. */
+/** Agents Mindly can run headlessly. */
 export const RUNNER_AGENT_KINDS = ['claude-code', 'codex'] as const;
 /** An agent kind supported by the runners. */
 export type RunnerAgentKind = (typeof RUNNER_AGENT_KINDS)[number];
@@ -21,7 +21,7 @@ export function isRunnerAgentKind(kind: unknown): kind is RunnerAgentKind {
 
 /** Throws `invalid_input` unless `kind` is a supported runner agent kind. */
 export function assertRunnerAgentKind(kind: unknown): asserts kind is RunnerAgentKind {
-  if (!isRunnerAgentKind(kind)) throw new SynapseError('invalid_input', 'unsupported agent kind');
+  if (!isRunnerAgentKind(kind)) throw new MindlyError('invalid_input', 'unsupported agent kind');
 }
 
 /** Token usage reported by an agent, normalised. Missing values are null. */

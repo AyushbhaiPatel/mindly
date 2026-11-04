@@ -144,7 +144,7 @@ export function redactDeep<T>(value: T, options?: RedactOptions, depth = 0): T {
 }
 
 /**
- * Paths whose content Synapse never reads or captures. Patterns are project-relative globs.
+ * Paths whose content Mindly never reads or captures. Patterns are project-relative globs.
  */
 export const DEFAULT_DENY_PATHS: readonly string[] = [
   '**/.env',

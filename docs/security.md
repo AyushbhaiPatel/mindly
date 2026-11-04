@@ -1,7 +1,7 @@
 # Security model
 
-Synapse sits between a developer, their source code and several autonomous agents. That makes it
-a high-value target: anything that can write into Synapse memory can try to influence every agent
+Mindly sits between a developer, their source code and several autonomous agents. That makes it
+a high-value target: anything that can write into Mindly memory can try to influence every agent
 on the machine. This document lists the threats we design against and the controls that answer
 them. Report vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 
@@ -16,7 +16,7 @@ them. Report vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 
 | Boundary                       | Trusted side          | Untrusted side                                |
 | ------------------------------ | --------------------- | --------------------------------------------- |
-| User ↔ Synapse CLI             | the local user        | —                                             |
+| User ↔ Mindly CLI             | the local user        | —                                             |
 | Agent hook payloads            | shape validated       | content (prompts, tool output, file contents) |
 | Repository contents and config | after explicit trust  | any freshly cloned repository                 |
 | Memory content                 | never                 | always treated as data                        |
@@ -40,10 +40,10 @@ memory, which is then injected into every other agent.
 
 ### T2. Hostile repository configuration
 
-A cloned repository ships `.synapse/config.json` that defines a shadow-merge check command such as
+A cloned repository ships `.mindly/config.json` that defines a shadow-merge check command such as
 `rm -rf ~`.
 
-- Repository-level config can never introduce commands until the user runs `synapse trust` for
+- Repository-level config can never introduce commands until the user runs `mindly trust` for
   that project; the trusted config's hash is pinned and re-approval is required after any change.
 - Commands are executed with `execFile`/`spawn` and an argument array, never through a shell, with
   a timeout, a minimal environment, and the working directory pinned inside a temp worktree.
@@ -61,14 +61,14 @@ A cloned repository ships `.synapse/config.json` that defines a shadow-merge che
   `.npmrc`, `.netrc`, `secrets/`, credential stores) are never read for evidence and their content
   is never captured.
 - Model API keys are read from environment variables at call time and never written to disk by
-  Synapse.
+  Mindly.
 - Pager payloads contain titles and counts only, never code or prompt text.
 
 ### T4. Local network and browser attacks on the daemon
 
 - Binds to `127.0.0.1` only; refuses to start on any other interface.
 - Every request needs either a bearer token (CLI) or a session cookie (dashboard). The token is
-  32 random bytes stored in `$SYNAPSE_HOME/daemon.token` with mode `0600`; comparisons are
+  32 random bytes stored in `$MINDLY_HOME/daemon.token` with mode `0600`; comparisons are
   constant-time.
 - The dashboard is opened through a one-time login code in the URL fragment (never sent in logs or
   `Referer`), exchanged for an `HttpOnly`, `SameSite=Strict` cookie.
@@ -80,7 +80,7 @@ A cloned repository ships `.synapse/config.json` that defines a shadow-merge che
 
 ### T5. Local file-system exposure
 
-- `$SYNAPSE_HOME` is created with mode `0700`; the database, token and logs are `0600`.
+- `$MINDLY_HOME` is created with mode `0700`; the database, token and logs are `0600`.
 - Every path that comes from a payload is resolved with `realpath` and must stay inside the
   project root before it is read. Symlinks pointing outside are rejected.
 
@@ -109,8 +109,8 @@ A cloned repository ships `.synapse/config.json` that defines a shadow-merge che
 
 ## Data retention and deletion
 
-- `synapse export` writes everything for a project as JSON.
-- `synapse forget --project` hard-deletes a project's rows and vacuums the database.
-- `synapse forget --memory <id>` hard-deletes one memory and its history.
+- `mindly export` writes everything for a project as JSON.
+- `mindly forget --project` hard-deletes a project's rows and vacuums the database.
+- `mindly forget --memory <id>` hard-deletes one memory and its history.
 - Raw prompts are kept for 30 days by default (`retention.promptsDays`), then reduced to their
   redacted summary.

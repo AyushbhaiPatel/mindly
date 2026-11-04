@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 import { agentProfile, detectAgent } from './agents.js';
 import type { AgentUsage, ParsedAgentOutput, RunMode, RunnerAgentKind } from './agents.js';
 import { buildAgentEnv, runProcess } from './process.js';
@@ -57,7 +57,7 @@ export function assertTimeoutSec(timeoutSec: unknown): asserts timeoutSec is num
     timeoutSec <= 0 ||
     timeoutSec > 7200
   ) {
-    throw new SynapseError('invalid_input', 'timeoutSec must be between 1 and 7200');
+    throw new MindlyError('invalid_input', 'timeoutSec must be between 1 and 7200');
   }
 }
 
@@ -69,7 +69,7 @@ export function assertPrompt(prompt: unknown): asserts prompt is string {
     prompt.length > MAX_PROMPT_CHARS ||
     prompt.includes('\0')
   ) {
-    throw new SynapseError('invalid_input', 'invalid prompt');
+    throw new MindlyError('invalid_input', 'invalid prompt');
   }
 }
 
@@ -90,10 +90,10 @@ export async function runAgent(
   assertPrompt(prompt);
   const baseEnv = options.env ?? process.env;
   const bin = detectAgent(kind, baseEnv);
-  if (!bin) throw new SynapseError('unavailable', `${kind} is not installed or not on PATH`);
+  if (!bin) throw new MindlyError('unavailable', `${kind} is not installed or not on PATH`);
   const maxTurns = Math.min(500, Math.max(1, Math.floor(options.maxTurns ?? DEFAULT_MAX_TURNS)));
 
-  const tmp = mkdtempSync(join(tmpdir(), 'synapse-run-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'mindly-run-'));
   try {
     const lastMessageFile = join(tmp, 'last-message.txt');
     const argv = profile.buildArgv({ mode, cwd, maxTurns, lastMessageFile });

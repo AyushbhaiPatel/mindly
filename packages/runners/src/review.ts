@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { SynapseError, redact, sanitizeForContext, sanitizeLine } from '@synapse/core';
-import { findRepoRoot } from '@synapse/git';
+import { MindlyError, redact, sanitizeForContext, sanitizeLine } from '@mindly/core';
+import { findRepoRoot } from '@mindly/git';
 import { assertRunnerAgentKind } from './agents.js';
 import type { AgentUsage, RunnerAgentKind } from './agents.js';
 import { assertTimeoutSec, runAgent } from './run.js';
@@ -90,7 +90,7 @@ export function prepareDiff(diff: string): {
     truncated = true;
   }
   if (truncated) {
-    text += '\n[diff truncated by Synapse: the remainder was not included]\n';
+    text += '\n[diff truncated by Mindly: the remainder was not included]\n';
   }
   return { text, redactions: r.count, truncated };
 }
@@ -101,8 +101,8 @@ export function buildReviewPrompt(
   context: ReviewInput['context'],
   nonce: string = randomBytes(12).toString('hex'),
 ): string {
-  const open = `<<<SYNAPSE_DIFF_${nonce}`;
-  const close = `SYNAPSE_DIFF_${nonce}>>>`;
+  const open = `<<<MINDLY_DIFF_${nonce}`;
+  const close = `MINDLY_DIFF_${nonce}>>>`;
   const safeDiff = diffText.split(open).join('').split(close).join('');
   const rules = context.rules
     .slice(0, MAX_RULES)
@@ -195,7 +195,7 @@ export async function runReview(
   assertRunnerAgentKind(input.reviewer);
   assertTimeoutSec(input.timeoutSec);
   if (typeof input.diff !== 'string' || input.diff.trim() === '') {
-    throw new SynapseError('invalid_input', 'diff must be a non-empty string');
+    throw new MindlyError('invalid_input', 'diff must be a non-empty string');
   }
   if (
     input.context === null ||
@@ -205,7 +205,7 @@ export async function runReview(
     !Array.isArray(input.context.rules) ||
     input.context.rules.some((r) => typeof r !== 'string')
   ) {
-    throw new SynapseError('invalid_input', 'invalid review context');
+    throw new MindlyError('invalid_input', 'invalid review context');
   }
   const root = await findRepoRoot(input.repoRoot);
   const prepared = prepareDiff(input.diff);

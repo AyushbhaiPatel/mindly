@@ -1,7 +1,7 @@
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 import { commitTree } from './capture.js';
 import { driverOverrides, gitVersion, runGit, versionAtLeast } from './exec.js';
 import type { GitVersion } from './exec.js';
@@ -98,11 +98,11 @@ export async function shadowMerge(input: ShadowMergeInput): Promise<ShadowMergeR
     };
   }
   if (!Array.isArray(input.sides) || input.sides.length === 0 || input.sides.length > 64) {
-    throw new SynapseError('invalid_input', 'shadow merge needs between 1 and 64 sides');
+    throw new MindlyError('invalid_input', 'shadow merge needs between 1 and 64 sides');
   }
   for (const side of input.sides) {
     if (typeof side.label !== 'string' || !LABEL_RE.test(side.label)) {
-      throw new SynapseError('invalid_input', 'invalid merge side label');
+      throw new MindlyError('invalid_input', 'invalid merge side label');
     }
     assertValidRevision(side.commit);
   }
@@ -111,7 +111,7 @@ export async function shadowMerge(input: ShadowMergeInput): Promise<ShadowMergeR
 
   const resolveOrThrow = async (rev: string): Promise<string> => {
     const id = await resolveCommit(root, rev);
-    if (!id) throw new SynapseError('not_found', 'merge commit not found');
+    if (!id) throw new MindlyError('not_found', 'merge commit not found');
     return id;
   };
   let base: string | null = null;
@@ -146,7 +146,7 @@ export async function shadowMerge(input: ShadowMergeInput): Promise<ShadowMergeR
     });
     const parsed = parseMergeTreeOutput(res.stdout);
     if (!/^[0-9a-f]{40,64}$/.test(parsed.tree)) {
-      throw new SynapseError('internal', 'unexpected merge-tree output');
+      throw new MindlyError('internal', 'unexpected merge-tree output');
     }
     const conflicted = res.exitCode === 1;
     steps.push({
@@ -162,12 +162,12 @@ export async function shadowMerge(input: ShadowMergeInput): Promise<ShadowMergeR
     }
     merged.push(side.label);
     accTree = parsed.tree;
-    acc = await commitTree(root, accTree, [acc, commit], `synapse shadow merge: ${side.label}`);
+    acc = await commitTree(root, accTree, [acc, commit], `mindly shadow merge: ${side.label}`);
   }
 
   // Wrap the final tree so callers always get a commit, even for a single side.
   const commit =
-    merged.length === 1 ? acc : await commitTree(root, accTree, [acc], 'synapse shadow merge');
+    merged.length === 1 ? acc : await commitTree(root, accTree, [acc], 'mindly shadow merge');
   return {
     supported: true,
     clean: skipped.length === 0,
@@ -212,14 +212,14 @@ export async function materializeTree(
     const tree = (
       await runGit(['rev-parse', '--verify', `${treeOrCommit}^{tree}`], { cwd: root })
     ).stdout.trim();
-    commit = await commitTree(root, tree, [], 'synapse materialized tree');
+    commit = await commitTree(root, tree, [], 'mindly materialized tree');
   } else {
     const resolved = await resolveCommit(root, treeOrCommit);
-    if (!resolved) throw new SynapseError('not_found', 'tree or commit not found');
+    if (!resolved) throw new MindlyError('not_found', 'tree or commit not found');
     commit = resolved;
   }
 
-  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'synapse-tree-')));
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-tree-')));
   const path = join(tmp, 'tree');
   const overrides = await driverOverrides(root);
   try {

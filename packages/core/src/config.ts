@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
 import { z } from 'zod';
 import { AgentKindSchema } from './domain.js';
-import { SynapseError } from './errors.js';
+import { MindlyError } from './errors.js';
 import { sha256 } from './text.js';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
@@ -72,7 +72,7 @@ export const UserConfigSchema = z.object({
   failover: z
     .object({
       enabled: z.boolean().default(true),
-      /** When true Synapse may launch the next agent headlessly after a rate limit. */
+      /** When true Mindly may launch the next agent headlessly after a rate limit. */
       autoLaunch: z.boolean().default(false),
       order: z.array(AgentKindSchema).default(['claude-code', 'codex']),
     })
@@ -113,12 +113,12 @@ export function defaultUserConfig(): UserConfig {
 function readBoundedJson(path: string): unknown {
   const size = statSync(path).size;
   if (size > MAX_CONFIG_BYTES) {
-    throw new SynapseError('invalid_input', `config file too large: ${path}`);
+    throw new MindlyError('invalid_input', `config file too large: ${path}`);
   }
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
   } catch (cause) {
-    throw new SynapseError('invalid_input', `config file is not valid JSON: ${path}`, { cause });
+    throw new MindlyError('invalid_input', `config file is not valid JSON: ${path}`, { cause });
   }
 }
 
@@ -126,7 +126,7 @@ export function loadUserConfig(path: string): UserConfig {
   if (!existsSync(path)) return defaultUserConfig();
   const parsed = UserConfigSchema.safeParse(readBoundedJson(path));
   if (!parsed.success) {
-    throw new SynapseError('invalid_input', `invalid config: ${z.prettifyError(parsed.error)}`);
+    throw new MindlyError('invalid_input', `invalid config: ${z.prettifyError(parsed.error)}`);
   }
   return parsed.data;
 }
@@ -140,8 +140,8 @@ export function writeJsonFile(path: string, value: unknown): void {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Project configuration (`<repo>/.synapse/config.json`). Untrusted until the user runs
-// `synapse trust`; commands in it are never executed while untrusted or after it changes.
+// Project configuration (`<repo>/.mindly/config.json`). Untrusted until the user runs
+// `mindly trust`; commands in it are never executed while untrusted or after it changes.
 // ---------------------------------------------------------------------------------------------
 
 const ArgvSchema = z
@@ -162,7 +162,7 @@ export const ProjectConfigSchema = z.object({
     )
     .max(20)
     .default([]),
-  /** Extra globs Synapse ignores for capture and analysis. */
+  /** Extra globs Mindly ignores for capture and analysis. */
   ignore: z.array(z.string().max(512)).max(200).default([]),
   /** Optional fixed context included in every session start (subject to trust labelling). */
   notes: z.string().max(4000).optional(),
@@ -179,18 +179,18 @@ export function loadProjectConfig(path: string): LoadedProjectConfig {
   if (!existsSync(path)) return { config: ProjectConfigSchema.parse({}), hash: null };
   const size = statSync(path).size;
   if (size > MAX_CONFIG_BYTES) {
-    throw new SynapseError('invalid_input', 'project config too large');
+    throw new MindlyError('invalid_input', 'project config too large');
   }
   const raw = readFileSync(path, 'utf8');
   let json: unknown;
   try {
     json = JSON.parse(raw);
   } catch (cause) {
-    throw new SynapseError('invalid_input', 'project config is not valid JSON', { cause });
+    throw new MindlyError('invalid_input', 'project config is not valid JSON', { cause });
   }
   const parsed = ProjectConfigSchema.safeParse(json);
   if (!parsed.success) {
-    throw new SynapseError(
+    throw new MindlyError(
       'invalid_input',
       `invalid project config: ${z.prettifyError(parsed.error)}`,
     );

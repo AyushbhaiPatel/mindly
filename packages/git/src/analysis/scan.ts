@@ -1,4 +1,4 @@
-import { sha256 } from '@synapse/core';
+import { sha256 } from '@mindly/core';
 
 /** Characters that, at the end of a line, mean the statement continues on the next line. */
 const CONTINUES_AFTER = new Set('=,(+-*/%&|^!?:<.['.split(''));

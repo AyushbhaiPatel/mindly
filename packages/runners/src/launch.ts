@@ -1,5 +1,5 @@
-import { redact, sanitizeForContext, sanitizeLine } from '@synapse/core';
-import { findRepoRoot } from '@synapse/git';
+import { redact, sanitizeForContext, sanitizeLine } from '@mindly/core';
+import { findRepoRoot } from '@mindly/git';
 import { assertRunnerAgentKind } from './agents.js';
 import type { AgentUsage, RunnerAgentKind } from './agents.js';
 import { assertPrompt, assertTimeoutSec, runAgent } from './run.js';

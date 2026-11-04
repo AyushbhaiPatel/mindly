@@ -1,4 +1,4 @@
-# @synapse/runners
+# @mindly/runners
 
 Headless runs of coding agents for three explicitly requested features:
 
@@ -11,8 +11,8 @@ Headless runs of coding agents for three explicitly requested features:
   existing worktree. The engine only calls this when `config.failover.autoLaunch` is `true`
   (default `false`) or the user explicitly asks for it.
 
-Supported agents: Claude Code (`claude`) and Codex (`codex`). Depends on `@synapse/core`,
-`@synapse/git` and Node built-ins.
+Supported agents: Claude Code (`claude`) and Codex (`codex`). Depends on `@mindly/core`,
+`@mindly/git` and Node built-ins.
 
 ## API overview
 
@@ -87,7 +87,7 @@ Sources (checked November 2026):
 - **Replay isolation.** Every agent gets its own `materializeTree` worktree, which is always
   disposed in a `finally` block, including on failure and timeout. Results are captured with
   `captureWorktreeCommit` (secret deny-listed paths are never stored) and kept reachable under
-  `refs/synapse/replays/<runId>/<agent>`; run ids and agent kinds are validated before use.
+  `refs/mindly/replays/<runId>/<agent>`; run ids and agent kinds are validated before use.
 - **Checks are trusted input only (T2).** `runReplay` runs `checks` through `runChecks` only when
   provided; callers must take them from a project config the user trusted (hash-pinned), never
   from repository content, memory or agent output.
@@ -98,4 +98,4 @@ Sources (checked November 2026):
 - On Windows, `.cmd` shims cannot be spawned without a shell and are not supported; process-group
   kill is replaced by killing the direct child.
 - A runaway agent can still use the network through its own tools where its sandbox allows it;
-  Synapse relies on the agent's permission system for that.
+  Mindly relies on the agent's permission system for that.

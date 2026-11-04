@@ -1,6 +1,6 @@
 /**
- * `@synapse/runners`: headless runs of coding agents (Claude Code, Codex) for cross-agent review,
- * A/B replay and opt-in failover launch. Depends on `@synapse/core`, `@synapse/git` and Node
+ * `@mindly/runners`: headless runs of coding agents (Claude Code, Codex) for cross-agent review,
+ * A/B replay and opt-in failover launch. Depends on `@mindly/core`, `@mindly/git` and Node
  * built-ins.
  *
  * Every agent is started with `spawn` and an argument array (never a shell), the prompt on stdin,

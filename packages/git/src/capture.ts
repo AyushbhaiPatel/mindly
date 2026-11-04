@@ -1,14 +1,14 @@
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import { SynapseError, isDeniedPath } from '@synapse/core';
+import { MindlyError, isDeniedPath } from '@mindly/core';
 import { driverOverrides, runGit } from './exec.js';
 import { findRepoRoot, headCommit } from './repo.js';
 
-/** Identity used for every synthetic commit Synapse creates. */
+/** Identity used for every synthetic commit Mindly creates. */
 export const SYNTHETIC_IDENTITY = {
-  name: 'Synapse',
-  email: 'synapse@localhost.invalid',
+  name: 'Mindly',
+  email: 'mindly@localhost.invalid',
   /** Fixed date (git internal format) so identical trees produce identical commit ids. */
   date: '946684800 +0000',
 } as const;
@@ -36,7 +36,7 @@ export async function commitTree(
   message: string,
 ): Promise<string> {
   for (const id of [tree, ...parents]) {
-    if (!/^[0-9a-f]{40,64}$/.test(id)) throw new SynapseError('invalid_input', 'invalid object id');
+    if (!/^[0-9a-f]{40,64}$/.test(id)) throw new MindlyError('invalid_input', 'invalid object id');
   }
   const args = ['commit-tree', '--no-gpg-sign'];
   for (const p of parents) args.push('-p', p);
@@ -44,14 +44,14 @@ export async function commitTree(
   const res = await runGit(args, {
     cwd,
     env: syntheticIdentityEnv(),
-    input: message.replace(/\0/g, '').slice(0, 2000) || 'synapse',
+    input: message.replace(/\0/g, '').slice(0, 2000) || 'mindly',
   });
   return res.stdout.trim();
 }
 
 /** Options for `captureWorktreeCommit`. */
 export interface CaptureOptions {
-  /** Commit message (default `synapse capture`). */
+  /** Commit message (default `mindly capture`). */
   message?: string;
   /** Extra deny globs on top of the core deny-list; matching paths are left out of the capture. */
   extraDeny?: readonly string[];
@@ -94,7 +94,7 @@ export async function captureWorktreeCommit(
   ).stdout.trim();
   const realIndex = isAbsolute(indexPath) ? indexPath : resolve(root, indexPath);
 
-  const tmp = mkdtempSync(join(tmpdir(), 'synapse-capture-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'mindly-capture-'));
   try {
     const tmpIndex = join(tmp, 'index');
     const env = { GIT_INDEX_FILE: tmpIndex };
@@ -168,7 +168,7 @@ export async function captureWorktreeCommit(
       root,
       tree,
       parent ? [parent] : [],
-      options.message ?? 'synapse capture',
+      options.message ?? 'mindly capture',
     );
     return { commit, tree, parent, skipped: [...skipped].sort() };
   } finally {

@@ -25,11 +25,11 @@ const CONTROL_RE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 // Bidirectional overrides/isolates and zero-width characters used to hide text.
 const INVISIBLE_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
 // Our own context delimiters; content must never be able to close or forge a block.
-const DELIMITER_RE = /<\s*\/?\s*synapse[-_a-z]*/gi;
+const DELIMITER_RE = /<\s*\/?\s*mindly[-_a-z]*/gi;
 
 /**
  * Makes untrusted text safe to embed in a context block given to an agent:
- * strips control and invisible characters, neutralises Synapse delimiter tags, collapses runs of
+ * strips control and invisible characters, neutralises Mindly delimiter tags, collapses runs of
  * blank lines and caps the length. It does not (and cannot) make the *meaning* safe; that is why
  * context is always labelled as reference data with its trust level.
  */

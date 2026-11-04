@@ -1,4 +1,4 @@
-import { normalizeLine, sha256 } from '@synapse/core';
+import { normalizeLine, sha256 } from '@mindly/core';
 
 /** Lines shorter than this after normalisation are too generic to attribute (`}`, `end`, …). */
 export const MIN_HUNK_LINE_LENGTH = 4;

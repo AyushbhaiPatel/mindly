@@ -38,16 +38,16 @@ importers:
 
   packages/git:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
 
   packages/runners:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
-      '@synapse/git':
+      '@mindly/git':
         specifier: workspace:*
         version: link:../git
       zod:

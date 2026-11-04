@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute } from 'node:path';
-import { SynapseError, redactText, sanitizeLine } from '@synapse/core';
+import { MindlyError, redactText, sanitizeLine } from '@mindly/core';
 
 /** Default wall-clock limit for one git invocation. */
 export const DEFAULT_GIT_TIMEOUT_MS = 30_000;
@@ -85,7 +85,7 @@ export function hardenedGitEnv(
   Object.assign(env, FIXED_ENV);
   for (const [key, value] of Object.entries(extra)) {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key) || value.includes('\0')) {
-      throw new SynapseError('invalid_input', 'invalid environment variable for git');
+      throw new MindlyError('invalid_input', 'invalid environment variable for git');
     }
     env[key] = value;
   }
@@ -119,7 +119,7 @@ export interface GitResult {
 
 function assertDirectory(cwd: string): void {
   if (typeof cwd !== 'string' || cwd === '' || cwd.includes('\0') || !isAbsolute(cwd)) {
-    throw new SynapseError('invalid_input', 'git cwd must be an absolute path');
+    throw new MindlyError('invalid_input', 'git cwd must be an absolute path');
   }
   let isDir = false;
   try {
@@ -127,7 +127,7 @@ function assertDirectory(cwd: string): void {
   } catch {
     // treated as missing below
   }
-  if (!isDir) throw new SynapseError('not_found', 'git cwd is not an existing directory');
+  if (!isDir) throw new MindlyError('not_found', 'git cwd is not an existing directory');
 }
 
 function safeStderr(stderr: string): string {
@@ -137,7 +137,7 @@ function safeStderr(stderr: string): string {
 /**
  * Runs `git` with an argument array (never a shell), a hardened environment and configuration,
  * a timeout and an output cap. Non-zero exit codes not listed in `okExitCodes` raise a
- * `SynapseError`; error messages name only the git subcommand, never argument values.
+ * `MindlyError`; error messages name only the git subcommand, never argument values.
  */
 export function runGit(args: readonly string[], options: RunGitOptions): Promise<GitResult> {
   try {
@@ -146,7 +146,7 @@ export function runGit(args: readonly string[], options: RunGitOptions): Promise
     return Promise.reject(err);
   }
   if (args.length === 0 || args.some((a) => typeof a !== 'string' || a.includes('\0'))) {
-    return Promise.reject(new SynapseError('invalid_input', 'invalid git arguments'));
+    return Promise.reject(new MindlyError('invalid_input', 'invalid git arguments'));
   }
   const timeout = Math.min(
     Math.max(1, Math.floor(options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS)),
@@ -156,7 +156,7 @@ export function runGit(args: readonly string[], options: RunGitOptions): Promise
   const configArgs: string[] = [];
   for (const kv of [...HARDENING_CONFIG, ...(options.config ?? [])]) {
     if (kv.includes('\0') || !kv.includes('=')) {
-      return Promise.reject(new SynapseError('invalid_input', 'invalid git config override'));
+      return Promise.reject(new MindlyError('invalid_input', 'invalid git config override'));
     }
     configArgs.push('-c', kv);
   }
@@ -190,12 +190,12 @@ export function runGit(args: readonly string[], options: RunGitOptions): Promise
           signal?: NodeJS.Signals | null;
         };
         if (err.code === 'ENOENT') {
-          reject(new SynapseError('unavailable', 'git executable not found on PATH'));
+          reject(new MindlyError('unavailable', 'git executable not found on PATH'));
           return;
         }
         if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
           reject(
-            new SynapseError('internal', `git ${subcommand} output exceeded the size limit`, {
+            new MindlyError('internal', `git ${subcommand} output exceeded the size limit`, {
               details: { subcommand, maxBuffer },
             }),
           );
@@ -203,7 +203,7 @@ export function runGit(args: readonly string[], options: RunGitOptions): Promise
         }
         if (err.killed || err.signal) {
           reject(
-            new SynapseError('timeout', `git ${subcommand} timed out`, {
+            new MindlyError('timeout', `git ${subcommand} timed out`, {
               details: { subcommand, timeoutMs: timeout },
             }),
           );
@@ -215,7 +215,7 @@ export function runGit(args: readonly string[], options: RunGitOptions): Promise
           return;
         }
         reject(
-          new SynapseError('internal', `git ${subcommand} failed`, {
+          new MindlyError('internal', `git ${subcommand} failed`, {
             details: { subcommand, exitCode, stderr: safeStderr(stderr) },
           }),
         );
@@ -242,7 +242,7 @@ let versionPromise: Promise<GitVersion> | null = null;
 /** Parses `git version 2.39.3 (Apple Git-145)` style output. */
 export function parseGitVersion(raw: string): GitVersion {
   const m = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(raw);
-  if (!m) throw new SynapseError('unavailable', 'could not determine git version');
+  if (!m) throw new MindlyError('unavailable', 'could not determine git version');
   return {
     major: Number(m[1]),
     minor: Number(m[2]),

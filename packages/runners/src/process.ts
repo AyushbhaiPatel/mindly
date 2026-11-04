@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 
 /** Default cap on captured stdout (the head is kept). */
 export const DEFAULT_MAX_STDOUT_BYTES = 2 * 1024 * 1024;
@@ -157,7 +157,7 @@ function killTree(pid: number | undefined, signal: NodeJS.Signals): void {
 
 function assertCwd(cwd: string): void {
   if (typeof cwd !== 'string' || cwd === '' || cwd.includes('\0') || !isAbsolute(cwd)) {
-    throw new SynapseError('invalid_input', 'runner cwd must be an absolute path');
+    throw new MindlyError('invalid_input', 'runner cwd must be an absolute path');
   }
   let isDir = false;
   try {
@@ -165,7 +165,7 @@ function assertCwd(cwd: string): void {
   } catch {
     // handled below
   }
-  if (!isDir) throw new SynapseError('not_found', 'runner cwd is not an existing directory');
+  if (!isDir) throw new MindlyError('not_found', 'runner cwd is not an existing directory');
 }
 
 /**
@@ -176,20 +176,20 @@ function assertCwd(cwd: string): void {
 export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
   assertCwd(options.cwd);
   if (typeof options.bin !== 'string' || options.bin === '' || options.bin.includes('\0')) {
-    throw new SynapseError('invalid_input', 'invalid program');
+    throw new MindlyError('invalid_input', 'invalid program');
   }
   if (
     !Array.isArray(options.argv) ||
     options.argv.some((a) => typeof a !== 'string' || a.includes('\0'))
   ) {
-    throw new SynapseError('invalid_input', 'invalid argv');
+    throw new MindlyError('invalid_input', 'invalid argv');
   }
   if (
     !Number.isFinite(options.timeoutMs) ||
     options.timeoutMs <= 0 ||
     options.timeoutMs > MAX_RUN_TIMEOUT_MS
   ) {
-    throw new SynapseError('invalid_input', 'invalid timeout');
+    throw new MindlyError('invalid_input', 'invalid timeout');
   }
   const killGraceMs = Math.max(0, Math.floor(options.killGraceMs ?? DEFAULT_KILL_GRACE_MS));
   const stdout = new HeadBuffer(

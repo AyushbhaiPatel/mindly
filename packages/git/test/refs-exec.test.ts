@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isSynapseError } from '@synapse/core';
+import { isMindlyError } from '@mindly/core';
 import {
   assertSafeRelativePath,
   assertValidBranchName,
@@ -56,7 +56,7 @@ describe('ref name validation', () => {
         fn();
         return undefined;
       } catch (err) {
-        return isSynapseError(err) ? err.code : 'other';
+        return isMindlyError(err) ? err.code : 'other';
       }
     };
     expect(codeOf(() => assertValidBranchName('-x'))).toBe('invalid_input');
@@ -106,15 +106,15 @@ describe('runGit', () => {
       runGit(['rev-parse', '--verify', 'secret-value-xyz'], { cwd: root }),
     ).rejects.toSatisfy(
       (err: unknown) =>
-        isSynapseError(err, 'internal') &&
+        isMindlyError(err, 'internal') &&
         !err.message.includes('secret-value-xyz') &&
         err.message.includes('rev-parse'),
     );
     await expect(runGit(['status'], { cwd: 'relative/dir' })).rejects.toSatisfy((err: unknown) =>
-      isSynapseError(err, 'invalid_input'),
+      isMindlyError(err, 'invalid_input'),
     );
     await expect(runGit(['status'], { cwd: '/definitely/not/here' })).rejects.toSatisfy(
-      (err: unknown) => isSynapseError(err, 'not_found'),
+      (err: unknown) => isMindlyError(err, 'not_found'),
     );
     const notRepo = tempDir();
     const res = await runGit(['rev-parse', '--show-toplevel'], {
@@ -127,7 +127,7 @@ describe('runGit', () => {
   it('refuses arguments containing NUL bytes', async () => {
     const root = makeRepo();
     await expect(runGit(['log', 'a\0b'], { cwd: root })).rejects.toSatisfy((err: unknown) =>
-      isSynapseError(err, 'invalid_input'),
+      isMindlyError(err, 'invalid_input'),
     );
   });
 

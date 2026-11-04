@@ -98,7 +98,7 @@ export interface AgentAdapter {
   readonly displayName: string;
   /** Whether the agent appears to be installed for the current user. */
   detect(): Promise<boolean>;
-  /** Parses a native hook payload. Returns null for events Synapse does not handle. */
+  /** Parses a native hook payload. Returns null for events Mindly does not handle. */
   parse(nativeEvent: string, payload: unknown): NormalizedHookEvent | null;
   /** Renders a result in the agent's native hook output format. */
   render(event: NormalizedHookEvent, result: HookResult): RenderedHookOutput;
@@ -109,7 +109,7 @@ export interface AgentAdapter {
 }
 
 export interface InstallOptions {
-  /** Absolute path of the `synapse` executable (or `node /path/cli.js`) hooks should call. */
+  /** Absolute path of the `mindly` executable (or `node /path/cli.js`) hooks should call. */
   command: string[];
   /** Install for a single project (project-level config) instead of user-wide. */
   projectRoot: string | null;

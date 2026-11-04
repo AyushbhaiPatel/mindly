@@ -1,13 +1,13 @@
 {
-  "name": "@synapse/git",
+  "name": "@mindly/git",
   "version": "0.1.0",
   "private": true,
-  "description": "Safe git invocation, shadow merge, snapshots and code analysis for Synapse.",
+  "description": "Safe git invocation, shadow merge, snapshots and code analysis for Mindly.",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {
-      "@synapse/source": "./src/index.ts",
+      "@mindly/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
@@ -19,6 +19,6 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@synapse/core": "workspace:*"
+    "@mindly/core": "workspace:*"
   }
 }
