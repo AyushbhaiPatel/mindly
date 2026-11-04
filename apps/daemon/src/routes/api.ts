@@ -1,4 +1,11 @@
-import { MINDLY_VERSION, describeError, type Memory, type Project, type Trust } from '@mindly/core';
+import {
+  conflictNeedsUser,
+  MINDLY_VERSION,
+  describeError,
+  type Memory,
+  type Project,
+  type Trust,
+} from '@mindly/core';
 import {
   LIVE_WINDOW_MS,
   USER,
@@ -125,6 +132,7 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
           proposedRules: proposed.filter((m) => m.kind === 'rule').length,
           proposedMemories: proposed.filter((m) => m.kind !== 'rule').length,
           criticalConflicts: conflicts.filter((c) => c.severity === 'critical').length,
+          openConflicts: conflicts.filter((c) => conflictNeedsUser(c)).length,
           pendingHandoffs: store.handoffs.list(pid, 200).filter((h) => h.status === 'pending')
             .length,
         },

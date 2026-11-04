@@ -148,6 +148,7 @@ describe('read endpoints', () => {
       proposedRules: 1,
       proposedMemories: 0,
       criticalConflicts: 1,
+      openConflicts: 1,
       pendingHandoffs: 1,
     });
     expect(o.lastSeq).toBe(d.mindly.store.events.maxSeq());
