@@ -48,6 +48,12 @@ importers:
         specifier: 4.6.7
         version: 4.6.7
 
+  packages/git:
+    dependencies:
+      '@synapse/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/llm:
     dependencies:
       '@synapse/core':
