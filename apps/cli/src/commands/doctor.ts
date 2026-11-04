@@ -125,17 +125,30 @@ export async function runChecks(out: Out): Promise<Check[]> {
 
   const adapters = adaptersFor(env);
   const command = await installCommand(env);
+  // Mindly may be installed user-wide or only for this project (`init --project`).
+  let projectRoot: string | null = null;
+  try {
+    const { findRepoRoot } = await import('@mindly/git');
+    projectRoot = await findRepoRoot(out.io.cwd);
+  } catch {
+    projectRoot = null;
+  }
   for (const kind of SUPPORTED_AGENTS) {
     const adapter = adapters[kind];
     try {
       const detected = await adapter.detect();
-      const steps = await adapter.planInstall({
-        command,
-        projectRoot: null,
-        homeDir: userHome(env),
-      });
-      if (steps.length === 0) {
+      const plan = (root: string | null) =>
+        adapter.planInstall({ command, projectRoot: root, homeDir: userHome(env) });
+      const userSteps = await plan(null);
+      const projectSteps = projectRoot ? await plan(projectRoot) : null;
+      if (userSteps.length === 0) {
         checks.push({ name: kind, status: 'ok', detail: 'hooks and MCP server configured' });
+      } else if (projectSteps !== null && projectSteps.length === 0) {
+        checks.push({
+          name: kind,
+          status: 'ok',
+          detail: 'hooks and MCP server configured for this project',
+        });
       } else if (detected) {
         checks.push({
           name: kind,
