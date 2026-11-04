@@ -45,6 +45,21 @@ importers:
         specifier: workspace:*
         version: link:../store
 
+  packages/llm:
+    dependencies:
+      '@synapse/core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
+  packages/notify:
+    dependencies:
+      '@synapse/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/store:
     dependencies:
       '@synapse/core':
