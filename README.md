@@ -60,16 +60,41 @@ Requires Node.js 22.13 or newer and git.
 npx mindly-agents init
 ```
 
-`init` detects installed agents, shows the exact hook and MCP configuration it will add, asks for
-confirmation, and initialises local storage in `~/.mindly`. Then open Claude Code and Codex in the
-same project as usual.
+`init` detects installed agents (or take `--agents claude-code,codex,cursor`), shows every file
+and line it will change, asks for confirmation, and initialises local storage in `~/.mindly`. Use
+`--project` to configure only the current repository and `--dry-run` to preview. Codex asks you to
+approve new hooks once with `/hooks`. Then open your agents in the same project as usual.
+`mindly doctor` checks the setup; `mindly uninstall` removes it again.
+
+## Commands
+
+Run inside a project; every read command takes `--json`.
 
 ```bash
-mindly status          # agents, tasks and conflicts for this project
-mindly dashboard       # open Mission Control
-mindly why <file>:<n>  # provenance for a line
-mindly standup         # what happened since yesterday
+mindly status                      # live agents, tasks, intents, conflicts, what needs you
+mindly dashboard                   # open Mission Control (starts the daemon if needed)
+mindly memory list|search <q>|show <id>
+mindly memory add --kind rule --title "Use pnpm" [--scope 'src/**'] [--enforce] [--pin]
+mindly memory approve|reject|archive|forget <id>
+mindly rules [--approve <id>]      # approved and proposed rules
+mindly why <file>:<line>           # which agent wrote a line, and why
+mindly xray [--session <id>] [--query <q>]   # what context an agent got, or missed
+mindly standup [--since 24h]       # what happened and what needs you
+mindly handoff --summary "..." [--to codex]  # and: mindly handoffs
+mindly snapshot create <label>|list|diff <id>|restore <id> [--branch <name>]
+mindly conflicts [--all]           # and: mindly conflict <id> resolve|dismiss|ack
+mindly trust [--show|--revoke]     # review and trust .mindly/config.json checks
+mindly contract add <memoryId> --kind pattern_present --path src/x.ts --pattern 'role'
+mindly review --session <id> --reviewer codex
+mindly replay --prompt "..." --agents claude-code,codex
+mindly export [--out file]         # JSON, mode 0600; mindly forget --project deletes
+mindly daemon start|stop|status    # optional background daemon
+mindly config get|set|path         # ~/.mindly/config.json, validated
 ```
+
+Exit codes: 0 ok, 1 error, 2 usage. Output is plain text without colour when not on a terminal or
+when `NO_COLOR` is set. Agents call `mindly hook <agent> <event>` and `mindly mcp --agent <agent>`
+themselves; hooks fail open and never block an agent.
 
 ## Security and privacy
 
