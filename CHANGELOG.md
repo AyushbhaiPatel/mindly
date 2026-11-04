@@ -3,6 +3,27 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## 0.1.3 — 2026-11-04
+
+### Changed
+
+- Mission Control has a new design in the style of ayushp.me: Newsreader and DM Sans type, a soft
+  sky background, a calm "nightfall" dark mode, and one centered column.
+- Data is structured instead of written as prose: a stats row, aligned tables for agents,
+  conflicts, merge checks, memory and activity, with details on expand.
+- One primary (gel) button per item; other actions are text links or in a `⋯` menu. Explanations
+  moved into `?` tooltips. Tables stack into label/value rows on phones.
+- Fonts are bundled (SIL OFL 1.1), so the dashboard still makes no external requests.
+
+### Fixed
+
+- Mission Control and `mindly status` now agree on what needs you: an open conflict that is more
+  than FYI. The dashboard used to count only critical conflicts.
+
+### Added
+
+- An animated demo in the README, generated from a real two-agent run (`pnpm demo`).
+
 ## 0.1.2 — 2026-11-04
 
 ### Changed
