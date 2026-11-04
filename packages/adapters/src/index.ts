@@ -75,8 +75,8 @@ export {
   removeJsoncValue,
   setJsoncValue,
 } from './mcp-clients/jsonc-edit.js';
-export { applyInstallSteps } from './apply.js';
-export type { AppliedStep } from './apply.js';
+export { applyInstallSteps, readOnlyTarget } from './apply.js';
+export type { AppliedStep, ApplyOptions } from './apply.js';
 export {
   hookCommand,
   isMindlyHookCommand,

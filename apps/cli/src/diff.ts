@@ -52,17 +52,23 @@ function splitLines(text: string): string[] {
   return lines;
 }
 
-function display(line: string): string {
+function display(line: string, maxWidth: number): string {
   // Redact secrets that may sit in the user's agent config and strip terminal control characters.
   const safe = stripControl(redactText(line));
-  return safe.length > 160 ? `${safe.slice(0, 157)}...` : safe;
+  return safe.length > maxWidth ? `${safe.slice(0, maxWidth - 3)}...` : safe;
 }
 
 /**
  * Summarises the change from `previous` (null for a new file) to `next`: counts and up to
- * `maxLines` changed lines. Secrets are redacted in the displayed lines.
+ * `maxLines` changed lines, each cut to `maxWidth` characters. Secrets are redacted in the
+ * displayed lines.
  */
-export function diffSummary(previous: string | null, next: string, maxLines = 40): DiffSummary {
+export function diffSummary(
+  previous: string | null,
+  next: string,
+  maxLines = 40,
+  maxWidth = 160,
+): DiffSummary {
   const a = previous === null ? [] : splitLines(previous);
   const b = splitLines(next);
   let start = 0;
@@ -84,7 +90,7 @@ export function diffSummary(previous: string | null, next: string, maxLines = 40
         ];
   const added = ops.filter((o) => o.op === '+').length;
   const removed = ops.length - added;
-  const lines = ops.slice(0, maxLines).map((o) => `${o.op} ${display(o.text)}`);
+  const lines = ops.slice(0, maxLines).map((o) => `${o.op} ${display(o.text, maxWidth)}`);
   if (ops.length > maxLines) lines.push(`  ... ${ops.length - maxLines} more changed lines`);
   return { added, removed, lines };
 }
