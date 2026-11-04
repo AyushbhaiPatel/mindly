@@ -16,3 +16,4 @@ export * from './ports.js';
 export { ProjectService, type ProjectContext } from './projects.js';
 export { Mindly, type MindlyModule, type MindlyOptions } from './mindly.js';
 export * from './features/continuity.js';
+export * from './features/index.js';

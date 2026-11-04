@@ -1,0 +1,24 @@
+{
+  "name": "@mindly/notify",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Opt-in pager channels (desktop, ntfy, webhook) with minimal, redacted payloads.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@mindly/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@mindly/core": "workspace:*"
+  }
+}

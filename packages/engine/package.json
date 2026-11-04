@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@mindly/core": "workspace:*",
-    "@mindly/store": "workspace:*"
+    "@mindly/store": "workspace:*",
+    "zod": "4.6.7"
   }
 }

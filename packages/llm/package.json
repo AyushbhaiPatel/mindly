@@ -1,0 +1,25 @@
+{
+  "name": "@mindly/llm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Optional, fail-soft model providers (Ollama, Anthropic, OpenAI) for Mindly.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@mindly/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@mindly/core": "workspace:*",
+    "zod": "4.6.7"
+  }
+}
