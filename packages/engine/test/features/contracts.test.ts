@@ -136,7 +136,26 @@ describe('safe regex subset', () => {
     '.*a.*x',
     'a?b?c?.*a.*x',
     'v\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}',
+    '(?:api[_-]?key|secret|token|password)\\s*[:=]\\s*[\'"]',
+    '(TODO|FIXME|XXX|HACK|BUG|NOTE|OPTIMIZE|REVIEW|DEPRECATED)\\s*:.*',
+    '^(feat|fix|docs|chore|refactor|test|perf|ci|build|style|revert)(\\(.+\\))?: .+',
+    '^\\s*(?:export\\s)?(?:const|let|var) \\w+ = require\\(',
+    'https?://(?:www\\.)?(?:staging|dev)\\.[a-z]+\\.com/.*',
+    '\\b(?:describe|it|test)\\.only\\(',
+    '<(?<tag>script|iframe)\\b[^>]*>',
   ])('accepts %s', (p) => expect(checkSafePattern(p)).toBeNull());
+
+  it.each([
+    [
+      '(api[_-]?key|secret|token|password)\\s*[:=]\\s*x',
+      '(?:api[_-]?key|secret|token|password)\\s*[:=]\\s*x',
+    ],
+    ['(a|ab|abc)'.repeat(3) + '.*.*x', '(?:a|ab|abc)'.repeat(3) + '.*.*x'],
+    ['(?<x>a|ab|abc)(?<y>a|ab|abc)(?<z>a|ab|abc).*.*x', '(?:a|ab|abc)'.repeat(3) + '.*.*x'],
+    ['(?i:a|b)(?i:a|b)\\d?.*.*x', '(?:a|b)(?:a|b)\\d?.*.*x'],
+  ])('treats %s like its non-capturing form', (capturing, plain) =>
+    expect(checkSafePattern(capturing)).toBe(checkSafePattern(plain)),
+  );
 
   it.each([
     ['(a+)+', 'nested'],
@@ -153,7 +172,9 @@ describe('safe regex subset', () => {
     ['a?b?c?d?.*a.*x', 'backtracking'],
     ['a{0,16}a{0,16}a{0,16}a{0,16}a{0,16}a{0,16}.*.*x', 'backtracking'],
     ['(a|a)'.repeat(20) + 'x', 'backtracking'],
-    ['(?:a|b|c|d)(?:a|b|c|d)(?:a|b|c|d).*.*x', 'backtracking'],
+    ['(?:a|a)'.repeat(20) + 'x', 'backtracking'],
+    ['(?:a|ab|abc)'.repeat(3) + '.*.*x', 'backtracking'],
+    ['((a|b))+x', 'nested'],
     ['[', 'compile'],
   ])('rejects %s', (p, why) => expect(checkSafePattern(p)).toMatch(why));
 });
@@ -181,6 +202,19 @@ describe('regex budget', () => {
     // Doubling the line costs about 8x for a cubic matcher; exponential backtracking would be
     // billions of times slower. The ratio is load-independent, unlike an absolute budget.
     expect(longMs / Math.max(shortMs, 0.01)).toBeLessThan(32);
+  });
+
+  it('explains why an existing contract with a now-rejected pattern cannot run', async () => {
+    const { root, memory, contracts } = await withDecision();
+    const spec = { path: 'src/auth.ts', pattern: 'role' };
+    const c = contracts.create(memory.id, 'pattern_absent', spec, USER);
+    const pattern = '(a|a)'.repeat(20) + 'x';
+    const result = contracts.evaluate({ ...c, spec: { ...spec, pattern } }, root);
+    expect(result.state).toBe('error');
+    expect(result.message).toContain(
+      `pattern rejected as too expensive to evaluate safely: ${pattern} (pattern allows too much backtracking`,
+    );
+    expect(result.message).toContain('add a contract with a simpler pattern');
   });
 
   it('stops evaluating once the time budget is spent', async () => {

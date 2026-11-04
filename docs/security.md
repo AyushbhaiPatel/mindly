@@ -129,7 +129,9 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - Contract regexes allow at most two unbounded quantifiers (large bounded repeats count as
   unbounded) and eight quantifiers in total, and patterns whose optional parts and alternatives
   combine into too many ways to match are rejected, so the work per line stays polynomial. Lines
-  are capped at 200 characters, with the time budget checked after every line.
+  are capped at 200 characters, with the time budget checked after every line. A stored contract
+  whose pattern fails these checks is not run: it reports an error explaining why, and
+  `mindly doctor` lists it.
 
 ## Data retention and deletion
 

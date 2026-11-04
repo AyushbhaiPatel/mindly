@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { describeError, homePaths, mindlyHome, type HomePaths } from '@mindly/core';
+import { describeError, homePaths, mindlyHome, shortId, type HomePaths } from '@mindly/core';
+import { checkSafePattern, type Mindly, type ProjectContext } from '@mindly/engine';
 import { gitVersion, versionAtLeast } from '@mindly/git';
 import { MIGRATIONS, schemaVersion, Store } from '@mindly/store';
 import { withProject } from '../context.js';
@@ -190,6 +191,65 @@ async function mcpClientCheck(
       `Check ${label}'s MCP settings file, then run: mindly init --agents ${name}`,
     );
   }
+}
+
+/** Whether this project's `.mindly/config.json` is valid and trusted. */
+function projectItem(project: ProjectContext): DoctorItem {
+  const name = clean(project.project.name, 80);
+  if (project.configError) {
+    return item(
+      { name: 'project', status: 'warn', detail: `${name}: invalid .mindly/config.json` },
+      'Setup',
+      `This project (${name}) has an invalid .mindly/config.json`,
+      'Fix .mindly/config.json (see mindly trust --show), then run: mindly trust',
+    );
+  }
+  if (project.configHash === null) {
+    return item(
+      { name: 'project', status: 'ok', detail: `${name}: no project config` },
+      'Setup',
+      `This project (${name}) has no .mindly/config.json, which is fine`,
+    );
+  }
+  return project.trusted
+    ? item(
+        { name: 'project', status: 'ok', detail: `${name}: config trusted` },
+        'Setup',
+        `This project's (${name}) .mindly/config.json is trusted`,
+      )
+    : item(
+        {
+          name: 'project',
+          status: 'warn',
+          detail: `${name}: config not trusted, its checks will not run (mindly trust)`,
+        },
+        'Setup',
+        `This project's (${name}) .mindly/config.json is not trusted, so its checks do not run`,
+        { cmd: 'mindly trust', why: 'review its commands and trust it' },
+      );
+}
+
+/** Pattern contracts whose pattern no longer passes the safety check, so they cannot run. */
+function rejectedPatternItems(mindly: Mindly, project: ProjectContext): DoctorItem[] {
+  const rejected = mindly.store.contracts
+    .list(project.project.id)
+    .filter(
+      (c) =>
+        (c.kind === 'pattern_present' || c.kind === 'pattern_absent') &&
+        checkSafePattern(c.spec.pattern ?? '') !== null,
+    );
+  if (rejected.length === 0) return [];
+  const list = rejected
+    .map((c) => `memory ${shortId(c.memoryId)}: ${clean(c.spec.pattern ?? '', 80)}`)
+    .join('; ');
+  const n = rejected.length;
+  const summary = `${n} contract${n === 1 ? '' : 's'} cannot run: pattern rejected as too expensive to evaluate safely (${list})`;
+  return [
+    item({ name: 'contract-patterns', status: 'warn', detail: summary }, 'Setup', summary, {
+      cmd: 'mindly contract add <memoryId> --kind <kind> --path <file> --pattern <simpler pattern>',
+      why: 'add the check again with fewer optional parts or alternatives',
+    }),
+  ];
 }
 
 /** Runs every check. Never prints or returns secrets (only paths, versions and states). */
@@ -433,40 +493,10 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
   if (paths && existsSync(paths.home)) {
     try {
       items.push(
-        await withProject(out.io, ({ project }): DoctorItem => {
-          const name = clean(project.project.name, 80);
-          if (project.configError) {
-            return item(
-              { name: 'project', status: 'warn', detail: `${name}: invalid .mindly/config.json` },
-              'Setup',
-              `This project (${name}) has an invalid .mindly/config.json`,
-              'Fix .mindly/config.json (see mindly trust --show), then run: mindly trust',
-            );
-          }
-          if (project.configHash === null) {
-            return item(
-              { name: 'project', status: 'ok', detail: `${name}: no project config` },
-              'Setup',
-              `This project (${name}) has no .mindly/config.json, which is fine`,
-            );
-          }
-          return project.trusted
-            ? item(
-                { name: 'project', status: 'ok', detail: `${name}: config trusted` },
-                'Setup',
-                `This project's (${name}) .mindly/config.json is trusted`,
-              )
-            : item(
-                {
-                  name: 'project',
-                  status: 'warn',
-                  detail: `${name}: config not trusted, its checks will not run (mindly trust)`,
-                },
-                'Setup',
-                `This project's (${name}) .mindly/config.json is not trusted, so its checks do not run`,
-                { cmd: 'mindly trust', why: 'review its commands and trust it' },
-              );
-        }),
+        ...(await withProject(out.io, ({ mindly, project }): DoctorItem[] => [
+          projectItem(project),
+          ...rejectedPatternItems(mindly, project),
+        ])),
       );
     } catch (err) {
       items.push(

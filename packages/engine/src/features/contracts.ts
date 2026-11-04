@@ -30,11 +30,13 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
  * subset at creation time (see `checkSafePattern`): at most 300 characters, no backreferences, no
  * lookaround, no quantified group that itself contains a quantifier or alternation (the classic
  * `(a+)+` / `(a|aa)*` shapes), at most two unbounded quantifiers (a `{n,m}` with m > 16 counts as
- * unbounded) and at most eight quantifiers in total. A backtracking matcher without nested
- * quantifiers tries at most one path per combination of choices, so the product of every
- * quantifier's repeat choices and every alternation's branches bounds the work per start position;
- * that product is capped at `MAX_CHOICES` (two unbounded quantifiers over a full line, with a
- * little room for optional tokens). That bounds the cost of a single line to roughly cubic in the
+ * unbounded) and at most eight quantifiers in total. Without nested quantifiers, the paths a
+ * backtracking matcher can try per start position are bounded by counting them: a sequence
+ * multiplies the paths of its parts, an alternation adds the paths of its branches (or counts
+ * once when its branches are distinct literals, none a prefix of another, since only one can
+ * match), and a quantifier multiplies by its number of repeat counts. That count is capped at
+ * `MAX_PATHS` (two unbounded quantifiers over a full line, with a little room for optional
+ * tokens). That bounds the cost of a single line to roughly cubic in the
  * line length, so matching line by line over at most 512 KB of content with lines capped at 200
  * characters keeps each line within a few milliseconds to a few tens of milliseconds and lets the
  * 100 ms budget (checked after every line) take effect.
@@ -52,8 +54,8 @@ const MAX_UNBOUNDED_QUANTIFIERS = 2;
 const MAX_QUANTIFIERS = 8;
 /** A bounded repeat with an upper bound above this counts as unbounded. */
 const MAX_BOUNDED_REPEAT = 16;
-/** Cap on the product of all repeat choices and alternation branches (see above). */
-const MAX_CHOICES = 8 * (MAX_LINE_CHARS + 1) ** 2;
+/** Cap on the match paths a backtracking matcher can try per start position (see above). */
+const MAX_PATHS = 8 * (MAX_LINE_CHARS + 1) ** 2;
 
 /** Result of evaluating a contract once. */
 export interface ContractEvaluation {
@@ -77,20 +79,47 @@ export function checkSafePattern(pattern: string): string | null {
   interface Frame {
     quantified: boolean;
     alternation: boolean;
-    branches: number;
+    /** Match paths through the finished branches, the current branch, and its last atom. */
+    finished: number;
+    current: number;
+    atom: number;
+    branchStart: number;
+    branches: string[];
   }
-  const stack: Frame[] = [{ quantified: false, alternation: false, branches: 1 }];
+  const frame = (branchStart: number): Frame => ({
+    quantified: false,
+    alternation: false,
+    finished: 0,
+    current: 1,
+    atom: 1,
+    branchStart,
+    branches: [],
+  });
+  const endBranch = (f: Frame, end: number): void => {
+    f.finished += f.current * f.atom;
+    f.current = 1;
+    f.atom = 1;
+    f.branches.push(pattern.slice(f.branchStart, end));
+    f.branchStart = end + 1;
+  };
+  const paths = (f: Frame): number => (exclusiveLiterals(f.branches) ? 1 : f.finished);
+  const stack: Frame[] = [frame(0)];
   let unbounded = 0;
   let quantifiers = 0;
-  let choices = 1;
   let lastClosed: Frame | null = null;
   let i = 0;
   const top = (): Frame => stack[stack.length - 1] as Frame;
+  const atom = (cost: number): void => {
+    const f = top();
+    f.current *= f.atom;
+    f.atom = cost;
+  };
   while (i < pattern.length) {
     const ch = pattern[i] as string;
     if (ch === '\\') {
       const next = pattern[i + 1] ?? '';
       if (/[1-9]/.test(next) || next === 'k') return 'backreferences are not allowed';
+      atom(1);
       i += 2;
       lastClosed = null;
       continue;
@@ -101,6 +130,7 @@ export function checkSafePattern(pattern: string): string | null {
       if (pattern[i] === '^') i++;
       if (pattern[i] === ']') i++;
       while (i < pattern.length && pattern[i] !== ']') i += pattern[i] === '\\' ? 2 : 1;
+      atom(1);
       i++;
       lastClosed = null;
       continue;
@@ -112,24 +142,27 @@ export function checkSafePattern(pattern: string): string | null {
       if (pattern.startsWith('(?<=', i) || pattern.startsWith('(?<!', i)) {
         return 'lookbehind is not allowed';
       }
-      stack.push({ quantified: false, alternation: false, branches: 1 });
+      // Skip group syntax such as `(?:`, `(?<name>` or `(?i:` so its `?` is not a quantifier.
+      if (pattern[i + 1] === '?') i = pattern.indexOf(pattern[i + 2] === '<' ? '>' : ':', i);
       i++;
+      stack.push(frame(i));
       lastClosed = null;
       continue;
     }
     if (ch === ')') {
       const closed = stack.pop();
       if (!closed || stack.length === 0) return 'unbalanced parentheses';
-      // A group containing a quantifier makes the enclosing group "quantified" too.
-      if (closed.quantified) top().quantified = true;
-      choices *= closed.branches;
+      endBranch(closed, i);
+      // A group containing a quantifier or an alternation makes the enclosing group "quantified".
+      if (closed.quantified || closed.alternation) top().quantified = true;
+      atom(paths(closed));
       lastClosed = closed;
       i++;
       continue;
     }
     if (ch === '|') {
       top().alternation = true;
-      top().branches++;
+      endBranch(top(), i);
       i++;
       lastClosed = null;
       continue;
@@ -150,15 +183,18 @@ export function checkSafePattern(pattern: string): string | null {
       }
       if (isUnbounded) unbounded++;
       const lower = Number(/^\{(\d+)/.exec(tok)?.[1] ?? (tok === '+' ? 1 : 0));
-      const upperBound = isUnbounded ? MAX_LINE_CHARS : tok === '?' ? 1 : Number(upper ?? lower);
-      choices *= Math.max(1, upperBound - Math.min(lower, upperBound) + 1);
-      if (tok !== '?') top().quantified = true;
+      const most = isUnbounded ? MAX_LINE_CHARS : tok === '?' ? 1 : Number(upper ?? lower);
+      const f = top();
+      if (most <= 1) f.atom += lower === 0 ? 1 : 0;
+      else f.atom *= most - Math.min(lower, most) + 1;
+      if (tok !== '?') f.quantified = true;
       i += tok.length;
       // Skip a lazy/possessive marker.
       if (pattern[i] === '?') i++;
       lastClosed = null;
       continue;
     }
+    atom(1);
     lastClosed = null;
     i++;
   }
@@ -168,11 +204,26 @@ export function checkSafePattern(pattern: string): string | null {
   if (unbounded > MAX_UNBOUNDED_QUANTIFIERS) {
     return `at most ${MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers are allowed`;
   }
-  choices *= top().branches;
-  if (choices > MAX_CHOICES) {
+  endBranch(top(), pattern.length);
+  if (paths(top()) > MAX_PATHS) {
     return 'pattern allows too much backtracking; use fewer optional parts or alternatives';
   }
   return null;
+}
+
+/**
+ * Whether these alternation branches are plain literals that can never match at the same
+ * position (none is empty or a prefix of another, ignoring case), so backtracking tries at most
+ * one of them.
+ */
+function exclusiveLiterals(branches: readonly string[]): boolean {
+  if (branches.length < 2) return false;
+  const literals: string[] = [];
+  for (const b of branches) {
+    if (!/^(?:[^\\^$.|?*+()[\]{}]|\\\W)+$/.test(b)) return false;
+    literals.push(b.replace(/\\(.)/g, '$1').toLowerCase());
+  }
+  return literals.every((a, i) => literals.every((b, j) => i === j || !b.startsWith(a)));
 }
 
 const pathField = z.string().min(1).max(300);
@@ -302,7 +353,15 @@ export class ContractService {
     switch (contract.kind) {
       case 'pattern_present':
       case 'pattern_absent': {
-        const found = matchLines(spec.pattern ?? '', content);
+        const pattern = spec.pattern ?? '';
+        const rejected = checkSafePattern(pattern);
+        if (rejected !== null) {
+          return {
+            state: 'error',
+            message: `pattern rejected as too expensive to evaluate safely: ${sanitizeLine(pattern, 120)} (${rejected}); add a contract with a simpler pattern`,
+          };
+        }
+        const found = matchLines(pattern, content);
         if (found === 'error') return { state: 'error', message: 'pattern could not be evaluated' };
         if (contract.kind === 'pattern_present') {
           return found
@@ -454,9 +513,11 @@ export class ContractService {
   }
 }
 
-/** Line-by-line regex match with a time budget. Returns 'error' if the budget is exceeded. */
+/**
+ * Line-by-line match of a pattern that passed `checkSafePattern`, with a time budget. Returns
+ * 'error' if the budget is exceeded.
+ */
 function matchLines(pattern: string, content: string): boolean | 'error' {
-  if (checkSafePattern(pattern) !== null) return 'error';
   const re = new RegExp(pattern);
   const start = performance.now();
   const lines = content.split('\n');
