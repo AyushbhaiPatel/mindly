@@ -73,3 +73,69 @@ describe('openMindly', () => {
     }
   });
 });
+
+describe('linked worktrees', () => {
+  it('groups sessions from linked worktrees into one project with worktree-relative paths', async () => {
+    const dir = repo();
+    const wt = `${dir}-wt`;
+    execFileSync('git', ['worktree', 'add', '-q', '-b', 'feat/x', wt], { cwd: dir });
+    const home = mkdtempSync(join(tmpdir(), 'mindly-home-'));
+    const mindly = openMindly({ home, disableNotify: true });
+    try {
+      const base = {
+        transcriptPath: null,
+        startSource: null,
+        prompt: null,
+        tool: null,
+        lastMessage: null,
+      };
+      await mindly.hooks.handle({
+        ...base,
+        agentKind: 'claude-code',
+        event: 'session_start',
+        externalSessionId: 'a',
+        cwd: dir,
+      });
+      await mindly.hooks.handle({
+        ...base,
+        agentKind: 'codex',
+        event: 'session_start',
+        externalSessionId: 'b',
+        cwd: realpathSync(wt),
+      });
+      expect(mindly.store.projects.list()).toHaveLength(1);
+      await mindly.hooks.handle({
+        ...base,
+        agentKind: 'codex',
+        event: 'post_tool',
+        externalSessionId: 'b',
+        cwd: realpathSync(wt),
+        tool: {
+          name: 'Edit',
+          writes: true,
+          shell: false,
+          edits: [
+            {
+              path: join(realpathSync(wt), 'auth.ts'),
+              addedText: 'export const y = 1;',
+              removedText: '',
+              wholeFile: false,
+            },
+          ],
+          command: null,
+          failed: false,
+          outputExcerpt: null,
+        },
+      });
+      const pid = mindly.store.projects.list()[0]!.id;
+      expect(mindly.store.fileChanges.forPath(pid, 'auth.ts')).toHaveLength(1);
+      const branches = mindly.store.sessions
+        .list(pid)
+        .map((s) => s.branch)
+        .sort();
+      expect(branches).toEqual(['feat/x', 'main']);
+    } finally {
+      mindly.close();
+    }
+  });
+});
