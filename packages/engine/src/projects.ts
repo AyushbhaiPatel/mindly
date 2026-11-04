@@ -61,12 +61,20 @@ export class ProjectService {
   }
 
   /**
-   * Records that the user trusts the project's current `.mindly/config.json`. Any later change to
-   * the file invalidates trust until this is called again.
+   * Records that the user trusts the project's `.mindly/config.json` at `expectedHash` (the version
+   * they reviewed). Any later change to the file invalidates trust until this is called again.
    */
-  trust(projectId: string): ProjectContext {
+  trust(projectId: string, expectedHash: string): ProjectContext {
     const ctx = this.byId(projectId);
     if (ctx.configError) throw new MindlyError('invalid_input', ctx.configError);
+    // The user reviewed a specific version; refuse if the file changed since (an agent could swap
+    // the checks between review and approval).
+    if (ctx.configHash === null || ctx.configHash !== expectedHash) {
+      throw new MindlyError(
+        'conflict',
+        'project config changed since it was reviewed; review it again',
+      );
+    }
     this.k.store.projects.setTrustedConfigHash(projectId, ctx.configHash);
     this.cache.clear();
     return this.byId(projectId);

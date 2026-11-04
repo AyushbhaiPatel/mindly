@@ -48,3 +48,17 @@ describe('isDeniedPath', () => {
     expect(isDeniedPath('vault/x.txt', ['vault/**'])).toBe(true);
   });
 });
+
+describe('security regressions', () => {
+  it('matches the deny-list case-insensitively', () => {
+    expect(isDeniedPath('.ENV')).toBe(true);
+    expect(isDeniedPath('SECRETS/k.txt')).toBe(true);
+    expect(isDeniedPath('Keys/Server.PEM')).toBe(true);
+  });
+
+  it('rejects paths with control or bidi characters', () => {
+    const root = mkdtempSync(join(tmpdir(), 'syn-ctl-'));
+    expect(() => resolveInsideRoot(root, 'a\nb')).toThrow(/control/);
+    expect(() => resolveInsideRoot(root, `a${String.fromCharCode(0x202e)}b`)).toThrow(/control/);
+  });
+});

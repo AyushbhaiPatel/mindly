@@ -15,6 +15,12 @@ export interface Kernel {
   clock: Clock;
   logger: Logger;
   ports: Ports;
+  /**
+   * True when this process serves an agent that Mindly itself launched headlessly (review, replay,
+   * failover). Prompts in such sessions were written by Mindly, not the user, so they must never
+   * become user-sourced rules.
+   */
+  headless: boolean;
 }
 
 // ---------------------------------------------------------------------------------------------

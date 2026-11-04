@@ -135,9 +135,11 @@ export function SettingsView() {
                 onCancel={() => setConfirm(false)}
                 onConfirm={() => {
                   setConfirm(false);
-                  void run('trust', () => client.trustConfig(project.id), 'Config trusted').then(
-                    (ok) => ok && res.reload(),
-                  );
+                  void run(
+                    'trust',
+                    () => client.trustConfig(project.id, t.configHash ?? ''),
+                    'Config trusted',
+                  ).then((ok) => ok && res.reload());
                 }}
               >
                 <p>

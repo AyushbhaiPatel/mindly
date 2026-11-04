@@ -107,6 +107,26 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - SQLite comes from Node's built-in `node:sqlite` (no native addon download at install time).
 - CI runs `pnpm audit` and Dependabot is enabled.
 
+### Hardening from the first security review
+
+- Agents cannot restate a user memory: a same-title write from a non-user source is refused, so an
+  agent cannot replace an approved rule's body while keeping its trust.
+- Evidence only verifies a fact when every excerpt is substantial (at least 20 normalised
+  characters) and present in the file; evidence without an excerpt never verifies.
+- Any path, glob or id containing control, line-break or bidi characters is rejected at input and
+  sanitised again at render time, so structure in a context block cannot be forged.
+- Rules are auto-approved only from short prompts without code blocks; anything else (typically
+  pasted, untrusted text) is proposed. Agents Mindly launches itself carry `MINDLY_HEADLESS_RUN=1`,
+  and their prompts are never captured as rules. Headless Claude Code runs load only user settings.
+- Failed command output is never stored or replayed; mistake memories keep only the command.
+- Trusting a project config requires the hash the user reviewed; a changed file is refused.
+- Config files are read with `lstat` + `O_NOFOLLOW | O_NONBLOCK` and a byte cap, so a config that
+  points at a device or FIFO cannot hang hooks.
+- Deny-list matching is case-insensitive and uses the on-disk case (`realpath.native`).
+- Contract regexes allow at most two unbounded quantifiers (large bounded repeats count as
+  unbounded) and eight quantifiers in total, over lines capped at 200 characters, with the time
+  budget checked after every line.
+
 ## Data retention and deletion
 
 - `mindly export` writes everything for a project as JSON.

@@ -34,6 +34,8 @@ export interface MindlyOptions {
   config?: UserConfig;
   /** Use an in-memory database (tests). */
   inMemory?: boolean;
+  /** See `Kernel.headless`. */
+  headless?: boolean;
 }
 
 /** A feature module plugs into the engine by registering bus handlers and/or exposing a service. */
@@ -91,7 +93,17 @@ export class Mindly {
     if (options.inMemory) {
       const logger = options.logger ?? createLogger({ sink: nullSink });
       const config = options.config ?? loadUserConfig('/nonexistent/mindly-config.json');
-      return new Mindly({ store: Store.memory(clock), config, clock, logger, ports }, null);
+      return new Mindly(
+        {
+          store: Store.memory(clock),
+          config,
+          clock,
+          logger,
+          ports,
+          headless: options.headless ?? false,
+        },
+        null,
+      );
     }
     const paths = ensureHome(options.home ?? mindlyHome(options.env));
     const config = options.config ?? loadUserConfig(paths.config);
@@ -99,7 +111,10 @@ export class Mindly {
       options.logger ??
       createLogger({ sink: fileSink(join(paths.logs, 'mindly.log')), level: 'info' });
     const store = Store.open(paths.db, { clock, busyTimeoutMs: 5000 });
-    return new Mindly({ store, config, clock, logger, ports }, paths);
+    return new Mindly(
+      { store, config, clock, logger, ports, headless: options.headless ?? false },
+      paths,
+    );
   }
 
   get store(): Store {

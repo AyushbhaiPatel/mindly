@@ -29,9 +29,11 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
  * cannot stop catastrophic backtracking. Patterns are therefore restricted to a conservative safe
  * subset at creation time (see `checkSafePattern`): at most 300 characters, no backreferences, no
  * lookaround, no quantified group that itself contains a quantifier or alternation (the classic
- * `(a+)+` / `(a|aa)*` shapes), and at most four unbounded quantifiers. On top of that, matching is
- * line by line over at most 512 KB of content, lines are capped at 2000 characters, and evaluation
- * gives up with state `error` once it has spent more than 100 ms.
+ * `(a+)+` / `(a|aa)*` shapes), at most two unbounded quantifiers (a `{n,m}` with m > 16 counts as
+ * unbounded) and at most eight quantifiers in total. That bounds the cost of a single line to
+ * roughly cubic in the line length, so matching line by line over at most 512 KB of content with
+ * lines capped at 200 characters keeps each line in the low milliseconds and lets the 100 ms
+ * budget (checked after every line) take effect.
  *
  * `command` contracts are never executed here: only the user may create them, their argv hash is
  * pinned at creation, and the daemon runs them later through a trusted runner.
@@ -39,9 +41,13 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
 
 export const MAX_PATTERN_LENGTH = 300;
 const MAX_CONTRACT_FILE_BYTES = 512 * 1024;
-const MAX_LINE_CHARS = 2000;
+const MAX_LINE_CHARS = 200;
 const PATTERN_BUDGET_MS = 100;
-const MAX_UNBOUNDED_QUANTIFIERS = 4;
+const MAX_UNBOUNDED_QUANTIFIERS = 2;
+/** Every quantifier (including `?` and `{n,m}`) counts toward this cap. */
+const MAX_QUANTIFIERS = 8;
+/** A bounded repeat with an upper bound above this counts as unbounded. */
+const MAX_BOUNDED_REPEAT = 16;
 
 /** Result of evaluating a contract once. */
 export interface ContractEvaluation {
@@ -68,6 +74,7 @@ export function checkSafePattern(pattern: string): string | null {
   }
   const stack: Frame[] = [{ quantified: false, alternation: false }];
   let unbounded = 0;
+  let quantifiers = 0;
   let lastClosed: Frame | null = null;
   let i = 0;
   const top = (): Frame => stack[stack.length - 1] as Frame;
@@ -120,7 +127,13 @@ export function checkSafePattern(pattern: string): string | null {
     const q = /^(?:[*+?]|\{\d+(?:,\d*)?\})/.exec(pattern.slice(i));
     if (q) {
       const tok = q[0];
-      const isUnbounded = tok === '*' || tok === '+' || /^\{\d+,\}$/.test(tok);
+      const upper = /^\{\d+,(\d+)\}$/.exec(tok)?.[1] ?? /^\{(\d+)\}$/.exec(tok)?.[1];
+      const isUnbounded =
+        tok === '*' ||
+        tok === '+' ||
+        /^\{\d+,\}$/.test(tok) ||
+        (upper !== undefined && Number(upper) > MAX_BOUNDED_REPEAT);
+      quantifiers++;
       const repeats = isUnbounded || (/^\{\d+,\d+\}$/.test(tok) && !/^\{[01],1\}$/.test(tok));
       if (lastClosed && repeats && (lastClosed.quantified || lastClosed.alternation)) {
         return 'nested quantifiers are not allowed';
@@ -135,6 +148,9 @@ export function checkSafePattern(pattern: string): string | null {
     }
     lastClosed = null;
     i++;
+  }
+  if (quantifiers > MAX_QUANTIFIERS) {
+    return `at most ${MAX_QUANTIFIERS} quantifiers are allowed`;
   }
   if (unbounded > MAX_UNBOUNDED_QUANTIFIERS) {
     return `at most ${MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers are allowed`;
@@ -430,7 +446,7 @@ function matchLines(pattern: string, content: string): boolean | 'error' {
   for (let i = 0; i < lines.length; i++) {
     const line = (lines[i] as string).slice(0, MAX_LINE_CHARS);
     if (re.test(line)) return true;
-    if ((i & 63) === 0 && performance.now() - start > PATTERN_BUDGET_MS) return 'error';
+    if (performance.now() - start > PATTERN_BUDGET_MS) return 'error';
   }
   return false;
 }

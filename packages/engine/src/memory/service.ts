@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import {
   globToRegExp,
+  hasUnsafeChars,
   invalidInput,
   isDeniedPath,
   normalizeLine,
@@ -20,6 +21,8 @@ import type { Kernel } from '../kernel.js';
 
 export const MAX_TITLE = 160;
 export const MAX_BODY = 4000;
+/** Minimum normalised excerpt length for evidence to count as verification. */
+export const MIN_VERIFY_EXCERPT = 20;
 const MAX_EVIDENCE_FILE_BYTES = 512 * 1024;
 
 export interface EvidenceInput {
@@ -84,7 +87,13 @@ export function cleanScopePaths(paths: readonly string[] | undefined): string[] 
   const out: string[] = [];
   for (const raw of paths ?? []) {
     const p = raw.trim().replace(/\\/g, '/').replace(/^\.\//, '');
-    if (!p || p.startsWith('/') || p.split('/').includes('..') || p.length > 300) {
+    if (
+      !p ||
+      p.startsWith('/') ||
+      p.split('/').includes('..') ||
+      p.length > 300 ||
+      hasUnsafeChars(p)
+    ) {
       throw invalidInput('scope paths must be project-relative globs');
     }
     try {
@@ -129,11 +138,24 @@ export class MemoryService {
     if (evidence.some((e) => !e.valid)) {
       throw invalidInput('evidence excerpt not found in the referenced file');
     }
-    // A fact backed by evidence that exists in the code is verified. Rules and decisions are never
-    // auto-verified: an excerpt existing does not prove an instruction is legitimate.
-    if (input.kind === 'fact' && evidence.length > 0 && trust === 'proposed') trust = 'verified';
+    // A fact backed by substantial excerpts that exist in the code is verified. Evidence without an
+    // excerpt proves nothing. Rules and decisions are never auto-verified: an excerpt existing does
+    // not prove an instruction is legitimate.
+    const substantial =
+      evidence.length > 0 &&
+      evidence.every(
+        (e) => e.excerpt !== null && normalizeBlock(e.excerpt).length >= MIN_VERIFY_EXCERPT,
+      );
+    if (input.kind === 'fact' && substantial && trust === 'proposed') trust = 'verified';
 
     const existing = this.findSameTitle(input.projectId, input.kind, title, input.branch ?? null);
+    if (existing && existing.source.type === 'user' && input.source.type !== 'user') {
+      // Restating a user memory would otherwise let an agent rewrite it while keeping user trust.
+      throw new MindlyError(
+        'forbidden',
+        'a user memory with this title exists; propose the change under a different title',
+      );
+    }
     const memory = this.k.store.transaction(() => {
       let m: Memory;
       if (existing) {

@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { MindlyError } from './errors.js';
 import { matchesAnyGlob } from './glob.js';
 import { DEFAULT_DENY_PATHS } from './redact.js';
+import { hasUnsafeChars } from './text.js';
 
 /** Directory holding the database, daemon token, logs and user config. */
 export function mindlyHome(env: NodeJS.ProcessEnv = process.env): string {
@@ -67,7 +68,9 @@ function realpathOrNearest(p: string): string {
   const tail: string[] = [];
   for (;;) {
     try {
-      const real = realpathSync(current);
+      // `.native` returns the on-disk case on case-insensitive file systems (macOS), so deny-list
+      // checks see `.env` even when the input says `.ENV`.
+      const real = realpathSync.native(current);
       return tail.length ? join(real, ...tail.reverse()) : real;
     } catch {
       const parent = dirname(current);
@@ -93,6 +96,9 @@ export function resolveInsideRoot(root: string, input: string): ResolvedProjectP
   if (input.includes('\0')) {
     throw new MindlyError('invalid_input', 'path contains a NUL byte');
   }
+  if (hasUnsafeChars(input) || input.length > 4096) {
+    throw new MindlyError('invalid_input', 'path contains control characters or is too long');
+  }
   const realRoot = realpathOrNearest(resolve(root));
   const candidate = realpathOrNearest(
     isAbsolute(input) ? resolve(input) : resolve(realRoot, input),
@@ -115,5 +121,6 @@ export function tryResolveInsideRoot(root: string, input: string): ResolvedProje
 
 /** True when Mindly must never read or capture this project-relative path. */
 export function isDeniedPath(rel: string, extraDeny: readonly string[] = []): boolean {
-  return matchesAnyGlob(rel, DEFAULT_DENY_PATHS) || matchesAnyGlob(rel, extraDeny);
+  const opts = { nocase: true };
+  return matchesAnyGlob(rel, DEFAULT_DENY_PATHS, opts) || matchesAnyGlob(rel, extraDeny, opts);
 }

@@ -34,7 +34,9 @@ export function buildAgentEnv(
   passThrough: readonly string[],
   base: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
-  const env: Record<string, string> = { TERM: 'dumb', NO_COLOR: '1' };
+  // MINDLY_HEADLESS_RUN tells Mindly's own hooks inside the child agent that its prompts were
+  // written by Mindly, not the user (no rule capture, no user trust).
+  const env: Record<string, string> = { TERM: 'dumb', NO_COLOR: '1', MINDLY_HEADLESS_RUN: '1' };
   const keys = [
     ...BASE_ENV_ALLOW_LIST,
     ...(process.platform === 'win32' ? WINDOWS_ENV_ALLOW_LIST : []),

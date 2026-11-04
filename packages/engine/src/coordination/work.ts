@@ -1,5 +1,6 @@
 import {
   fingerprint,
+  hasUnsafeChars,
   sanitizeLine,
   shortId,
   type Conflict,
@@ -13,8 +14,10 @@ import type { TaskPatch } from '@mindly/store';
 import { INTENT_TTL_MS, OVERLAP_WINDOW_MS, type Kernel } from '../kernel.js';
 import type { TelepathyService } from './telepathy.js';
 
+/** Short human label for a session; a stored label is sanitised so it cannot forge delimiters. */
 export function sessionLabel(s: Session): string {
-  return s.label ? `${s.agentKind} "${s.label}"` : `${s.agentKind} #${shortId(s.id)}`;
+  const label = s.label ? sanitizeLine(s.label, 60) : '';
+  return label ? `${s.agentKind} "${label}"` : `${s.agentKind} #${shortId(s.id)}`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -133,7 +136,7 @@ export class IntentService {
       taskId: session.currentTaskId,
       summary: sanitizeLine(summary, 300),
       targets: {
-        files: files.slice(0, 100),
+        files: files.filter((f) => !hasUnsafeChars(f) && f.length <= 1024).slice(0, 100),
         symbols: symbols.slice(0, 100).map((s) => sanitizeLine(s, 120)),
       },
       ttlMs: INTENT_TTL_MS,
