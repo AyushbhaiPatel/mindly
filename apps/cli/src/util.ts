@@ -1,5 +1,6 @@
-import { isUuid, MindlyError, sanitizeForContext, sanitizeLine } from '@mindly/core';
+import { MindlyError, sanitizeForContext, sanitizeLine } from '@mindly/core';
 import { styleFor, type CliIo, type Style } from './io.js';
+import { screenFor, type Screen } from './present/terminal.js';
 
 /** Exit codes of the `mindly` command. */
 export const EXIT_OK = 0;
@@ -14,6 +15,18 @@ export class UsageError extends Error {
   }
 }
 
+/** A Mindly error that also says how to fix it (printed as a `->` line). */
+export class HintedError extends MindlyError {
+  constructor(
+    code: MindlyError['code'],
+    message: string,
+    readonly hint: string,
+  ) {
+    super(code, message);
+    this.name = 'HintedError';
+  }
+}
+
 /** Per-command helpers bound to one `CliIo`. */
 export interface Out {
   readonly io: CliIo;
@@ -24,6 +37,8 @@ export interface Out {
   warn(text: string): void;
   /** Writes `value` as pretty JSON to stdout. */
   json(value: unknown): void;
+  /** Human output helpers for stdout (markers, wrapping, next steps), at the current time. */
+  screen(): Screen;
 }
 
 /** Creates the output helpers for `io`. */
@@ -34,6 +49,7 @@ export function outFor(io: CliIo): Out {
     line: (text = '') => io.stdout.write(`${text}\n`),
     warn: (text) => io.stderr.write(`${text}\n`),
     json: (value) => io.stdout.write(`${JSON.stringify(value, null, 2)}\n`),
+    screen: () => screenFor((l) => io.stdout.write(`${l}\n`), io.stdout, io.env, Date.now()),
   };
 }
 
@@ -54,31 +70,6 @@ export function cleanBlock(text: string | null | undefined, max = 4000): string 
 export function stripControl(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, '');
-}
-
-/** Validates an id argument. */
-export function requireId(value: string, what = 'id'): string {
-  const v = value.trim().toLowerCase();
-  if (!isUuid(v)) throw new UsageError(`${what} must be a full id (UUID)`);
-  return v;
-}
-
-/** `2026-11-04 09:30` in local time. */
-export function formatTime(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '-';
-  const d = new Date(ms);
-  const p = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-/** `3m ago`, `2h ago`, `5d ago`. */
-export function ago(ms: number | null | undefined, now = Date.now()): string {
-  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '-';
-  const s = Math.max(0, Math.round((now - ms) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86_400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86_400)}d ago`;
 }
 
 const DURATION_RE = /^(\d{1,6})\s*(s|m|h|d|w)$/i;
@@ -121,28 +112,7 @@ export function positiveInt(max: number): (value: string) => number {
   };
 }
 
-/** Pads `cells` into aligned columns (cells must already be clean). */
-export function table(rows: readonly (readonly string[])[], gap = 2): string[] {
-  const widths: number[] = [];
-  for (const row of rows) {
-    row.forEach((cell, i) => {
-      widths[i] = Math.max(widths[i] ?? 0, cell.length);
-    });
-  }
-  return rows.map((row) =>
-    row
-      .map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd((widths[i] ?? 0) + gap)))
-      .join('')
-      .trimEnd(),
-  );
-}
-
 /** Plural helper: `1 memory`, `2 memories`. */
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
-}
-
-/** Throws a `not_found` error unless `cond`. */
-export function ensureFound(cond: boolean, what: string): void {
-  if (!cond) throw new MindlyError('not_found', `${what} not found in this project`);
 }

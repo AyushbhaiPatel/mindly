@@ -8,8 +8,10 @@ import { clean, type Out } from '../util.js';
 import { runningDaemon } from './daemon.js';
 import { McpClientAdapter } from '@mindly/adapters';
 import { adapterOf, adaptersFor, installCommand, SUPPORTED_AGENTS, userHome } from './setup.js';
+import type { Step } from '../present/index.js';
+import { renderDoctor, type DoctorItem } from '../views/doctor.js';
 
-/** Result of one doctor check. */
+/** Result of one doctor check (the `--json` shape; keep it stable). */
 export interface Check {
   name: string;
   status: 'ok' | 'warn' | 'fail' | 'info';
@@ -30,9 +32,26 @@ function modeOf(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
-function permissionChecks(paths: HomePaths): Check[] {
+/** Builds a doctor item: the JSON check plus its human wording. */
+function item(
+  check: Check,
+  group: DoctorItem['group'],
+  text: string,
+  fix: Step | string | null = null,
+): DoctorItem {
+  if (typeof fix === 'string') fix = { why: fix };
+  return { check, group, text, fix };
+}
+
+function permissionChecks(paths: HomePaths): DoctorItem[] {
   if (process.platform === 'win32') {
-    return [{ name: 'permissions', status: 'info', detail: 'not checked on Windows' }];
+    return [
+      item(
+        { name: 'permissions', status: 'info', detail: 'not checked on Windows' },
+        'Setup',
+        'File permissions are not checked on Windows',
+      ),
+    ];
   }
   const loose: string[] = [];
   const dirs = [paths.home, paths.logs, paths.run];
@@ -51,14 +70,27 @@ function permissionChecks(paths: HomePaths): Check[] {
   for (const f of files) {
     if (existsSync(f) && statSync(f).isFile() && (modeOf(f) & 0o077) !== 0) loose.push(f);
   }
+  if (loose.length === 0) {
+    return [
+      item(
+        { name: 'permissions', status: 'ok', detail: 'home is 0700, files are owner-only' },
+        'Setup',
+        "Only you can read Mindly's files",
+      ),
+    ];
+  }
+  const shown = `${loose.slice(0, 5).join(', ')}${loose.length > 5 ? ', ...' : ''}`;
   return [
-    loose.length === 0
-      ? { name: 'permissions', status: 'ok', detail: 'home is 0700, files are owner-only' }
-      : {
-          name: 'permissions',
-          status: 'fail',
-          detail: `readable by others: ${loose.slice(0, 5).join(', ')}${loose.length > 5 ? ', ...' : ''} (chmod 700 directories, 600 files)`,
-        },
+    item(
+      {
+        name: 'permissions',
+        status: 'fail',
+        detail: `readable by others: ${shown} (chmod 700 directories, 600 files)`,
+      },
+      'Setup',
+      `Other users on this machine can read: ${shown}`,
+      `Make them private: chmod 700 ${paths.home} and chmod 600 the files listed`,
+    ),
   ];
 }
 
@@ -71,8 +103,9 @@ async function mcpClientCheck(
   command: string[],
   homeDir: string,
   projectRoot: string | null,
-): Promise<Check | null> {
+): Promise<DoctorItem | null> {
   const name = adapter.kind;
+  const label = adapter.displayName;
   try {
     const scopes: (string | null)[] =
       projectRoot !== null && adapter.supportsProjectScope ? [null, projectRoot] : [null];
@@ -81,88 +114,181 @@ async function mcpClientCheck(
       const steps = await adapter.planInstall({ command, projectRoot: root, homeDir });
       if (steps.length === 0) {
         const where = root === null ? '' : ' for this project';
-        return { name, status: 'ok', detail: `MCP server configured${where} (MCP tools only)` };
+        return item(
+          { name, status: 'ok', detail: `MCP server configured${where} (MCP tools only)` },
+          'Agents',
+          `${label}: connected${where} (Mindly tools only, no automatic capture)`,
+        );
       }
       if (await adapter.isConfigured({ homeDir, projectRoot: root })) present = true;
     }
     if (present) {
-      return {
-        name,
-        status: 'warn',
-        detail: 'Mindly MCP entry points elsewhere (run mindly init --agents ' + name + ')',
-      };
+      return item(
+        {
+          name,
+          status: 'warn',
+          detail: 'Mindly MCP entry points elsewhere (run mindly init --agents ' + name + ')',
+        },
+        'Agents',
+        `${label}: its Mindly entry points to another Mindly install`,
+        { cmd: `mindly init --agents ${name}`, why: 'point it at this Mindly' },
+      );
     }
     if (await adapter.detect()) {
-      return {
-        name,
-        status: 'info',
-        detail: `installed, MCP not configured (optional: mindly init --agents ${name})`,
-      };
+      return item(
+        {
+          name,
+          status: 'info',
+          detail: `installed, MCP not configured (optional: mindly init --agents ${name})`,
+        },
+        'Optional',
+        `${label} is installed but not connected (connect it with: mindly init --agents ${name})`,
+      );
     }
     return null;
   } catch (err) {
-    return { name, status: 'warn', detail: describeError(err) };
+    return item(
+      { name, status: 'warn', detail: describeError(err) },
+      'Agents',
+      `${label}: could not read its settings (${describeError(err)})`,
+      `Check ${label}'s MCP settings file, then run: mindly init --agents ${name}`,
+    );
   }
 }
 
 /** Runs every check. Never prints or returns secrets (only paths, versions and states). */
-export async function runChecks(out: Out): Promise<Check[]> {
+export async function runDoctor(out: Out): Promise<DoctorItem[]> {
   const env = out.io.env;
-  const checks: Check[] = [];
+  const items: DoctorItem[] = [];
   const node = process.versions.node;
-  checks.push({
-    name: 'node',
-    status: atLeast(node, MIN_NODE) ? 'ok' : 'fail',
-    detail: `v${node}${atLeast(node, MIN_NODE) ? '' : ` (need >= ${MIN_NODE.join('.')})`}`,
-  });
+  const nodeOk = atLeast(node, MIN_NODE);
+  items.push(
+    item(
+      {
+        name: 'node',
+        status: nodeOk ? 'ok' : 'fail',
+        detail: `v${node}${nodeOk ? '' : ` (need >= ${MIN_NODE.join('.')})`}`,
+      },
+      'Setup',
+      nodeOk ? `Node.js ${node}` : `Node.js ${node} is too old`,
+      nodeOk ? null : `Install Node.js ${MIN_NODE.join('.')} or newer`,
+    ),
+  );
   try {
     await import('node:sqlite');
-    checks.push({ name: 'node:sqlite', status: 'ok', detail: 'available' });
+    items.push(
+      item(
+        { name: 'node:sqlite', status: 'ok', detail: 'available' },
+        'Setup',
+        'Built-in SQLite is available',
+      ),
+    );
   } catch {
-    checks.push({ name: 'node:sqlite', status: 'fail', detail: 'not available in this Node.js' });
+    items.push(
+      item(
+        { name: 'node:sqlite', status: 'fail', detail: 'not available in this Node.js' },
+        'Setup',
+        'This Node.js has no built-in SQLite (node:sqlite)',
+        `Install Node.js ${MIN_NODE.join('.')} or newer`,
+      ),
+    );
   }
   try {
     const v = await gitVersion();
     const ok = versionAtLeast(v, MIN_GIT[0], MIN_GIT[1]);
-    checks.push({
-      name: 'git',
-      status: ok ? 'ok' : 'warn',
-      detail: `${v.major}.${v.minor}.${v.patch}${ok ? '' : ` (shadow merge needs >= ${MIN_GIT.join('.')})`}`,
-    });
+    const version = `${v.major}.${v.minor}.${v.patch}`;
+    items.push(
+      item(
+        {
+          name: 'git',
+          status: ok ? 'ok' : 'warn',
+          detail: `${version}${ok ? '' : ` (shadow merge needs >= ${MIN_GIT.join('.')})`}`,
+        },
+        'Setup',
+        ok
+          ? `git ${version}`
+          : `git ${version} is too old for merge checks between agents (needs ${MIN_GIT.join('.')})`,
+        ok ? null : `Update git to ${MIN_GIT.join('.')} or newer`,
+      ),
+    );
   } catch {
-    checks.push({ name: 'git', status: 'fail', detail: 'git was not found on PATH' });
+    items.push(
+      item(
+        { name: 'git', status: 'fail', detail: 'git was not found on PATH' },
+        'Setup',
+        'git was not found',
+        'Install git and make sure it is on your PATH',
+      ),
+    );
   }
 
   let paths: HomePaths | null = null;
   try {
     paths = homePaths(mindlyHome(env));
   } catch (err) {
-    checks.push({ name: 'home', status: 'fail', detail: describeError(err) });
+    items.push(
+      item(
+        { name: 'home', status: 'fail', detail: describeError(err) },
+        'Setup',
+        `Mindly's data folder is not usable: ${describeError(err)}`,
+        'Point MINDLY_HOME at an absolute path you own, or unset it',
+      ),
+    );
   }
   if (paths) {
     if (!existsSync(paths.home)) {
-      checks.push({
-        name: 'home',
-        status: 'fail',
-        detail: `${paths.home} does not exist (run mindly init)`,
-      });
+      items.push(
+        item(
+          {
+            name: 'home',
+            status: 'fail',
+            detail: `${paths.home} does not exist (run mindly init)`,
+          },
+          'Setup',
+          `Mindly's data folder ${paths.home} does not exist yet`,
+          { cmd: 'mindly init', why: 'create it and connect your agents' },
+        ),
+      );
     } else {
-      checks.push({ name: 'home', status: 'ok', detail: paths.home });
-      checks.push(...permissionChecks(paths));
+      items.push(
+        item(
+          { name: 'home', status: 'ok', detail: paths.home },
+          'Setup',
+          `Data folder ${paths.home}`,
+        ),
+      );
+      items.push(...permissionChecks(paths));
       try {
         const store = Store.open(paths.db, { busyTimeoutMs: 2000 });
         try {
           const v = schemaVersion(store.db);
-          checks.push({
-            name: 'database',
-            status: v === MIGRATIONS.length ? 'ok' : 'fail',
-            detail: `schema v${v}${v === MIGRATIONS.length ? '' : ` (expected v${MIGRATIONS.length})`}`,
-          });
+          const ok = v === MIGRATIONS.length;
+          items.push(
+            item(
+              {
+                name: 'database',
+                status: ok ? 'ok' : 'fail',
+                detail: `schema v${v}${ok ? '' : ` (expected v${MIGRATIONS.length})`}`,
+              },
+              'Setup',
+              ok
+                ? 'Database is up to date'
+                : `Database format v${v} does not match this Mindly (v${MIGRATIONS.length})`,
+              ok ? null : 'Update Mindly to the newest version (npm install -g mindly-cli)',
+            ),
+          );
         } finally {
           store.close();
         }
       } catch (err) {
-        checks.push({ name: 'database', status: 'fail', detail: describeError(err) });
+        items.push(
+          item(
+            { name: 'database', status: 'fail', detail: describeError(err) },
+            'Setup',
+            `The database cannot be opened: ${describeError(err)}`,
+            `Close other Mindly processes (mindly daemon stop) and check ${paths.db}`,
+          ),
+        );
       }
     }
   }
@@ -179,9 +305,10 @@ export async function runChecks(out: Out): Promise<Check[]> {
   }
   for (const kind of SUPPORTED_AGENTS) {
     const adapter = adapterOf(adapters, kind);
+    const label = adapter.displayName;
     if (adapter instanceof McpClientAdapter) {
       const check = await mcpClientCheck(adapter, command, userHome(env), projectRoot);
-      if (check !== null) checks.push(check);
+      if (check !== null) items.push(check);
       continue;
     }
     try {
@@ -191,85 +318,141 @@ export async function runChecks(out: Out): Promise<Check[]> {
       const userSteps = await plan(null);
       const projectSteps = projectRoot ? await plan(projectRoot) : null;
       if (userSteps.length === 0) {
-        checks.push({ name: kind, status: 'ok', detail: 'hooks and MCP server configured' });
+        items.push(
+          item(
+            { name: kind, status: 'ok', detail: 'hooks and MCP server configured' },
+            'Agents',
+            `${label}: connected (automatic capture and Mindly tools)`,
+          ),
+        );
       } else if (projectSteps !== null && projectSteps.length === 0) {
-        checks.push({
-          name: kind,
-          status: 'ok',
-          detail: 'hooks and MCP server configured for this project',
-        });
+        items.push(
+          item(
+            {
+              name: kind,
+              status: 'ok',
+              detail: 'hooks and MCP server configured for this project',
+            },
+            'Agents',
+            `${label}: connected for this project (automatic capture and Mindly tools)`,
+          ),
+        );
       } else if (detected) {
-        checks.push({
-          name: kind,
-          status: 'warn',
-          detail:
-            'installed, but Mindly hooks/MCP are missing or point elsewhere (run mindly init)',
-        });
+        items.push(
+          item(
+            {
+              name: kind,
+              status: 'warn',
+              detail:
+                'installed, but Mindly hooks/MCP are missing or point elsewhere (run mindly init)',
+            },
+            'Agents',
+            `${label} is installed but not connected to Mindly`,
+            { cmd: `mindly init --agents ${kind}`, why: 'connect it' },
+          ),
+        );
       } else {
-        checks.push({ name: kind, status: 'info', detail: 'not installed' });
+        items.push(
+          item(
+            { name: kind, status: 'info', detail: 'not installed' },
+            'Optional',
+            `${label} is not installed`,
+          ),
+        );
       }
     } catch (err) {
-      checks.push({ name: kind, status: 'warn', detail: describeError(err) });
+      items.push(
+        item(
+          { name: kind, status: 'warn', detail: describeError(err) },
+          'Agents',
+          `${label}: could not read its settings (${describeError(err)})`,
+          `Check ${label}'s settings files, then run: mindly init --agents ${kind}`,
+        ),
+      );
     }
   }
 
   const daemon = await runningDaemon(env);
-  checks.push({
-    name: 'daemon',
-    status: 'info',
-    detail: daemon
-      ? `running on 127.0.0.1:${daemon.port} (pid ${daemon.pid})`
-      : 'not running (optional)',
-  });
+  items.push(
+    item(
+      {
+        name: 'daemon',
+        status: 'info',
+        detail: daemon
+          ? `running on 127.0.0.1:${daemon.port} (pid ${daemon.pid})`
+          : 'not running (optional)',
+      },
+      'Optional',
+      daemon
+        ? `Background service is running (open Mission Control with: mindly dashboard)`
+        : 'Background service is not running; it powers Mission Control and background checks (start it with: mindly daemon start)',
+    ),
+  );
 
   if (paths && existsSync(paths.home)) {
     try {
-      checks.push(
-        await withProject(out.io, ({ project }) => {
+      items.push(
+        await withProject(out.io, ({ project }): DoctorItem => {
           const name = clean(project.project.name, 80);
           if (project.configError) {
-            return {
-              name: 'project',
-              status: 'warn',
-              detail: `${name}: invalid .mindly/config.json`,
-            } as Check;
+            return item(
+              { name: 'project', status: 'warn', detail: `${name}: invalid .mindly/config.json` },
+              'Setup',
+              `This project (${name}) has an invalid .mindly/config.json`,
+              'Fix .mindly/config.json (see mindly trust --show), then run: mindly trust',
+            );
           }
           if (project.configHash === null) {
-            return { name: 'project', status: 'ok', detail: `${name}: no project config` } as Check;
+            return item(
+              { name: 'project', status: 'ok', detail: `${name}: no project config` },
+              'Setup',
+              `This project (${name}) has no .mindly/config.json, which is fine`,
+            );
           }
           return project.trusted
-            ? ({ name: 'project', status: 'ok', detail: `${name}: config trusted` } as Check)
-            : ({
-                name: 'project',
-                status: 'warn',
-                detail: `${name}: config not trusted, its checks will not run (mindly trust)`,
-              } as Check);
+            ? item(
+                { name: 'project', status: 'ok', detail: `${name}: config trusted` },
+                'Setup',
+                `This project's (${name}) .mindly/config.json is trusted`,
+              )
+            : item(
+                {
+                  name: 'project',
+                  status: 'warn',
+                  detail: `${name}: config not trusted, its checks will not run (mindly trust)`,
+                },
+                'Setup',
+                `This project's (${name}) .mindly/config.json is not trusted, so its checks do not run`,
+                { cmd: 'mindly trust', why: 'review its commands and trust it' },
+              );
         }),
       );
     } catch (err) {
-      checks.push({ name: 'project', status: 'warn', detail: describeError(err) });
+      items.push(
+        item(
+          { name: 'project', status: 'warn', detail: describeError(err) },
+          'Setup',
+          `This folder could not be opened as a project: ${describeError(err)}`,
+        ),
+      );
     }
   }
-  return checks;
+  return items;
+}
+
+/** Runs every check and returns the `--json` shape. */
+export async function runChecks(out: Out): Promise<Check[]> {
+  return (await runDoctor(out)).map((i) => i.check);
 }
 
 /** `mindly doctor`. Exit code 1 when any check fails. */
 export async function doctor(out: Out, o: { json?: boolean }): Promise<number> {
-  const checks = await runChecks(out);
-  const failed = checks.some((c) => c.status === 'fail');
+  const items = await runDoctor(out);
+  const failed = items.some((i) => i.check.status === 'fail');
   if (o.json) {
-    out.json({ ok: !failed, checks });
+    out.json({ ok: !failed, checks: items.map((i) => i.check) });
     return failed ? 1 : 0;
   }
-  const s = out.style;
-  const tag: Record<Check['status'], string> = {
-    ok: s.green('ok  '),
-    warn: s.yellow('warn'),
-    fail: s.red('FAIL'),
-    info: s.dim('info'),
-  };
-  for (const c of checks) out.line(`${tag[c.status]}  ${c.name.padEnd(12)} ${c.detail}`);
-  out.line();
-  out.line(failed ? s.red('Some checks failed.') : s.green('Mindly looks healthy.'));
+  renderDoctor(out.screen(), items);
   return failed ? 1 : 0;
 }

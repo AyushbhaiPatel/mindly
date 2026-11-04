@@ -1,20 +1,19 @@
-import { CONFLICT_STATUSES, type Conflict, type ConflictStatus } from '@mindly/core';
-import { LIVE_WINDOW_MS, provenanceOf, sessionLabel, standupService, xrayOf } from '@mindly/engine';
+import { CONFLICT_STATUSES, shortId, type ConflictStatus } from '@mindly/core';
+import { LIVE_WINDOW_MS, provenanceOf, standupService, xrayOf } from '@mindly/engine';
 import { z } from 'zod';
 import { pickSession, projectPath, withProject } from '../context.js';
+import { resolveId } from '../ids.js';
+import { conflictStatusWord } from '../present/index.js';
+import { clean, parseDuration, UsageError, type Out } from '../util.js';
+import { conflictText, sessionLookup } from '../views/common.js';
 import {
-  ago,
-  clean,
-  ensureFound,
-  formatTime,
-  parseDuration,
-  plural,
-  requireId,
-  stripControl,
-  table,
-  UsageError,
-  type Out,
-} from '../util.js';
+  renderConflicts,
+  renderStandup,
+  renderWhy,
+  renderXray,
+  renderXrayQuery,
+} from '../views/insight.js';
+import { renderStatus, type AgentActivity } from '../views/status.js';
 import { parseOptions } from './memory.js';
 
 /** `mindly status`: live agents, work in progress, conflicts and what needs the user. */
@@ -51,61 +50,49 @@ export async function status(out: Out, o: { json?: boolean }): Promise<number> {
       });
       return 0;
     }
-    const s = out.style;
-    out.line(`${s.bold(clean(project.project.name, 80))} ${s.dim(clean(project.root, 300))}`);
-    out.line();
-    out.line(s.bold(`Agents (${sessions.length})`));
-    if (sessions.length === 0) out.line(s.dim('  No live agent sessions.'));
-    for (const line of table(
-      sessions.map((x) => [
-        `  ${clean(sessionLabel(x), 60)}`,
-        x.status,
-        x.branch ? clean(x.branch, 60) : '-',
-        ago(x.lastSeenAt),
-      ]),
-    )) {
-      out.line(line);
-    }
-    out.line();
-    out.line(s.bold(`Tasks (${tasks.length})`));
-    for (const t of tasks.slice(0, 20)) out.line(`  ${t.status.padEnd(12)}${clean(t.title, 100)}`);
-    out.line();
-    out.line(s.bold(`Intents (${intents.length})`));
-    for (const i of intents.slice(0, 20)) {
-      const files = i.targets.files.slice(0, 3).map((f) => clean(f, 80));
-      out.line(`  ${clean(i.summary, 80)}${files.length ? s.dim(` (${files.join(', ')})`) : ''}`);
-    }
-    out.line();
-    out.line(s.bold(`Open conflicts (${conflicts.length})`));
-    for (const c of conflicts.slice(0, 20)) out.line(`  ${conflictLine(out, c)}`);
-    out.line();
-    const total =
-      needsYou.proposedRules +
-      needsYou.proposedMemories +
-      needsYou.criticalConflicts +
-      needsYou.pendingHandoffs;
-    out.line(s.bold(`Needs you (${total})`));
-    out.line(
-      `  ${plural(needsYou.proposedRules, 'proposed rule')}, ${plural(needsYou.proposedMemories, 'proposed memory', 'proposed memories')}, ${plural(needsYou.criticalConflicts, 'critical conflict')}, ${plural(needsYou.pendingHandoffs, 'unclaimed handoff')}`,
-    );
+    const sessionOf = sessionLookup(store);
+    const liveIds = new Set(sessions.map((x) => x.id));
+    const since = Date.now() - LIVE_WINDOW_MS;
+    const agents: AgentActivity[] = sessions.map((session) => {
+      const mine = intents.filter((i) => i.sessionId === session.id);
+      const last = store.fileChanges.forSession(session.id, since)[0];
+      const task = session.currentTaskId
+        ? (tasks.find((t) => t.id === session.currentTaskId) ?? null)
+        : null;
+      return {
+        session,
+        editing: [...new Set(mine.flatMap((i) => i.targets.files))],
+        plans: mine.filter((i) => i.targets.files.length === 0).map((i) => i.summary),
+        lastEdit: last ? { path: last.path, at: last.createdAt } : null,
+        task,
+      };
+    });
+    const pendingHandoffs = store.handoffs.list(pid, 200).filter((h) => h.status === 'pending');
+    renderStatus(out.screen(), {
+      projectName: project.project.name,
+      agents,
+      conflicts,
+      proposed,
+      handoffs: pendingHandoffs,
+      tasks: tasks.filter((t) => !agents.some((a) => a.task?.id === t.id)),
+      otherIntents: intents.filter((i) => !liveIds.has(i.sessionId)),
+      config: project.configError
+        ? 'invalid'
+        : project.configHash === null
+          ? 'none'
+          : project.trusted
+            ? 'trusted'
+            : 'untrusted',
+      sessionOf,
+    });
     return 0;
   });
-}
-
-function conflictLine(out: Out, c: Conflict): string {
-  const sev =
-    c.severity === 'critical'
-      ? out.style.red(c.severity)
-      : c.severity === 'warning'
-        ? out.style.yellow(c.severity)
-        : c.severity;
-  return `${c.id}  ${sev}  ${c.status}  ${clean(c.title, 100)}`;
 }
 
 /** Parses `path/to/file.ts:42`. */
 export function parseFileLine(spec: string): { file: string; line: number } {
   const m = /^(.+):(\d{1,9})$/.exec(spec.trim());
-  if (!m) throw new UsageError('expected <file>:<line>, for example src/auth.ts:42');
+  if (!m) throw new UsageError('give a file and a line number, for example src/auth.ts:42');
   const line = Number(m[2]);
   if (line < 1) throw new UsageError('line numbers start at 1');
   return { file: m[1] as string, line };
@@ -126,26 +113,7 @@ export async function why(out: Out, spec: string, o: { json?: boolean }): Promis
       out.json(r);
       return 0;
     }
-    const s = out.style;
-    out.line(`${s.bold(`${clean(r.path, 300)}:${r.line}`)}  ${s.dim(clean(r.text, 160))}`);
-    if (r.changes.length === 0) {
-      out.line('No recorded agent edit introduced this line.');
-    }
-    for (const [i, c] of r.changes.entries()) {
-      const who = clean(c.label ?? c.agentKind ?? 'unknown agent', 60);
-      out.line(
-        `${i === 0 ? 'Written by' : 'Earlier  '} ${who} with ${clean(c.tool, 40)} at ${formatTime(c.at)}`,
-      );
-      if (c.prompt) out.line(`  prompt: ${clean(c.prompt, 200)}`);
-      out.line(s.dim(`  session ${c.sessionId}`));
-    }
-    if (r.memories.length) {
-      out.line();
-      out.line(s.bold('Related memories'));
-      for (const m of r.memories) {
-        out.line(`  ${m.id}  ${m.kind}  ${m.trust}  ${clean(m.title, 100)}`);
-      }
-    }
+    renderWhy(out.screen(), r);
     return 0;
   });
 }
@@ -163,23 +131,13 @@ export async function xray(out: Out, raw: unknown): Promise<number> {
   return withProject(out.io, (scope) => {
     const session = pickSession(scope, o.session);
     const svc = xrayOf(scope.mindly);
-    const s = out.style;
     if (o.query !== undefined) {
       const r = svc.explainMissing(session.id, o.query);
       if (o.json) {
         out.json(r);
         return 0;
       }
-      out.line(
-        s.bold(
-          `Why memories matching "${clean(o.query, 80)}" reach ${clean(sessionLabel(session), 60)} or not`,
-        ),
-      );
-      if (r.items.length === 0) out.line(s.dim('No memory matches that query.'));
-      for (const it of r.items) {
-        out.line(`  ${it.reason.padEnd(15)}${it.memoryId}  ${clean(it.title, 80)}`);
-        out.line(s.dim(`  ${' '.repeat(15)}${clean(it.detail, 160)}`));
-      }
+      renderXrayQuery(out.screen(), session, r);
       return 0;
     }
     const r = svc.session(session.id, o.limit ?? 5);
@@ -187,26 +145,7 @@ export async function xray(out: Out, raw: unknown): Promise<number> {
       out.json(r);
       return 0;
     }
-    out.line(
-      s.bold(`Context served to ${clean(r.label, 60)}`) + s.dim(` (session ${r.sessionId})`),
-    );
-    if (r.packets.length === 0) out.line(s.dim('No context packets recorded yet.'));
-    for (const p of r.packets) {
-      out.line();
-      out.line(
-        `${formatTime(p.at)}  ${p.trigger}  ${p.tokensUsed}/${p.tokenBudget} tokens${p.query ? `  query: ${clean(p.query, 80)}` : ''}`,
-      );
-      for (const it of p.included) {
-        out.line(
-          `  ${s.green('+')} ${it.kind.padEnd(9)}${clean(it.title, 90)} ${s.dim(`(${clean(it.reason, 60)})`)}`,
-        );
-      }
-      for (const it of p.omitted) {
-        out.line(
-          `  ${s.dim('-')} ${it.kind.padEnd(9)}${clean(it.title, 90)} ${s.dim(`(${clean(it.reason, 60)})`)}`,
-        );
-      }
-    }
+    renderXray(out.screen(), session, r);
     return 0;
   });
 }
@@ -219,7 +158,7 @@ export async function standup(out: Out, o: { since?: string; json?: boolean }): 
     const since = sinceMs !== undefined ? mindly.kernel.clock.now() - sinceMs : undefined;
     const digest = svc.build(project.project.id, since);
     if (o.json) out.json(digest);
-    else out.line(stripControl(svc.render(digest)));
+    else renderStandup(out.screen(), digest);
     return 0;
   });
 }
@@ -235,19 +174,7 @@ export async function conflicts(out: Out, o: { all?: boolean; json?: boolean }):
       out.json(list);
       return 0;
     }
-    if (list.length === 0) out.line(out.style.dim(o.all ? 'No conflicts.' : 'No open conflicts.'));
-    for (const c of list) {
-      out.line(conflictLine(out, c));
-      if (c.paths.length)
-        out.line(
-          out.style.dim(
-            `  ${c.paths
-              .slice(0, 5)
-              .map((p) => clean(p, 100))
-              .join(', ')}`,
-          ),
-        );
-    }
+    renderConflicts(out.screen(), list, sessionLookup(mindly.store), o.all === true);
     return 0;
   });
 }
@@ -262,18 +189,14 @@ const CONFLICT_ACTIONS: Record<string, ConflictStatus> = {
 export async function conflictAction(out: Out, id: string, action: string): Promise<number> {
   const target = CONFLICT_ACTIONS[action];
   if (!target || !(CONFLICT_STATUSES as readonly string[]).includes(target)) {
-    throw new UsageError('action must be resolve, dismiss or ack');
+    throw new UsageError(
+      `"${clean(action, 20)}" is not something you can do to a conflict; use resolve (it is fixed), dismiss (not a real problem) or ack (seen, still open)`,
+    );
   }
-  const cid = requireId(id, 'conflict id');
   return withProject(out.io, ({ mindly, project }) => {
     const store = mindly.store;
-    let existing: Conflict | null;
-    try {
-      existing = store.conflicts.get(cid);
-    } catch {
-      existing = null;
-    }
-    ensureFound(existing !== null && existing.projectId === project.project.id, 'conflict');
+    const cid = resolveId(store, 'conflict', project.project.id, id);
+    const before = store.conflicts.get(cid);
     const c = store.conflicts.setStatus(cid, target);
     store.events.append({
       projectId: c.projectId,
@@ -281,7 +204,14 @@ export async function conflictAction(out: Out, id: string, action: string): Prom
       type: 'conflict.updated',
       payload: { conflictId: c.id, kind: c.kind, status: target, by: 'user' },
     });
-    out.line(`Conflict ${c.id} is now ${c.status}.`);
+    const sc = out.screen();
+    const what = conflictText(c, sessionLookup(store));
+    const word = conflictStatusWord(c.status);
+    sc.text(
+      before.status === c.status
+        ? `Conflict ${shortId(c.id)} was already ${word}: ${what}`
+        : `${sc.mark('ok')} Conflict ${shortId(c.id)} marked ${word}: ${what}`,
+    );
     return 0;
   });
 }

@@ -10,7 +10,8 @@ import {
   type HomePaths,
 } from '@mindly/core';
 import type { DaemonState } from '@mindly/daemon';
-import { ago, type Out } from '../util.js';
+import { relativeTime } from '../present/index.js';
+import { HintedError, type Out } from '../util.js';
 
 const HOST = '127.0.0.1';
 const START_TIMEOUT_MS = 15_000;
@@ -85,7 +86,11 @@ function readToken(env: NodeJS.ProcessEnv): string {
   } catch {
     // fall through
   }
-  throw new MindlyError('unavailable', 'the daemon token is missing; restart the daemon');
+  throw new HintedError(
+    'unavailable',
+    "The background service's access token is missing",
+    'Restart it: mindly daemon stop, then mindly daemon start',
+  );
 }
 
 /**
@@ -160,9 +165,10 @@ export async function startBackground(env: NodeJS.ProcessEnv): Promise<DaemonSta
     if (!pidAlive(pid)) break;
     await sleep(100);
   }
-  throw new MindlyError(
+  throw new HintedError(
     'unavailable',
-    `the daemon did not start; see ${join(paths(env).logs, 'mindly.log')}`,
+    "Mindly's background service did not start",
+    `See what went wrong in ${join(paths(env).logs, 'mindly.log')}, or run it in this terminal: mindly daemon start --foreground`,
   );
 }
 
@@ -171,15 +177,13 @@ export async function daemonStart(out: Out, o: { foreground?: boolean }): Promis
   const env = out.io.env;
   const running = await runningDaemon(env);
   if (running) {
-    out.line(
-      `The daemon is already running at http://${HOST}:${running.port} (pid ${running.pid}).`,
-    );
+    out.line(`The background service is already running at http://${HOST}:${running.port}.`);
     return 0;
   }
   if (o.foreground) {
     const { startDaemon } = await import('@mindly/daemon');
     const daemon = await startDaemon({ env });
-    out.line(`Mindly daemon listening on ${daemon.url} (Ctrl-C to stop)`);
+    out.line(`Mindly's background service is running at ${daemon.url} (Ctrl-C to stop).`);
     await new Promise<void>((resolve) => {
       const shutdown = (): void => {
         process.off('SIGINT', shutdown);
@@ -192,7 +196,9 @@ export async function daemonStart(out: Out, o: { foreground?: boolean }): Promis
     return 0;
   }
   const state = await startBackground(env);
-  out.line(`Mindly daemon started at http://${HOST}:${state.port} (pid ${state.pid}).`);
+  const sc = out.screen();
+  sc.text(`${sc.mark('ok')} Started Mindly's background service at http://${HOST}:${state.port}.`);
+  sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
   return 0;
 }
 
@@ -200,30 +206,31 @@ export async function daemonStart(out: Out, o: { foreground?: boolean }): Promis
 export async function daemonStop(out: Out): Promise<number> {
   const env = out.io.env;
   const state = readState(env);
-  if (!state) {
-    out.line('The daemon is not running.');
-    return 0;
-  }
-  if (!pidAlive(state.pid)) {
-    out.line('The daemon is not running (stale state file).');
+  if (!state || !pidAlive(state.pid)) {
+    out.line('The background service is not running: nothing to stop.');
     return 0;
   }
   if (!(await healthy(state.port))) {
-    throw new MindlyError(
+    throw new HintedError(
       'conflict',
-      `pid ${state.pid} from daemon.json does not answer as a Mindly daemon on port ${state.port}; not stopping it`,
+      `Process ${state.pid}, named in ${paths(env).daemonState}, does not answer as Mindly's background service on port ${state.port}, so Mindly did not stop it`,
+      `If you are sure it is not running, delete ${paths(env).daemonState}`,
     );
   }
   process.kill(state.pid, 'SIGTERM');
   const deadline = Date.now() + STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!pidAlive(state.pid)) {
-      out.line('Mindly daemon stopped.');
+      out.line("Stopped Mindly's background service.");
       return 0;
     }
     await sleep(100);
   }
-  throw new MindlyError('timeout', `the daemon (pid ${state.pid}) did not stop in time`);
+  throw new HintedError(
+    'timeout',
+    `The background service (process ${state.pid}) did not stop within ${STOP_TIMEOUT_MS / 1000} seconds`,
+    `Try again, or stop the process yourself: kill ${state.pid}`,
+  );
 }
 
 /** `mindly daemon status`. */
@@ -236,14 +243,31 @@ export async function daemonStatus(out: Out, o: { json?: boolean }): Promise<num
     out.json({ running: answering, ...(state ? { state } : {}) });
     return 0;
   }
+  const sc = out.screen();
   if (answering && state) {
-    out.line(
-      `Running at http://${HOST}:${state.port} (pid ${state.pid}, version ${state.version}, started ${ago(state.startedAt)}).`,
+    sc.summary(
+      `${sc.mark('ok')} Mindly's background service is running at http://${HOST}:${state.port}`,
     );
+    sc.note(
+      `Version ${state.version}, started ${relativeTime(state.startedAt, sc.now)}. It serves Mission Control and runs checks in the background.`,
+      2,
+    );
+    sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
   } else if (alive && state) {
-    out.line(`daemon.json names pid ${state.pid}, but nothing answers on port ${state.port}.`);
+    sc.summary(
+      `${sc.mark('warn')} Process ${state.pid} should be Mindly's background service, but nothing answers on port ${state.port}`,
+    );
+    sc.next([
+      { cmd: 'mindly daemon stop', why: 'stop it' },
+      { cmd: 'mindly daemon start', why: 'then start it again' },
+    ]);
   } else {
-    out.line('Not running. Start it with: mindly daemon start');
+    sc.summary("Mindly's background service is not running.");
+    sc.note(
+      'It is optional: hooks and the CLI work without it. It serves Mission Control (the browser view) and runs checks in the background.',
+      2,
+    );
+    sc.next([{ cmd: 'mindly daemon start', why: 'start it' }]);
   }
   return 0;
 }
@@ -273,7 +297,7 @@ export async function dashboard(out: Out, o: { open?: boolean }): Promise<number
   const env = out.io.env;
   let state = await runningDaemon(env);
   if (!state) {
-    out.warn('Starting the Mindly daemon...');
+    out.warn("Starting Mindly's background service...");
     state = await startBackground(env);
   }
   const { code } = await daemonRequest<{ code: string; expiresAt: number }>(
@@ -288,9 +312,13 @@ export async function dashboard(out: Out, o: { open?: boolean }): Promise<number
   }
   const url = `http://${HOST}:${state.port}/#login=${code}`;
   out.line(`Mission Control: ${url}`);
-  out.line(out.style.dim('The login code works once and expires in 60 seconds.'));
+  out.line(
+    out.style.dim(
+      'The live view of your agents, conflicts and memory in the browser. This link logs you in once and expires in 60 seconds.',
+    ),
+  );
   if (o.open !== false && !(await openInBrowser(url))) {
-    out.warn('Could not open a browser; open the URL above yourself.');
+    out.warn('Could not open a browser: open the link above yourself.');
   }
   return 0;
 }

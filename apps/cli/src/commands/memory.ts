@@ -1,7 +1,7 @@
 import {
   CONTRACT_KINDS,
   MEMORY_KINDS,
-  MindlyError,
+  shortId,
   TRUST_LEVELS,
   type ContractKind,
   type Memory,
@@ -9,17 +9,17 @@ import {
 import { commandHash, contractsOf, USER } from '@mindly/engine';
 import { z } from 'zod';
 import { projectPath, withProject, type ProjectScope } from '../context.js';
+import { resolveId } from '../ids.js';
 import { confirm } from '../io.js';
 import {
-  clean,
-  cleanBlock,
-  ensureFound,
-  formatTime,
-  requireId,
-  table,
-  UsageError,
-  type Out,
-} from '../util.js';
+  argvWords,
+  contractStateWord,
+  contractWords,
+  memoryKindWord,
+  trustWord,
+} from '../present/index.js';
+import { clean, HintedError, UsageError, type Out } from '../util.js';
+import { renderMemoryList, renderMemoryShow, renderRules } from '../views/memory.js';
 
 const ListOptions = z.object({
   kind: z.enum(MEMORY_KINDS).optional(),
@@ -51,29 +51,10 @@ export function parseOptions<T extends z.ZodType>(schema: T, value: unknown): z.
   return r.data;
 }
 
-function flags(m: Memory): string {
-  const f: string[] = [];
-  if (m.enforce) f.push('enforced');
-  if (m.pinned) f.push('pinned');
-  if (m.status !== 'active') f.push(m.status);
-  return f.length ? ` [${f.join(', ')}]` : '';
-}
-
-/** Prints memories as an aligned list. */
-export function printMemories(out: Out, memories: readonly Memory[]): void {
-  if (memories.length === 0) {
-    out.line(out.style.dim('No memories.'));
-    return;
-  }
-  const rows = memories.map((m) => [m.id, m.kind, m.trust, `${clean(m.title, 100)}${flags(m)}`]);
-  for (const line of table(rows)) out.line(line);
-}
-
-/** Fetches a memory of the current project by id. */
+/** Fetches a memory of the current project by full, short or prefix id. */
 function memoryOf(scope: ProjectScope, id: string): Memory {
-  const m = scope.mindly.store.memories.find(requireId(id, 'memory id'));
-  ensureFound(m !== null && m.projectId === scope.project.project.id, 'memory');
-  return m as Memory;
+  const pid = scope.project.project.id;
+  return scope.mindly.store.memories.get(resolveId(scope.mindly.store, 'memory', pid, id));
 }
 
 /** `mindly memory list`. */
@@ -87,7 +68,12 @@ export async function memoryList(out: Out, raw: unknown): Promise<number> {
       limit: o.limit ?? 100,
     });
     if (o.json) out.json(memories);
-    else printMemories(out, memories);
+    else {
+      renderMemoryList(out.screen(), memories, {
+        archived: o.archived === true,
+        filtered: o.kind !== undefined || o.trust !== undefined,
+      });
+    }
     return 0;
   });
 }
@@ -106,7 +92,7 @@ export async function memorySearch(out: Out, query: string, raw: unknown): Promi
       })
       .map((h) => h.memory);
     if (o.json) out.json(hits);
-    else printMemories(out, hits);
+    else renderMemoryList(out.screen(), hits, { query: q.data });
     return 0;
   });
 }
@@ -123,42 +109,7 @@ export async function memoryShow(out: Out, id: string, raw: { json?: boolean }):
       out.json({ memory: m, versions, evidence, contracts });
       return 0;
     }
-    const s = out.style;
-    out.line(s.bold(clean(m.title, 160)));
-    out.line(
-      `${m.kind} | ${m.trust} | ${m.status} | source ${m.source.type}${m.source.agentKind ? ` (${clean(m.source.agentKind, 40)})` : ''} | v${m.version}${flags(m)}`,
-    );
-    out.line(s.dim(`id ${m.id} | updated ${formatTime(m.updatedAt)}`));
-    if (m.tags.length) out.line(`tags: ${m.tags.map((t) => clean(t, 60)).join(', ')}`);
-    if (m.scope.paths.length) out.line(`scope: ${m.scope.paths.map((p) => clean(p)).join(', ')}`);
-    if (m.scope.branch) out.line(`branch: ${clean(m.scope.branch)}`);
-    if (m.body) {
-      out.line();
-      out.line(cleanBlock(m.body));
-    }
-    if (evidence.length) {
-      out.line();
-      out.line(s.bold('Evidence'));
-      for (const e of evidence) {
-        out.line(
-          `  ${e.valid ? s.green('valid') : s.yellow('changed')}  ${e.type} ${clean(e.ref)}`,
-        );
-      }
-    }
-    if (contracts.length) {
-      out.line();
-      out.line(s.bold('Contracts'));
-      for (const c of contracts) out.line(`  ${c.id}  ${c.kind}  ${c.state}`);
-    }
-    if (versions.length > 1) {
-      out.line();
-      out.line(s.bold('History'));
-      for (const v of versions) {
-        out.line(
-          `  v${v.version}  ${formatTime(v.createdAt)}  ${v.trust}  by ${v.changedBy.type}${v.reason ? `: ${clean(v.reason, 100)}` : ''}`,
-        );
-      }
-    }
+    renderMemoryShow(out.screen(), { memory: m, versions, evidence, contracts });
     return 0;
   });
 }
@@ -166,7 +117,7 @@ export async function memoryShow(out: Out, id: string, raw: { json?: boolean }):
 /** `mindly memory add`. */
 export async function memoryAdd(out: Out, raw: unknown): Promise<number> {
   const o = parseOptions(AddOptions, raw);
-  if (o.enforce && o.kind !== 'rule') throw new UsageError('--enforce only applies to rules');
+  if (o.enforce && o.kind !== 'rule') throw new UsageError('--enforce only works with --kind rule');
   return withProject(out.io, ({ mindly, project }) => {
     const m = mindly.memory.remember({
       projectId: project.project.id,
@@ -182,7 +133,18 @@ export async function memoryAdd(out: Out, raw: unknown): Promise<number> {
       ...(o.pin !== undefined ? { pinned: o.pin } : {}),
     });
     if (o.json) out.json(m);
-    else out.line(`Saved ${m.kind} ${m.id} (${m.trust}).`);
+    else {
+      const sc = out.screen();
+      sc.text(
+        `${sc.mark('ok')} Saved ${memoryKindWord(m.kind)} "${clean(m.title, 100)}" ${sc.ref(m.id)}`,
+      );
+      sc.note(
+        m.trust === 'approved' || m.trust === 'verified'
+          ? 'Every agent in this project gets it from now on.'
+          : `It is ${trustWord(m.trust, m.source)}.`,
+        2,
+      );
+    }
     return 0;
   });
 }
@@ -200,9 +162,18 @@ export async function memoryAction(out: Out, action: Action, id: string): Promis
         : action === 'reject'
           ? svc.reject(m.id)
           : svc.archive(m.id, USER);
-    out.line(
-      `${action === 'approve' ? 'Approved' : action === 'reject' ? 'Rejected' : 'Archived'}: ${clean(updated.title, 100)} (${updated.trust}, ${updated.status}).`,
-    );
+    const sc = out.screen();
+    const what = `${memoryKindWord(updated.kind)} "${clean(updated.title, 100)}"`;
+    if (action === 'approve') {
+      sc.text(`${sc.mark('ok')} Approved ${what}.`);
+      sc.note('Every agent in this project gets it from now on.', 2);
+    } else if (action === 'reject') {
+      sc.text(`${sc.mark('ok')} Rejected ${what}.`);
+      sc.note('Agents will not be told about it.', 2);
+    } else {
+      sc.text(`${sc.mark('ok')} Archived ${what}.`);
+      sc.note('It is no longer sent to agents; see it with: mindly memory list --archived', 2);
+    }
     return 0;
   });
 }
@@ -211,8 +182,13 @@ export async function memoryAction(out: Out, action: Action, id: string): Promis
 export async function memoryForget(out: Out, id: string, o: { yes?: boolean }): Promise<number> {
   return withProject(out.io, async (scope) => {
     const m = memoryOf(scope, id);
-    out.line(`This permanently deletes "${clean(m.title, 100)}" and its whole history.`);
-    if (!(await confirm(out.io, 'Delete it?', o.yes === true))) return 1;
+    out.line(
+      `This permanently deletes the ${memoryKindWord(m.kind)} "${clean(m.title, 100)}" and its whole history.`,
+    );
+    if (!(await confirm(out.io, 'Delete it?', o.yes === true))) {
+      out.line('Nothing was deleted.');
+      return 1;
+    }
     scope.mindly.memory.forget(m.id);
     out.line('Deleted.');
     return 0;
@@ -225,9 +201,17 @@ export async function rules(out: Out, o: { approve?: string; json?: boolean }): 
     const pid = scope.project.project.id;
     if (o.approve !== undefined) {
       const m = memoryOf(scope, o.approve);
-      if (m.kind !== 'rule') throw new MindlyError('invalid_input', 'that memory is not a rule');
+      if (m.kind !== 'rule') {
+        throw new HintedError(
+          'invalid_input',
+          `${shortId(m.id)} is a ${memoryKindWord(m.kind)}, not a rule.`,
+          `Approve it with: mindly memory approve ${shortId(m.id)}`,
+        );
+      }
       scope.mindly.memory.approve(m.id);
-      out.line(`Approved rule: ${clean(m.title, 120)}`);
+      const sc = out.screen();
+      sc.text(`${sc.mark('ok')} Approved rule "${clean(m.title, 120)}".`);
+      sc.note('Every agent in this project follows it from now on.', 2);
       return 0;
     }
     const list = (trust: Memory['trust'][]): Memory[] =>
@@ -238,14 +222,7 @@ export async function rules(out: Out, o: { approve?: string; json?: boolean }): 
       out.json({ approved, proposed });
       return 0;
     }
-    out.line(out.style.bold(`Approved rules (${approved.length})`));
-    printMemories(out, approved);
-    out.line();
-    out.line(out.style.bold(`Proposed rules (${proposed.length})`));
-    printMemories(out, proposed);
-    if (proposed.length) {
-      out.line(out.style.dim('Approve one with: mindly rules --approve <id>'));
-    }
+    renderRules(out.screen(), approved, proposed);
     return 0;
   });
 }
@@ -283,13 +260,14 @@ export async function contractAdd(out: Out, memoryId: string, raw: unknown): Pro
     (k) => o[k] !== undefined,
   );
   const extra = given.filter((k) => !allowed[kind].includes(k));
-  if (extra.length) throw new UsageError(`--${extra[0]} does not apply to ${kind} contracts`);
+  if (extra.length) throw new UsageError(`--${extra[0]} does not apply to --kind ${kind}`);
 
   return withProject(out.io, async (scope) => {
     const m = memoryOf(scope, memoryId);
     let spec: Record<string, unknown>;
     if (kind === 'command') {
-      if (o.argv === undefined) throw new UsageError('--argv is required for command contracts');
+      if (o.argv === undefined)
+        throw new UsageError('--kind command needs --argv, e.g. --argv \'["pnpm","test"]\'');
       let parsedJson: unknown;
       try {
         parsedJson = JSON.parse(o.argv);
@@ -299,26 +277,39 @@ export async function contractAdd(out: Out, memoryId: string, raw: unknown): Pro
       const argv = ArgvJson.safeParse(parsedJson);
       if (!argv.success) throw new UsageError('--argv must be a JSON array of 1-50 strings');
       spec = { argv: argv.data, ...(o.timeout !== undefined ? { timeoutSec: o.timeout } : {}) };
-      out.line('Command contract (runs without a shell, in the daemon, only for this argv):');
+      out.line(
+        `This check runs a command on your machine (without a shell, in the background service) to confirm "${clean(m.title, 80)}":`,
+      );
+      out.line(`  command: ${argvWords(argv.data)}`);
       out.line(`  argv: ${JSON.stringify(argv.data)}`);
       out.line(`  pinned hash: ${commandHash(argv.data)}`);
-      if (!(await confirm(out.io, 'Approve this command?', o.yes === true))) return 1;
+      out.line(out.style.dim('  Only this exact command will ever run for it.'));
+      if (!(await confirm(out.io, 'Allow this command?', o.yes === true))) {
+        out.line('No check was added.');
+        return 1;
+      }
     } else {
-      if (o.path === undefined) throw new UsageError(`--path is required for ${kind} contracts`);
+      if (o.path === undefined) throw new UsageError(`--kind ${kind} needs --path <file>`);
       const rel = projectPath(scope, out.io.cwd, o.path).rel;
       spec = { path: rel };
       for (const k of allowed[kind]) {
         if (k === 'path') continue;
         const v = o[k as 'pattern' | 'key' | 'symbol'];
-        if (v === undefined) throw new UsageError(`--${k} is required for ${kind} contracts`);
+        if (v === undefined) throw new UsageError(`--kind ${kind} needs --${k}`);
         spec[k] = v;
       }
     }
     const c = contractsOf(scope.mindly).create(m.id, kind, spec, USER);
     if (o.json) out.json(c);
     else {
-      out.line(`Contract ${c.id} (${c.kind}) bound to "${clean(m.title, 80)}": ${c.state}.`);
-      if (c.lastMessage) out.line(out.style.dim(clean(c.lastMessage, 200)));
+      const sc = out.screen();
+      sc.text(
+        `${sc.mark('ok')} Check added to "${clean(m.title, 80)}": ${clean(contractWords(c.kind, c.spec), 200)} ${sc.ref(c.id)}`,
+      );
+      sc.text(
+        `${sc.mark(c.state === 'passing' ? 'ok' : c.state === 'unknown' ? 'item' : 'fail')} Right now it is ${contractStateWord(c.state)}${c.lastMessage && c.state !== 'passing' ? `: ${clean(c.lastMessage, 200)}` : '.'}`,
+        2,
+      );
     }
     return 0;
   });

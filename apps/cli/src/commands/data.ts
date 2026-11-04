@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { MINDLY_VERSION, MindlyError, writeJsonFile } from '@mindly/core';
+import { MINDLY_VERSION, writeJsonFile } from '@mindly/core';
 import type { Mindly } from '@mindly/engine';
 import { withProject } from '../context.js';
 import { confirm } from '../io.js';
-import { clean, plural, type Out } from '../util.js';
+import { argvWords } from '../present/index.js';
+import { clean, HintedError, plural, UsageError, type Out } from '../util.js';
 
 /** `mindly trust [--show|--revoke]`: review and trust the project's `.mindly/config.json`. */
 export async function trust(
@@ -16,7 +17,7 @@ export async function trust(
     const s = out.style;
     if (o.revoke) {
       mindly.projects.untrust(pid);
-      out.line('Trust revoked. Commands from this project config will not run.');
+      out.line('Trust revoked: Mindly will not run the commands in this project config any more.');
       return 0;
     }
     const status = {
@@ -33,41 +34,69 @@ export async function trust(
       out.json(status);
       return 0;
     }
-    out.line(`Project config: ${clean(`${project.root}/.mindly/config.json`, 400)}`);
+    const sc = out.screen();
+    const file = clean(`${project.root}/.mindly/config.json`, 400);
     if (project.configError) {
-      out.line(s.red(`Invalid: ${clean(project.configError, 300)}`));
+      sc.summary(`${sc.mark('fail')} This project's config is invalid, so Mindly ignores it.`);
+      sc.text(`File: ${file}`, 2);
+      sc.text(`Problem: ${clean(project.configError, 300)}`, 2);
+      sc.next([{ why: 'Fix the file, then run mindly trust again.' }]);
       return o.show ? 0 : 1;
     }
     if (project.configHash === null) {
-      out.line('No project config: there is nothing to trust.');
+      sc.summary('This project has no .mindly/config.json: there is nothing to trust.');
+      sc.note(
+        "A project config can list checks (such as your test command) that Mindly runs when it compares agents' work.",
+        2,
+      );
       return 0;
     }
-    out.line(`Status: ${project.trusted ? s.green('trusted') : s.yellow('not trusted')}`);
-    out.line(`sha256: ${project.configHash}`);
-    out.line(
-      `Checks (${status.checks.length}) - run without a shell against shadow-merged trees and replays:`,
+    sc.summary(
+      project.trusted
+        ? `${sc.mark('ok')} This project's config is trusted.`
+        : `${sc.mark('warn')} This project's config is not trusted yet, so its checks do not run.`,
     );
-    for (const c of status.checks) {
-      out.line(`  ${clean(c.name, 64)}: ${JSON.stringify(c.argv)} (timeout ${c.timeoutSec}s)`);
+    sc.note(`File: ${file}`, 2);
+    sc.blank();
+    if (status.checks.length) {
+      sc.text(
+        `Trusting it lets Mindly run ${status.checks.length === 1 ? 'this command' : `these ${status.checks.length} commands`} on your machine (without a shell) when it checks merges and replays of agents' work:`,
+      );
+      sc.rows(
+        status.checks.map((c) => ({
+          marker: 'item',
+          text: `${clean(c.name, 64)}: ${clean(argvWords(c.argv), 300)} (stopped after ${c.timeoutSec}s)`,
+          details: [`argv ${JSON.stringify(c.argv)}`],
+        })),
+      );
+    } else {
+      sc.text('It lists no commands, so trusting it lets nothing run.');
     }
     if (project.config.ignore.length) {
-      out.line(`Ignore globs: ${project.config.ignore.map((g) => clean(g, 100)).join(', ')}`);
+      sc.text(
+        `Mindly also ignores these paths: ${project.config.ignore.map((g) => clean(g, 100)).join(', ')}`,
+      );
     }
-    if (project.config.notes) out.line(`Notes: ${clean(project.config.notes, 300)}`);
+    if (project.config.notes) sc.text(`Notes: ${clean(project.config.notes, 300)}`);
+    sc.note(`Fingerprint (sha256): ${project.configHash}. If the file changes, Mindly asks again.`);
     if (o.show) return 0;
-    if (project.trusted) {
-      out.line('This exact config is already trusted.');
-      return 0;
-    }
+    if (project.trusted) return 0;
     if (
       !(await confirm(out.io, 'Trust this config and allow these commands to run?', o.yes === true))
     ) {
+      out.line('Not trusted: its checks will not run.');
       return 1;
     }
     // Pass the hash that was shown: the engine refuses if the file changed in the meantime.
     const after = mindly.projects.trust(pid, project.configHash);
     if (o.json) out.json({ trusted: after.trusted, configHash: after.configHash });
-    else out.line(s.green(`Trusted (sha256 ${after.configHash ?? '-'}).`));
+    else {
+      out.line(
+        s.green(
+          `Trusted. Mindly will run these checks; if the file changes, it asks again (sha256 ${after.configHash ?? '-'}).`,
+        ),
+      );
+    }
     return 0;
   });
 }
@@ -126,13 +155,21 @@ export async function exportCmd(out: Out, o: { out?: string; force?: boolean }):
       out.json(data);
       return 0;
     }
-    if (o.out.includes('\0')) throw new MindlyError('invalid_input', 'invalid output path');
+    if (o.out.includes('\0')) throw new UsageError('--out is not a valid file path');
     const file = resolve(out.io.cwd, o.out);
     if (existsSync(file) && !o.force) {
-      throw new MindlyError('conflict', `${file} already exists (use --force to overwrite)`);
+      throw new HintedError(
+        'conflict',
+        `${file} already exists, so nothing was exported`,
+        'Choose another --out file, or add --force to overwrite it',
+      );
     }
     writeJsonFile(file, data);
-    out.line(`Exported ${clean(project.project.name, 80)} to ${file} (mode 0600).`);
+    const sc = out.screen();
+    sc.text(
+      `${sc.mark('ok')} Exported everything Mindly stored for ${clean(project.project.name, 80)} to ${file}`,
+    );
+    sc.note('Only you can read the file. It may contain prompts and code excerpts.', 2);
     return 0;
   });
 }
@@ -143,14 +180,16 @@ export async function forget(
   o: { project?: boolean; memory?: string; yes?: boolean },
 ): Promise<number> {
   if (o.project === true && o.memory !== undefined) {
-    throw new MindlyError('invalid_input', 'use either --project or --memory');
+    throw new UsageError('use either --project or --memory <id>, not both');
   }
   if (o.memory !== undefined) {
     const { memoryForget } = await import('./memory.js');
     return memoryForget(out, o.memory, { ...(o.yes !== undefined ? { yes: o.yes } : {}) });
   }
   if (o.project !== true) {
-    throw new MindlyError('invalid_input', 'say what to forget: --project or --memory <id>');
+    throw new UsageError(
+      'say what to forget: --project (everything for this project) or --memory <id>',
+    );
   }
   return withProject(out.io, async ({ mindly, project }) => {
     const pid = project.project.id;
@@ -164,10 +203,13 @@ export async function forget(
         'Your code and git history are not touched. Run `mindly export` first to keep a copy.',
       ),
     );
-    if (!(await confirm(out.io, 'Forget this project?', o.yes === true))) return 1;
+    if (!(await confirm(out.io, 'Forget this project?', o.yes === true))) {
+      out.line('Nothing was deleted.');
+      return 1;
+    }
     mindly.store.projects.delete(pid);
     mindly.store.vacuum();
-    out.line('Forgotten.');
+    out.line(`Forgotten: Mindly no longer has any data for ${clean(project.project.name, 80)}.`);
     return 0;
   });
 }
