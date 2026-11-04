@@ -1,4 +1,4 @@
-import { systemClock, type Clock } from '@synapse/core';
+import { systemClock, type Clock } from '@mindly/core';
 import { openDatabase, transaction, type Db, type OpenOptions } from './db.js';
 import { EventRepo, ProjectRepo, SessionRepo } from './repos/core.js';
 import { MemoryRepo } from './repos/memories.js';
@@ -78,7 +78,7 @@ export class Store {
     if (this.db.isOpen) this.db.close();
   }
 
-  /** Reclaims space after large deletions (`synapse forget`). */
+  /** Reclaims space after large deletions (`mindly forget`). */
   vacuum(): void {
     this.db.exec('VACUUM');
   }

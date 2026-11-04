@@ -14,18 +14,18 @@ import {
   invalidInput,
   redactText,
   sanitizeLine,
-  SynapseError,
+  MindlyError,
   type Handoff,
   type HandoffPacket,
   type HandoffStatus,
   type Session,
-  type SynapseEvent,
-} from '@synapse/core';
+  type MindlyEvent,
+} from '@mindly/core';
 import type { BusEvents, Kernel } from '../kernel.js';
-import type { Synapse, SynapseModule } from '../synapse.js';
+import type { Mindly, MindlyModule } from '../mindly.js';
 
 /*
- * Rate-limit failover. When an agent stops because it hit a usage or rate limit, Synapse marks the
+ * Rate-limit failover. When an agent stops because it hit a usage or rate limit, Mindly marks the
  * session `rate_limited`, packages what it was doing into a handoff for the next agent in
  * `config.failover.order` and pages the user. The next session of that agent claims the handoff
  * at session start (see ContextBuilder). Launching that agent automatically is left to a runner.
@@ -252,7 +252,7 @@ async function safely<T>(p: Promise<T>, fallback: T): Promise<T> {
   }
 }
 
-function promptSummaries(events: readonly SynapseEvent[]): string[] {
+function promptSummaries(events: readonly MindlyEvent[]): string[] {
   return events
     .map((e) => (typeof e.payload.summary === 'string' ? sanitizeLine(e.payload.summary, 200) : ''))
     .filter((s) => s.length > 0)
@@ -386,7 +386,7 @@ export class HandoffService {
   cancel(id: string): Handoff {
     const h = this.k.store.handoffs.get(id);
     if (h.status !== 'pending') {
-      throw new SynapseError('conflict', `handoff is ${h.status}, not pending`);
+      throw new MindlyError('conflict', `handoff is ${h.status}, not pending`);
     }
     this.k.store.handoffs.setStatus(id, 'cancelled');
     return this.k.store.handoffs.get(id);
@@ -565,30 +565,30 @@ export class FailoverService {
   }
 }
 
-const services = new WeakMap<Synapse, FailoverService>();
-const registered = new WeakSet<Synapse>();
+const services = new WeakMap<Mindly, FailoverService>();
+const registered = new WeakSet<Mindly>();
 
-/** The failover service attached to `synapse` (created on first use). */
-export function failoverService(synapse: Synapse, options: FailoverOptions = {}): FailoverService {
-  let svc = services.get(synapse);
+/** The failover service attached to `mindly` (created on first use). */
+export function failoverService(mindly: Mindly, options: FailoverOptions = {}): FailoverService {
+  let svc = services.get(mindly);
   if (!svc) {
-    svc = new FailoverService(synapse.kernel, options);
-    services.set(synapse, svc);
+    svc = new FailoverService(mindly.kernel, options);
+    services.set(mindly, svc);
   }
   return svc;
 }
 
 /** Creates the failover module with options (e.g. a custom home directory in tests). */
-export function createFailoverModule(options: FailoverOptions = {}): SynapseModule {
-  return (synapse) => {
-    if (registered.has(synapse)) return;
-    registered.add(synapse);
-    const svc = failoverService(synapse, options);
-    synapse.bus.on('turn.stopped', 'failover', async (p) => {
+export function createFailoverModule(options: FailoverOptions = {}): MindlyModule {
+  return (mindly) => {
+    if (registered.has(mindly)) return;
+    registered.add(mindly);
+    const svc = failoverService(mindly, options);
+    mindly.bus.on('turn.stopped', 'failover', async (p) => {
       await svc.onTurnStopped(p);
     });
   };
 }
 
-/** Rate-limit failover module: `synapse.use(failoverModule)`. */
-export const failoverModule: SynapseModule = createFailoverModule();
+/** Rate-limit failover module: `mindly.use(failoverModule)`. */
+export const failoverModule: MindlyModule = createFailoverModule();

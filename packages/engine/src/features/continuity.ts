@@ -1,9 +1,9 @@
 /*
  * Continuity features: rate-limit failover and handoffs, the multi-agent time machine, memory
- * branches and the morning standup. Each module is a `SynapseModule`; `continuityModules`
+ * branches and the morning standup. Each module is a `MindlyModule`; `continuityModules`
  * registers all of them.
  */
-import type { SynapseModule } from '../synapse.js';
+import type { MindlyModule } from '../mindly.js';
 import { branchesModule } from './branches.js';
 import { failoverModule } from './failover.js';
 import { snapshotsModule } from './snapshots.js';
@@ -61,7 +61,7 @@ export {
   type StandupItem,
 } from './standup.js';
 
-/** Registers every continuity module: `synapse.use(continuityModules)`. */
-export const continuityModules: SynapseModule = (synapse) => {
-  synapse.use(failoverModule).use(snapshotsModule).use(branchesModule).use(standupModule);
+/** Registers every continuity module: `mindly.use(continuityModules)`. */
+export const continuityModules: MindlyModule = (mindly) => {
+  mindly.use(failoverModule).use(snapshotsModule).use(branchesModule).use(standupModule);
 };

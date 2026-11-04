@@ -1,6 +1,6 @@
 # Code of conduct
 
-Synapse is built by people with different backgrounds and levels of experience. We want
+Mindly is built by people with different backgrounds and levels of experience. We want
 participating to be welcoming and productive for all of them.
 
 ## Expected behaviour

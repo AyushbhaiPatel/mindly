@@ -1,4 +1,4 @@
-import { sanitizeLine, type Memory, type Session } from '@synapse/core';
+import { sanitizeLine, type Memory, type Session } from '@mindly/core';
 import { DELIVERY_TTL_MS, LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
 import type { MemoryService } from './service.js';
 

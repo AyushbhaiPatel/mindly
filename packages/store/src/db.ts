@@ -1,6 +1,6 @@
 import { chmodSync, closeSync, existsSync, openSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 import { MIGRATIONS } from './migrations.js';
 
 export type Db = DatabaseSync;
@@ -13,7 +13,7 @@ export interface OpenOptions {
 }
 
 /**
- * Opens (creating if necessary) the Synapse database with hardened settings and applies pending
+ * Opens (creating if necessary) the Mindly database with hardened settings and applies pending
  * migrations. Safe to call concurrently from several processes: WAL mode allows one writer and
  * many readers, and `busy_timeout` makes writers queue instead of failing.
  */
@@ -44,9 +44,9 @@ export function migrate(db: Db): void {
   const current = schemaVersion(db);
   const latest = MIGRATIONS.length;
   if (current > latest) {
-    throw new SynapseError(
+    throw new MindlyError(
       'unavailable',
-      `database schema v${current} is newer than this Synapse (v${latest}); upgrade Synapse`,
+      `database schema v${current} is newer than this Mindly (v${latest}); upgrade Mindly`,
     );
   }
   for (let v = current; v < latest; v++) {
@@ -92,7 +92,7 @@ export function transaction<T>(db: Db, fn: () => T): T {
 
 export function str(row: Row, key: string): string {
   const v = row[key];
-  if (typeof v !== 'string') throw new SynapseError('internal', `column ${key} is not text`);
+  if (typeof v !== 'string') throw new MindlyError('internal', `column ${key} is not text`);
   return v;
 }
 
@@ -105,7 +105,7 @@ export function num(row: Row, key: string): number {
   const v = row[key];
   if (typeof v === 'number') return v;
   if (typeof v === 'bigint') return Number(v);
-  throw new SynapseError('internal', `column ${key} is not numeric`);
+  throw new MindlyError('internal', `column ${key} is not numeric`);
 }
 
 export function numOrNull(row: Row, key: string): number | null {

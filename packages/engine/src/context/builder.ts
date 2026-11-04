@@ -9,7 +9,7 @@ import {
   type Handoff,
   type Memory,
   type Session,
-} from '@synapse/core';
+} from '@mindly/core';
 import { LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
 import type { ProjectContext } from '../projects.js';
 import type { MistakeService } from '../memory/mistakes.js';
@@ -151,7 +151,7 @@ export class ContextBuilder {
           tokens: 0,
           reason: 'trusted project config',
         },
-        section: 'Project notes (.synapse/config.json)',
+        section: 'Project notes (.mindly/config.json)',
         order: 8,
         line: sanitizeForContext(project.config.notes, 2000),
       });
@@ -302,7 +302,7 @@ export class ContextBuilder {
     const now = this.k.clock.now();
     return this.telepathy.pending(session, 15).map((d) => {
       const from = d.sourceSessionId ? this.k.store.sessions.find(d.sourceSessionId) : null;
-      const who = from ? sessionLabel(from) : 'Synapse';
+      const who = from ? sessionLabel(from) : 'Mindly';
       const body = d.body ? ` — ${sanitizeForContext(d.body, 600).replace(/\n/g, ' ')}` : '';
       return {
         item: {

@@ -18,24 +18,24 @@ describe('morning standup', () => {
         c.standup.time = '09:00';
       },
     });
-    const { root, clock, synapse, sent } = env;
-    synapse.use(standupModule);
-    await synapse.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const { root, clock, mindly, sent } = env;
+    mindly.use(standupModule);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
     clock.advance(1000);
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'prompt', { prompt: `Please look at ${SECRET} today` }),
     );
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'post_tool', {
         tool: writeTool('src/auth.ts', 'const secretCode = 42;'),
       }),
     );
-    await synapse.hooks.handle(event(root, 'claude-code', 'cc', 'stop'));
-    await synapse.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'stop'));
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
 
-    const pid = synapse.store.projects.list()[0]!.id;
-    const cx = synapse.store.sessions.findByExternal(pid, 'codex', 'cx')!;
-    synapse.memory.remember({
+    const pid = mindly.store.projects.list()[0]!.id;
+    const cx = mindly.store.sessions.findByExternal(pid, 'codex', 'cx')!;
+    mindly.memory.remember({
       projectId: pid,
       projectRoot: root,
       kind: 'decision',
@@ -43,7 +43,7 @@ describe('morning standup', () => {
       body: `because ${SECRET}`,
       source: USER,
     });
-    synapse.memory.remember({
+    mindly.memory.remember({
       projectId: pid,
       projectRoot: root,
       kind: 'rule',
@@ -51,7 +51,7 @@ describe('morning standup', () => {
       body: 'b',
       source: { type: 'agent', sessionId: cx.id, agentKind: 'codex' },
     });
-    synapse.store.conflicts.report({
+    mindly.store.conflicts.report({
       projectId: pid,
       kind: 'contract_broken',
       severity: 'critical',
@@ -61,14 +61,14 @@ describe('morning standup', () => {
       paths: ['src/auth.ts'],
       fingerprint: 'fp1',
     });
-    const blocked = synapse.tasks.create({ projectId: pid, title: 'Deploy pipeline' });
-    synapse.tasks.update(blocked.id, { status: 'blocked' }, null);
-    await failoverService(synapse).handoffs.create(cx, {
+    const blocked = mindly.tasks.create({ projectId: pid, title: 'Deploy pipeline' });
+    mindly.tasks.update(blocked.id, { status: 'blocked' }, null);
+    await failoverService(mindly).handoffs.create(cx, {
       toAgentKind: 'cursor',
       summary: `Continue ${SECRET}`,
     });
 
-    const svc = standupService(synapse);
+    const svc = standupService(mindly);
     const d = svc.build(pid);
     const cc = d.agents.find((a) => a.agentKind === 'claude-code')!;
     expect(cc).toMatchObject({ sessions: 1, turns: 1, filesChanged: 1, topFiles: ['src/auth.ts'] });
@@ -115,6 +115,6 @@ describe('morning standup', () => {
     expect(standupDueAt('11:15', now)).toBe(new Date(2026, 10, 3, 11, 15).getTime());
     expect(standupDueAt('25:00', now)).toBeNull();
     const env = make();
-    expect(standupService(env.synapse).dueAt(now)).toBeNull();
+    expect(standupService(env.mindly).dueAt(now)).toBeNull();
   });
 });

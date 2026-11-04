@@ -38,16 +38,16 @@ importers:
 
   packages/engine:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
-      '@synapse/store':
+      '@mindly/store':
         specifier: workspace:*
         version: link:../store
 
   packages/store:
     dependencies:
-      '@synapse/core':
+      '@mindly/core':
         specifier: workspace:*
         version: link:../core
 

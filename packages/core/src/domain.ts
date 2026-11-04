@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 /*
- * Domain model shared by every Synapse package. Enumerations are declared once as `as const`
+ * Domain model shared by every Mindly package. Enumerations are declared once as `as const`
  * tuples so they can drive runtime validation (zod), SQL CHECK constraints and TypeScript types
  * from a single definition.
  *
@@ -146,7 +146,7 @@ export interface Project {
   id: string;
   root: string;
   name: string;
-  /** sha256 of the repository's `.synapse/config.json` the user trusted, or null if untrusted. */
+  /** sha256 of the repository's `.mindly/config.json` the user trusted, or null if untrusted. */
   trustedConfigHash: string | null;
   createdAt: number;
   updatedAt: number;
@@ -404,7 +404,7 @@ export interface Snapshot {
   id: string;
   projectId: string;
   label: string;
-  /** Hidden ref under refs/synapse/snapshots/ capturing tracked + untracked work. */
+  /** Hidden ref under refs/mindly/snapshots/ capturing tracked + untracked work. */
   gitRef: string | null;
   commit: string | null;
   createdAt: number;
@@ -423,7 +423,7 @@ export interface Run {
   createdAt: number;
 }
 
-export interface SynapseEvent {
+export interface MindlyEvent {
   seq: number;
   id: string;
   projectId: string;

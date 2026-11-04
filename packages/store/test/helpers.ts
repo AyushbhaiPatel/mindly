@@ -1,4 +1,4 @@
-import type { Clock } from '@synapse/core';
+import type { Clock } from '@mindly/core';
 import { Store } from '../src/index.js';
 
 export class FakeClock implements Clock {

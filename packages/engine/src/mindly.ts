@@ -4,14 +4,14 @@ import {
   fileSink,
   loadUserConfig,
   nullSink,
-  synapseHome,
+  mindlyHome,
   systemClock,
   type Clock,
   type HomePaths,
   type Logger,
   type UserConfig,
-} from '@synapse/core';
-import { Store } from '@synapse/store';
+} from '@mindly/core';
+import { Store } from '@mindly/store';
 import { join } from 'node:path';
 import { ContextBuilder } from './context/builder.js';
 import { TelepathyService } from './coordination/telepathy.js';
@@ -24,8 +24,8 @@ import { MemoryService } from './memory/service.js';
 import { nullGit, nullLlm, nullNotifier, type Ports } from './ports.js';
 import { ProjectService } from './projects.js';
 
-export interface SynapseOptions {
-  /** Defaults to `$SYNAPSE_HOME` or `~/.synapse`. */
+export interface MindlyOptions {
+  /** Defaults to `$MINDLY_HOME` or `~/.mindly`. */
   home?: string;
   env?: NodeJS.ProcessEnv;
   ports?: Partial<Ports>;
@@ -37,13 +37,13 @@ export interface SynapseOptions {
 }
 
 /** A feature module plugs into the engine by registering bus handlers and/or exposing a service. */
-export type SynapseModule = (synapse: Synapse) => void;
+export type MindlyModule = (mindly: Mindly) => void;
 
 /**
  * The engine facade. Every entry point (hook CLI, MCP server, daemon, CLI commands) creates one
- * `Synapse` per process and talks only to it.
+ * `Mindly` per process and talks only to it.
  */
-export class Synapse {
+export class Mindly {
   readonly kernel: Kernel;
   readonly bus: EngineBus;
   readonly projects: ProjectService;
@@ -81,7 +81,7 @@ export class Synapse {
     });
   }
 
-  static open(options: SynapseOptions = {}): Synapse {
+  static open(options: MindlyOptions = {}): Mindly {
     const clock = options.clock ?? systemClock;
     const ports: Ports = {
       git: options.ports?.git ?? nullGit,
@@ -90,16 +90,16 @@ export class Synapse {
     };
     if (options.inMemory) {
       const logger = options.logger ?? createLogger({ sink: nullSink });
-      const config = options.config ?? loadUserConfig('/nonexistent/synapse-config.json');
-      return new Synapse({ store: Store.memory(clock), config, clock, logger, ports }, null);
+      const config = options.config ?? loadUserConfig('/nonexistent/mindly-config.json');
+      return new Mindly({ store: Store.memory(clock), config, clock, logger, ports }, null);
     }
-    const paths = ensureHome(options.home ?? synapseHome(options.env));
+    const paths = ensureHome(options.home ?? mindlyHome(options.env));
     const config = options.config ?? loadUserConfig(paths.config);
     const logger =
       options.logger ??
-      createLogger({ sink: fileSink(join(paths.logs, 'synapse.log')), level: 'info' });
+      createLogger({ sink: fileSink(join(paths.logs, 'mindly.log')), level: 'info' });
     const store = Store.open(paths.db, { clock, busyTimeoutMs: 5000 });
-    return new Synapse({ store, config, clock, logger, ports }, paths);
+    return new Mindly({ store, config, clock, logger, ports }, paths);
   }
 
   get store(): Store {
@@ -110,7 +110,7 @@ export class Synapse {
     return this.kernel.config;
   }
 
-  use(module: SynapseModule): this {
+  use(module: MindlyModule): this {
     module(this);
     return this;
   }

@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ensureHome, isDeniedPath, resolveInsideRoot, synapseHome } from '../src/paths.js';
+import { ensureHome, isDeniedPath, resolveInsideRoot, mindlyHome } from '../src/paths.js';
 
 describe('resolveInsideRoot', () => {
   const root = mkdtempSync(join(tmpdir(), 'syn-root-'));
@@ -26,9 +26,9 @@ describe('resolveInsideRoot', () => {
 });
 
 describe('home', () => {
-  it('requires an absolute SYNAPSE_HOME', () => {
-    expect(() => synapseHome({ SYNAPSE_HOME: 'rel' })).toThrow();
-    expect(synapseHome({ SYNAPSE_HOME: '/tmp/x' })).toBe('/tmp/x');
+  it('requires an absolute MINDLY_HOME', () => {
+    expect(() => mindlyHome({ MINDLY_HOME: 'rel' })).toThrow();
+    expect(mindlyHome({ MINDLY_HOME: '/tmp/x' })).toBe('/tmp/x');
   });
 
   it.skipIf(process.platform === 'win32')('creates owner-only directories', () => {

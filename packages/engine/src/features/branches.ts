@@ -1,6 +1,6 @@
-import { invalidInput, type MemorySource } from '@synapse/core';
+import { invalidInput, type MemorySource } from '@mindly/core';
 import type { BusEvents, Kernel } from '../kernel.js';
-import type { Synapse, SynapseModule } from '../synapse.js';
+import type { Mindly, MindlyModule } from '../mindly.js';
 import { isValidBranchName } from './snapshots.js';
 
 /*
@@ -98,25 +98,25 @@ export class BranchService {
   }
 }
 
-const services = new WeakMap<Synapse, BranchService>();
-const registered = new WeakSet<Synapse>();
+const services = new WeakMap<Mindly, BranchService>();
+const registered = new WeakSet<Mindly>();
 
-/** The branch service attached to `synapse` (created on first use). */
-export function branchService(synapse: Synapse): BranchService {
-  let svc = services.get(synapse);
+/** The branch service attached to `mindly` (created on first use). */
+export function branchService(mindly: Mindly): BranchService {
+  let svc = services.get(mindly);
   if (!svc) {
-    svc = new BranchService(synapse.kernel);
-    services.set(synapse, svc);
+    svc = new BranchService(mindly.kernel);
+    services.set(mindly, svc);
   }
   return svc;
 }
 
 /** Memory-branch module: promotes memories of merged branches at session start. */
-export const branchesModule: SynapseModule = (synapse) => {
-  if (registered.has(synapse)) return;
-  registered.add(synapse);
-  const svc = branchService(synapse);
-  synapse.bus.on('session.started', 'branches.promote', async (p) => {
+export const branchesModule: MindlyModule = (mindly) => {
+  if (registered.has(mindly)) return;
+  registered.add(mindly);
+  const svc = branchService(mindly);
+  mindly.bus.on('session.started', 'branches.promote', async (p) => {
     await svc.onSessionStarted(p);
   });
 };

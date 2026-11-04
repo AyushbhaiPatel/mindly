@@ -1,16 +1,16 @@
 import {
   invalidInput,
   sanitizeLine,
-  SynapseError,
+  MindlyError,
   uuidv7,
   type MemorySource,
   type Snapshot,
   type TaskPlanStep,
   type TaskStatus,
-} from '@synapse/core';
+} from '@mindly/core';
 import type { BusEvents, Kernel } from '../kernel.js';
 import { LIVE_WINDOW_MS } from '../kernel.js';
-import type { Synapse, SynapseModule } from '../synapse.js';
+import type { Mindly, MindlyModule } from '../mindly.js';
 
 /*
  * Multi-agent time machine. A snapshot records the engine state (memory versions, tasks, open
@@ -265,7 +265,7 @@ export class SnapshotService {
     if (branch !== null) {
       if (!isValidBranchName(branch)) throw invalidInput('invalid branch name');
       if (!this.k.ports.git.restoreSnapshotToBranch || !snap.gitRef) {
-        throw new SynapseError('unavailable', 'this snapshot has no git ref to restore from');
+        throw new MindlyError('unavailable', 'this snapshot has no git ref to restore from');
       }
     }
     const state = parseState(snap.state);
@@ -395,25 +395,25 @@ export class SnapshotService {
   }
 }
 
-const services = new WeakMap<Synapse, SnapshotService>();
-const registered = new WeakSet<Synapse>();
+const services = new WeakMap<Mindly, SnapshotService>();
+const registered = new WeakSet<Mindly>();
 
-/** The snapshot service attached to `synapse` (created on first use). */
-export function snapshotService(synapse: Synapse): SnapshotService {
-  let svc = services.get(synapse);
+/** The snapshot service attached to `mindly` (created on first use). */
+export function snapshotService(mindly: Mindly): SnapshotService {
+  let svc = services.get(mindly);
   if (!svc) {
-    svc = new SnapshotService(synapse.kernel);
-    services.set(synapse, svc);
+    svc = new SnapshotService(mindly.kernel);
+    services.set(mindly, svc);
   }
   return svc;
 }
 
-/** Time-machine module: auto-snapshots on session start. `synapse.use(snapshotsModule)`. */
-export const snapshotsModule: SynapseModule = (synapse) => {
-  if (registered.has(synapse)) return;
-  registered.add(synapse);
-  const svc = snapshotService(synapse);
-  synapse.bus.on('session.started', 'snapshots.auto', async (p) => {
+/** Time-machine module: auto-snapshots on session start. `mindly.use(snapshotsModule)`. */
+export const snapshotsModule: MindlyModule = (mindly) => {
+  if (registered.has(mindly)) return;
+  registered.add(mindly);
+  const svc = snapshotService(mindly);
+  mindly.bus.on('session.started', 'snapshots.auto', async (p) => {
     await svc.onSessionStarted(p);
   });
 };

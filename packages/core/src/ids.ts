@@ -53,7 +53,7 @@ export function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString('base64url');
 }
 
-/** Short, human-friendly prefix of an id for display (`synapse why` output, dashboards). */
+/** Short, human-friendly prefix of an id for display (`mindly why` output, dashboards). */
 export function shortId(id: string): string {
   return id.replace(/-/g, '').slice(-8);
 }

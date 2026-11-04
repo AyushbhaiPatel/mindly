@@ -1,4 +1,4 @@
-# Contributing to Synapse
+# Contributing to Mindly
 
 Thanks for helping. This guide covers how to get set up and what we expect in a pull request.
 
@@ -10,9 +10,9 @@ pnpm install
 pnpm check   # typecheck, lint, format check, tests
 ```
 
-Node.js 22.13+ is required (Synapse uses the built-in `node:sqlite` module).
+Node.js 22.13+ is required (Mindly uses the built-in `node:sqlite` module).
 
-Set `SYNAPSE_HOME=$(pwd)/.synapse-dev` while developing so you do not touch your real store.
+Set `MINDLY_HOME=$(pwd)/.mindly-dev` while developing so you do not touch your real store.
 
 ## Workflow
 
@@ -26,7 +26,7 @@ Set `SYNAPSE_HOME=$(pwd)/.synapse-dev` while developing so you do not touch your
 
 - TypeScript strict mode; no `any` in public APIs.
 - Validate every external input (hook payloads, MCP arguments, HTTP bodies, config files) with the
-  schemas in `@synapse/core` before use.
+  schemas in `@mindly/core` before use.
 - SQL is always parameterised. Dynamic identifiers come from closed allow-lists.
 - Never use a shell to run commands: `execFile`/`spawn` with an argument array only.
 - Anything that reads a path from input must resolve it and confirm it stays inside the project.
@@ -39,5 +39,5 @@ changing storage, context rendering, the daemon or anything that executes proces
 ## Adding an agent adapter
 
 Adapters live in `packages/adapters/src/<agent>/`. An adapter translates the agent's hook payloads
-into Synapse events and renders context back in the agent's expected output format. Add fixtures of
+into Mindly events and renders context back in the agent's expected output format. Add fixtures of
 real payloads under `packages/adapters/test/fixtures/<agent>/`.

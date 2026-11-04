@@ -28,7 +28,7 @@ export interface GitPort {
   dependentsOf(repoRoot: string, file: string): Promise<string[]>;
   /**
    * Optional (time machine): records tracked and untracked work of `worktree` under a hidden ref
-   * `refs/synapse/snapshots/<id>` without touching the index or working tree. Null when nothing
+   * `refs/mindly/snapshots/<id>` without touching the index or working tree. Null when nothing
    * could be captured.
    */
   createSnapshotRef?(

@@ -8,14 +8,14 @@ import {
   sanitizeForContext,
   sanitizeLine,
   sha256,
-  SynapseError,
+  MindlyError,
   tryResolveInsideRoot,
   type Memory,
   type MemoryKind,
   type MemorySource,
   type Trust,
-} from '@synapse/core';
-import type { MemoryFilter, MemoryPatch, MemorySearchHit } from '@synapse/store';
+} from '@mindly/core';
+import type { MemoryFilter, MemoryPatch, MemorySearchHit } from '@mindly/store';
 import type { Kernel } from '../kernel.js';
 
 export const MAX_TITLE = 160;
@@ -217,9 +217,9 @@ export class MemoryService {
   ): { rel: string; excerpt: string | null; hash: string | null; valid: boolean } {
     const resolved = tryResolveInsideRoot(projectRoot, e.path);
     if (!resolved)
-      throw new SynapseError('path_outside_project', 'evidence path is outside the project');
+      throw new MindlyError('path_outside_project', 'evidence path is outside the project');
     if (isDeniedPath(resolved.rel, this.k.config.redaction.denyPaths)) {
-      throw new SynapseError('forbidden', 'evidence path is on the deny-list');
+      throw new MindlyError('forbidden', 'evidence path is on the deny-list');
     }
     const excerpt = e.excerpt ? e.excerpt.slice(0, 2000) : null;
     if (!excerpt) return { rel: resolved.rel, excerpt: null, hash: null, valid: true };
@@ -246,7 +246,7 @@ export class MemoryService {
     if (by.type !== 'user') {
       // Agents may refine content of their own proposals but cannot change trust or enforcement.
       if (cur.source.type === 'user')
-        throw new SynapseError('forbidden', 'agents cannot edit user memories');
+        throw new MindlyError('forbidden', 'agents cannot edit user memories');
       delete clean.trust;
       delete clean.enforce;
       delete clean.pinned;

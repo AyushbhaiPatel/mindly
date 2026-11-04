@@ -1,6 +1,6 @@
-import { sanitizeLine } from '@synapse/core';
+import { sanitizeLine } from '@mindly/core';
 import type { Kernel } from '../kernel.js';
-import type { Synapse, SynapseModule } from '../synapse.js';
+import type { Mindly, MindlyModule } from '../mindly.js';
 
 /*
  * Morning standup: a digest of what every agent did since the last standup, built from the event
@@ -99,7 +99,7 @@ function plural(n: number, word: string): string {
 export function renderStandup(d: StandupDigest): string {
   const hours = Math.max(1, Math.round((d.until - d.since) / 3_600_000));
   const lines: string[] = [
-    `# Synapse standup: ${sanitizeLine(d.projectName, 80)}`,
+    `# Mindly standup: ${sanitizeLine(d.projectName, 80)}`,
     `Last ${hours}h (since ${new Date(d.since).toISOString().slice(0, 16).replace('T', ' ')} UTC)`,
     '',
     '## Agents',
@@ -329,7 +329,7 @@ export class StandupService {
       const waiting = needsYouCount(digest);
       await this.k.ports.notifier.send({
         trigger: 'standup',
-        title: `Synapse standup: ${name}`,
+        title: `Mindly standup: ${name}`,
         body: `${plural(sessions, 'session')}, ${plural(turns, 'turn')}, ${plural(files, 'file')} changed; ${waiting} item${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} you.`,
         projectName: name,
         priority: waiting > 0 ? 'default' : 'low',
@@ -345,19 +345,19 @@ export class StandupService {
   }
 }
 
-const services = new WeakMap<Synapse, StandupService>();
+const services = new WeakMap<Mindly, StandupService>();
 
-/** The standup service attached to `synapse` (created on first use). */
-export function standupService(synapse: Synapse): StandupService {
-  let svc = services.get(synapse);
+/** The standup service attached to `mindly` (created on first use). */
+export function standupService(mindly: Mindly): StandupService {
+  let svc = services.get(mindly);
   if (!svc) {
-    svc = new StandupService(synapse.kernel);
-    services.set(synapse, svc);
+    svc = new StandupService(mindly.kernel);
+    services.set(mindly, svc);
   }
   return svc;
 }
 
 /** Standup module: attaches the service (no hook-time work; the daemon drives scheduling). */
-export const standupModule: SynapseModule = (synapse) => {
-  standupService(synapse);
+export const standupModule: MindlyModule = (mindly) => {
+  standupService(mindly);
 };

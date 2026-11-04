@@ -7,7 +7,7 @@ import {
   failoverService,
   MAX_TRANSCRIPT_TAIL_BYTES,
   readTranscriptTail,
-  type Synapse,
+  type Mindly,
 } from '../../src/index.js';
 import { event, writeTool } from '../helpers.js';
 import { make, tmp } from './continuity-helpers.js';
@@ -26,12 +26,12 @@ function assistant(text: string, ts: number): object {
   };
 }
 
-async function claudeTurn(synapse: Synapse, root: string, clockAdvance: () => void) {
-  await synapse.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+async function claudeTurn(mindly: Mindly, root: string, clockAdvance: () => void) {
+  await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
   clockAdvance();
-  await synapse.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: SECRET_PROMPT }));
+  await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: SECRET_PROMPT }));
   clockAdvance();
-  await synapse.hooks.handle(
+  await mindly.hooks.handle(
     event(root, 'claude-code', 'cc', 'post_tool', {
       tool: writeTool('src/auth.ts', 'export function login() { return 1; }'),
     }),
@@ -41,17 +41,17 @@ async function claudeTurn(synapse: Synapse, root: string, clockAdvance: () => vo
 
 function setupFailover(opts: Parameters<typeof make>[0] = {}, homeDir?: string) {
   const env = make(opts);
-  env.synapse.use(createFailoverModule(homeDir ? { homeDir } : {}));
+  env.mindly.use(createFailoverModule(homeDir ? { homeDir } : {}));
   return env;
 }
 
 describe('rate-limit failover', () => {
   it('detects a usage limit in the transcript tail and hands off to codex', async () => {
-    const { root, clock, synapse, sent } = setupFailover();
-    await claudeTurn(synapse, root, () => clock.advance(1000));
-    const pid = synapse.store.projects.list()[0]!.id;
-    const cc = synapse.store.sessions.findByExternal(pid, 'claude-code', 'cc')!;
-    synapse.tasks.create({
+    const { root, clock, mindly, sent } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    const cc = mindly.store.sessions.findByExternal(pid, 'claude-code', 'cc')!;
+    mindly.tasks.create({
       projectId: pid,
       title: 'Migrate auth to sessions',
       owner: cc,
@@ -71,12 +71,12 @@ describe('rate-limit failover', () => {
         assistant('Claude usage limit reached. Your limit will reset at 3pm.', clock.t),
       ]),
     );
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'stop', { transcriptPath: transcript }),
     );
 
-    expect(synapse.store.sessions.get(cc.id).status).toBe('rate_limited');
-    const handoffs = synapse.store.handoffs.list(pid);
+    expect(mindly.store.sessions.get(cc.id).status).toBe('rate_limited');
+    const handoffs = mindly.store.handoffs.list(pid);
     expect(handoffs).toHaveLength(1);
     const h = handoffs[0]!;
     expect(h.reason).toBe('rate_limit');
@@ -88,7 +88,7 @@ describe('rate-limit failover', () => {
     expect(h.packet.branch).toBe('main');
     expect(h.packet.headCommit).toBe('abc1234def5678');
     expect(
-      synapse.store.events
+      mindly.store.events
         .query(pid, { types: ['session.rate_limited'] })
         .map((e) => e.payload.signature),
     ).toEqual(['claude.usage_limit_reached']);
@@ -100,43 +100,43 @@ describe('rate-limit failover', () => {
 
     // A second stop with the same transcript does not re-trigger.
     clock.advance(1000);
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'stop', { transcriptPath: transcript }),
     );
-    expect(synapse.store.handoffs.list(pid)).toHaveLength(1);
+    expect(mindly.store.handoffs.list(pid)).toHaveLength(1);
     expect(sent).toHaveLength(1);
 
     // The next Codex session picks it up at session start.
-    const cx = await synapse.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    const cx = await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
     expect(cx.context).toContain('Handoff for you');
     expect(cx.context).toContain('it hit its usage limit');
     expect(cx.context).toContain('Migrate auth to sessions');
-    expect(synapse.store.handoffs.get(h.id).status).toBe('claimed');
-    expect(failoverService(synapse).pendingLaunch()).toHaveLength(0);
+    expect(mindly.store.handoffs.get(h.id).status).toBe('claimed');
+    expect(failoverService(mindly).pendingLaunch()).toHaveLength(0);
   });
 
   it('detects Codex limits in the last message and targets the next agent in order', async () => {
-    const { root, clock, synapse } = setupFailover();
-    await synapse.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    const { root, clock, mindly } = setupFailover();
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
     clock.advance(1000);
-    await synapse.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'fix the tests' }));
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'fix the tests' }));
     clock.advance(1000);
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'codex', 'cx', 'stop', {
         lastMessage: "You've hit your usage limit. Upgrade to Pro or try again later.",
       }),
     );
-    const pid = synapse.store.projects.list()[0]!.id;
-    const [h] = synapse.store.handoffs.list(pid);
+    const pid = mindly.store.projects.list()[0]!.id;
+    const [h] = mindly.store.handoffs.list(pid);
     expect(h?.toAgentKind).toBe('claude-code');
-    const pending = failoverService(synapse).pendingLaunch(pid);
+    const pending = failoverService(mindly).pendingLaunch(pid);
     expect(pending).toHaveLength(1);
     expect(pending[0]).toMatchObject({ toAgentKind: 'claude-code', autoLaunch: false });
   });
 
   it('ignores limit messages older than the last prompt and user-side text', async () => {
-    const { root, clock, synapse, sent } = setupFailover();
-    await claudeTurn(synapse, root, () => clock.advance(1000));
+    const { root, clock, mindly, sent } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
     const transcript = join(root, 'old.jsonl');
     writeFileSync(
       transcript,
@@ -150,35 +150,35 @@ describe('rate-limit failover', () => {
         assistant('Here is the refactor; I also added a rate limit middleware.', clock.t),
       ]),
     );
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'stop', { transcriptPath: transcript }),
     );
-    const pid = synapse.store.projects.list()[0]!.id;
-    expect(synapse.store.handoffs.list(pid)).toHaveLength(0);
+    const pid = mindly.store.projects.list()[0]!.id;
+    expect(mindly.store.handoffs.list(pid)).toHaveLength(0);
     expect(sent).toHaveLength(0);
   });
 
   it('does nothing when failover is disabled', async () => {
-    const { root, clock, synapse, sent } = setupFailover({
+    const { root, clock, mindly, sent } = setupFailover({
       config: (c) => {
         c.failover.enabled = false;
       },
     });
-    await claudeTurn(synapse, root, () => clock.advance(1000));
-    await synapse.hooks.handle(
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'stop', { lastMessage: 'Claude usage limit reached.' }),
     );
-    const pid = synapse.store.projects.list()[0]!.id;
-    expect(synapse.store.handoffs.list(pid)).toHaveLength(0);
-    expect(synapse.store.sessions.findByExternal(pid, 'claude-code', 'cc')!.status).toBe('idle');
+    const pid = mindly.store.projects.list()[0]!.id;
+    expect(mindly.store.handoffs.list(pid)).toHaveLength(0);
+    expect(mindly.store.sessions.findByExternal(pid, 'claude-code', 'cc')!.status).toBe('idle');
     expect(sent).toHaveLength(0);
   });
 
   it('ignores a transcript symlink that points outside the home directory', async () => {
     const home = tmp('syn-home-');
     const outside = tmp('syn-outside-');
-    const { root, clock, synapse } = setupFailover({}, home);
-    await claudeTurn(synapse, root, () => clock.advance(1000));
+    const { root, clock, mindly } = setupFailover({}, home);
+    await claudeTurn(mindly, root, () => clock.advance(1000));
     const target = join(outside, 't.jsonl');
     writeFileSync(target, jsonl([assistant('Claude usage limit reached.', clock.t)]));
     const link = join(root, 'link.jsonl');
@@ -194,14 +194,14 @@ describe('rate-limit failover', () => {
     expect(readTranscriptTail('relative/path.jsonl', home)).toBeNull();
     expect(readTranscriptTail(root, home)).toBeNull();
 
-    await synapse.hooks.handle(event(root, 'claude-code', 'cc', 'stop', { transcriptPath: link }));
-    const pid = synapse.store.projects.list()[0]!.id;
-    expect(synapse.store.handoffs.list(pid)).toHaveLength(0);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'stop', { transcriptPath: link }));
+    const pid = mindly.store.projects.list()[0]!.id;
+    expect(mindly.store.handoffs.list(pid)).toHaveLength(0);
   });
 
   it('reads only the bounded tail of a huge transcript', async () => {
-    const { root, clock, synapse } = setupFailover();
-    await claudeTurn(synapse, root, () => clock.advance(1000));
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
     const filler = jsonl(
       Array.from({ length: 4000 }, (_, i) => assistant(`step ${i} ${'x'.repeat(400)}`, clock.t)),
     );
@@ -212,10 +212,10 @@ describe('rate-limit failover', () => {
     expect(tail.startsWith('{')).toBe(true);
 
     const started = Date.now();
-    await synapse.hooks.handle(event(root, 'claude-code', 'cc', 'stop', { transcriptPath: big }));
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'stop', { transcriptPath: big }));
     expect(Date.now() - started).toBeLessThan(1000);
-    const pid = synapse.store.projects.list()[0]!.id;
-    expect(synapse.store.handoffs.list(pid)).toHaveLength(0);
+    const pid = mindly.store.projects.list()[0]!.id;
+    expect(mindly.store.handoffs.list(pid)).toHaveLength(0);
   });
 
   it('matches signatures heuristically per agent', () => {
@@ -239,11 +239,11 @@ describe('rate-limit failover', () => {
 
 describe('manual handoffs', () => {
   it('creates, lists and cancels', async () => {
-    const { root, clock, synapse } = setupFailover();
-    await claudeTurn(synapse, root, () => clock.advance(1000));
-    const pid = synapse.store.projects.list()[0]!.id;
-    const cc = synapse.store.sessions.findByExternal(pid, 'claude-code', 'cc')!;
-    const svc = failoverService(synapse).handoffs;
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    const cc = mindly.store.sessions.findByExternal(pid, 'claude-code', 'cc')!;
+    const svc = failoverService(mindly).handoffs;
     await expect(svc.create(cc, { toAgentKind: 'Not Valid', summary: 'x' })).rejects.toThrow();
     await expect(svc.create(cc, { summary: '   ' })).rejects.toThrow();
     const h = await svc.create(cc, {
@@ -259,7 +259,7 @@ describe('manual handoffs', () => {
     expect(svc.list(pid, 'pending').map((x) => x.id)).toEqual([h.id]);
     expect(svc.cancel(h.id).status).toBe('cancelled');
     expect(() => svc.cancel(h.id)).toThrow(/cancelled/);
-    const cu = await synapse.hooks.handle(event(root, 'cursor', 'cu', 'session_start'));
+    const cu = await mindly.hooks.handle(event(root, 'cursor', 'cu', 'session_start'));
     expect(cu.context ?? '').not.toContain('Handoff for you');
   });
 });

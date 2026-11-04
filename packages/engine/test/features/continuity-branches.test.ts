@@ -14,11 +14,11 @@ describe('memory branches', () => {
         },
       },
     });
-    const { root, clock, synapse } = env;
-    synapse.use(branchesModule);
-    const pid = (await synapse.projects.resolve(root)).project.id;
+    const { root, clock, mindly } = env;
+    mindly.use(branchesModule);
+    const pid = (await mindly.projects.resolve(root)).project.id;
     const remember = (title: string, branch: string | null) =>
-      synapse.memory.remember({
+      mindly.memory.remember({
         projectId: pid,
         projectRoot: root,
         kind: 'decision',
@@ -31,32 +31,32 @@ describe('memory branches', () => {
     const y = remember('Use websockets for push', 'feature/y');
     const m = remember('Main-only note', 'main');
 
-    await synapse.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
-    expect(synapse.store.memories.get(x.id).scope.branch).toBeNull();
-    expect(synapse.store.memories.get(y.id).scope.branch).toBe('feature/y');
-    expect(synapse.store.memories.get(m.id).scope.branch).toBe('main');
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    expect(mindly.store.memories.get(x.id).scope.branch).toBeNull();
+    expect(mindly.store.memories.get(y.id).scope.branch).toBe('feature/y');
+    expect(mindly.store.memories.get(m.id).scope.branch).toBe('main');
     expect(checks.sort()).toEqual(['feature/x->main', 'feature/y->main']);
 
     // Not-merged answers are cached for ten minutes.
     clock.advance(60_000);
-    await synapse.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
     expect(checks).toHaveLength(2);
     clock.advance(10 * 60_000);
-    await synapse.hooks.handle(event(root, 'codex', 'cx2', 'session_start'));
+    await mindly.hooks.handle(event(root, 'codex', 'cx2', 'session_start'));
     expect(checks).toHaveLength(3);
 
-    const svc = branchService(synapse);
+    const svc = branchService(mindly);
     expect(svc.promote(pid, 'feature/y')).toBe(1);
-    expect(synapse.store.memories.get(y.id).scope.branch).toBeNull();
-    expect(synapse.store.memories.versions(y.id).at(-1)?.reason).toBe('branch feature/y merged');
+    expect(mindly.store.memories.get(y.id).scope.branch).toBeNull();
+    expect(mindly.store.memories.versions(y.id).at(-1)?.reason).toBe('branch feature/y merged');
     expect(() => svc.promote(pid, '../oops')).toThrow(/invalid branch/);
   });
 
   it('does nothing without git support', async () => {
     const env = make();
-    env.synapse.use(branchesModule);
-    const pid = (await env.synapse.projects.resolve(env.root)).project.id;
-    const x = env.synapse.memory.remember({
+    env.mindly.use(branchesModule);
+    const pid = (await env.mindly.projects.resolve(env.root)).project.id;
+    const x = env.mindly.memory.remember({
       projectId: pid,
       projectRoot: env.root,
       kind: 'fact',
@@ -65,8 +65,8 @@ describe('memory branches', () => {
       branch: 'feature/z',
       source: USER,
     });
-    const res = await branchService(env.synapse).checkMerged(pid, env.root, 'main');
+    const res = await branchService(env.mindly).checkMerged(pid, env.root, 'main');
     expect(res.checked).toEqual([]);
-    expect(env.synapse.store.memories.get(x.id).scope.branch).toBe('feature/z');
+    expect(env.mindly.store.memories.get(x.id).scope.branch).toBe('feature/z');
   });
 });

@@ -8,8 +8,8 @@ import {
   type Task,
   type TaskPlanStep,
   type TaskStatus,
-} from '@synapse/core';
-import type { TaskPatch } from '@synapse/store';
+} from '@mindly/core';
+import type { TaskPatch } from '@mindly/store';
 import { INTENT_TTL_MS, OVERLAP_WINDOW_MS, type Kernel } from '../kernel.js';
 import type { TelepathyService } from './telepathy.js';
 
@@ -120,7 +120,7 @@ export class IntentService {
     private readonly telepathy: TelepathyService,
   ) {}
 
-  /** Explicit declaration (MCP `synapse_declare_intent`). */
+  /** Explicit declaration (MCP `mindly_declare_intent`). */
   declare(
     session: Session,
     summary: string,
