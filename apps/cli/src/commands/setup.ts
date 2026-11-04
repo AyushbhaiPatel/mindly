@@ -27,6 +27,7 @@ import { openMindly } from '@mindly/runtime';
 import { diffSummary } from '../diff.js';
 import { confirm, type CliIo } from '../io.js';
 import { splitList, UsageError, type Out } from '../util.js';
+import { renderInitSummary } from '../views/setup.js';
 
 /** Agents `mindly init` knows how to connect: hook agents first, then MCP-only clients. */
 export const SUPPORTED_AGENTS: readonly string[] = Object.freeze([
@@ -66,21 +67,28 @@ export function adapterOf(all: Record<SupportedAgent, AgentAdapter>, kind: strin
 /** `mindly init --list-agents`: every supported agent with its integration level. */
 export function listAgents(out: Out): number {
   const all = adaptersFor(out.io.env);
-  const s = out.style;
-  const width = Math.max(...SUPPORTED_AGENTS.map((k) => k.length)) + 2;
-  out.line(s.bold(`${'Agent'.padEnd(width)}Integration  Name`));
-  for (const kind of SUPPORTED_AGENTS) {
+  const sc = out.screen();
+  sc.summary(`Mindly works with ${SUPPORTED_AGENTS.length} agents.`);
+  const row = (kind: string): readonly [string, string] => {
     const adapter = adapterOf(all, kind);
-    const level = integrationOf(adapter) === 'mcp' ? 'MCP tools  ' : 'hooks + MCP';
-    const scope =
-      adapter instanceof McpClientAdapter && !adapter.supportsProjectScope
-        ? ' (user scope only)'
-        : '';
-    out.line(`${kind.padEnd(width)}${level}  ${adapter.displayName}${scope}`);
-  }
-  out.line();
-  out.line('hooks + MCP: automatic capture and context injection, plus Mindly tools.');
-  out.line('MCP tools: Mindly tools only; the agent must call them itself.');
+    const userOnly = adapter instanceof McpClientAdapter && !adapter.supportsProjectScope;
+    return [
+      adapter.displayName,
+      `${kind}${userOnly ? '   (user-wide only, not per project)' : ''}`,
+    ];
+  };
+  const full = SUPPORTED_AGENTS.filter((k) => integrationOf(adapterOf(all, k)) !== 'mcp');
+  const tools = SUPPORTED_AGENTS.filter((k) => integrationOf(adapterOf(all, k)) === 'mcp');
+  sc.section('Full integration (hooks + MCP)');
+  sc.note('Mindly sees what the agent does and gives it context automatically, plus its tools.', 2);
+  sc.pairs(full.map(row));
+  sc.section('Tools only (MCP)');
+  sc.note("The agent can call Mindly's tools, but nothing is captured or sent automatically.", 2);
+  sc.pairs(tools.map(row));
+  sc.next([
+    { cmd: 'mindly init', why: 'connect every agent found on this machine' },
+    { cmd: 'mindly init --agents claude-code,codex', why: 'connect only the agents you name' },
+  ]);
   return 0;
 }
 
@@ -88,11 +96,13 @@ export function listAgents(out: Out): number {
 export function parseAgents(value: string | undefined): SupportedAgent[] | null {
   if (value === undefined) return null;
   const list = splitList(value);
-  if (list.length === 0) throw new UsageError('--agents needs at least one agent');
+  if (list.length === 0) {
+    throw new UsageError('--agents needs at least one agent, e.g. --agents claude-code,codex');
+  }
   for (const a of list) {
     if (!(SUPPORTED_AGENTS as readonly string[]).includes(a)) {
       throw new UsageError(
-        `unknown agent "${a}" (supported: ${SUPPORTED_AGENTS.join(', ')}; see mindly init --list-agents)`,
+        `"${a}" is not an agent Mindly knows; use one of: ${SUPPORTED_AGENTS.join(', ')} (details: mindly init --list-agents)`,
       );
     }
   }
@@ -206,9 +216,7 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
     agents = [];
     for (const a of SUPPORTED_AGENTS) if (await adapterOf(all, a).detect()) agents.push(a);
     if (agents.length === 0) {
-      out.line('No supported agent was detected.');
-      out.line('Choose explicitly with: mindly init --agents claude-code,codex,cursor');
-      out.line('See every supported agent with: mindly init --list-agents');
+      out.line('No supported agent was found on this machine.');
     } else {
       out.line(`Detected: ${agents.map((a) => adapterOf(all, a).displayName).join(', ')}`);
     }
@@ -234,7 +242,9 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
     });
   }
   out.line(
-    `Hooks and MCP will run: ${command.join(' ')}${projectRoot ? ` (project scope: ${projectRoot})` : ' (user scope)'}`,
+    out.style.dim(
+      `Agents will reach Mindly by running: ${command.join(' ')}${projectRoot ? ` (for the project ${projectRoot} only)` : ' (for all your projects)'}`,
+    ),
   );
   out.line();
   const total = printPlan(out, plans, 'already configured');
@@ -258,23 +268,16 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
     }
   }
   const home = initHome(out.io);
-  out.line(`Mindly storage is ready in ${home}.`);
-  if (agents.includes('codex')) {
-    out.line();
-    out.line(
-      'Codex: start Codex and run /hooks to review and approve the Mindly hooks; Codex does not run new hooks until you approve them.',
-    );
-  }
-  const mcpOnly = plans.filter((p) => integrationOf(p.adapter) === 'mcp');
-  if (mcpOnly.length > 0) out.line();
-  for (const p of mcpOnly) {
-    out.line(
-      `${p.adapter.displayName}: gets Mindly's MCP tools but no automatic capture; add "${MCP_ONLY_RULE}" to its rules/instructions file.`,
-    );
-  }
-  if (agents.length > 0) {
-    out.line('Restart running agent sessions so they pick up the hooks and the MCP server.');
-  }
+  renderInitSummary(out.screen(), {
+    home,
+    connected: plans.filter((p) => p.steps.length > 0).map((p) => p.adapter.displayName),
+    already: plans.filter((p) => p.steps.length === 0).map((p) => p.adapter.displayName),
+    toolsOnly: plans
+      .filter((p) => integrationOf(p.adapter) === 'mcp')
+      .map((p) => p.adapter.displayName),
+    codex: agents.includes('codex'),
+    rule: MCP_ONLY_RULE,
+  });
   return 0;
 }
 
@@ -306,7 +309,7 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
     return 0;
   }
   if (total === 0) {
-    out.line('Mindly is not connected to any of these agents.');
+    out.line('Mindly is not connected to any of these agents: there is nothing to remove.');
     return 0;
   }
   out.line();
@@ -319,8 +322,13 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
       out.line(`Wrote ${applied.file}${applied.backup ? ` (backup: ${applied.backup})` : ''}`);
     }
   }
-  out.line(
-    `Disconnected. Your Mindly data in ${mindlyHome(env)} is kept; delete a project's data with mindly forget --project.`,
+  const sc = out.screen();
+  const names = plans.filter((p) => p.steps.length > 0).map((p) => p.adapter.displayName);
+  sc.blank();
+  sc.text(
+    `${sc.mark('ok')} Disconnected ${names.join(', ')}. Restart running agent sessions so they stop using Mindly.`,
   );
+  sc.note(`Your Mindly data in ${mindlyHome(env)} is kept.`, 2);
+  sc.next([{ cmd: 'mindly forget --project', why: "delete this project's Mindly data too" }]);
   return 0;
 }

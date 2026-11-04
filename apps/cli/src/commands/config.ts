@@ -9,7 +9,7 @@ import {
   writeJsonFile,
 } from '@mindly/core';
 import { z } from 'zod';
-import { UsageError, type Out } from '../util.js';
+import { HintedError, UsageError, type Out } from '../util.js';
 
 const KEY_RE = /^[A-Za-z][A-Za-z0-9]{0,63}(\.[A-Za-z][A-Za-z0-9]{0,63}){0,5}$/;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
@@ -85,7 +85,13 @@ export function configPathCmd(out: Out): number {
 export function configGet(out: Out, key: string | undefined): number {
   const config = loadUserConfig(configPath(out));
   const value = key === undefined ? config : getPath(config, configKey(key));
-  if (value === undefined) throw new MindlyError('not_found', `unknown config key: ${key ?? ''}`);
+  if (value === undefined) {
+    throw new HintedError(
+      'not_found',
+      `There is no setting called ${key ?? ''}`,
+      'See every setting and its value with: mindly config get',
+    );
+  }
   out.json(value);
   return 0;
 }
@@ -109,7 +115,11 @@ export function configSet(out: Out, key: string, rawValue: string): number {
   }
   // zod strips unknown keys, so a key that is missing after parsing does not exist.
   if (getPath(parsed.data, parts) === undefined) {
-    throw new MindlyError('invalid_input', `unknown config key: ${key}`);
+    throw new HintedError(
+      'invalid_input',
+      `There is no setting called ${key}`,
+      'See every setting and its value with: mindly config get',
+    );
   }
   writeJsonFile(path, raw);
   out.line(`${key} = ${JSON.stringify(value)}`);

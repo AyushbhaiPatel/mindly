@@ -1,6 +1,13 @@
 import { MindlyError, type Run } from '@mindly/core';
 import { z } from 'zod';
 import { pickSession, withProject, type ProjectScope } from '../context.js';
+import {
+  agentName,
+  capitalise,
+  humanizeText,
+  runKindWord,
+  runStatusWord,
+} from '../present/index.js';
 import { clean, splitList, type Out } from '../util.js';
 import { daemonRequest, runningDaemon } from './daemon.js';
 import { parseOptions } from './memory.js';
@@ -29,41 +36,70 @@ const ReplayOptions = z.object({
   json: z.boolean().optional(),
 });
 
+const SEVERITY_WORDS: Record<string, string> = {
+  info: 'FYI',
+  warning: 'check this',
+  critical: 'urgent',
+};
+
 function printRun(out: Out, run: Run, json: boolean | undefined): void {
   if (json) {
     out.json(run);
     return;
   }
-  out.line(`${clean(run.title, 120)}: ${run.status} (run ${run.id})`);
+  const sc = out.screen();
+  const ok = run.status === 'passed';
+  const marker = ok ? 'ok' : run.status === 'failed' || run.status === 'error' ? 'fail' : 'item';
+  sc.summary(
+    `${sc.mark(marker)} ${capitalise(runKindWord(run.kind))}: ${humanizeText(clean(run.title, 120))} ${sc.sym.dot} ${runStatusWord(run.status)}  ${sc.ref(run.id)}`,
+  );
   const r = run.result;
   if (!r) return;
-  if (typeof r['summary'] === 'string') out.line(clean(r['summary'], 300));
+  if (typeof r['summary'] === 'string') sc.text(clean(r['summary'], 300), 2);
   if (Array.isArray(r['findings'])) {
-    for (const f of r['findings'] as {
+    const findings = r['findings'] as {
       severity?: string;
       file?: string | null;
       line?: number | null;
       message?: string;
-    }[]) {
-      const where = f.file ? `${clean(f.file, 120)}${f.line ? `:${f.line}` : ''} ` : '';
-      out.line(`  ${f.severity ?? 'info'}  ${where}${clean(f.message ?? '', 200)}`);
-    }
+    }[];
+    if (findings.length) sc.section('Findings');
+    sc.rows(
+      findings.map((f) => {
+        const where = f.file ? `${clean(f.file, 120)}${f.line ? `:${f.line}` : ''}: ` : '';
+        const sev = f.severity ?? 'info';
+        return {
+          marker: sev === 'critical' ? 'fail' : sev === 'warning' ? 'warn' : 'item',
+          text: `${SEVERITY_WORDS[sev] ?? 'FYI'}: ${where}${clean(f.message ?? '', 200)}`,
+        };
+      }),
+    );
   }
   if (Array.isArray(r['agents'])) {
-    for (const a of r['agents'] as {
+    const agents = r['agents'] as {
       agent?: string;
       status?: string;
       filesChanged?: number;
       addedLines?: number;
       removedLines?: number;
       summary?: string;
-    }[]) {
-      out.line(
-        `  ${clean(a.agent ?? '?', 20)}  ${a.status ?? '?'}  ${a.filesChanged ?? 0} files +${a.addedLines ?? 0}/-${a.removedLines ?? 0}  ${clean(a.summary ?? '', 120)}`,
-      );
-    }
+    }[];
+    if (agents.length) sc.section('Agents');
+    sc.rows(
+      agents.map((a) => ({
+        marker:
+          a.status === 'passed'
+            ? 'ok'
+            : a.status === 'failed' || a.status === 'error'
+              ? 'fail'
+              : 'item',
+        text: `${agentName(clean(a.agent ?? 'agent', 32))}: ${a.status ? runStatusWord(a.status as Run['status']) : 'unknown'}, changed ${a.filesChanged ?? 0} files (+${a.addedLines ?? 0} -${a.removedLines ?? 0} lines)${a.summary ? `. ${clean(a.summary, 120)}` : ''}`,
+      })),
+    );
   }
-  if (typeof r['error'] === 'string' && r['error']) out.line(`error: ${clean(r['error'], 300)}`);
+  if (typeof r['error'] === 'string' && r['error']) {
+    sc.text(`${sc.mark('fail')} What went wrong: ${clean(r['error'], 300)}`);
+  }
 }
 
 /** Runs a review/replay in this process with the real agent runners (no daemon). */
@@ -83,7 +119,7 @@ async function runDirect(scope: ProjectScope, run: Run): Promise<Run> {
 }
 
 const DIRECT_WARNING =
-  'The Mindly daemon is not running: running here instead. This launches the agent CLIs headlessly in isolated worktrees and may take several minutes.';
+  "Mindly's background service is not running, so this runs here instead. It starts the agents without a window in separate copies of the code and may take several minutes.";
 
 /** `mindly review --session <id> --reviewer <agent>`: cross-agent review of a session's changes. */
 export async function review(out: Out, raw: unknown): Promise<number> {
@@ -91,7 +127,10 @@ export async function review(out: Out, raw: unknown): Promise<number> {
   return withProject(out.io, async (scope) => {
     const session = pickSession(scope, o.session);
     if (session.agentKind === o.reviewer) {
-      throw new MindlyError('invalid_input', 'the reviewer must be a different agent');
+      throw new MindlyError(
+        'invalid_input',
+        `${agentName(session.agentKind)} cannot review its own work: choose another agent with --reviewer`,
+      );
     }
     const pid = scope.project.project.id;
     const daemon = await runningDaemon(out.io.env);
@@ -107,7 +146,11 @@ export async function review(out: Out, raw: unknown): Promise<number> {
         },
       );
       if (o.json) out.json(run);
-      else out.line(`Review queued in the daemon (run ${run.id}). Follow it in mindly dashboard.`);
+      else {
+        const sc = out.screen();
+        sc.text(`${sc.mark('ok')} Review started in the background ${sc.ref(run.id)}.`);
+        sc.next([{ cmd: 'mindly dashboard', why: 'follow it in Mission Control' }]);
+      }
       return 0;
     }
     out.warn(DIRECT_WARNING);
@@ -148,7 +191,11 @@ export async function replay(
         },
       );
       if (o.json) out.json(run);
-      else out.line(`Replay queued in the daemon (run ${run.id}). Follow it in mindly dashboard.`);
+      else {
+        const sc = out.screen();
+        sc.text(`${sc.mark('ok')} Replay started in the background ${sc.ref(run.id)}.`);
+        sc.next([{ cmd: 'mindly dashboard', why: 'follow it in Mission Control' }]);
+      }
       return 0;
     }
     out.warn(DIRECT_WARNING);

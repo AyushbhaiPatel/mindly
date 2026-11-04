@@ -1,7 +1,6 @@
 import { resolve } from 'node:path';
 import {
   isDeniedPath,
-  MindlyError,
   resolveInsideRoot,
   type ResolvedProjectPath,
   type Session,
@@ -9,7 +8,8 @@ import {
 import type { Mindly, ProjectContext } from '@mindly/engine';
 import { openMindly } from '@mindly/runtime';
 import type { CliIo } from './io.js';
-import { requireId } from './util.js';
+import { resolveId } from './ids.js';
+import { HintedError } from './util.js';
 
 /** An opened Mindly instance and the project of the working directory. */
 export interface ProjectScope {
@@ -44,29 +44,41 @@ export async function withProject<T>(
  */
 export function projectPath(scope: ProjectScope, cwd: string, input: string): ResolvedProjectPath {
   const resolved = resolveInsideRoot(scope.project.root, resolve(cwd, input));
-  if (resolved.rel === '')
-    throw new MindlyError('invalid_input', 'path must be inside the project');
+  if (resolved.rel === '') {
+    throw new HintedError(
+      'invalid_input',
+      `${input} is the project folder itself, not a file in it`,
+      'Give a file path, e.g. src/auth.ts',
+    );
+  }
   const deny = [...scope.mindly.config.redaction.denyPaths, ...scope.project.config.ignore];
   if (isDeniedPath(resolved.rel, deny)) {
-    throw new MindlyError('forbidden', 'that path is on the deny-list');
+    throw new HintedError(
+      'forbidden',
+      `Mindly never reads ${resolved.rel}: it is on the deny-list (files such as .env, keys and credentials)`,
+      'Choose another file; the deny-list is redaction.denyPaths in mindly config get',
+    );
   }
   return resolved;
 }
 
 /**
- * The session named by `--session`, or the most recently seen session of the project. Throws
- * `not_found` when there is none or it belongs to another project.
+ * The session named by `--session` (full, short or prefix id), or the most recently seen session
+ * of the project. Throws `not_found` when there is none or it belongs to another project.
  */
 export function pickSession(scope: ProjectScope, sessionId: string | undefined): Session {
   const store = scope.mindly.store;
+  const pid = scope.project.project.id;
   if (sessionId !== undefined) {
-    const s = store.sessions.find(requireId(sessionId, 'session'));
-    if (!s || s.projectId !== scope.project.project.id) {
-      throw new MindlyError('not_found', 'session not found in this project');
-    }
-    return s;
+    return store.sessions.get(resolveId(store, 'session', pid, sessionId));
   }
-  const latest = store.sessions.list(scope.project.project.id, 1)[0];
-  if (!latest) throw new MindlyError('not_found', 'no agent session recorded for this project yet');
+  const latest = store.sessions.list(pid, 1)[0];
+  if (!latest) {
+    throw new HintedError(
+      'not_found',
+      'No agent has worked in this project yet.',
+      'Start Claude Code, Codex or Cursor here (connect them first with: mindly init).',
+    );
+  }
   return latest;
 }

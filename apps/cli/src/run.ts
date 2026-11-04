@@ -1,13 +1,16 @@
 import { Command, CommanderError } from 'commander';
-import { AGENT_KIND_RE, isMindlyError, MINDLY_VERSION } from '@mindly/core';
+import { AGENT_KIND_RE, isMindlyError, MINDLY_VERSION, type ErrorCode } from '@mindly/core';
+import { symbolsFor, toAscii, useAscii } from './present/terminal.js';
 import { processIo, type CliIo } from './io.js';
 import {
   collect,
   EXIT_ERROR,
   EXIT_OK,
   EXIT_USAGE,
+  HintedError,
   outFor,
   positiveInt,
+  stripControl,
   UsageError,
   type Out,
 } from './util.js';
@@ -444,14 +447,59 @@ export async function run(argv: readonly string[], io: CliIo = processIo()): Pro
       return err.exitCode === 0 ? EXIT_OK : EXIT_USAGE;
     }
     if (err instanceof UsageError) {
-      io.stderr.write(`mindly: ${err.message}\n(see mindly --help)\n`);
+      const path = commandPath(program, argv);
+      printError(io, err.message, `See the options with: mindly ${path ? `${path} ` : ''}--help`);
       return EXIT_USAGE;
     }
     if (isMindlyError(err)) {
-      io.stderr.write(`mindly: ${err.message}\n`);
+      printError(io, err.message, err instanceof HintedError ? err.hint : hintFor(err.code));
       return EXIT_ERROR;
     }
-    io.stderr.write(`mindly: ${err instanceof Error ? err.message : 'unexpected error'}\n`);
+    printError(
+      io,
+      err instanceof Error ? err.message : 'unexpected error',
+      'If this keeps happening, check your setup with: mindly doctor',
+    );
     return EXIT_ERROR;
   }
+}
+
+/** The command words of `argv` (`memory show`), for help hints. */
+function commandPath(program: Command, argv: readonly string[]): string {
+  const words: string[] = [];
+  let cmd: Command | undefined = program;
+  for (const arg of argv.slice(0, 2)) {
+    cmd = cmd?.commands.find((c) => c.name() === arg);
+    if (!cmd) break;
+    words.push(arg);
+  }
+  return words.length ? words.join(' ') : '';
+}
+
+/** How to fix an error of `code`, when there is a general answer. */
+function hintFor(code: ErrorCode): string | null {
+  switch (code) {
+    case 'untrusted_project':
+      return "Review this project's .mindly/config.json and trust it with: mindly trust";
+    case 'path_outside_project':
+      return 'Use a path inside this project.';
+    case 'unavailable':
+    case 'internal':
+      return 'Check your setup with: mindly doctor';
+    case 'timeout':
+      return 'Try again; if it keeps happening, check your setup with: mindly doctor';
+    default:
+      return null;
+  }
+}
+
+/** Prints `x What went wrong.` and `-> How to fix it.` to stderr (no colour: logs read it). */
+function printError(io: CliIo, message: string, hint: string | null): void {
+  const sym = symbolsFor(io.env);
+  const text = stripControl(message).trim();
+  const first = text.length ? `${text[0]?.toUpperCase() ?? ''}${text.slice(1)}` : 'Failed';
+  const sentence = first.includes('\n') || /[.:!?)]$/.test(first) ? first : `${first}.`;
+  const ascii = useAscii(io.env) ? toAscii : (t: string): string => t;
+  io.stderr.write(ascii(`${sym.fail} ${sentence}\n`));
+  if (hint) io.stderr.write(ascii(`${sym.next} ${hint}\n`));
 }

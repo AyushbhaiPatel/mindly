@@ -5,6 +5,8 @@ export interface TextOut {
   write(text: string): void;
   /** True when the stream is an interactive terminal (enables colour). */
   readonly isTTY?: boolean;
+  /** Width of the terminal in columns, when it is one. */
+  readonly columns?: number;
 }
 
 /**

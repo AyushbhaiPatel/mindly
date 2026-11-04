@@ -1,9 +1,13 @@
-import { AGENT_KIND_RE, MindlyError } from '@mindly/core';
+import { AGENT_KIND_RE, shortId } from '@mindly/core';
 import { failoverService, isValidBranchName, snapshotService } from '@mindly/engine';
 import { z } from 'zod';
 import { pickSession, withProject, type ProjectScope } from '../context.js';
+import { resolveId } from '../ids.js';
 import { confirm } from '../io.js';
-import { ago, clean, formatTime, requireId, table, UsageError, type Out } from '../util.js';
+import { agentName, count, relativeTime } from '../present/index.js';
+import { clean, UsageError, type Out } from '../util.js';
+import { renderHandoffs, renderSnapshotDiff, renderSnapshots } from '../views/continuity.js';
+import { sessionLookup } from '../views/common.js';
 import { parseOptions } from './memory.js';
 
 const HandoffOptions = z.object({
@@ -28,8 +32,10 @@ export async function handoff(out: Out, raw: unknown): Promise<number> {
     });
     if (o.json) out.json(h);
     else {
-      out.line(`Handoff ${h.id} created for ${h.toAgentKind ?? 'the next agent'}.`);
-      out.line(out.style.dim('It is offered to the next matching session at its start.'));
+      const sc = out.screen();
+      const who = h.toAgentKind ? agentName(h.toAgentKind) : 'The next agent';
+      sc.text(`${sc.mark('ok')} Handoff created ${sc.ref(h.id)}: "${clean(h.summary, 100)}"`);
+      sc.note(`${who} picks it up when its next session starts in this project.`, 2);
     }
     return 0;
   });
@@ -43,19 +49,7 @@ export async function handoffs(out: Out, o: { json?: boolean }): Promise<number>
       out.json(list);
       return 0;
     }
-    if (list.length === 0) out.line(out.style.dim('No handoffs.'));
-    for (const line of table(
-      list.map((h) => [
-        h.id,
-        h.status,
-        h.reason,
-        `to ${h.toAgentKind ?? 'any'}`,
-        ago(h.createdAt),
-        clean(h.summary, 80),
-      ]),
-    )) {
-      out.line(line);
-    }
+    renderHandoffs(out.screen(), list, sessionLookup(mindly.store));
     return 0;
   });
 }
@@ -69,18 +63,20 @@ export async function snapshotCreate(
   o: { json?: boolean },
 ): Promise<number> {
   const l = Label.safeParse(label);
-  if (!l.success) throw new UsageError('label must be 1-80 characters');
+  if (!l.success) throw new UsageError('the snapshot label must be 1-80 characters');
   return withProject(out.io, async ({ mindly, project }) => {
     const snap = await snapshotService(mindly).create(project.project.id, l.data);
     if (o.json) out.json(snap);
     else {
-      out.line(`Snapshot ${snap.id} "${clean(snap.label, 80)}" created.`);
-      if (!snap.gitRef)
-        out.line(
-          out.style.yellow(
-            'No git ref was captured (not a git repository?): memory and task state only.',
-          ),
+      const sc = out.screen();
+      sc.text(`${sc.mark('ok')} Snapshot "${clean(snap.label, 80)}" saved ${sc.ref(snap.id)}.`);
+      if (!snap.gitRef) {
+        sc.text(
+          `${sc.mark('warn')} The code was not saved (this is not a git repository); memory and tasks were.`,
+          2,
         );
+      }
+      sc.note(`See what changes from here on with: mindly snapshot diff ${shortId(snap.id)}`, 2);
     }
     return 0;
   });
@@ -94,28 +90,13 @@ export async function snapshotList(out: Out, o: { json?: boolean }): Promise<num
       out.json(list);
       return 0;
     }
-    if (list.length === 0) out.line(out.style.dim('No snapshots.'));
-    for (const line of table(
-      list.map((s) => [
-        s.id,
-        formatTime(s.createdAt),
-        s.commit ? s.commit.slice(0, 12) : '-',
-        clean(s.label, 80),
-      ]),
-    )) {
-      out.line(line);
-    }
+    renderSnapshots(out.screen(), list);
     return 0;
   });
 }
 
 function snapshotOf(scope: ProjectScope, id: string): string {
-  const sid = requireId(id, 'snapshot id');
-  const found = snapshotService(scope.mindly)
-    .list(scope.project.project.id, 1000)
-    .some((s) => s.id === sid);
-  if (!found) throw new MindlyError('not_found', 'snapshot not found in this project');
-  return sid;
+  return resolveId(scope.mindly.store, 'snapshot', scope.project.project.id, id);
 }
 
 /** `mindly snapshot diff <id>`: what changed in memory and tasks since a snapshot. */
@@ -126,37 +107,7 @@ export async function snapshotDiff(out: Out, id: string, o: { json?: boolean }):
       out.json(d);
       return 0;
     }
-    const s = out.style;
-    out.line(
-      s.bold(`Since "${clean(d.snapshot.label, 80)}" (${formatTime(d.snapshot.createdAt)})`),
-    );
-    const section = (title: string, rows: string[]): void => {
-      out.line(`${title}: ${rows.length}`);
-      for (const r of rows.slice(0, 20)) out.line(`  ${r}`);
-    };
-    section(
-      'Memories added',
-      d.memories.added.map((m) => clean(m.title, 100)),
-    );
-    section(
-      'Memories changed',
-      d.memories.updated.map((m) => `${clean(m.title, 100)} (v${m.from} -> v${m.to})`),
-    );
-    section(
-      'Memories archived',
-      d.memories.archived.map((m) => clean(m.title, 100)),
-    );
-    section(
-      'Tasks added',
-      d.tasks.added.map((t) => clean(t.title, 100)),
-    );
-    section(
-      'Tasks changed',
-      d.tasks.changed.map((t) => `${clean(t.title, 100)} (${t.from} -> ${t.to})`),
-    );
-    out.line(
-      `Conflicts opened: ${d.conflicts.opened.length}, closed: ${d.conflicts.closed.length}`,
-    );
+    renderSnapshotDiff(out.screen(), d);
     return 0;
   });
 }
@@ -168,24 +119,42 @@ export async function snapshotRestore(
   o: { branch?: string; yes?: boolean; json?: boolean },
 ): Promise<number> {
   if (o.branch !== undefined && !isValidBranchName(o.branch)) {
-    throw new UsageError('invalid branch name');
+    throw new UsageError(`"${clean(o.branch, 60)}" is not a valid git branch name`);
   }
   return withProject(out.io, async (scope) => {
     const sid = snapshotOf(scope, id);
     const svc = snapshotService(scope.mindly);
     const snap = svc.list(scope.project.project.id, 1000).find((s) => s.id === sid);
     out.line(
-      `Restore memory and task state to "${clean(snap?.label ?? sid, 80)}"${o.branch ? ` and create branch ${clean(o.branch, 100)} at its code` : ''}.`,
+      `This puts memory and tasks back the way they were at snapshot "${clean(snap?.label ?? shortId(sid), 80)}"${snap ? ` (${relativeTime(snap.createdAt, Date.now())})` : ''}${o.branch ? ` and creates the branch ${clean(o.branch, 100)} with its code` : ''}.`,
     );
-    out.line(out.style.dim('Nothing is deleted: newer memories are archived and can be restored.'));
-    if (!(await confirm(out.io, 'Restore?', o.yes === true))) return 1;
+    out.line(
+      out.style.dim(
+        `Nothing is deleted: newer memories are archived and can be restored.${o.branch ? '' : ' Your code is not touched (add --branch <name> to get the code back on a new branch).'}`,
+      ),
+    );
+    if (!(await confirm(out.io, 'Restore?', o.yes === true))) {
+      out.line('Nothing was restored.');
+      return 1;
+    }
     const r = await svc.restore(sid, o.branch ? { branch: o.branch } : {});
     if (o.json) out.json(r);
     else {
-      out.line(
-        `Restored ${r.memoriesRestored} memories and ${r.tasksRestored} tasks; archived ${r.memoriesArchived}${r.memoriesMissing ? `; ${r.memoriesMissing} could not be restored (deleted)` : ''}.`,
+      const sc = out.screen();
+      sc.text(
+        `${sc.mark('ok')} Restored ${count(r.memoriesRestored, 'memory', 'memories')} and ${count(r.tasksRestored, 'task')}; archived ${count(r.memoriesArchived, 'newer memory', 'newer memories')}.`,
       );
-      if (r.branch) out.line(`Branch ${clean(r.branch, 100)} created.`);
+      if (r.memoriesMissing) {
+        sc.text(
+          `${sc.mark('warn')} ${count(r.memoriesMissing, 'memory', 'memories')} could not be restored because ${r.memoriesMissing === 1 ? 'it was' : 'they were'} deleted.`,
+          2,
+        );
+      }
+      if (r.branch)
+        sc.text(
+          `${sc.mark('ok')} Created the branch ${clean(r.branch, 100)} with the snapshot's code.`,
+          2,
+        );
     }
     return 0;
   });

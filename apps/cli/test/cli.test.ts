@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { shortId } from '@mindly/core';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary, runHook, styleFor } from '../src/index.js';
 import { cli, fixture, sandbox, testIo, write, type Sandbox } from './helpers.js';
@@ -123,9 +124,12 @@ describe('init / uninstall', () => {
     const sb = sandbox();
     const r = await cli(sb, ['init', '--list-agents']);
     expect(r.code).toBe(0);
-    expect(r.stdout).toMatch(/claude-code\s+hooks \+ MCP/);
-    expect(r.stdout).toMatch(/windsurf\s+MCP tools/);
-    expect(r.stdout).toContain('Claude Desktop (user scope only)');
+    expect(r.stdout).toContain('Mindly works with 15 agents.');
+    const [full = '', tools = ''] = r.stdout.split('Tools only (MCP)');
+    expect(full).toMatch(/Full integration \(hooks \+ MCP\)/);
+    expect(full).toMatch(/Claude Code\s+claude-code/);
+    expect(tools).toMatch(/Windsurf\s+windsurf/);
+    expect(tools).toMatch(/Claude Desktop\s+claude-desktop\s+\(user-wide only/);
     expect(existsSync(join(sb.mindlyHome, 'mindly.db'))).toBe(false);
   });
 
@@ -283,7 +287,7 @@ describe('memory and rules', () => {
     expect(rules.proposed.map((m) => m.id)).toContain(proposedId);
     const approve = await cli(sb, ['memory', 'approve', proposedId]);
     expect(approve.code).toBe(0);
-    expect(approve.stdout).toContain('approved');
+    expect(approve.stdout).toContain('Approved rule "Run tests with vitest"');
 
     const list = json<{ id: string }[]>((await cli(sb, ['memory', 'list', '--json'])).stdout);
     expect(list.map((m) => m.id).sort()).toEqual([added.id, proposedId].sort());
@@ -297,7 +301,8 @@ describe('memory and rules', () => {
     expect(forget.code).toBe(0);
     const gone = await cli(sb, ['memory', 'show', added.id]);
     expect(gone.code).toBe(1);
-    expect(gone.stderr).toContain('not found');
+    expect(gone.stderr).toContain('No memory with id');
+    expect(gone.stderr).toContain('mindly memory list');
   });
 
   it('validates input', async () => {
@@ -442,11 +447,16 @@ describe('doctor, config, export, misc', () => {
     const secret = 'A'.repeat(43);
     writeFileSync(join(sb.mindlyHome, 'daemon.token'), `${secret}\n`, { mode: 0o600 });
     const r = await cli(sb, ['doctor']);
-    expect(r.stdout).toMatch(/ok\s+node/);
-    expect(r.stdout).toMatch(/ok\s+database\s+schema v\d+/);
-    expect(r.stdout).toMatch(/ok\s+claude-code\s+hooks and MCP server configured/);
-    expect(r.stdout).toMatch(/info\s+daemon\s+not running/);
-    expect(r.stdout).toContain('no project config');
+    expect(r.stdout).toMatch(/^Setup$/m);
+    expect(r.stdout).toMatch(/^Agents$/m);
+    expect(r.stdout).toMatch(/^Optional$/m);
+    expect(r.stdout).toMatch(/\[ok\] Node\.js \d+/);
+    expect(r.stdout).toContain('[ok] Database is up to date');
+    expect(r.stdout).toContain('[ok] Claude Code: connected (automatic capture and Mindly tools)');
+    expect(r.stdout).toContain('- Background service is not running');
+    expect(r.stdout).toContain('has no .mindly/config.json');
+    expect(r.stdout).toContain('[ok] Everything looks good.');
+    expect(r.stdout).not.toMatch(/schema v\d|hooks\/MCP|info /);
     expect(r.stdout).not.toContain(secret);
     expect(r.code).toBe(0);
     const j = json<{ ok: boolean; checks: { name: string }[] }>(
@@ -461,7 +471,7 @@ describe('doctor, config, export, misc', () => {
     expect((await cli(sb, ['config', 'get', 'hooks.timeoutMs'])).stdout.trim()).toBe('1000');
     const tooLow = await cli(sb, ['config', 'set', 'hooks.timeoutMs', '5']);
     expect(tooLow.code).toBe(1);
-    expect(tooLow.stderr).toContain('invalid value');
+    expect(tooLow.stderr).toContain('Invalid value for hooks.timeoutMs');
     expect((await cli(sb, ['config', 'set', 'hooks.nope', '1'])).code).toBe(1);
     expect((await cli(sb, ['config', 'set', '__proto__.polluted', '1'])).code).toBe(2);
     expect((await cli(sb, ['config', 'set', 'llm.provider', 'ollama'])).code).toBe(0);
@@ -502,7 +512,7 @@ describe('doctor, config, export, misc', () => {
     const sb = sandbox();
     const status = await cli(sb, ['status']);
     expect(status.code).toBe(0);
-    expect(status.stdout).toContain('No live agent sessions.');
+    expect(status.stdout).toMatch(/^Mindly - mindly-cli-repo-\w+ - All quiet\.$/m);
     expect(status.stdout).not.toContain('\u001b[');
     expect((await cli(sb, ['conflicts'])).stdout).toContain('No open conflicts.');
     expect((await cli(sb, ['standup', '--since', '24h'])).code).toBe(0);
@@ -510,10 +520,16 @@ describe('doctor, config, export, misc', () => {
     const snap = json<{ id: string }>(
       (await cli(sb, ['snapshot', 'create', 'before', '--json'])).stdout,
     );
-    expect((await cli(sb, ['snapshot', 'list'])).stdout).toContain(snap.id);
-    expect((await cli(sb, ['snapshot', 'diff', snap.id])).stdout).toContain('Memories added: 0');
+    const list = (await cli(sb, ['snapshot', 'list'])).stdout;
+    expect(list).toContain(`[${shortId(snap.id)}]`);
+    expect(list).not.toContain(snap.id);
+    expect((await cli(sb, ['snapshot', 'diff', shortId(snap.id)])).stdout).toContain(
+      'nothing changed',
+    );
     expect((await cli(sb, ['snapshot', 'restore', snap.id])).code).toBe(1);
-    expect((await cli(sb, ['daemon', 'status'])).stdout).toContain('Not running');
+    expect((await cli(sb, ['daemon', 'status'])).stdout).toContain(
+      "Mindly's background service is not running.",
+    );
     expect((await cli(sb, ['xray'])).code).toBe(1);
     expect((await cli(sb, ['handoff', '--summary', 'continue'])).code).toBe(1);
   });
