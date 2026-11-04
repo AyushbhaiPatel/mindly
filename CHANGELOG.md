@@ -15,6 +15,15 @@ All notable changes to `mindly-cli` are documented here. The project follows
   moved into `?` tooltips. Tables stack into label/value rows on phones.
 - Fonts are bundled (SIL OFL 1.1), so the dashboard still makes no external requests.
 
+### Fixed
+
+- Mission Control and `mindly status` now agree on what needs you: an open conflict that is more
+  than FYI. The dashboard used to count only critical conflicts.
+
+### Added
+
+- An animated demo in the README, generated from a real two-agent run (`pnpm demo`).
+
 ## 0.1.2 — 2026-11-04
 
 ### Changed
