@@ -10,6 +10,7 @@ import {
   createGeminiAdapter,
   createMcpClientAdapters,
   HOOK_AGENT_KINDS,
+  inspectClaudeCodeStatusLine,
   integrationOf,
   MCP_CLIENTS,
   McpClientAdapter,
@@ -47,11 +48,21 @@ export function userHome(env: NodeJS.ProcessEnv): string {
   return fromEnv && isAbsolute(fromEnv) ? fromEnv : homedir();
 }
 
-/** Adapters bound to the user's home and environment. */
-export function adaptersFor(env: NodeJS.ProcessEnv): Record<SupportedAgent, AgentAdapter> {
+/**
+ * Adapters bound to the user's home and environment. `statusLine: false` keeps the Claude Code
+ * adapter from adding its status line (an existing one is left as it is).
+ */
+export function adaptersFor(
+  env: NodeJS.ProcessEnv,
+  options: { statusLine?: boolean } = {},
+): Record<SupportedAgent, AgentAdapter> {
   const homeDir = userHome(env);
   return {
-    'claude-code': createClaudeCodeAdapter({ homeDir, env }),
+    'claude-code': createClaudeCodeAdapter({
+      homeDir,
+      env,
+      ...(options.statusLine !== undefined ? { statusLine: options.statusLine } : {}),
+    }),
     codex: createCodexAdapter({ homeDir, env }),
     cursor: createCursorAdapter({ homeDir, env }),
     gemini: createGeminiAdapter({ homeDir, env }),
@@ -205,13 +216,16 @@ interface SetupOptions {
   yes?: boolean;
   dryRun?: boolean;
   listAgents?: boolean;
+  /** `--no-statusline` sets this to false. */
+  statusline?: boolean;
 }
 
 /** `mindly init`. */
 export async function init(out: Out, o: SetupOptions): Promise<number> {
   if (o.listAgents) return listAgents(out);
   const env = out.io.env;
-  const all = adaptersFor(env);
+  const statusLine = o.statusline !== false;
+  const all = adaptersFor(env, { statusLine });
   const projectRoot = o.project ? await projectRootOf(out.io.cwd) : null;
   let agents = parseAgents(o.agents);
   if (agents === null) {
@@ -250,6 +264,16 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
   );
   out.line();
   const total = printPlan(out, plans, 'already configured');
+  const claudeStatusLine =
+    statusLine && agents.includes('claude-code')
+      ? await inspectClaudeCodeStatusLine(homeDir, projectRoot, command)
+      : null;
+  if (claudeStatusLine?.owner === 'other') {
+    out.line();
+    out.line(
+      `Claude Code already has a status line (${claudeStatusLine.file}), so Mindly leaves it alone. To see Mindly's counts there too, have your script also pipe its input to \`mindly statusline\` (see "Claude Code status line" in Mindly's README).`,
+    );
+  }
   if (o.dryRun) {
     out.line();
     out.line('Dry run: nothing was written.');

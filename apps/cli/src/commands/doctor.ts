@@ -6,7 +6,7 @@ import { MIGRATIONS, schemaVersion, Store } from '@mindly/store';
 import { withProject } from '../context.js';
 import { clean, type Out } from '../util.js';
 import { runningDaemon } from './daemon.js';
-import { McpClientAdapter } from '@mindly/adapters';
+import { inspectClaudeCodeStatusLine, McpClientAdapter } from '@mindly/adapters';
 import { adapterOf, adaptersFor, installCommand, SUPPORTED_AGENTS, userHome } from './setup.js';
 import type { Step } from '../present/index.js';
 import { renderDoctor, type DoctorItem } from '../views/doctor.js';
@@ -41,6 +41,42 @@ function item(
 ): DoctorItem {
   if (typeof fix === 'string') fix = { why: fix };
   return { check, group, text, fix };
+}
+
+/** Whether Claude Code's status line (for this project, or user-wide) shows Mindly. */
+async function claudeStatusLineCheck(
+  homeDir: string,
+  projectRoot: string | null,
+  command: readonly string[],
+): Promise<DoctorItem> {
+  const found = await inspectClaudeCodeStatusLine(homeDir, projectRoot, command);
+  if (found.owner === 'mindly') {
+    return item(
+      {
+        name: 'claude-code-statusline',
+        status: 'ok',
+        detail: `mindly statusline in ${found.file}`,
+      },
+      'Agents',
+      "Claude Code's status line shows Mindly's rules, updates and conflicts",
+    );
+  }
+  if (found.owner === 'other') {
+    return item(
+      {
+        name: 'claude-code-statusline',
+        status: 'info',
+        detail: `your own status line in ${found.file}`,
+      },
+      'Optional',
+      `Claude Code uses your own status line (${found.file}); add \`mindly statusline\` to it to see Mindly's counts there`,
+    );
+  }
+  return item(
+    { name: 'claude-code-statusline', status: 'info', detail: 'no status line' },
+    'Optional',
+    "Claude Code has no status line; mindly init --agents claude-code adds Mindly's",
+  );
 }
 
 function permissionChecks(paths: HomePaths): DoctorItem[] {
@@ -293,7 +329,8 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
     }
   }
 
-  const adapters = adaptersFor(env);
+  // The status line is optional, so it does not decide whether an agent counts as connected.
+  const adapters = adaptersFor(env, { statusLine: false });
   const command = await installCommand(env);
   // Mindly may be installed user-wide or only for this project (`init --project`).
   let projectRoot: string | null;
@@ -359,6 +396,10 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
             `${label} is not installed`,
           ),
         );
+      }
+      const connected = userSteps.length === 0 || projectSteps?.length === 0;
+      if (kind === 'claude-code' && connected) {
+        items.push(await claudeStatusLineCheck(userHome(env), projectRoot, command));
       }
     } catch (err) {
       items.push(

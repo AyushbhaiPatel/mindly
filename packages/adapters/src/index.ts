@@ -14,6 +14,14 @@ export {
 } from './claude-code/index.js';
 export type { ClaudeCodeAdapterOptions } from './claude-code/index.js';
 export {
+  inspectClaudeCodeStatusLine,
+  isMindlyStatusLine,
+  parseClaudeCodeStatusLine,
+  STATUS_LINE_REFRESH_SEC,
+  statusLineSetting,
+} from './claude-code/statusline.js';
+export type { ClaudeCodeStatusLine, StatusLineInput } from './claude-code/statusline.js';
+export {
   CODEX_EVENTS,
   CODEX_TOOL_MATCHER,
   codexAdapter,

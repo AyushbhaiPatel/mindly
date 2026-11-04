@@ -128,6 +128,32 @@ automatically. MCP-only clients get Mindly's tools but no automatic capture, so 
 `init` edits only the `mindly` entry in each config file and keeps comments, other servers and
 formatting as they are.
 
+### Claude Code status line
+
+`init` also gives Claude Code a [status line](https://code.claude.com/docs/en/statusline) with
+Mindly at a glance:
+
+```
+mindly · 3 rules · 1 update · 0 conflicts
+```
+
+That is the approved rules in effect for the session (branch-scoped rules only on their branch),
+updates from other agents waiting for this session, and open conflicts that need you. It reads the
+local database directly (no daemon needed), never writes, refreshes every 10 seconds, and prints
+just `mindly` if anything is wrong, so the status line never breaks.
+
+If you already have a status line, `init` leaves it alone. To show both, pipe the same input to
+`mindly statusline` from your script:
+
+```bash
+#!/bin/bash
+input=$(cat)
+mine=$(printf '%s' "$input" | ~/.claude/my-statusline.sh)
+printf '%s · %s\n' "$mine" "$(printf '%s' "$input" | mindly statusline)"
+```
+
+Use `mindly init --no-statusline` to skip it; `mindly uninstall` removes only Mindly's own entry.
+
 ### Other MCP clients
 
 For a client not in the list, add a stdio server to its MCP config. Most use this shape (run
@@ -227,6 +253,7 @@ mindly replay --prompt "…" --agents claude-code,codex
 mindly trust                        # review and allow this repo's .mindly/config.json checks
 mindly export | forget              # your data, as JSON or gone
 mindly doctor | config | daemon start|stop|status
+mindly statusline                   # Claude Code status line (installed by init)
 ```
 
 Every read command takes `--json`. Run `mindly <command> --help` for options.

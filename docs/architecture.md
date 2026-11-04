@@ -200,6 +200,9 @@ dropped with an event.
 - **Hooks** run `mindly hook <agent> <event>`; JSON in on stdin, JSON out on stdout. Hard timeout,
   fail-open.
 - **MCP** runs `mindly mcp` over stdio, spawned by the agent.
+- **Status line** (Claude Code) runs `mindly statusline` every few seconds; session JSON in on
+  stdin, one line out. It opens the database read-only, skips the command parser, never writes and
+  always exits 0.
 - **Daemon** listens on `127.0.0.1` only. See [security.md](security.md) for its authentication.
 
 ## Future: cloud sync

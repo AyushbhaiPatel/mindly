@@ -24,6 +24,12 @@ import {
 import type { PlanMode } from '../shared/plan.js';
 import { compactSteps, planJsonFile, validateInstallOptions } from '../shared/plan.js';
 import { isRecord } from '../shared/payload.js';
+import {
+  isMindlyStatusLine,
+  readStatusLine,
+  statusLineSetting,
+  statusLineSettingsFiles,
+} from './statusline.js';
 
 const KIND = 'claude-code';
 
@@ -76,6 +82,11 @@ function hookSpecs(command: readonly string[]): HookSpec[] {
 export interface ClaudeCodeAdapterOptions {
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Install Mindly's status line (default true). It is only added where no other status line
+   * applies; false leaves any existing `statusLine` untouched. Uninstall always removes Mindly's.
+   */
+  statusLine?: boolean;
 }
 
 /** Config files touched by the Claude Code installer. */
@@ -92,15 +103,41 @@ export function claudeCodePaths(options: InstallOptions): { settings: string; mc
   };
 }
 
-async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallStep[]> {
+/**
+ * Whether install may add Mindly's status line: never when a settings file of the scope (the
+ * target itself, the user's settings or the project's local settings) has a status line of the
+ * user's own, because Mindly's would replace it, hide it or be hidden by it.
+ */
+async function mayAddStatusLine(options: InstallOptions): Promise<boolean> {
+  const files = statusLineSettingsFiles(options.homeDir, options.projectRoot);
+  const found = await Promise.all(files.map((f) => readStatusLine(f, options.command)));
+  return !found.some((s) => s.owner === 'other');
+}
+
+async function plan(
+  options: InstallOptions,
+  mode: PlanMode,
+  statusLine: boolean,
+): Promise<InstallStep[]> {
   validateInstallOptions(options);
   const paths = claudeCodePaths(options);
   const install = mode === 'install';
+  const withStatusLine = install && statusLine;
+  const addStatusLine = withStatusLine && (await mayAddStatusLine(options));
   const settings = await planJsonFile(
     paths.settings,
-    install ? 'Register Mindly hooks for Claude Code' : 'Remove Mindly hooks from Claude Code',
+    install
+      ? `Register Mindly hooks${addStatusLine ? ' and status line' : ''} for Claude Code`
+      : 'Remove Mindly hooks from Claude Code',
     mode,
     (config) => {
+      const current = config['statusLine'];
+      if (isMindlyStatusLine(current, options.command)) {
+        if (withStatusLine) config['statusLine'] = statusLineSetting(options.command);
+        else if (!install) Reflect.deleteProperty(config, 'statusLine');
+      } else if ((current === undefined || current === null) && addStatusLine) {
+        config['statusLine'] = statusLineSetting(options.command);
+      }
       if (!install && !isRecord(config['hooks'])) return;
       const hooks = hooksObject(config, paths.settings);
       removeGroupedHooks(hooks, KIND);
@@ -134,8 +171,9 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
 }
 
 /**
- * Creates the Claude Code adapter. Hooks go in `.claude/settings.json` (user or project) and the
- * MCP server in `~/.claude.json` (user scope) or `<project>/.mcp.json` (project scope).
+ * Creates the Claude Code adapter. Hooks and the status line go in `.claude/settings.json` (user
+ * or project) and the MCP server in `~/.claude.json` (user scope) or `<project>/.mcp.json`
+ * (project scope).
  */
 export function createClaudeCodeAdapter(opts: ClaudeCodeAdapterOptions = {}): AgentAdapter {
   return {
@@ -161,8 +199,8 @@ export function createClaudeCodeAdapter(opts: ClaudeCodeAdapterOptions = {}): Ag
         ]),
       });
     },
-    planInstall: (options) => plan(options, 'install'),
-    planUninstall: (options) => plan(options, 'uninstall'),
+    planInstall: (options) => plan(options, 'install', opts.statusLine ?? true),
+    planUninstall: (options) => plan(options, 'uninstall', false),
   };
 }
 
