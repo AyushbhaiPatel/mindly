@@ -47,8 +47,9 @@ function item(
 async function claudeStatusLineCheck(
   homeDir: string,
   projectRoot: string | null,
+  command: readonly string[],
 ): Promise<DoctorItem> {
-  const found = await inspectClaudeCodeStatusLine(homeDir, projectRoot);
+  const found = await inspectClaudeCodeStatusLine(homeDir, projectRoot, command);
   if (found.owner === 'mindly') {
     return item(
       {
@@ -398,7 +399,7 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
       }
       const connected = userSteps.length === 0 || projectSteps?.length === 0;
       if (kind === 'claude-code' && connected) {
-        items.push(await claudeStatusLineCheck(userHome(env), projectRoot));
+        items.push(await claudeStatusLineCheck(userHome(env), projectRoot, command));
       }
     } catch (err) {
       items.push(

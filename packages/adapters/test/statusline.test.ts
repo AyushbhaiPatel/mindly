@@ -31,9 +31,17 @@ function statusLineOf(file: string): unknown {
 describe('isMindlyStatusLine', () => {
   it.each([
     ['mindly statusline', true],
-    ["'/opt/my tools/mindly' --profile 'it'\\''s' statusline", true],
+    ['/usr/local/bin/mindly statusline', true],
+    ["'/Users/me/my tools/mindly' statusline", true],
     ['/usr/bin/node /x/node_modules/mindly-cli/dist/main.js statusline', true],
     ['/usr/bin/node /src/repo/apps/cli/dist/main.js statusline', true],
+    ["'/opt/my tools/mindly' --profile 'it'\\''s' statusline", false],
+    ['sh status.sh | mindly statusline', false],
+    ['~/.claude/status.sh && mindly statusline', false],
+    ['mindly statusline; echo hi', false],
+    ['$HOME/bin/mindly statusline', false],
+    ['mindly statusline --verbose', false],
+    ['/usr/bin/node /tmp/evil.js statusline', false],
     ['mindly statusline | tee x', false],
     ['~/.claude/statusline.sh', false],
     ['npx ccstatusline@latest', false],
@@ -41,6 +49,14 @@ describe('isMindlyStatusLine', () => {
     ['statusline', false],
   ])('%s -> %s', (command, expected) => {
     expect(isMindlyStatusLine({ type: 'command', command })).toBe(expected);
+  });
+
+  it('accepts the exact command for the current launcher, extra arguments included', () => {
+    const command = `'/opt/my tools/mindly' --profile 'it'\\''s' statusline`;
+    expect(isMindlyStatusLine({ type: 'command', command }, COMMAND)).toBe(true);
+    expect(isMindlyStatusLine({ type: 'command', command: `${command} | cat` }, COMMAND)).toBe(
+      false,
+    );
   });
 
   it('rejects non-objects', () => {
@@ -86,15 +102,19 @@ describe('claude-code status line install', () => {
       command: `'/opt/my tools/mindly' --profile 'it'\\''s' statusline`,
       refreshInterval: 10,
     });
-    expect(await inspectClaudeCodeStatusLine(home, null)).toMatchObject({
+    expect(await inspectClaudeCodeStatusLine(home, null, COMMAND)).toMatchObject({
       owner: 'mindly',
       file: settings,
     });
 
-    // A new launcher path (e.g. a Node upgrade) rewrites Mindly's own entry.
+    applyInstallSteps(await claude.planUninstall(opts(home)));
+    expect(statusLineOf(settings)).toBeUndefined();
+
+    // A new launcher path (e.g. a reinstall elsewhere) rewrites Mindly's own entry, and uninstall
+    // recognises an entry written by an earlier launcher.
+    applyInstallSteps(await claude.planInstall({ ...opts(home), command: ['/old/bin/mindly'] }));
     applyInstallSteps(await claude.planInstall({ ...opts(home), command: ['/new/mindly'] }));
     expect(statusLineOf(settings)).toMatchObject({ command: '/new/mindly statusline' });
-
     applyInstallSteps(await claude.planUninstall(opts(home)));
     expect(statusLineOf(settings)).toBeUndefined();
   });
@@ -116,6 +136,20 @@ describe('claude-code status line install', () => {
     });
     applyInstallSteps(await claude.planUninstall(opts(home)));
     expect(statusLineOf(settings)).toEqual(OWN);
+  });
+
+  it("treats a user status line that pipes into mindly statusline as the user's own", async () => {
+    const home = tempDir();
+    const settings = join(home, '.claude', 'settings.json');
+    const piped = { type: 'command', command: 'sh ~/.claude/status.sh | mindly statusline' };
+    write(settings, { statusLine: piped });
+    applyInstallSteps(await claude.planInstall(opts(home)));
+    expect(statusLineOf(settings)).toEqual(piped);
+    expect(await inspectClaudeCodeStatusLine(home, null, COMMAND)).toMatchObject({
+      owner: 'other',
+    });
+    applyInstallSteps(await claude.planUninstall(opts(home)));
+    expect(statusLineOf(settings)).toEqual(piped);
   });
 
   it("does not add a project status line that would hide the user's own", async () => {

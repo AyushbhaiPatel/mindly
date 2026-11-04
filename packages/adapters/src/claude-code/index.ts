@@ -110,7 +110,7 @@ export function claudeCodePaths(options: InstallOptions): { settings: string; mc
  */
 async function mayAddStatusLine(options: InstallOptions): Promise<boolean> {
   const files = statusLineSettingsFiles(options.homeDir, options.projectRoot);
-  const found = await Promise.all(files.map(readStatusLine));
+  const found = await Promise.all(files.map((f) => readStatusLine(f, options.command)));
   return !found.some((s) => s.owner === 'other');
 }
 
@@ -132,7 +132,7 @@ async function plan(
     mode,
     (config) => {
       const current = config['statusLine'];
-      if (isMindlyStatusLine(current)) {
+      if (isMindlyStatusLine(current, options.command)) {
         if (withStatusLine) config['statusLine'] = statusLineSetting(options.command);
         else if (!install) Reflect.deleteProperty(config, 'statusLine');
       } else if ((current === undefined || current === null) && addStatusLine) {

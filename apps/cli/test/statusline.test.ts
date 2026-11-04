@@ -113,6 +113,20 @@ describe('statusline setup', () => {
     expect(settingsOf(sb)['statusLine']).toEqual(OWN);
   });
 
+  it('keeps a user status line that pipes into mindly statusline through init and uninstall', async () => {
+    const sb = sandbox();
+    mkdirSync(join(sb.home, '.claude'));
+    const piped = { type: 'command', command: 'sh ~/.claude/status.sh | mindly statusline' };
+    writeFileSync(join(sb.home, '.claude', 'settings.json'), JSON.stringify({ statusLine: piped }));
+    const init = await cli(sb, ['init', '--yes', '--agents', 'claude-code']);
+    expect(init.code).toBe(0);
+    expect(init.stdout).toContain('Claude Code already has a status line');
+    expect(settingsOf(sb)['statusLine']).toEqual(piped);
+    const un = await cli(sb, ['uninstall', '--yes', '--agents', 'claude-code']);
+    expect(un.code).toBe(0);
+    expect(settingsOf(sb)['statusLine']).toEqual(piped);
+  });
+
   it('init --no-statusline connects Claude Code without it', async () => {
     const sb = sandbox();
     mkdirSync(join(sb.home, '.claude'));

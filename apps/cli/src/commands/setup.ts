@@ -266,7 +266,7 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
   const total = printPlan(out, plans, 'already configured');
   const claudeStatusLine =
     statusLine && agents.includes('claude-code')
-      ? await inspectClaudeCodeStatusLine(homeDir, projectRoot)
+      ? await inspectClaudeCodeStatusLine(homeDir, projectRoot, command)
       : null;
   if (claudeStatusLine?.owner === 'other') {
     out.line();

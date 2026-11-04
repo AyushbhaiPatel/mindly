@@ -23,14 +23,55 @@ export function statusLineSetting(command: readonly string[]): Record<string, un
 }
 
 /**
- * True when a `statusLine` settings value is one Mindly installed: a command whose last word is
- * `statusline` (bare or single-quoted) and that runs Mindly (`mindly` or the CLI's
- * `cli/dist/main.js`).
+ * Splits a command into words when it uses only the quoting {@link shellJoin} produces (bare safe
+ * characters and single-quoted segments). Returns null for anything else: pipes, redirections,
+ * variables, other quoting.
  */
-export function isMindlyStatusLine(value: unknown): boolean {
-  if (!isRecord(value) || typeof value['command'] !== 'string') return false;
-  const m = /^(.*\S)\s+'?statusline'?$/s.exec(value['command'].trim());
-  return m !== null && /mindly|[\\/]cli[\\/]dist[\\/]main\.js/i.test(m[1] as string);
+function shellWords(command: string): string[] | null {
+  const words: string[] = [];
+  const re = /\s+|[A-Za-z0-9_@%+=:,./-]+|'[^']*'|\\'/gy;
+  let word: string | null = null;
+  let consumed = 0;
+  for (const m of command.matchAll(re)) {
+    if (m.index !== consumed) return null;
+    consumed += m[0].length;
+    const token = m[0];
+    if (/^\s/.test(token)) {
+      if (word !== null) words.push(word);
+      word = null;
+    } else {
+      const text = token === "\\'" ? "'" : token.startsWith("'") ? token.slice(1, -1) : token;
+      word = (word ?? '') + text;
+    }
+  }
+  if (consumed !== command.length) return null;
+  if (word !== null) words.push(word);
+  return words;
+}
+
+/**
+ * True when a `statusLine` settings value is exactly one Mindly writes: `<launcher> statusline`
+ * and nothing else, where the launcher is `command` (the current one) or one Mindly may have
+ * written before: a `mindly` executable, or Node running the CLI's `dist/main.js`. A user's
+ * own command that merely calls `mindly statusline` (in a pipe, a script, with extra arguments)
+ * is not Mindly's.
+ */
+export function isMindlyStatusLine(value: unknown, command?: readonly string[]): boolean {
+  if (!isRecord(value) || value['type'] !== 'command' || typeof value['command'] !== 'string') {
+    return false;
+  }
+  const text = value['command'].trim();
+  if (command !== undefined && text === statusLineSetting(command)['command']) return true;
+  const words = shellWords(text);
+  if (words === null || words.at(-1) !== 'statusline') return false;
+  const base = (p: string) => p.split(/[\\/]/).pop() ?? '';
+  const launcher = words.slice(0, -1);
+  if (launcher.length === 1) return /^mindly(\.cmd|\.exe)?$/.test(base(launcher[0] as string));
+  return (
+    launcher.length === 2 &&
+    /^node(\.exe)?$/.test(base(launcher[0] as string)) &&
+    /[\\/](mindly-cli|apps[\\/]cli)[\\/]dist[\\/]main\.js$/.test(launcher[1] as string)
+  );
 }
 
 /** The status line Claude Code would use, and whose it is. */
@@ -64,16 +105,20 @@ export function statusLineSettingsFiles(homeDir: string, projectRoot: string | n
 export async function inspectClaudeCodeStatusLine(
   homeDir: string,
   projectRoot: string | null,
+  launcher?: readonly string[],
 ): Promise<ClaudeCodeStatusLine> {
   for (const file of statusLineSettingsFiles(homeDir, projectRoot)) {
-    const found = await readStatusLine(file);
+    const found = await readStatusLine(file, launcher);
     if (found.owner !== null) return found;
   }
   return { owner: null, file: null, command: null };
 }
 
 /** The status line one settings file defines; a missing or unreadable file defines none. */
-export async function readStatusLine(file: string): Promise<ClaudeCodeStatusLine> {
+export async function readStatusLine(
+  file: string,
+  launcher?: readonly string[],
+): Promise<ClaudeCodeStatusLine> {
   let value: unknown;
   try {
     value = parseJsonConfig(file, await readConfigText(file))['statusLine'];
@@ -82,7 +127,7 @@ export async function readStatusLine(file: string): Promise<ClaudeCodeStatusLine
   }
   if (value === undefined || value === null) return { owner: null, file: null, command: null };
   const command = isRecord(value) && typeof value['command'] === 'string' ? value['command'] : null;
-  return { owner: isMindlyStatusLine(value) ? 'mindly' : 'other', file, command };
+  return { owner: isMindlyStatusLine(value, launcher) ? 'mindly' : 'other', file, command };
 }
 
 /** What `mindly statusline` reads from Claude Code's status line JSON. */
