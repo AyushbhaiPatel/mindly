@@ -1,0 +1,26 @@
+{
+  "name": "@synapse/runners",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Headless agent runs (cross-agent review, A/B replay, opt-in failover launch) for Synapse.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@synapse/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@synapse/core": "workspace:*",
+    "@synapse/git": "workspace:*",
+    "zod": "4.6.7"
+  }
+}
