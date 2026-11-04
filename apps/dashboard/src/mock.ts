@@ -1075,6 +1075,7 @@ export function createMockClient(): MindlyClient {
           proposedMemories: pm.filter(
             (m) => m.trust === 'proposed' && m.kind !== 'rule' && m.status === 'active',
           ).length,
+          openConflicts: pc.filter((c) => c.status === 'open' && c.severity !== 'info').length,
           criticalConflicts: pc.filter((c) => c.severity === 'critical' && c.status === 'open')
             .length,
           pendingHandoffs: byProject(handoffs, id).filter((h) => h.status === 'pending').length,

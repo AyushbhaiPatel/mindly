@@ -1,4 +1,5 @@
 import {
+  conflictNeedsUser,
   shortId,
   type Conflict,
   type Handoff,
@@ -52,7 +53,7 @@ export interface StatusData {
 /** Number of items in "Needs you". */
 export function needsYouCount(d: StatusData): number {
   return (
-    d.conflicts.length +
+    d.conflicts.filter(conflictNeedsUser).length +
     d.proposed.length +
     d.handoffs.length +
     (d.config === 'untrusted' || d.config === 'invalid' ? 1 : 0)
@@ -133,9 +134,9 @@ export function renderStatus(sc: Screen, d: StatusData): void {
       text: "This project's .mindly/config.json is not trusted yet, so its checks do not run",
     });
   }
-  const conflicts = [...d.conflicts].sort(
-    (a, b) => (b.severity === 'critical' ? 1 : 0) - (a.severity === 'critical' ? 1 : 0),
-  );
+  const conflicts = d.conflicts
+    .filter(conflictNeedsUser)
+    .sort((a, b) => (b.severity === 'critical' ? 1 : 0) - (a.severity === 'critical' ? 1 : 0));
   for (const c of conflicts) {
     needs.push({
       marker: conflictMarker(c),

@@ -432,3 +432,11 @@ export interface MindlyEvent {
   payload: Record<string, unknown>;
   createdAt: number;
 }
+
+/**
+ * Whether a conflict should be listed under "Needs you": it is open (nobody has marked it seen)
+ * and it is more than an FYI. Shared by the CLI, the daemon and Mission Control so they agree.
+ */
+export function conflictNeedsUser(c: Pick<Conflict, 'status' | 'severity'>): boolean {
+  return c.status === 'open' && c.severity !== 'info';
+}
