@@ -1,0 +1,15 @@
+// User settings for Gemini CLI
+{
+  "general": { "vimMode": true },
+  /* servers used every day */
+  "mcpServers": {
+    // keep this one
+    "other": {"command": "python", "args": ["-m", "my_server"], "timeout": 30000, "trust": false}, // trailing comment
+  },
+  "hooks": {
+    // my own audit hook
+    "BeforeTool": [
+      {"matcher": "run_shell_command", "hooks": [{"type": "command", "command": "/usr/local/bin/audit.sh"}]},
+    ],
+  },
+}

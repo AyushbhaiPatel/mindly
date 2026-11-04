@@ -1,7 +1,7 @@
 # Mindly architecture
 
 Mindly is a local-first memory and coordination layer for coding agents (Claude Code, Codex,
-Cursor and anything that speaks MCP). It keeps every agent working on a project aware of the
+Cursor, Gemini CLI and anything that speaks MCP). It keeps every agent working on a project aware of the
 project's knowledge, of what the other agents are doing right now, and of what changed that
 affects them.
 
@@ -81,7 +81,7 @@ scheduled background work.
 | `packages/notify`   | Pager channels (desktop, ntfy, webhook); off by default                        |
 | `packages/runners`  | Headless agent runs for replay, cross-agent review and opt-in failover         |
 | `packages/mcp`      | MCP server exposing Mindly tools to any MCP client                             |
-| `packages/adapters` | Per-agent installers and hook translators (Claude Code, Codex, Cursor)         |
+| `packages/adapters` | Per-agent installers and hook translators (Claude Code, Codex, Cursor, Gemini) |
 | `apps/cli`          | `mindly` command; the only published package (`mindly-cli`)                    |
 | `apps/daemon`       | Local HTTP/WebSocket server for Mission Control and background jobs            |
 | `apps/dashboard`    | Mission Control single-page app, served by the daemon                          |

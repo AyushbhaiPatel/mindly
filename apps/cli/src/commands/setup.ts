@@ -7,6 +7,7 @@ import {
   createClaudeCodeAdapter,
   createCodexAdapter,
   createCursorAdapter,
+  createGeminiAdapter,
   createMcpClientAdapters,
   HOOK_AGENT_KINDS,
   integrationOf,
@@ -53,6 +54,7 @@ export function adaptersFor(env: NodeJS.ProcessEnv): Record<SupportedAgent, Agen
     'claude-code': createClaudeCodeAdapter({ homeDir, env }),
     codex: createCodexAdapter({ homeDir, env }),
     cursor: createCursorAdapter({ homeDir, env }),
+    gemini: createGeminiAdapter({ homeDir, env }),
     ...createMcpClientAdapters({ homeDir, env }),
   };
 }

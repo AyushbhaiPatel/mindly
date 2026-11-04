@@ -107,9 +107,9 @@ agents as usual; there is nothing else to run. `mindly doctor` checks the setup 
 | Claude Code              | hooks + MCP | tested end to end                                |
 | Codex CLI                | hooks + MCP | supported (approve the hooks once with `/hooks`) |
 | Cursor                   | hooks + MCP | supported                                        |
+| Gemini CLI               | hooks + MCP | supported                                        |
 | Windsurf                 | MCP tools   | supported                                        |
 | Kiro                     | MCP tools   | supported                                        |
-| Gemini CLI               | MCP tools   | supported                                        |
 | VS Code (GitHub Copilot) | MCP tools   | supported                                        |
 | Cline                    | MCP tools   | supported                                        |
 | Roo Code                 | MCP tools   | supported                                        |

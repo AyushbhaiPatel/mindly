@@ -120,6 +120,17 @@ function pretty(value: unknown, indent: string, options: FormattingOptions): str
     .join((options.eol ?? '\n') + indent);
 }
 
+/** An object property line (`"key": value`) or, with `key` null, an array element. */
+function entryText(
+  key: string | null,
+  value: unknown,
+  indent: string,
+  options: FormattingOptions,
+): string {
+  const text = pretty(value, indent, options);
+  return key === null ? text : `${JSON.stringify(key)}: ${text}`;
+}
+
 interface LineTail {
   /** Offset of a comma following the node on the same line. */
   comma: number | null;
@@ -156,11 +167,14 @@ function lineTail(text: string, offset: number): LineTail {
   }
 }
 
-/** Edits that add property `key` = `value` to the object `obj`, or null to fall back. */
+/**
+ * Edits that add property `key` = `value` to the object `obj` (or, with `key` null, append `value`
+ * to the array `obj`), or null to fall back.
+ */
 function insertEdits(
   body: string,
   obj: Node,
-  key: string,
+  key: string | null,
   value: unknown,
   options: FormattingOptions,
 ): Edit[] | null {
@@ -172,7 +186,7 @@ function insertEdits(
     if (inner.trim() !== '') return null;
     const outer = lineIndent(body, obj.offset);
     const indent = outer + unitOf(options);
-    const entry = `${JSON.stringify(key)}: ${pretty(value, indent, options)}`;
+    const entry = entryText(key, value, indent, options);
     return [
       {
         offset: obj.offset + 1,
@@ -186,7 +200,7 @@ function insertEdits(
   const tail = lineTail(body, end);
   if (tail.lineBreak === null) return null;
   const indent = lineIndent(body, last.offset);
-  const entry = `${JSON.stringify(key)}: ${pretty(value, indent, options)}`;
+  const entry = entryText(key, value, indent, options);
   const edits: Edit[] = [];
   if (tail.comma === null) edits.push({ offset: end, length: 0, content: ',' });
   // A trailing comma after the last property (JSONC style) is repeated on the new last one.
@@ -198,7 +212,10 @@ function insertEdits(
   return edits;
 }
 
-/** Edits that remove the property node `prop` from its object `obj`, or null to fall back. */
+/**
+ * Edits that remove the property node `prop` from its object `obj` (or the element `prop` from
+ * the array `obj`), or null to fall back.
+ */
 function removeEdits(body: string, obj: Node, prop: Node): Edit[] | null {
   const children = obj.children ?? [];
   const index = children.indexOf(prop);
@@ -330,6 +347,56 @@ export function removeJsoncValue(
     ) {
       result = removeJsoncValue(file, result, format, parent);
     }
+  }
+  return result;
+}
+
+/**
+ * Edits one element of the array at `path`: `index` null appends `value`, `value` undefined
+ * removes the element at `index`, anything else replaces it. The other elements, and the
+ * comments around them, keep their bytes. The array must already exist.
+ */
+export function editJsoncArrayItem(
+  file: string,
+  text: string,
+  format: McpConfigFormat,
+  path: readonly string[],
+  index: number | null,
+  value: unknown,
+): string {
+  const { body, bom, root } = parseText(file, text, format);
+  const array = root === undefined ? undefined : findNodeAtLocation(root, [...path]);
+  if (array?.type !== 'array') {
+    throw new MindlyError('invalid_input', `"${path.join('.')}" in ${file} is not an array`);
+  }
+  const children = array.children ?? [];
+  const at = index ?? children.length;
+  const child = children[at];
+  const expected = [...(getNodeValue(array) as unknown[])];
+  let edits: Edit[] | null;
+  if (index === null) {
+    expected.push(value);
+    edits = insertEdits(body, array, null, value, detectFormatting(body));
+  } else if (child === undefined) {
+    throw new MindlyError('internal', `no element ${at} in ${path.join('.')} of ${file}`);
+  } else if (value === undefined) {
+    expected.splice(at, 1);
+    edits = removeEdits(body, array, child);
+  } else {
+    expected[at] = value;
+    const indent = lineIndent(body, child.offset);
+    edits = [
+      {
+        offset: child.offset,
+        length: child.length,
+        content: pretty(value, indent, detectFormatting(body)),
+      },
+    ];
+  }
+  edits ??= modify(body, [...path, at], value, { isArrayInsertion: index === null });
+  const result = bom + applyEdits(body, edits);
+  if (!sameJson(readJsoncValue(file, result, format, path), expected)) {
+    throw new MindlyError('internal', `could not update ${file} safely`);
   }
   return result;
 }
