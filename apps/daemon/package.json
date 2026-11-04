@@ -22,7 +22,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@fastify/static": "10.1.6",
+    "@fastify/static": "10.1.10",
     "@fastify/websocket": "11.3.4",
     "@mindly/core": "workspace:*",
     "@mindly/engine": "workspace:*",
