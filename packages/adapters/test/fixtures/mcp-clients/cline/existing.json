@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "other": {
+      "command": "node",
+      "args": [
+        "/srv/weather/build/index.js"
+      ],
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "other": {
+      "command": "uvx",
+      "args": [
+        "awslabs.aws-documentation-mcp-server@latest"
+      ],
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}

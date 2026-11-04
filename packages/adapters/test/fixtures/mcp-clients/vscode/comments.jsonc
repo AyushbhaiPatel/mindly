@@ -1,0 +1,8 @@
+// User settings for vscode
+{
+  /* servers used every day */
+  "servers": {
+    // keep this one
+    "other": {"type": "stdio", "command": "npx", "args": ["-y", "@playwright/mcp"]}, // trailing comment
+  },
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "theme": "opencode",
+  "mcp": {
+    "other": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-everything"
+      ],
+      "enabled": true
+    }
+  }
+}
