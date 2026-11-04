@@ -1,0 +1,13 @@
+{
+  "session_id": "00893aaf-19fa-41d2-8238-13269b9b3ca0",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-shop/00893aaf-19fa-41d2-8238-13269b9b3ca0.jsonl",
+  "cwd": "/Users/dev/shop",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/Users/dev/shop/src/new.ts",
+    "content": "export const x = 1;\n"
+  },
+  "tool_use_id": "toolu_01ABC125"
+}

@@ -1,0 +1,13 @@
+{
+  "session_id": "00893aaf-19fa-41d2-8238-13269b9b3ca0",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-shop/00893aaf-19fa-41d2-8238-13269b9b3ca0.jsonl",
+  "cwd": "/Users/dev/shop",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "pnpm build"
+  },
+  "tool_use_id": "toolu_01ABC129",
+  "error": "Command failed with exit code 2: src/checkout.ts(4,3): error TS2304"
+}

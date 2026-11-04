@@ -31,6 +31,11 @@ export interface FileEdit {
 export interface NormalizedHookEvent {
   agentKind: AgentKind;
   event: HookEventName;
+  /**
+   * The agent's native event name as received by the adapter (e.g. `PostToolUseFailure`). Lets
+   * `render` answer with the exact event name when several native events map to one `event`.
+   */
+  nativeEvent?: string;
   /** The agent's own session id. */
   externalSessionId: string;
   /** Working directory reported by the agent. */
