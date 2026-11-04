@@ -1,21 +1,29 @@
 import { duration, readReplay, readReview, readShadowMerge, SEVERITY_ORDER } from '../format';
 import type { Run } from '../types';
+import { productName, runStatusWords } from '../vocab';
 import { Empty, Mono, SeverityBadge, Status, cx } from './ui';
 
 export function ShadowMergeResult({ run, compact }: { run: Run; compact?: boolean }) {
   const r = readShadowMerge(run);
   if (!run.result)
     return (
-      <Empty>{run.status === 'queued' ? 'Waiting to start…' : 'Merging and running checks…'}</Empty>
+      <Empty>
+        {run.status === 'queued'
+          ? 'Waiting to start. Results appear here when it finishes.'
+          : 'Combining the agents’ work and running the checks…'}
+      </Empty>
     );
   return (
     <div className="stack">
       <div className="kv-row">
-        <span className="kv-label">Merge</span>
+        <span className="kv-label">Combining the work</span>
         {r.conflictedPaths.length === 0 ? (
-          <span className="tag tone-good">clean</span>
+          <span className="tag tone-good">no overlapping changes</span>
         ) : (
-          <span className="tag tone-bad">{r.conflictedPaths.length} conflicted</span>
+          <span className="tag tone-bad">
+            {r.conflictedPaths.length} {r.conflictedPaths.length === 1 ? 'file' : 'files'} with
+            overlapping changes
+          </span>
         )}
         {r.conflictedPaths.map((p) => (
           <Mono key={p}>{p}</Mono>
@@ -27,11 +35,13 @@ export function ShadowMergeResult({ run, compact }: { run: Run; compact?: boolea
             <li key={c.name} className={cx('check', c.ok ? 'check-ok' : 'check-bad')}>
               <div className="check-head">
                 <span className={cx('tag', c.ok ? 'tone-good' : 'tone-bad')}>
-                  {c.ok ? 'pass' : 'fail'}
+                  {c.ok ? 'passed' : 'failed'}
                 </span>
                 <Mono>{c.name}</Mono>
-                {c.exitCode !== null && <span className="muted">exit {c.exitCode}</span>}
-                <span className="muted">{duration(c.durationMs)}</span>
+                {c.exitCode !== null && !c.ok && (
+                  <span className="muted">exit code {c.exitCode}</span>
+                )}
+                <span className="muted">took {duration(c.durationMs)}</span>
               </div>
               {c.outputTail && (!compact || !c.ok) && (
                 <pre className="pre pre-tail">{c.outputTail}</pre>
@@ -46,7 +56,7 @@ export function ShadowMergeResult({ run, compact }: { run: Run; compact?: boolea
 
 export function ReviewResult({ run }: { run: Run }) {
   const r = readReview(run);
-  if (!run.result) return <Empty>Review in progress…</Empty>;
+  if (!run.result) return <Empty>The reviewer is reading the changes. Findings appear here.</Empty>;
   const findings = [...r.findings].sort(
     (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity],
   );
@@ -54,7 +64,7 @@ export function ReviewResult({ run }: { run: Run }) {
     <div className="stack">
       {r.summary && <p>{r.summary}</p>}
       {findings.length === 0 ? (
-        <Empty>No findings.</Empty>
+        <Empty>The reviewer found nothing to report.</Empty>
       ) : (
         <ul className="findings">
           {findings.map((f, i) => (
@@ -77,8 +87,9 @@ export function ReviewResult({ run }: { run: Run }) {
 
 export function ReplayResult({ run }: { run: Run }) {
   const rows = readReplay(run);
-  if (!run.result) return <Empty>Replaying in isolated worktrees…</Empty>;
-  if (rows.length === 0) return <Empty>No agent results.</Empty>;
+  if (!run.result)
+    return <Empty>Each agent is working on the prompt in its own copy. Results appear here.</Empty>;
+  if (rows.length === 0) return <Empty>No agent reported a result.</Empty>;
   const hasCost = rows.some((r) => r.costUsd !== null);
   const best = Math.min(...rows.map((r) => r.durationMs ?? Infinity));
   return (
@@ -92,10 +103,10 @@ export function ReplayResult({ run }: { run: Run }) {
               Files
             </th>
             <th scope="col" className="num">
-              Lines
+              Lines changed
             </th>
             <th scope="col" className="num">
-              Checks
+              Checks passed
             </th>
             <th scope="col" className="num">
               Duration
@@ -110,10 +121,10 @@ export function ReplayResult({ run }: { run: Run }) {
         <tbody>
           {rows.map((r) => (
             <tr key={r.agent}>
-              <th scope="row">
-                <Mono>{r.agent}</Mono>
-              </th>
-              <td>{r.status ? <Status value={r.status} /> : '—'}</td>
+              <th scope="row">{productName(r.agent)}</th>
+              <td>
+                {r.status ? <Status value={r.status} label={runStatusWords(r.status)} /> : '—'}
+              </td>
               <td className="num">{r.filesChanged ?? '—'}</td>
               <td className="num">
                 <span className="add">+{r.added ?? 0}</span>{' '}
@@ -148,11 +159,11 @@ export function RunResult({ run }: { run: Run }) {
       return run.result ? (
         <pre className="pre">{JSON.stringify(run.result, null, 2)}</pre>
       ) : (
-        <Empty>No result yet.</Empty>
+        <Empty>No result yet. It appears here when the run finishes.</Empty>
       );
   }
 }
 
 export function RunStatus({ run }: { run: Run }) {
-  return <Status value={run.status} />;
+  return <Status value={run.status} label={runStatusWords(run.status)} />;
 }
