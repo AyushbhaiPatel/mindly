@@ -1,0 +1,25 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the command you ran and the output. Remove any secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Synapse version (`synapse --version`)
+  - type: input
+    id: env
+    attributes:
+      label: OS, Node.js version and agents (with versions)
