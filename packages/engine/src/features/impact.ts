@@ -1,11 +1,11 @@
 import { existsSync } from 'node:fs';
-import { fingerprint, type Conflict, type Session } from '@synapse/core';
+import { fingerprint, type Conflict, type Session } from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { sessionLabel } from '../coordination/work.js';
 import type { BusEvents, ChangedFile, Kernel } from '../kernel.js';
 import { readBounded } from '../memory/service.js';
 import type { ExportSurfaceDiff } from '../ports.js';
-import type { Synapse } from '../synapse.js';
+import type { Mindly } from '../mindly.js';
 import { attachService, guarded, liveSessions, MAX_FILES_PER_EVENT, nameList } from './shared.js';
 
 /** Files whose export surface the impact radar analyses. */
@@ -211,13 +211,13 @@ export function describeDiff(diff: ExportSurfaceDiff): string {
 }
 
 /** Feature module: registers the impact radar on `files.changed`. */
-export const impactModule = (synapse: Synapse): void => {
+export const impactModule = (mindly: Mindly): void => {
   const service = attachService(
-    synapse,
+    mindly,
     'impact',
-    new ImpactService(synapse.kernel, synapse.telepathy),
+    new ImpactService(mindly.kernel, mindly.telepathy),
   );
-  synapse.bus.on('files.changed', 'impact', async (p) => {
+  mindly.bus.on('files.changed', 'impact', async (p) => {
     await service.onFilesChanged(p);
   });
 };

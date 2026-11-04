@@ -15,7 +15,7 @@ import {
   type RunKind,
   type RunStatus,
   type Snapshot,
-} from '@synapse/core';
+} from '@mindly/core';
 import { json, limit, num, numOrNull, str, strOrNull, toJson, type Db, type Row } from '../db.js';
 
 // ---------------------------------------------------------------------------------------------

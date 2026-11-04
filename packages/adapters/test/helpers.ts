@@ -1,8 +1,8 @@
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { HookResult } from '@synapse/core';
-import { EMPTY_HOOK_RESULT } from '@synapse/core';
+import type { HookResult } from '@mindly/core';
+import { EMPTY_HOOK_RESULT } from '@mindly/core';
 
 const FIXTURES = join(import.meta.dirname, 'fixtures');
 
@@ -21,7 +21,7 @@ export function result(partial: Partial<HookResult>): HookResult {
 
 /** Fresh temporary directory. */
 export function tempDir(): string {
-  return mkdtempSync(join(tmpdir(), 'synapse-adapters-'));
+  return mkdtempSync(join(tmpdir(), 'mindly-adapters-'));
 }
 
 /** Asserts a value is present (test helper instead of non-null assertions). */

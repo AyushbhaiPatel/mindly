@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isSynapseError } from '@synapse/core';
+import { isMindlyError } from '@mindly/core';
 import {
   captureWorktreeCommit,
   listWorktrees,
@@ -103,14 +103,14 @@ describe('shadowMerge', () => {
     });
     expect(result.supported && result.clean).toBe(true);
     await expect(shadowMerge({ repoRoot: root, sides: [] })).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
     await expect(
       shadowMerge({ repoRoot: root, sides: [{ label: 'x', commit: '--output=/tmp/x' }] }),
-    ).rejects.toSatisfy((e: unknown) => isSynapseError(e, 'invalid_input'));
+    ).rejects.toSatisfy((e: unknown) => isMindlyError(e, 'invalid_input'));
     await expect(
       shadowMerge({ repoRoot: root, sides: [{ label: 'x', commit: 'no-such-ref' }] }),
-    ).rejects.toSatisfy((e: unknown) => isSynapseError(e, 'not_found'));
+    ).rejects.toSatisfy((e: unknown) => isMindlyError(e, 'not_found'));
   });
 
   it('parses merge-tree output', () => {
@@ -150,7 +150,7 @@ describe('materializeTree', () => {
     expect(mat.commit).toBe(head);
     await mat.dispose();
     await expect(materializeTree(root, 'deadbeef')).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'not_found'),
+      isMindlyError(e, 'not_found'),
     );
   });
 });
@@ -197,7 +197,7 @@ describe('runChecks', () => {
 
   it('caps captured output to the tail and does not leak the parent environment', async () => {
     const dir = tempDir();
-    process.env['SYNAPSE_TEST_SECRET'] = 'leak-me';
+    process.env['MINDLY_TEST_SECRET'] = 'leak-me';
     try {
       const [big, env] = await runChecks(
         dir,
@@ -218,23 +218,23 @@ describe('runChecks', () => {
       expect(big?.output.length).toBeLessThanOrEqual(1024);
       expect(big?.output.endsWith('END')).toBe(true);
       expect(big?.truncated).toBe(true);
-      expect(env?.output).not.toContain('SYNAPSE_TEST_SECRET');
+      expect(env?.output).not.toContain('MINDLY_TEST_SECRET');
       expect(env?.output).toContain('"CI"');
     } finally {
-      delete process.env['SYNAPSE_TEST_SECRET'];
+      delete process.env['MINDLY_TEST_SECRET'];
     }
   });
 
   it('validates its input and stops on failure when asked', async () => {
     const dir = tempDir();
     await expect(runChecks('relative', [])).rejects.toSatisfy((e: unknown) =>
-      isSynapseError(e, 'invalid_input'),
+      isMindlyError(e, 'invalid_input'),
     );
     await expect(runChecks(dir, [{ name: 'x', argv: [], timeoutSec: 1 }])).rejects.toSatisfy(
-      (e: unknown) => isSynapseError(e, 'invalid_input'),
+      (e: unknown) => isMindlyError(e, 'invalid_input'),
     );
     await expect(runChecks(dir, [{ name: 'x', argv: ['a\0b'], timeoutSec: 1 }])).rejects.toSatisfy(
-      (e: unknown) => isSynapseError(e, 'invalid_input'),
+      (e: unknown) => isMindlyError(e, 'invalid_input'),
     );
     const results = await runChecks(
       dir,

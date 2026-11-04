@@ -11,7 +11,7 @@ import {
   type MemoryStatus,
   type MemoryVersion,
   type Trust,
-} from '@synapse/core';
+} from '@mindly/core';
 import {
   bool,
   json,

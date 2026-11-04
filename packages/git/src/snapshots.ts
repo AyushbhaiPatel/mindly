@@ -1,4 +1,4 @@
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 import { captureWorktreeCommit } from './capture.js';
 import type { CaptureOptions } from './capture.js';
 import { runGit } from './exec.js';
@@ -6,12 +6,12 @@ import { assertValidBranchName, assertValidSnapshotId } from './refs.js';
 import { findRepoRoot, gitCommonDir, resolveCommit } from './repo.js';
 
 /** Namespace holding snapshot refs. Hidden from `git branch` and not fetched or pushed by default. */
-export const SNAPSHOT_REF_PREFIX = 'refs/synapse/snapshots/';
+export const SNAPSHOT_REF_PREFIX = 'refs/mindly/snapshots/';
 
-/** A snapshot stored under `refs/synapse/snapshots/`. */
+/** A snapshot stored under `refs/mindly/snapshots/`. */
 export interface SnapshotRef {
   id: string;
-  /** Full ref name, e.g. `refs/synapse/snapshots/<id>`. */
+  /** Full ref name, e.g. `refs/mindly/snapshots/<id>`. */
   ref: string;
   commit: string;
 }
@@ -39,13 +39,13 @@ async function createRefExclusive(cwd: string, ref: string, commit: string, why:
     okExitCodes: [128],
   });
   if (res.exitCode !== 0) {
-    throw new SynapseError('conflict', 'reference already exists or could not be created');
+    throw new MindlyError('conflict', 'reference already exists or could not be created');
   }
 }
 
 /**
  * Captures the working tree containing `worktree` (tracked + untracked, see
- * `captureWorktreeCommit`) and stores it under `refs/synapse/snapshots/<id>`. Never touches the
+ * `captureWorktreeCommit`) and stores it under `refs/mindly/snapshots/<id>`. Never touches the
  * working tree, index or branches. `worktree` must belong to the repository at `repoRoot`. Throws
  * `conflict` if a snapshot with that id already exists.
  */
@@ -59,13 +59,13 @@ export async function createSnapshotRef(
   const root = await findRepoRoot(repoRoot);
   const [rootCommon, wtCommon] = await Promise.all([gitCommonDir(root), gitCommonDir(worktree)]);
   if (rootCommon !== wtCommon) {
-    throw new SynapseError('invalid_input', 'worktree does not belong to this repository');
+    throw new MindlyError('invalid_input', 'worktree does not belong to this repository');
   }
   const captured = await captureWorktreeCommit(worktree, {
-    message: `synapse snapshot ${id}`,
+    message: `mindly snapshot ${id}`,
     ...options,
   });
-  await createRefExclusive(root, ref, captured.commit, `synapse snapshot ${id}`);
+  await createRefExclusive(root, ref, captured.commit, `mindly snapshot ${id}`);
   return {
     id,
     ref,
@@ -112,14 +112,14 @@ export async function restoreSnapshotToBranch(
   assertValidBranchName(branchName);
   const root = await findRepoRoot(repoRoot);
   const commit = await snapshotCommit(root, id);
-  if (!commit) throw new SynapseError('not_found', 'snapshot not found', { details: { id } });
+  if (!commit) throw new MindlyError('not_found', 'snapshot not found', { details: { id } });
   const ref = `refs/heads/${branchName}`;
   if (await resolveCommit(root, ref)) {
-    throw new SynapseError('conflict', 'branch already exists', {
+    throw new MindlyError('conflict', 'branch already exists', {
       details: { branch: branchName },
     });
   }
-  await createRefExclusive(root, ref, commit, `synapse restore snapshot ${id}`);
+  await createRefExclusive(root, ref, commit, `mindly restore snapshot ${id}`);
   return { branch: branchName, ref, commit };
 }
 

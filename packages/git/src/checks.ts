@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 
 /** A command to run against a materialized tree. */
 export interface CheckSpec {
@@ -61,7 +61,7 @@ function validateCheck(check: CheckSpec): void {
     // eslint-disable-next-line no-control-regex
     /[\u0000-\u001F\u007F]/.test(check.name)
   ) {
-    throw new SynapseError('invalid_input', 'invalid check name');
+    throw new MindlyError('invalid_input', 'invalid check name');
   }
   if (
     !Array.isArray(check.argv) ||
@@ -70,10 +70,10 @@ function validateCheck(check: CheckSpec): void {
     check.argv.some((a) => typeof a !== 'string' || a.includes('\0')) ||
     check.argv[0] === ''
   ) {
-    throw new SynapseError('invalid_input', 'invalid check argv');
+    throw new MindlyError('invalid_input', 'invalid check argv');
   }
   if (!Number.isFinite(check.timeoutSec) || check.timeoutSec <= 0 || check.timeoutSec > 3600) {
-    throw new SynapseError('invalid_input', 'invalid check timeout');
+    throw new MindlyError('invalid_input', 'invalid check timeout');
   }
 }
 
@@ -201,7 +201,7 @@ export async function runChecks(
   options: RunChecksOptions = {},
 ): Promise<CheckResult[]> {
   if (typeof dir !== 'string' || !isAbsolute(dir) || dir.includes('\0')) {
-    throw new SynapseError('invalid_input', 'check directory must be an absolute path');
+    throw new MindlyError('invalid_input', 'check directory must be an absolute path');
   }
   let isDir = false;
   try {
@@ -209,9 +209,9 @@ export async function runChecks(
   } catch {
     // treated as missing below
   }
-  if (!isDir) throw new SynapseError('not_found', 'check directory does not exist');
+  if (!isDir) throw new MindlyError('not_found', 'check directory does not exist');
   if (!Array.isArray(checks) || checks.length > 100) {
-    throw new SynapseError('invalid_input', 'invalid checks list');
+    throw new MindlyError('invalid_input', 'invalid checks list');
   }
   for (const c of checks) validateCheck(c);
   const opts: Required<RunChecksOptions> = {

@@ -1,4 +1,4 @@
-import { SynapseError, redactText, sanitizeForContext } from '@synapse/core';
+import { MindlyError, redactText, sanitizeForContext } from '@mindly/core';
 import { z } from 'zod';
 import {
   DEFAULT_MAX_RESPONSE_BYTES,
@@ -61,7 +61,7 @@ export class NoneProvider implements LlmProvider {
   }
 
   complete(_req: CompletionRequest): Promise<CompletionResult> {
-    return Promise.reject(new SynapseError('unavailable', this.#reason));
+    return Promise.reject(new MindlyError('unavailable', this.#reason));
   }
 }
 
@@ -122,7 +122,7 @@ abstract class HttpProvider implements LlmProvider {
   protected requireKey(envName: string): string {
     const key = this.env[envName];
     if (!key || key.trim() === '') {
-      throw new SynapseError('unavailable', `${this.name}: ${envName} is not set`);
+      throw new MindlyError('unavailable', `${this.name}: ${envName} is not set`);
     }
     return key.trim();
   }
@@ -130,7 +130,7 @@ abstract class HttpProvider implements LlmProvider {
   protected parse<T>(schema: z.ZodType<T>, json: unknown): T {
     const parsed = schema.safeParse(json);
     if (!parsed.success) {
-      throw new SynapseError('unavailable', `${this.name} returned an unexpected response shape`);
+      throw new MindlyError('unavailable', `${this.name} returned an unexpected response shape`);
     }
     return parsed.data;
   }
@@ -160,16 +160,16 @@ export function validateOllamaBaseUrl(baseUrl: string, allowRemote: boolean): UR
   try {
     url = new URL(baseUrl);
   } catch {
-    throw new SynapseError('invalid_input', 'ollama baseUrl is not a valid URL');
+    throw new MindlyError('invalid_input', 'ollama baseUrl is not a valid URL');
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new SynapseError('invalid_input', 'ollama baseUrl must use http or https');
+    throw new MindlyError('invalid_input', 'ollama baseUrl must use http or https');
   }
   if (url.username || url.password) {
-    throw new SynapseError('invalid_input', 'ollama baseUrl must not contain credentials');
+    throw new MindlyError('invalid_input', 'ollama baseUrl must not contain credentials');
   }
   if (!allowRemote && !isLoopbackHostname(url.hostname)) {
-    throw new SynapseError(
+    throw new MindlyError(
       'forbidden',
       'ollama baseUrl must point at localhost; set llm.allowRemote to use a remote host',
     );

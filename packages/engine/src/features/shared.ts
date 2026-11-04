@@ -1,6 +1,6 @@
-import { isDeniedPath, tryResolveInsideRoot, type Session } from '@synapse/core';
+import { isDeniedPath, tryResolveInsideRoot, type Session } from '@mindly/core';
 import { LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
-import type { Synapse } from '../synapse.js';
+import type { Mindly } from '../mindly.js';
 
 /*
  * Small helpers shared by the feature modules. Not exported from the package index.
@@ -9,24 +9,24 @@ import type { Synapse } from '../synapse.js';
 /** Maximum changed files a single bus handler processes per event. */
 export const MAX_FILES_PER_EVENT = 20;
 
-const services = new WeakMap<Synapse, Map<string, unknown>>();
+const services = new WeakMap<Mindly, Map<string, unknown>>();
 
-/** Attaches a feature service to a `Synapse` instance (one per key). */
-export function attachService<T>(synapse: Synapse, key: string, service: T): T {
-  let map = services.get(synapse);
+/** Attaches a feature service to a `Mindly` instance (one per key). */
+export function attachService<T>(mindly: Mindly, key: string, service: T): T {
+  let map = services.get(mindly);
   if (!map) {
     map = new Map();
-    services.set(synapse, map);
+    services.set(mindly, map);
   }
   map.set(key, service);
   return service;
 }
 
 /** Returns the attached service, creating and attaching one with `make` when missing. */
-export function serviceOf<T>(synapse: Synapse, key: string, make: () => T): T {
-  const existing = services.get(synapse)?.get(key);
+export function serviceOf<T>(mindly: Mindly, key: string, make: () => T): T {
+  const existing = services.get(mindly)?.get(key);
   if (existing !== undefined) return existing as T;
-  return attachService(synapse, key, make());
+  return attachService(mindly, key, make());
 }
 
 /** Live (active/idle/rate-limited, recently seen) sessions of a project. */

@@ -1,4 +1,4 @@
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 
 const MAX_REF_LENGTH = 1024;
 // ASCII control characters (incl. DEL), space and the characters `git check-ref-format` forbids.
@@ -36,7 +36,7 @@ export function isValidRefName(name: string): boolean {
 /** Throws `invalid_input` unless `name` is a valid reference name. */
 export function assertValidRefName(name: string, what = 'ref name'): void {
   const problem = refNameProblem(name);
-  if (problem !== null) throw new SynapseError('invalid_input', `invalid ${what}: ${problem}`);
+  if (problem !== null) throw new MindlyError('invalid_input', `invalid ${what}: ${problem}`);
 }
 
 /**
@@ -46,7 +46,7 @@ export function assertValidRefName(name: string, what = 'ref name'): void {
 export function assertValidBranchName(name: string): void {
   assertValidRefName(name, 'branch name');
   if (name === 'HEAD' || name.startsWith('refs/')) {
-    throw new SynapseError('invalid_input', 'invalid branch name: reserved');
+    throw new MindlyError('invalid_input', 'invalid branch name: reserved');
   }
 }
 
@@ -62,7 +62,7 @@ export function isObjectId(value: string): boolean {
  * expressions (`~`, `^`, `@{…}`, `:path`) are deliberately not accepted from callers.
  */
 export function assertValidRevision(rev: string): void {
-  if (typeof rev !== 'string') throw new SynapseError('invalid_input', 'invalid revision');
+  if (typeof rev !== 'string') throw new MindlyError('invalid_input', 'invalid revision');
   if (rev === 'HEAD' || isObjectId(rev)) return;
   assertValidRefName(rev, 'revision');
 }
@@ -72,7 +72,7 @@ const SNAPSHOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** Throws `invalid_input` unless `id` is a safe snapshot id (letters, digits, `_` and `-`). */
 export function assertValidSnapshotId(id: string): void {
   if (typeof id !== 'string' || !SNAPSHOT_ID_RE.test(id)) {
-    throw new SynapseError('invalid_input', 'invalid snapshot id');
+    throw new MindlyError('invalid_input', 'invalid snapshot id');
   }
 }
 
@@ -82,17 +82,17 @@ export function assertValidSnapshotId(id: string): void {
  */
 export function assertSafeRelativePath(path: string): string {
   if (typeof path !== 'string' || path === '' || path.length > 4096 || path.includes('\0')) {
-    throw new SynapseError('invalid_input', 'invalid repository path');
+    throw new MindlyError('invalid_input', 'invalid repository path');
   }
   if (path.startsWith('/') || /^[A-Za-z]:/.test(path) || path.includes('\\')) {
-    throw new SynapseError('invalid_input', 'repository path must be relative');
+    throw new MindlyError('invalid_input', 'repository path must be relative');
   }
   const segments = path.split('/');
   if (segments.some((s) => s === '' || s === '.' || s === '..')) {
-    throw new SynapseError('invalid_input', 'repository path must be normalised');
+    throw new MindlyError('invalid_input', 'repository path must be normalised');
   }
   if (segments.some((s) => s.toLowerCase() === '.git')) {
-    throw new SynapseError('invalid_input', 'repository path must not point into .git');
+    throw new MindlyError('invalid_input', 'repository path must not point into .git');
   }
   return path;
 }

@@ -2,7 +2,7 @@
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "customConditions": ["@synapse/source"]
+    "customConditions": ["@mindly/source"]
   },
   "include": ["packages/*/src", "packages/*/test", "apps/*/src", "apps/*/test", "*.config.ts"],
   "exclude": ["apps/dashboard"]

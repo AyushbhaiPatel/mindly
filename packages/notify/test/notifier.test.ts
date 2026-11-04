@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REDACTED, type UserConfig } from '@synapse/core';
+import { REDACTED, type UserConfig } from '@mindly/core';
 import {
   DEDUPE_WINDOW_MS,
   MAX_PER_WINDOW,
@@ -54,7 +54,7 @@ const webhook = (url = 'https://hooks.example.com/abc'): NotifyConfig['channels'
 const ntfy = (url = 'https://ntfy.sh'): NotifyConfig['channels'][number] => ({
   type: 'ntfy',
   url,
-  topic: 'synapse_topic_1',
+  topic: 'mindly_topic_1',
 });
 
 function config(
@@ -122,12 +122,12 @@ describe('ntfy', () => {
       { channel: 'ntfy', status: 'sent' },
     ]);
     const call = calls[0];
-    expect(call?.url).toBe('https://ntfy.example.com/synapse_topic_1');
+    expect(call?.url).toBe('https://ntfy.example.com/mindly_topic_1');
     expect(call?.init.redirect).toBe('error');
     const headers = call?.init.headers as Record<string, string>;
     expect(headers.Title).toBe('Agent blocked');
     expect(headers.Priority).toBe('4');
-    expect(headers.Tags).toBe('synapse,agent_blocked');
+    expect(headers.Tags).toBe('mindly,agent_blocked');
     expect(call?.init.body).toBe('[web] Waiting');
   });
 

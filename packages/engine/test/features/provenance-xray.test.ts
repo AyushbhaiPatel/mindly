@@ -1,4 +1,4 @@
-import { isSynapseError } from '@synapse/core';
+import { isMindlyError } from '@mindly/core';
 import { describe, expect, it } from 'vitest';
 import { provenanceOf, USER, xrayOf } from '../../src/index.js';
 import { event, writeTool } from '../helpers.js';
@@ -8,25 +8,25 @@ function codeOf(fn: () => unknown): string {
   try {
     fn();
   } catch (err) {
-    return isSynapseError(err) ? err.code : 'other';
+    return isMindlyError(err) ? err.code : 'other';
   }
   return 'none';
 }
 
 describe('code provenance', () => {
   it('maps a line back to the agent and prompt that wrote it', async () => {
-    const { root, synapse, pid, cc, write } = await featureSetup();
-    await synapse.hooks.handle(
+    const { root, mindly, pid, cc, write } = await featureSetup();
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'prompt', {
         prompt: 'Add a guard so login rejects empty users',
       }),
     );
     const guard = '  if (!user) throw new Error("no user");';
     write('src/auth.ts', AUTH_V1.replace('{\n', `{\n${guard}\n`));
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', guard) }),
     );
-    synapse.memory.remember({
+    mindly.memory.remember({
       projectId: pid,
       projectRoot: root,
       kind: 'fact',
@@ -36,7 +36,7 @@ describe('code provenance', () => {
       evidence: [{ path: 'src/auth.ts', excerpt: 'throw new Error("no user")' }],
     });
 
-    const why = provenanceOf(synapse).why(pid, root, 'src/auth.ts', 2);
+    const why = provenanceOf(mindly).why(pid, root, 'src/auth.ts', 2);
     expect(why.text).toBe('if (!user) throw new Error("no user");');
     expect(why.changes).toHaveLength(1);
     expect(why.changes[0]).toMatchObject({
@@ -48,13 +48,13 @@ describe('code provenance', () => {
     expect(why.changes[0]!.label).toMatch(/^claude-code #/);
     expect(why.memories.map((m) => m.title)).toEqual(['Login guards empty users']);
 
-    const unknown = provenanceOf(synapse).why(pid, root, 'src/auth.ts', 5);
+    const unknown = provenanceOf(mindly).why(pid, root, 'src/auth.ts', 5);
     expect(unknown.changes).toEqual([]);
   });
 
   it('rejects unsafe or invalid input', async () => {
-    const { root, synapse, pid } = await featureSetup();
-    const p = provenanceOf(synapse);
+    const { root, mindly, pid } = await featureSetup();
+    const p = provenanceOf(mindly);
     expect(codeOf(() => p.why(pid, root, '../outside.ts', 1))).toBe('path_outside_project');
     expect(codeOf(() => p.why(pid, root, '.env', 1))).toBe('forbidden');
     expect(codeOf(() => p.why(pid, root, 'src/auth.ts', 0))).toBe('invalid_input');
@@ -65,12 +65,12 @@ describe('code provenance', () => {
 
 describe('context x-ray', () => {
   it('shows omitted items and explains why a memory did not reach the session', async () => {
-    const { root, synapse, pid, cx } = await featureSetup();
+    const { root, mindly, pid, cx } = await featureSetup();
     const long = 'Postgres connection pooling details. '.repeat(12);
     const ids: string[] = [];
     for (let i = 0; i < 20; i++) {
       ids.push(
-        synapse.memory.remember({
+        mindly.memory.remember({
           projectId: pid,
           projectRoot: root,
           kind: 'fact',
@@ -80,7 +80,7 @@ describe('context x-ray', () => {
         }).id,
       );
     }
-    const stale = synapse.memory.remember({
+    const stale = mindly.memory.remember({
       projectId: pid,
       projectRoot: root,
       kind: 'fact',
@@ -88,8 +88,8 @@ describe('context x-ray', () => {
       body: 'old',
       source: USER,
     });
-    synapse.memory.markStale(stale.id, 'test');
-    const branchOnly = synapse.memory.remember({
+    mindly.memory.markStale(stale.id, 'test');
+    const branchOnly = mindly.memory.remember({
       projectId: pid,
       projectRoot: root,
       kind: 'fact',
@@ -99,11 +99,11 @@ describe('context x-ray', () => {
       branch: 'feature-x',
     });
 
-    await synapse.hooks.handle(
+    await mindly.hooks.handle(
       event(root, 'codex', 'cx', 'prompt', { prompt: 'database pooling setup' }),
     );
 
-    const xray = xrayOf(synapse);
+    const xray = xrayOf(mindly);
     const view = xray.session(cx.id);
     const packet = view.packets.find((p) => p.trigger === 'prompt')!;
     expect(packet.included.length).toBeGreaterThan(0);
@@ -129,12 +129,12 @@ describe('context x-ray', () => {
     expect(missing.items.some((i) => i.reason === 'budget')).toBe(true);
     expect(reasons.get(stale.id)).toBe('trust_filter');
     expect(reasons.get(branchOnly.id)).toBe('branch_filter');
-    expect(missing.tokenBudget).toBe(synapse.config.context.promptTokens);
+    expect(missing.tokenBudget).toBe(mindly.config.context.promptTokens);
   });
 
   it('rejects a memory from another project', async () => {
-    const { root, synapse, pid } = await featureSetup();
-    const m = synapse.memory.remember({
+    const { root, mindly, pid } = await featureSetup();
+    const m = mindly.memory.remember({
       projectId: pid,
       projectRoot: root,
       kind: 'note',
@@ -142,6 +142,6 @@ describe('context x-ray', () => {
       body: 'b',
       source: USER,
     });
-    expect(codeOf(() => xrayOf(synapse).memory('other-project', m.id))).toBe('not_found');
+    expect(codeOf(() => xrayOf(mindly).memory('other-project', m.id))).toBe('not_found');
   });
 });

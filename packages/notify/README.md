@@ -1,6 +1,6 @@
-# @synapse/notify
+# @mindly/notify
 
-The Synapse "phone pager": short status notifications when an agent is blocked, rate limited,
+The Mindly "phone pager": short status notifications when an agent is blocked, rate limited,
 and so on. **Off by default**: nothing is sent until channels are configured.
 
 ## Configuration
@@ -13,7 +13,7 @@ and so on. **Off by default**: nothing is sent until channels are configured.
     "channels": [
       { "type": "desktop" },
       { "type": "ntfy", "url": "https://ntfy.sh", "topic": "my_private_topic_123" },
-      { "type": "webhook", "url": "https://example.com/synapse-hook" }
+      { "type": "webhook", "url": "https://example.com/mindly-hook" }
     ],
     "triggers": ["agent_blocked", "rate_limited"]
   }
@@ -21,7 +21,7 @@ and so on. **Off by default**: nothing is sent until channels are configured.
 ```
 
 ```ts
-import { createNotifier } from '@synapse/notify';
+import { createNotifier } from '@mindly/notify';
 
 const pager = createNotifier(config.notify);
 await pager.send({ trigger: 'agent_blocked', title: 'Agent waiting', body: '2 sessions idle' });

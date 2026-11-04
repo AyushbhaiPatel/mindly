@@ -1,4 +1,4 @@
-import { isSynapseError, type UserConfig } from '@synapse/core';
+import { isMindlyError, type UserConfig } from '@mindly/core';
 import {
   AnthropicProvider,
   NoneProvider,
@@ -38,7 +38,7 @@ export function createProvider(
         return new OpenAIProvider(common);
     }
   } catch (err) {
-    if (isSynapseError(err)) return new NoneProvider(err.message);
+    if (isMindlyError(err)) return new NoneProvider(err.message);
     return new NoneProvider('LLM provider could not be created');
   }
   return new NoneProvider();

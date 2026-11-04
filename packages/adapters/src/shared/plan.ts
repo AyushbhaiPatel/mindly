@@ -1,6 +1,6 @@
 import { isAbsolute } from 'node:path';
-import type { InstallOptions, InstallStep } from '@synapse/core';
-import { invalidInput } from '@synapse/core';
+import type { InstallOptions, InstallStep } from '@mindly/core';
+import { invalidInput } from '@mindly/core';
 import {
   cloneJson,
   parseJsonConfig,
@@ -10,7 +10,7 @@ import {
 } from './config-files.js';
 import { validateArgv } from './command.js';
 
-/** Whether a plan installs or removes Synapse. */
+/** Whether a plan installs or removes Mindly. */
 export type PlanMode = 'install' | 'uninstall';
 
 /** Validates install options shared by every adapter. */

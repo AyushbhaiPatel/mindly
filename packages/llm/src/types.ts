@@ -17,7 +17,7 @@ export interface CompletionResult {
   outputTokens?: number;
 }
 
-/** A model provider. Implementations throw `SynapseError` on every failure. */
+/** A model provider. Implementations throw `MindlyError` on every failure. */
 export interface LlmProvider {
   readonly name: string;
   complete(req: CompletionRequest): Promise<CompletionResult>;

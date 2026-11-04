@@ -1,20 +1,20 @@
 import { chmodSync, existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { SynapseError } from './errors.js';
+import { MindlyError } from './errors.js';
 import { matchesAnyGlob } from './glob.js';
 import { DEFAULT_DENY_PATHS } from './redact.js';
 
 /** Directory holding the database, daemon token, logs and user config. */
-export function synapseHome(env: NodeJS.ProcessEnv = process.env): string {
-  const fromEnv = env['SYNAPSE_HOME'];
+export function mindlyHome(env: NodeJS.ProcessEnv = process.env): string {
+  const fromEnv = env['MINDLY_HOME'];
   if (fromEnv && fromEnv.trim() !== '') {
     if (!isAbsolute(fromEnv)) {
-      throw new SynapseError('invalid_input', 'SYNAPSE_HOME must be an absolute path');
+      throw new MindlyError('invalid_input', 'MINDLY_HOME must be an absolute path');
     }
     return resolve(fromEnv);
   }
-  return join(homedir(), '.synapse');
+  return join(homedir(), '.mindly');
 }
 
 export interface HomePaths {
@@ -30,7 +30,7 @@ export interface HomePaths {
 export function homePaths(home: string): HomePaths {
   return {
     home,
-    db: join(home, 'synapse.db'),
+    db: join(home, 'mindly.db'),
     config: join(home, 'config.json'),
     token: join(home, 'daemon.token'),
     daemonState: join(home, 'daemon.json'),
@@ -40,7 +40,7 @@ export function homePaths(home: string): HomePaths {
 }
 
 /**
- * Creates the Synapse home (and its logs/run subdirectories) with owner-only permissions and
+ * Creates the Mindly home (and its logs/run subdirectories) with owner-only permissions and
  * tightens permissions if the directory already existed with looser ones.
  */
 export function ensureHome(home: string): HomePaths {
@@ -91,7 +91,7 @@ export interface ResolvedProjectPath {
  */
 export function resolveInsideRoot(root: string, input: string): ResolvedProjectPath {
   if (input.includes('\0')) {
-    throw new SynapseError('invalid_input', 'path contains a NUL byte');
+    throw new MindlyError('invalid_input', 'path contains a NUL byte');
   }
   const realRoot = realpathOrNearest(resolve(root));
   const candidate = realpathOrNearest(
@@ -101,7 +101,7 @@ export function resolveInsideRoot(root: string, input: string): ResolvedProjectP
   if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) {
     return { abs: candidate, rel: toPosix(rel) };
   }
-  throw new SynapseError('path_outside_project', 'path resolves outside the project root');
+  throw new MindlyError('path_outside_project', 'path resolves outside the project root');
 }
 
 /** Like `resolveInsideRoot` but returns null instead of throwing. */
@@ -113,7 +113,7 @@ export function tryResolveInsideRoot(root: string, input: string): ResolvedProje
   }
 }
 
-/** True when Synapse must never read or capture this project-relative path. */
+/** True when Mindly must never read or capture this project-relative path. */
 export function isDeniedPath(rel: string, extraDeny: readonly string[] = []): boolean {
   return matchesAnyGlob(rel, DEFAULT_DENY_PATHS) || matchesAnyGlob(rel, extraDeny);
 }

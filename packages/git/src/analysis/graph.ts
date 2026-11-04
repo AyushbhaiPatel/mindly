@@ -1,7 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { posix } from 'node:path';
-import { SynapseError, isDeniedPath, tryResolveInsideRoot } from '@synapse/core';
+import { MindlyError, isDeniedPath, tryResolveInsideRoot } from '@mindly/core';
 import { extractImports } from './imports.js';
 import { languageOf } from './language.js';
 import type { Language } from './language.js';
@@ -71,7 +71,7 @@ export async function buildImportGraph(
   try {
     root = realpathSync(repoRoot);
   } catch {
-    throw new SynapseError('not_found', 'repository root does not exist');
+    throw new MindlyError('not_found', 'repository root does not exist');
   }
   const extraDeny = options.extraDeny ?? [];
   const maxFiles = Math.max(0, Math.floor(options.maxFiles ?? DEFAULT_GRAPH_MAX_FILES));

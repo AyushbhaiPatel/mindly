@@ -9,7 +9,7 @@ const user = { type: 'user' as const, sessionId: null, agentKind: null };
 
 describe('database', () => {
   it('migrates, uses WAL and owner-only file permissions', () => {
-    const path = join(mkdtempSync(join(tmpdir(), 'syn-db-')), 'synapse.db');
+    const path = join(mkdtempSync(join(tmpdir(), 'syn-db-')), 'mindly.db');
     const store = Store.open(path);
     expect(schemaVersion(store.db)).toBe(MIGRATIONS.length);
     const mode = store.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string };

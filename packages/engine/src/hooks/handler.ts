@@ -7,7 +7,7 @@ import {
   type HookResult,
   type NormalizedHookEvent,
   type Session,
-} from '@synapse/core';
+} from '@mindly/core';
 import type { ContextBuilder } from '../context/builder.js';
 import type { IntentService } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
@@ -30,7 +30,7 @@ export interface HookDeps {
 
 /**
  * Translates normalised hook events into engine operations. `handle` never throws: any internal
- * failure is logged and an empty result returned, so a Synapse bug can never block an agent.
+ * failure is logged and an empty result returned, so a Mindly bug can never block an agent.
  */
 export class HookHandler {
   constructor(
@@ -144,7 +144,7 @@ export class HookHandler {
     });
     const built = this.d.context.prompt(project, session, raw);
     const userMessage = rules.length
-      ? `Synapse saved ${rules.length === 1 ? 'a project rule' : `${rules.length} project rules`} for all agents: ${rules.map((r) => r.title).join('; ')}`
+      ? `Mindly saved ${rules.length === 1 ? 'a project rule' : `${rules.length} project rules`} for all agents: ${rules.map((r) => r.title).join('; ')}`
       : null;
     return { ...EMPTY_HOOK_RESULT, context: built.text, userMessage };
   }
@@ -200,10 +200,10 @@ export class HookHandler {
       return {
         ...EMPTY_HOOK_RESULT,
         context: [
-          '<synapse-context>',
-          'Synapse note: a similar command failed before in this project.',
+          '<mindly-context>',
+          'Mindly note: a similar command failed before in this project.',
           ...lines,
-          '</synapse-context>',
+          '</mindly-context>',
         ].join('\n'),
       };
     }

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { SynapseError } from '@synapse/core';
+import { MindlyError } from '@mindly/core';
 import { requireSecureUrl, toHeaderValue } from './sanitize.js';
 import type { ExecFileLike, FetchLike, SafePayload } from './types.js';
 
@@ -24,7 +24,7 @@ export const defaultExecFile: ExecFileLike = (file, args, options) =>
       file,
       [...args],
       { timeout: options.timeout, windowsHide: true, shell: false },
-      (err) => (err ? reject(new SynapseError('unavailable', `${file} failed`)) : resolve()),
+      (err) => (err ? reject(new MindlyError('unavailable', `${file} failed`)) : resolve()),
     );
   });
 
@@ -77,7 +77,7 @@ async function post(
     });
   } catch {
     // No cause: transport errors can echo the URL, which may contain a secret path.
-    throw new SynapseError(
+    throw new MindlyError(
       controller.signal.aborted ? 'timeout' : 'unavailable',
       controller.signal.aborted ? `${channel} request timed out` : `${channel} request failed`,
     );
@@ -86,9 +86,9 @@ async function post(
   }
   await res.body?.cancel().catch(() => undefined);
   if (res.status >= 300 && res.status < 400) {
-    throw new SynapseError('forbidden', `${channel} redirect refused`);
+    throw new MindlyError('forbidden', `${channel} redirect refused`);
   }
-  if (!res.ok) throw new SynapseError('unavailable', `${channel} returned HTTP ${res.status}`);
+  if (!res.ok) throw new MindlyError('unavailable', `${channel} returned HTTP ${res.status}`);
 }
 
 const NTFY_PRIORITY = { low: '2', default: '3', high: '4' } as const;
@@ -105,7 +105,7 @@ export async function sendNtfy(
   fetchImpl: FetchLike,
 ): Promise<ChannelOutcome> {
   const base = requireSecureUrl(channel.url, 'ntfy');
-  if (!TOPIC_RE.test(channel.topic)) throw new SynapseError('invalid_input', 'ntfy topic invalid');
+  if (!TOPIC_RE.test(channel.topic)) throw new MindlyError('invalid_input', 'ntfy topic invalid');
   const target = `${base.origin}${base.pathname.replace(/\/+$/, '')}/${channel.topic}`;
   const body = [p.project ? `[${p.project}]` : '', p.body || p.title].filter(Boolean).join(' ');
   await post(fetchImpl, target, 'ntfy', {
@@ -113,7 +113,7 @@ export async function sendNtfy(
       'content-type': 'text/plain; charset=utf-8',
       Title: toHeaderValue(p.title),
       Priority: NTFY_PRIORITY[p.priority],
-      Tags: toHeaderValue(`synapse,${p.trigger}`),
+      Tags: toHeaderValue(`mindly,${p.trigger}`),
     },
     body,
   });

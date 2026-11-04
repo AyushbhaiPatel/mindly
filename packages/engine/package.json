@@ -1,13 +1,13 @@
 {
-  "name": "@synapse/engine",
+  "name": "@mindly/engine",
   "version": "0.1.0",
   "private": true,
-  "description": "Domain services and the Synapse facade.",
+  "description": "Domain services and the Mindly facade.",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {
-      "@synapse/source": "./src/index.ts",
+      "@mindly/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
@@ -19,8 +19,8 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@synapse/core": "workspace:*",
-    "@synapse/store": "workspace:*",
+    "@mindly/core": "workspace:*",
+    "@mindly/store": "workspace:*",
     "zod": "4.6.7"
   }
 }

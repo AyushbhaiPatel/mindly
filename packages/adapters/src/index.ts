@@ -1,4 +1,4 @@
-import type { AgentAdapter } from '@synapse/core';
+import type { AgentAdapter } from '@mindly/core';
 import { claudeCodeAdapter } from './claude-code/index.js';
 import { codexAdapter } from './codex/index.js';
 import { cursorAdapter } from './cursor/index.js';
@@ -34,7 +34,7 @@ export { applyInstallSteps } from './apply.js';
 export type { AppliedStep } from './apply.js';
 export {
   hookCommand,
-  isSynapseHookCommand,
+  isMindlyHookCommand,
   MCP_SERVER_NAME,
   mcpLaunch,
   shellJoin,

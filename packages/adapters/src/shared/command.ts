@@ -1,14 +1,14 @@
-import { invalidInput } from '@synapse/core';
+import { invalidInput } from '@mindly/core';
 
-/** Name under which Synapse registers its MCP server in every agent config. */
-export const MCP_SERVER_NAME = 'synapse';
+/** Name under which Mindly registers its MCP server in every agent config. */
+export const MCP_SERVER_NAME = 'mindly';
 
 const SAFE_ARG_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
 const MAX_ARGS = 64;
 const MAX_ARG_CHARS = 4096;
 
 /**
- * Validates the Synapse launcher argv from `InstallOptions.command`. Rejects empty argv, empty
+ * Validates the Mindly launcher argv from `InstallOptions.command`. Rejects empty argv, empty
  * elements and anything containing NUL, CR or LF (which cannot be safely embedded in an agent's
  * single-line command string).
  */
@@ -65,10 +65,10 @@ function escapeRe(s: string): string {
 }
 
 /**
- * True when `command` is a hook command Synapse installed for `agentKind`, i.e. it contains the
+ * True when `command` is a hook command Mindly installed for `agentKind`, i.e. it contains the
  * words `hook <agentKind>` (bare or single-quoted) followed by an event name.
  */
-export function isSynapseHookCommand(command: unknown, agentKind: string): boolean {
+export function isMindlyHookCommand(command: unknown, agentKind: string): boolean {
   if (typeof command !== 'string') return false;
   const kind = escapeRe(agentKind);
   const re = new RegExp(`(^|\\s)'?hook'?\\s+'?${kind}'?\\s+\\S`);

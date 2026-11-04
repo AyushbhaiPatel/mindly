@@ -1,9 +1,9 @@
-import { SynapseError } from '@synapse/core';
-import { isSynapseHookCommand } from './command.js';
+import { MindlyError } from '@mindly/core';
+import { isMindlyHookCommand } from './command.js';
 import { ensureRecord } from './config-files.js';
 import { isRecord } from './payload.js';
 
-/** One hook Synapse registers. */
+/** One hook Mindly registers. */
 export interface HookSpec {
   /** Native event name, e.g. `PreToolUse` or `beforeSubmitPrompt`. */
   event: string;
@@ -15,9 +15,9 @@ export interface HookSpec {
 }
 
 /**
- * Removes Synapse's hooks for `agentKind` from a Claude Code / Codex style `hooks` object
+ * Removes Mindly's hooks for `agentKind` from a Claude Code / Codex style `hooks` object
  * (`{ Event: [{ matcher, hooks: [{ type, command }] }] }`). Matcher groups that only contained
- * Synapse hooks are dropped, as are event keys left empty. User entries are untouched.
+ * Mindly hooks are dropped, as are event keys left empty. User entries are untouched.
  */
 export function removeGroupedHooks(hooks: Record<string, unknown>, agentKind: string): void {
   for (const [event, groups] of Object.entries(hooks)) {
@@ -31,7 +31,7 @@ export function removeGroupedHooks(hooks: Record<string, unknown>, agentKind: st
       }
       const inner = group['hooks'] as unknown[];
       const filtered = inner.filter(
-        (h) => !(isRecord(h) && isSynapseHookCommand(h['command'], agentKind)),
+        (h) => !(isRecord(h) && isMindlyHookCommand(h['command'], agentKind)),
       );
       if (filtered.length === inner.length) {
         kept.push(group);
@@ -46,7 +46,7 @@ export function removeGroupedHooks(hooks: Record<string, unknown>, agentKind: st
   }
 }
 
-/** Appends Synapse matcher groups to a Claude Code / Codex style `hooks` object. */
+/** Appends Mindly matcher groups to a Claude Code / Codex style `hooks` object. */
 export function addGroupedHooks(
   hooks: Record<string, unknown>,
   specs: readonly HookSpec[],
@@ -63,12 +63,12 @@ export function addGroupedHooks(
   }
 }
 
-/** Removes Synapse's hooks for `agentKind` from a Cursor style `hooks` object (`{ event: [{ command }] }`). */
+/** Removes Mindly's hooks for `agentKind` from a Cursor style `hooks` object (`{ event: [{ command }] }`). */
 export function removeFlatHooks(hooks: Record<string, unknown>, agentKind: string): void {
   for (const [event, entries] of Object.entries(hooks)) {
     if (!Array.isArray(entries)) continue;
     const kept = entries.filter(
-      (h) => !(isRecord(h) && isSynapseHookCommand(h['command'], agentKind)),
+      (h) => !(isRecord(h) && isMindlyHookCommand(h['command'], agentKind)),
     );
     if (kept.length === entries.length) continue;
     if (kept.length === 0) Reflect.deleteProperty(hooks, event);
@@ -76,7 +76,7 @@ export function removeFlatHooks(hooks: Record<string, unknown>, agentKind: strin
   }
 }
 
-/** Appends Synapse entries to a Cursor style `hooks` object. */
+/** Appends Mindly entries to a Cursor style `hooks` object. */
 export function addFlatHooks(
   hooks: Record<string, unknown>,
   specs: readonly HookSpec[],
@@ -97,7 +97,7 @@ function eventList(hooks: Record<string, unknown>, event: string, path: string):
     return created;
   }
   if (!Array.isArray(existing)) {
-    throw new SynapseError('invalid_input', `hooks.${event} in ${path} must be an array`);
+    throw new MindlyError('invalid_input', `hooks.${event} in ${path} must be an array`);
   }
   return existing;
 }

@@ -8,7 +8,7 @@ import type {
   InstallStep,
   NormalizedHookEvent,
   RenderedHookOutput,
-} from '@synapse/core';
+} from '@mindly/core';
 import type { NativeEventSpec } from '../shared/claude-style.js';
 import { parseClaudeStyle, renderClaudeStyle } from '../shared/claude-style.js';
 import { hookCommand, MCP_SERVER_NAME, mcpLaunch } from '../shared/command.js';
@@ -30,7 +30,7 @@ export { findPatchText, MAX_PATCH_BYTES, parseApplyPatch } from './apply-patch.j
 
 const KIND = 'codex';
 
-/** Native Codex hook events Synapse handles. */
+/** Native Codex hook events Mindly handles. */
 export const CODEX_EVENTS: Readonly<Record<string, NativeEventSpec>> = {
   SessionStart: { event: 'session_start' },
   UserPromptSubmit: { event: 'prompt' },
@@ -115,8 +115,8 @@ async function planToml(
   return stepIfChanged(
     file,
     mode === 'install'
-      ? 'Register the Synapse MCP server for Codex'
-      : 'Remove the Synapse MCP server from Codex',
+      ? 'Register the Mindly MCP server for Codex'
+      : 'Remove the Mindly MCP server from Codex',
     previous,
     content,
   );
@@ -134,7 +134,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): AgentAdapter
     const install = mode === 'install';
     const hooks = await planJsonFile(
       paths.hooks,
-      install ? 'Register Synapse hooks for Codex' : 'Remove Synapse hooks from Codex',
+      install ? 'Register Mindly hooks for Codex' : 'Remove Mindly hooks from Codex',
       mode,
       (config) => {
         if (!install && !isRecord(config['hooks'])) return;

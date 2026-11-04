@@ -4,7 +4,7 @@ import type {
   HookResult,
   NormalizedHookEvent,
   RenderedHookOutput,
-} from '@synapse/core';
+} from '@mindly/core';
 import {
   baseEvent,
   contextText,
@@ -23,7 +23,7 @@ import { buildTool } from './tools.js';
  * using `hookSpecificOutput` / `systemMessage`.
  */
 
-/** How a native event maps to Synapse. */
+/** How a native event maps to Mindly. */
 export interface NativeEventSpec {
   event: HookEventName;
   /** The native event only fires for failed tool calls. */
@@ -104,11 +104,11 @@ export function parseClaudeStyle(
 
 /** Agent-specific rendering capabilities. */
 export interface ClaudeStyleRenderOptions {
-  /** Native event name to echo in `hookSpecificOutput.hookEventName` per Synapse event. */
+  /** Native event name to echo in `hookSpecificOutput.hookEventName` per Mindly event. */
   names: Readonly<Record<HookEventName, string>>;
   /** Whether PreToolUse accepts `permissionDecision: "ask"`. */
   supportsAsk: boolean;
-  /** Synapse events whose output may carry `systemMessage`. */
+  /** Mindly events whose output may carry `systemMessage`. */
   systemMessageEvents: ReadonlySet<HookEventName>;
 }
 

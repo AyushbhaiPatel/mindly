@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyTool,
   hookCommand,
-  isSynapseHookCommand,
+  isMindlyHookCommand,
   mcpLaunch,
   shellJoin,
   shellQuote,
@@ -11,7 +11,7 @@ import {
 
 describe('shell quoting', () => {
   it('leaves safe arguments bare and quotes the rest', () => {
-    expect(shellQuote('/usr/local/bin/synapse')).toBe('/usr/local/bin/synapse');
+    expect(shellQuote('/usr/local/bin/mindly')).toBe('/usr/local/bin/mindly');
     expect(shellQuote('a b')).toBe("'a b'");
     expect(shellQuote("it's")).toBe(`'it'\\''s'`);
     expect(shellQuote('$(rm -rf ~)')).toBe("'$(rm -rf ~)'");
@@ -35,20 +35,20 @@ describe('shell quoting', () => {
   });
 
   it('builds hook and MCP commands', () => {
-    expect(hookCommand(['/bin/synapse'], 'codex', 'Stop')).toBe('/bin/synapse hook codex Stop');
+    expect(hookCommand(['/bin/mindly'], 'codex', 'Stop')).toBe('/bin/mindly hook codex Stop');
     expect(mcpLaunch(['node', '/x/cli.js'], 'cursor')).toEqual({
       command: 'node',
       args: ['/x/cli.js', 'mcp', '--agent', 'cursor'],
     });
   });
 
-  it('recognises Synapse hook commands per agent', () => {
-    expect(isSynapseHookCommand('/bin/synapse hook codex Stop', 'codex')).toBe(true);
-    expect(isSynapseHookCommand("'/a b/synapse' 'hook' 'codex' 'Stop'", 'codex')).toBe(true);
-    expect(isSynapseHookCommand('/bin/synapse hook codex Stop', 'cursor')).toBe(false);
-    expect(isSynapseHookCommand('/bin/synapse hook codex-x Stop', 'codex')).toBe(false);
-    expect(isSynapseHookCommand('./notify.sh', 'codex')).toBe(false);
-    expect(isSynapseHookCommand(42, 'codex')).toBe(false);
+  it('recognises Mindly hook commands per agent', () => {
+    expect(isMindlyHookCommand('/bin/mindly hook codex Stop', 'codex')).toBe(true);
+    expect(isMindlyHookCommand("'/a b/mindly' 'hook' 'codex' 'Stop'", 'codex')).toBe(true);
+    expect(isMindlyHookCommand('/bin/mindly hook codex Stop', 'cursor')).toBe(false);
+    expect(isMindlyHookCommand('/bin/mindly hook codex-x Stop', 'codex')).toBe(false);
+    expect(isMindlyHookCommand('./notify.sh', 'codex')).toBe(false);
+    expect(isMindlyHookCommand(42, 'codex')).toBe(false);
   });
 });
 

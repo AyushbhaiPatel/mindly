@@ -8,7 +8,7 @@ import type {
   InstallStep,
   NormalizedHookEvent,
   RenderedHookOutput,
-} from '@synapse/core';
+} from '@mindly/core';
 import type { NativeEventSpec } from '../shared/claude-style.js';
 import { parseClaudeStyle, renderClaudeStyle } from '../shared/claude-style.js';
 import { hookCommand, MCP_SERVER_NAME, mcpLaunch } from '../shared/command.js';
@@ -27,7 +27,7 @@ import { isRecord } from '../shared/payload.js';
 
 const KIND = 'claude-code';
 
-/** Native Claude Code hook events Synapse handles. */
+/** Native Claude Code hook events Mindly handles. */
 export const CLAUDE_CODE_EVENTS: Readonly<Record<string, NativeEventSpec>> = {
   SessionStart: { event: 'session_start' },
   UserPromptSubmit: { event: 'prompt' },
@@ -47,7 +47,7 @@ const NAMES: Readonly<Record<HookEventName, string>> = {
   session_end: 'SessionEnd',
 };
 
-/** Tools whose calls Synapse inspects (file writes and shell). */
+/** Tools whose calls Mindly inspects (file writes and shell). */
 export const CLAUDE_CODE_TOOL_MATCHER = 'Edit|MultiEdit|Write|NotebookEdit|Bash';
 
 /** `~/.claude.json` holds a lot of Claude Code state, so it gets a larger read cap. */
@@ -98,7 +98,7 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
   const install = mode === 'install';
   const settings = await planJsonFile(
     paths.settings,
-    install ? 'Register Synapse hooks for Claude Code' : 'Remove Synapse hooks from Claude Code',
+    install ? 'Register Mindly hooks for Claude Code' : 'Remove Mindly hooks from Claude Code',
     mode,
     (config) => {
       if (!install && !isRecord(config['hooks'])) return;
@@ -111,8 +111,8 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
   const mcp = await planJsonFile(
     paths.mcp,
     install
-      ? 'Register the Synapse MCP server for Claude Code'
-      : 'Remove the Synapse MCP server from Claude Code',
+      ? 'Register the Mindly MCP server for Claude Code'
+      : 'Remove the Mindly MCP server from Claude Code',
     mode,
     (config) => {
       if (install) {

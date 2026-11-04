@@ -3,10 +3,10 @@ import { basename, join } from 'node:path';
 import {
   loadProjectConfig,
   ProjectConfigSchema,
-  SynapseError,
+  MindlyError,
   type ProjectConfig,
   type Project,
-} from '@synapse/core';
+} from '@mindly/core';
 import type { Kernel } from './kernel.js';
 
 export interface ProjectContext {
@@ -30,7 +30,7 @@ export class ProjectService {
     try {
       real = realpathSync(cwd);
     } catch (cause) {
-      throw new SynapseError('invalid_input', 'working directory does not exist', { cause });
+      throw new MindlyError('invalid_input', 'working directory does not exist', { cause });
     }
     const cached = this.cache.get(real);
     if (cached) return cached;
@@ -50,7 +50,7 @@ export class ProjectService {
     let hash: string | null = null;
     let configError: string | null = null;
     try {
-      const loaded = loadProjectConfig(join(project.root, '.synapse', 'config.json'));
+      const loaded = loadProjectConfig(join(project.root, '.mindly', 'config.json'));
       config = loaded.config;
       hash = loaded.hash;
     } catch (err) {
@@ -61,12 +61,12 @@ export class ProjectService {
   }
 
   /**
-   * Records that the user trusts the project's current `.synapse/config.json`. Any later change to
+   * Records that the user trusts the project's current `.mindly/config.json`. Any later change to
    * the file invalidates trust until this is called again.
    */
   trust(projectId: string): ProjectContext {
     const ctx = this.byId(projectId);
-    if (ctx.configError) throw new SynapseError('invalid_input', ctx.configError);
+    if (ctx.configError) throw new MindlyError('invalid_input', ctx.configError);
     this.k.store.projects.setTrustedConfigHash(projectId, ctx.configHash);
     this.cache.clear();
     return this.byId(projectId);

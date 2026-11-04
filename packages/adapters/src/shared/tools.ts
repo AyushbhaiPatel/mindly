@@ -1,4 +1,4 @@
-import type { FileEdit, NormalizedHookEvent } from '@synapse/core';
+import type { FileEdit, NormalizedHookEvent } from '@mindly/core';
 import { findPatchText, parseApplyPatch } from '../codex/apply-patch.js';
 import {
   capText,
