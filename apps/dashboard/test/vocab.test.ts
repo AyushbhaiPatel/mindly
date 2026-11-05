@@ -19,6 +19,8 @@ import {
   productName,
   relTime,
   runKindWords,
+  saveKindWords,
+  saveStatusWords,
   sessionName,
   sessionStatusWords,
   severityWords,
@@ -157,6 +159,32 @@ describe('overviewStats', () => {
     ]);
     expect(stats.at(-1)?.at).toBe(123);
     expect(stats.at(-1)?.tone).toBe('bad');
+  });
+
+  it('adds the saves of the week once they are known', () => {
+    const base = { sessions: [], needsYou: 0, lastMergeCheck: null };
+    expect(overviewStats(base).map((s) => s.label)).not.toContain('saves this week');
+    expect(
+      overviewStats({ ...base, saves: 0 }).find((s) => s.label === 'saves this week'),
+    ).toMatchObject({
+      value: '0',
+      tone: 'neutral',
+    });
+    expect(
+      overviewStats({ ...base, saves: 1 }).find((s) => s.label === 'save this week'),
+    ).toMatchObject({
+      value: '1',
+      tone: 'good',
+    });
+  });
+
+  it('names save kinds and statuses in plain words', () => {
+    expect(saveKindWords('impact_warned')).toBe('Told about a change before building on it');
+    expect(saveKindWords('unknown_kind')).toBe('Save');
+    expect(saveStatusWords('caught')).toBe('pending');
+    expect(saveStatusWords('confirmed')).toBe('counted');
+    expect(saveStatusWords('expired')).toBe('not confirmed in time');
+    expect(saveStatusWords('rejected')).toBe('not a save');
   });
 
   it('adds usage limits and handles no merge check', () => {
@@ -331,6 +359,40 @@ describe('describeEvent', () => {
     expect(
       describeEvent(ev('memory.created', { kind: 'mistake', title: 'x' }, CODEX.id), sessions).text,
     ).toBe('suggested a known pitfall: “x”');
+  });
+
+  it('says what Mindly told an agent before a tool call, and what saves did', () => {
+    const say = (type: string, payload: Record<string, unknown>, sid?: string) =>
+      describeEvent(ev(type, payload, sid), sessions);
+    expect(
+      say('tool.before', { paths: ['src/generated/api.ts'], deniedBy: 'r1' }, CODEX.id).text,
+    ).toBe('was stopped by your rule from editing src/generated/api.ts');
+    expect(
+      say(
+        'tool.before',
+        { paths: ['src/auth.ts'], overlaps: [{ intentId: 'i' }], deniedBy: null },
+        CODEX.id,
+      ).text,
+    ).toBe('was told another agent is editing src/auth.ts');
+    expect(say('tool.before', { command: 'npm test', mistakes: ['m1'] }, CODEX.id).text).toBe(
+      'was reminded that `npm test` failed before',
+    );
+    expect(say('tool.after', { command: 'npm test', failed: true }, CODEX.id).text).toBe(
+      'ran `npm test`, which failed again',
+    );
+    expect(
+      say('tool.after', { command: 'pnpm lint', failed: true, again: false }, CODEX.id).text,
+    ).toBe('ran `pnpm lint`, which failed');
+    const confirmed = say('save.confirmed', { title: 'A write by Codex was blocked by your rule' });
+    expect(confirmed.text).toBe('Mindly saved you: A write by Codex was blocked by your rule');
+    expect(confirmed.tone).toBe('good');
+    expect(say('save.caught', { title: 't' }).text).toBe('Possible save, waiting for evidence: t');
+    expect(say('save.rejected', { title: 't' }).text).toBe('Not counted as a save: t');
+    for (const t of ['save.caught', 'save.confirmed', 'save.rejected']) {
+      expect(say(t, { kind: 'rule_enforced', title: 't' }).text).not.toMatch(
+        /rule_enforced|save\./,
+      );
+    }
   });
 
   it('never leaks unknown event types', () => {

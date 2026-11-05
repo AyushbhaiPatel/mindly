@@ -683,6 +683,21 @@ code.mono {
   flex: 1 1 auto;
 }
 
+.share-card {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+}
+
+.check-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.875rem;
+}
+
 /* ------------------------------------------------------------------ dots (one per row) */
 
 .dot {

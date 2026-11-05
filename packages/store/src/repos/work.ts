@@ -512,6 +512,11 @@ export class ConflictRepo {
     return toConflict(r);
   }
 
+  find(id: string): Conflict | null {
+    const r = this.db.prepare('SELECT * FROM conflicts WHERE id = ?').get(id) as Row | undefined;
+    return r ? toConflict(r) : null;
+  }
+
   setStatus(id: string, status: ConflictStatus): Conflict {
     const now = this.clock.now();
     this.db
@@ -649,6 +654,11 @@ export class DeliveryRepo {
         : this.db.prepare('SELECT * FROM deliveries WHERE id = ?').get(id)
     ) as Row;
     return toDelivery(r);
+  }
+
+  find(id: string): Delivery | null {
+    const r = this.db.prepare('SELECT * FROM deliveries WHERE id = ?').get(id) as Row | undefined;
+    return r ? toDelivery(r) : null;
   }
 
   /** Pending, unexpired deliveries for a session (directly addressed or by agent kind). */

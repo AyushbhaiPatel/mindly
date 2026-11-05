@@ -2,6 +2,7 @@ import type { Mindly, MindlyModule } from '../mindly.js';
 import { contractsModule, ContractService } from './contracts.js';
 import { impactModule, ImpactService } from './impact.js';
 import { provenanceModule, ProvenanceService } from './provenance.js';
+import { savesModule, SavesService } from './saves.js';
 import { selfHealingModule, SelfHealingService } from './self-healing.js';
 import { serviceOf } from './shared.js';
 import { xrayModule, XRayService } from './xray.js';
@@ -10,6 +11,8 @@ import { continuityModules } from './continuity.js';
 export * from './contracts.js';
 export * from './impact.js';
 export * from './provenance.js';
+export * from './saves.js';
+export * from './saves-card.js';
 export * from './self-healing.js';
 export * from './xray.js';
 
@@ -21,11 +24,18 @@ export const defaultModules: readonly MindlyModule[] = [
   provenanceModule,
   xrayModule,
   continuityModules,
+  savesModule,
 ];
 
-/** Installs `defaultModules` on a `Mindly` instance. Call once per instance. */
-export function installDefaultModules(mindly: Mindly): Mindly {
-  for (const m of defaultModules) mindly.use(m);
+/**
+ * Installs `defaultModules` on a `Mindly` instance. Call once per instance. `saves: false` leaves
+ * out the saves module (the MCP server: agents must not be able to create or change saves).
+ */
+export function installDefaultModules(mindly: Mindly, opts: { saves?: boolean } = {}): Mindly {
+  for (const m of defaultModules) {
+    if (m === savesModule && opts.saves === false) continue;
+    mindly.use(m);
+  }
   return mindly;
 }
 
@@ -56,6 +66,14 @@ export function contractsOf(mindly: Mindly): ContractService {
 /** The code provenance service of `mindly`. */
 export function provenanceOf(mindly: Mindly): ProvenanceService {
   return serviceOf(mindly, 'provenance', () => new ProvenanceService(mindly.kernel));
+}
+
+/**
+ * The saves service of `mindly`. Without the saves module it only reads and settles saves; it
+ * does not follow the event log.
+ */
+export function savesOf(mindly: Mindly): SavesService {
+  return serviceOf(mindly, 'saves', () => new SavesService(mindly.kernel));
 }
 
 /** The Context X-Ray service of `mindly`. */

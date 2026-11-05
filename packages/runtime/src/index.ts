@@ -9,6 +9,11 @@ export interface RuntimeOptions extends Omit<MindlyOptions, 'ports' | 'config'> 
   disableLlm?: boolean;
   /** Skip notifications (e.g. in tests). */
   disableNotify?: boolean;
+  /**
+   * Follow the event log to record saves (default true). The MCP server passes false so nothing an
+   * agent does through MCP can create or change a save.
+   */
+  saves?: boolean;
 }
 
 /**
@@ -31,6 +36,6 @@ export function openMindly(options: RuntimeOptions = {}): Mindly {
       ...(options.disableNotify ? {} : { notifier: createNotifierPort(config.notify) }),
     },
   });
-  installDefaultModules(mindly);
+  installDefaultModules(mindly, { saves: options.saves !== false });
   return mindly;
 }

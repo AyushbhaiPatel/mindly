@@ -1,6 +1,7 @@
 import { shortId, type Conflict, type ContextItem, type Session } from '@mindly/core';
 import type {
   ProvenanceResult,
+  SavesSummary,
   StandupDigest,
   XRayMissing,
   XRayMissingItem,
@@ -27,6 +28,7 @@ import {
 } from '../present/index.js';
 import { clean } from '../util.js';
 import { conflictMarker, conflictText, type SessionLookup } from './common.js';
+import { renderStandupSaves } from './saves.js';
 
 // ---------------------------------------------------------------------------------------------
 // Conflicts
@@ -247,7 +249,7 @@ export function renderXrayQuery(sc: Screen, session: Session, r: XRayMissing): v
 // ---------------------------------------------------------------------------------------------
 
 /** Renders `mindly standup` from the engine's digest. */
-export function renderStandup(sc: Screen, d: StandupDigest): void {
+export function renderStandup(sc: Screen, d: StandupDigest, saves?: SavesSummary): void {
   const sep = sc.sym.dot;
   sc.summary(
     `Standup ${sep} ${clean(d.projectName, 60)} ${sep} last ${spanWords(d.until - d.since)} (since ${relativeTime(d.since, sc.now)})`,
@@ -283,6 +285,7 @@ export function renderStandup(sc: Screen, d: StandupDigest): void {
     sc.blank();
     sc.note('No agent worked in this project in that time.');
   }
+  if (saves) renderStandupSaves(sc, saves);
   const mem: Row[] = [];
   const titles = (items: { title: string }[]): string =>
     items

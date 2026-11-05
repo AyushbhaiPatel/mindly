@@ -171,31 +171,32 @@ dropped with an event.
 
 ## Features and where they live
 
-| Feature                   | Mechanism                                                                    |
-| ------------------------- | ---------------------------------------------------------------------------- |
-| Universal memory          | `engine/memory` + FTS5 retrieval                                             |
-| Zero-prompt context       | `engine/context` on SessionStart                                             |
-| Context compression       | Token budgeting, per-item truncation, optional LLM summary                   |
-| Agent telepathy / inbox   | `engine/coordination/deliveries`                                             |
-| Handoff and failover      | `engine/coordination/handoff`, rate-limit detection in Stop                  |
-| Mission Control           | daemon + dashboard, live WebSocket over the event log                        |
-| Intent ledger             | `engine/coordination/intents`, PreToolUse                                    |
-| Conflict and impact radar | intent overlap, file overlap, export-surface diff + import graph             |
-| Shadow merge              | `git merge-tree --write-tree` over every session's tree, checks in temp tree |
-| Self-healing memory       | evidence content hashes re-checked on change and by periodic sweep           |
-| Executable memory         | `contracts` table; declarative checks; command checks need user approval     |
-| Say-it-once rules         | correction detector on prompts, path-scoped rules                            |
-| Rule import               | `engine/memory/instructions` parses CLAUDE.md, AGENTS.md, .cursorrules, …    |
-| Rules file sync           | `engine/memory/rules-file` rewrites a marked section on every rule change    |
-| Mistake memory            | failed attempts recorded and surfaced before similar edits                   |
-| Code provenance           | `file_changes` hunk hashes; `mindly why file:line`                           |
-| Context X-Ray             | `context_packets` with included/omitted items and scores                     |
-| Cross-agent review        | `runners` headless review of a diff by a different agent                     |
-| Agent A/B replay          | `runners` in isolated worktrees at the same base commit                      |
-| Phone pager               | `notify` channels, minimal payloads, opt-in                                  |
-| Multi-agent time machine  | `snapshots`: hidden git ref + engine state; restore is non-destructive       |
-| Memory branches           | memories scoped to a git branch, promoted when the branch merges             |
-| Morning standup           | digest built from the event log; CLI, dashboard, optional scheduled pager    |
+| Feature                   | Mechanism                                                                                                                                            |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Universal memory          | `engine/memory` + FTS5 retrieval                                                                                                                     |
+| Zero-prompt context       | `engine/context` on SessionStart                                                                                                                     |
+| Context compression       | Token budgeting, per-item truncation, optional LLM summary                                                                                           |
+| Agent telepathy / inbox   | `engine/coordination/deliveries`                                                                                                                     |
+| Handoff and failover      | `engine/coordination/handoff`, rate-limit detection in Stop                                                                                          |
+| Mission Control           | daemon + dashboard, live WebSocket over the event log                                                                                                |
+| Intent ledger             | `engine/coordination/intents`, PreToolUse                                                                                                            |
+| Conflict and impact radar | intent overlap, file overlap, export-surface diff + import graph                                                                                     |
+| Shadow merge              | `git merge-tree --write-tree` over every session's tree, checks in temp tree                                                                         |
+| Self-healing memory       | evidence content hashes re-checked on change and by periodic sweep                                                                                   |
+| Executable memory         | `contracts` table; declarative checks; command checks need user approval                                                                             |
+| Say-it-once rules         | correction detector on prompts, path-scoped rules                                                                                                    |
+| Rule import               | `engine/memory/instructions` parses CLAUDE.md, AGENTS.md, .cursorrules, …                                                                            |
+| Rules file sync           | `engine/memory/rules-file` rewrites a marked section on every rule change                                                                            |
+| Mistake memory            | failed attempts recorded and surfaced before similar edits                                                                                           |
+| Code provenance           | `file_changes` hunk hashes; `mindly why file:line`                                                                                                   |
+| Context X-Ray             | `context_packets` with included/omitted items and scores                                                                                             |
+| Cross-agent review        | `runners` headless review of a diff by a different agent                                                                                             |
+| Agent A/B replay          | `runners` in isolated worktrees at the same base commit                                                                                              |
+| Phone pager               | `notify` channels, minimal payloads, opt-in                                                                                                          |
+| Multi-agent time machine  | `snapshots`: hidden git ref + engine state; restore is non-destructive                                                                               |
+| Memory branches           | memories scoped to a git branch, promoted when the branch merges                                                                                     |
+| Morning standup           | digest built from the event log; CLI, dashboard, optional scheduled pager                                                                            |
+| Saves                     | `engine/features/saves` follows the event log of hook, CLI and daemon processes (not MCP); confirmed only on later evidence, expired by housekeeping |
 
 ## Processes and IPC
 

@@ -132,6 +132,7 @@ export type Topic =
   | 'runs'
   | 'snapshots'
   | 'xray'
+  | 'saves'
   | 'overview';
 
 export function topicsFor(type: EventType | string): Topic[] {
@@ -162,6 +163,8 @@ export function topicsFor(type: EventType | string): Topic[] {
       return ['snapshots'];
     case 'context':
       return ['xray'];
+    case 'save':
+      return ['saves'];
     default:
       return [];
   }

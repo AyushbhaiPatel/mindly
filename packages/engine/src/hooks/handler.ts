@@ -3,9 +3,12 @@ import {
   EMPTY_HOOK_RESULT,
   isDeniedPath,
   redactText,
+  fingerprint,
   sanitizeLine,
   tryResolveInsideRoot,
   type HookResult,
+  type Save,
+  type SaveKind,
   type NormalizedHookEvent,
   type Session,
 } from '@mindly/core';
@@ -15,11 +18,27 @@ import { memoryLine, renderSections } from '../context/render.js';
 import type { IntentService } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { LIVE_WINDOW_MS, type ChangedFile, type EngineBus, type Kernel } from '../kernel.js';
-import type { MistakeService } from '../memory/mistakes.js';
+import { commandKey, type MistakeService } from '../memory/mistakes.js';
+import { normalizeCommandLine, shellMayWrite } from './shell.js';
 import type { RuleService } from '../memory/rules.js';
 import type { ProjectContext, ProjectService } from '../projects.js';
 
 const MAX_PROMPT_STORED = 4000;
+
+/** Save kinds settled by what the helped agent does next (its later tool calls). */
+const WATCHED_SAVE_KINDS: readonly SaveKind[] = [
+  'overlap_avoided',
+  'mistake_avoided',
+  'rule_enforced',
+];
+
+/**
+ * Fingerprint of a normalized, redacted shell command line: compares two runs without storing
+ * either.
+ */
+export function commandLineFingerprint(command: string): string {
+  return fingerprint('command-line', redactText(normalizeCommandLine(command)));
+}
 
 export interface HookDeps {
   projects: ProjectService;
@@ -181,6 +200,11 @@ export class HookHandler {
   ): Promise<HookResult> {
     const tool = evt.tool;
     if (!tool) return EMPTY_HOOK_RESULT;
+    const pid = project.project.id;
+    // Saves of this session still waiting for evidence: while there are any, every tool call is
+    // recorded (without its content), because what the agent does next is that evidence.
+    const pending = this.k.store.saves.caughtFor(pid, session.id, WATCHED_SAVE_KINDS);
+    const toolName = sanitizeLine(tool.name, 40);
     if (tool.writes && tool.edits.length > 0) {
       const paths = (
         await this.projectPaths(
@@ -189,9 +213,22 @@ export class HookHandler {
           tool.edits.map((e) => e.path),
         )
       ).map((p) => p.rel);
-      if (paths.length === 0) return EMPTY_HOOK_RESULT;
+      if (paths.length === 0) {
+        if (pending.length > 0)
+          this.appendToolEvent(pid, session, 'tool.before', { tool: toolName });
+        return EMPTY_HOOK_RESULT;
+      }
       const overlap = this.d.intents.noteEditing(session, paths);
       const built = this.d.context.preWrite(project, session, paths, overlap.warnings);
+      if (overlap.overlaps.length > 0 || built.deny || pending.length > 0) {
+        // What Mindly told the agent before this write: the evidence of overlap and rule saves.
+        this.appendToolEvent(pid, session, 'tool.before', {
+          tool: toolName,
+          paths,
+          overlaps: overlap.overlaps,
+          deniedBy: built.deny?.id ?? null,
+        });
+      }
       if (built.deny) {
         return {
           ...EMPTY_HOOK_RESULT,
@@ -203,7 +240,14 @@ export class HookHandler {
       return { ...EMPTY_HOOK_RESULT, context: built.text };
     }
     if (tool.shell && tool.command) {
-      const mistakes = this.d.mistakes.forCommand(project.project.id, tool.command);
+      const mistakes = this.d.mistakes.forCommand(pid, tool.command);
+      if (mistakes.length > 0 || pending.length > 0) {
+        this.appendToolEvent(pid, session, 'tool.before', {
+          tool: toolName,
+          ...this.shellFacts(tool.command, pending),
+          ...(mistakes.length > 0 ? { mistakes: mistakes.map((m) => m.id) } : {}),
+        });
+      }
       if (mistakes.length === 0) return EMPTY_HOOK_RESULT;
       return {
         ...EMPTY_HOOK_RESULT,
@@ -215,6 +259,7 @@ export class HookHandler {
         ]),
       };
     }
+    if (pending.length > 0) this.appendToolEvent(pid, session, 'tool.before', { tool: toolName });
     return EMPTY_HOOK_RESULT;
   }
 
@@ -226,6 +271,31 @@ export class HookHandler {
     const tool = evt.tool;
     if (!tool) return EMPTY_HOOK_RESULT;
     this.k.store.sessions.touch(session.id);
+    // Only sessions with a save waiting for evidence record their tool calls: one indexed query,
+    // no memory lookups (whether a warned command ran again is told by the pending save itself).
+    const pending = this.k.store.saves.caughtFor(
+      project.project.id,
+      session.id,
+      WATCHED_SAVE_KINDS,
+    );
+    if (pending.length > 0) {
+      const paths =
+        tool.writes && tool.edits.length > 0
+          ? (
+              await this.projectPaths(
+                project,
+                evt.cwd,
+                tool.edits.map((e) => e.path),
+              )
+            ).map((p) => p.rel)
+          : [];
+      this.appendToolEvent(project.project.id, session, 'tool.after', {
+        tool: sanitizeLine(tool.name, 40),
+        ...(paths.length > 0 ? { paths } : {}),
+        ...(tool.shell && tool.command ? this.shellFacts(tool.command, pending) : {}),
+        failed: tool.failed,
+      });
+    }
     if (tool.shell && tool.failed && tool.command) {
       this.d.mistakes.recordFailedCommand({
         projectId: project.project.id,
@@ -282,6 +352,45 @@ export class HookHandler {
       files: changed,
     });
     return EMPTY_HOOK_RESULT;
+  }
+
+  private appendToolEvent(
+    projectId: string,
+    session: Session,
+    type: 'tool.before' | 'tool.after',
+    payload: Record<string, unknown>,
+  ): void {
+    this.k.store.events.append({ projectId, sessionId: session.id, type, payload });
+  }
+
+  /**
+   * What saves need to know about a shell command, without storing it: its redacted key, a
+   * fingerprint of its normalized command line, whether it is the command of a pending mistake
+   * save (`again`), and which watched files of pending saves it may have written (`touched`).
+   */
+  private shellFacts(command: string, pending: readonly Save[]): Record<string, unknown> {
+    const key = this.commandKey(command);
+    const watched = new Set<string>();
+    for (const s of pending) {
+      if (s.kind === 'overlap_avoided' || s.kind === 'rule_enforced') {
+        for (const p of s.paths) watched.add(p);
+      }
+    }
+    const touched = [...watched].filter((p) => shellMayWrite(command, p)).slice(0, 20);
+    return {
+      command: key,
+      line: commandLineFingerprint(command),
+      again: pending.some((s) => s.kind === 'mistake_avoided' && s.refs.command === key),
+      ...(touched.length > 0 ? { touched } : {}),
+    };
+  }
+
+  /** The comparable key of a shell command (program and subcommand), redacted. */
+  private commandKey(command: string): string {
+    return sanitizeLine(
+      redactText(commandKey(command), { extraPatterns: this.k.config.redaction.extraPatterns }),
+      120,
+    );
   }
 
   /**

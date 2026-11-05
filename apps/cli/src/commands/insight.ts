@@ -1,5 +1,6 @@
 import { CONFLICT_STATUSES, shortId, type ConflictStatus } from '@mindly/core';
-import { LIVE_WINDOW_MS, provenanceOf, standupService, xrayOf } from '@mindly/engine';
+import { LIVE_WINDOW_MS, provenanceOf, savesOf, standupService, xrayOf } from '@mindly/engine';
+import { startOfLocalDay } from '@mindly/store';
 import { z } from 'zod';
 import { pickSession, projectPath, withProject } from '../context.js';
 import { resolveId } from '../ids.js';
@@ -84,6 +85,7 @@ export async function status(out: Out, o: { json?: boolean }): Promise<number> {
             ? 'trusted'
             : 'untrusted',
       sessionOf,
+      savesToday: store.saves.countConfirmed(pid, startOfLocalDay(mindly.kernel.clock.now())),
     });
     return 0;
   });
@@ -158,7 +160,12 @@ export async function standup(out: Out, o: { since?: string; json?: boolean }): 
     const since = sinceMs !== undefined ? mindly.kernel.clock.now() - sinceMs : undefined;
     const digest = svc.build(project.project.id, since);
     if (o.json) out.json(digest);
-    else renderStandup(out.screen(), digest);
+    else
+      renderStandup(
+        out.screen(),
+        digest,
+        savesOf(mindly).summary(project.project.id, digest.since),
+      );
     return 0;
   });
 }

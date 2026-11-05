@@ -12,6 +12,8 @@ import {
   MEMORY_STATUSES,
   RUN_KINDS,
   RUN_STATUSES,
+  SAVE_KINDS,
+  SAVE_STATUSES,
   SESSION_STATUSES,
   SEVERITIES,
   SOURCE_TYPES,
@@ -318,5 +320,23 @@ CREATE TABLE kv (
   value       TEXT NOT NULL,
   updated_at  INTEGER NOT NULL
 );
+`,
+  /* v2: saves. `refs` holds the ids of the records a save is about. */ `
+CREATE TABLE saves (
+  id            TEXT PRIMARY KEY,
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL ${oneOf('kind', SAVE_KINDS)},
+  status        TEXT NOT NULL ${oneOf('status', SAVE_STATUSES)},
+  title         TEXT NOT NULL,
+  session_ids   TEXT NOT NULL DEFAULT '[]',
+  paths         TEXT NOT NULL DEFAULT '[]',
+  evidence      TEXT NOT NULL DEFAULT '[]',
+  fingerprint   TEXT NOT NULL,
+  refs          TEXT NOT NULL DEFAULT '{}',
+  created_at    INTEGER NOT NULL,
+  confirmed_at  INTEGER,
+  UNIQUE (project_id, fingerprint)
+);
+CREATE INDEX saves_project ON saves (project_id, status, created_at);
 `,
 ];

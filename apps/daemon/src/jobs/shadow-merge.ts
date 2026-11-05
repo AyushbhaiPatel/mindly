@@ -1,5 +1,5 @@
 import { fingerprint, sanitizeLine, shortId, type Run, type Session } from '@mindly/core';
-import { LIVE_WINDOW_MS, sessionLabel } from '@mindly/engine';
+import { LIVE_WINDOW_MS, savesOf, sessionLabel } from '@mindly/engine';
 import { materializeTree, runChecks, shadowMerge, type CheckResult } from '@mindly/git';
 import { captureSession, type SessionCapture } from './git-helpers.js';
 import {
@@ -122,6 +122,9 @@ export async function executeShadowMerge(ctx: JobContext, run: Run): Promise<Run
     // Conflicts: one per distinct path set, attributed to the conflicting side and the merged
     // sides that touched any of those paths.
     const present: string[] = [];
+    let baseBranch: { name: string | null } | undefined;
+    // check_failed conflicts this run finds passing again (merge-check saves are confirmed then).
+    let fixed: string[] = [];
     const accumulated: string[] = [captures[0]?.session.id ?? ''];
     for (const step of merge.steps) {
       if (step.status === 'clean') {
@@ -142,7 +145,7 @@ export async function executeShadowMerge(ctx: JobContext, run: Run): Promise<Run
         .map((id) => byId.get(id)?.session)
         .filter((s): s is Session => s !== undefined)
         .map(sessionLabel);
-      const { isNew } = reportConflict(ctx, {
+      const { conflict, isNew, eventId } = reportConflict(ctx, {
         projectId,
         kind: 'merge_conflict',
         severity: 'critical',
@@ -158,6 +161,27 @@ export async function executeShadowMerge(ctx: JobContext, run: Run): Promise<Run
         paths,
         fingerprint: fp,
       });
+      if (eventId) {
+        const git = mindly.kernel.ports.git;
+        baseBranch ??= { name: await git.currentBranch(root) };
+        const sides: { session: Session; changed: string[]; branch: string | null }[] = [];
+        for (const id of sessionIds) {
+          const c = byId.get(id);
+          if (c)
+            sides.push({
+              session: c.session,
+              changed: c.changed,
+              branch: await git.currentBranch(c.top),
+            });
+        }
+        await savesOf(mindly).mergeConflictFound({
+          conflict,
+          eventId,
+          sides,
+          repoRoot: root,
+          baseBranch: baseBranch.name,
+        });
+      }
       if (isNew) {
         await notify(ctx, {
           trigger: 'conflict_critical',
@@ -211,7 +235,7 @@ export async function executeShadowMerge(ctx: JobContext, run: Run): Promise<Run
         const mentioned = changedBy.filter((x) => x.changed.some((p) => tail.includes(p)));
         const involved = mentioned.length > 0 ? mentioned : changedBy;
         const paths = [...new Set(involved.flatMap((x) => x.changed))].sort().slice(0, 200);
-        const { isNew } = reportConflict(ctx, {
+        const { conflict, isNew, eventId } = reportConflict(ctx, {
           projectId,
           kind: 'check_failed',
           severity: 'critical',
@@ -224,6 +248,7 @@ export async function executeShadowMerge(ctx: JobContext, run: Run): Promise<Run
           paths,
           fingerprint: fp,
         });
+        if (eventId) savesOf(mindly).mergeCheckFailed(conflict, eventId);
         if (isNew) {
           await notify(ctx, {
             trigger: 'check_failed',
@@ -235,9 +260,20 @@ export async function executeShadowMerge(ctx: JobContext, run: Run): Promise<Run
           });
         }
       }
+      fixed = mindly.store.conflicts
+        .list(projectId, { statuses: ['open', 'acknowledged'], limit: 500 })
+        .filter((c) => c.kind === 'check_failed' && !failing.includes(c.fingerprint))
+        .map((c) => c.id);
       mindly.store.conflicts.resolveMissing(projectId, 'check_failed', failing);
     }
-    return finishRun(ctx, run, failed ? 'failed' : 'passed', result);
+    const finished = finishRun(ctx, run, failed ? 'failed' : 'passed', result);
+    if (fixed.length > 0) {
+      const evidence = mindly.store.events
+        .query(projectId, { types: ['run.finished'], order: 'desc', limit: 20 })
+        .find((e) => e.payload.runId === run.id);
+      if (evidence) savesOf(mindly).mergeChecksPassed(projectId, fixed, evidence.id);
+    }
+    return finished;
   } catch (err) {
     return failRun(ctx, run, err);
   }

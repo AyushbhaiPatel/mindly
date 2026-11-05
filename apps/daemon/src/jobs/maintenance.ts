@@ -1,5 +1,5 @@
 import { describeError } from '@mindly/core';
-import { needsYouCount, selfHealingOf, standupService } from '@mindly/engine';
+import { needsYouCount, savesOf, selfHealingOf, standupService } from '@mindly/engine';
 import type { JobContext } from './context.js';
 
 const DAY_MS = 86_400_000;
@@ -32,11 +32,14 @@ export interface HousekeepingResult {
   promptsCompacted: number;
   eventsDeleted: number;
   packetsDeleted: number;
+  /** Caught saves settled because their window passed (or their conflict was dismissed). */
+  saves: { confirmed: number; expired: number; rejected: number };
 }
 
 /**
- * Expires intents and deliveries, ends stale sessions and applies retention: prompt text after
- * `retention.promptsDays`, events after `retention.eventsDays`, context packets after 30 days.
+ * Expires intents and deliveries, ends stale sessions, settles saves whose window passed and
+ * applies retention: prompt text after `retention.promptsDays`, events after
+ * `retention.eventsDays`, context packets after 30 days.
  */
 export function housekeepingTick(ctx: JobContext): HousekeepingResult {
   const { store, config } = ctx.mindly;
@@ -48,10 +51,12 @@ export function housekeepingTick(ctx: JobContext): HousekeepingResult {
     promptsCompacted: store.events.compactPrompts(now - config.retention.promptsDays * DAY_MS),
     eventsDeleted: store.events.deleteOlderThan(now - config.retention.eventsDays * DAY_MS),
     packetsDeleted: store.contextPackets.deleteOlderThan(now - CONTEXT_PACKET_RETENTION_MS),
+    saves: { confirmed: 0, expired: 0, rejected: 0 },
   };
   for (const p of store.projects.list().slice(0, MAX_PROJECTS)) {
     result.sessionsEnded += store.sessions.endStale(p.id, STALE_SESSION_MS).length;
   }
+  result.saves = savesOf(ctx.mindly).sweep();
   ctx.logger.info('housekeeping', { ...result });
   return result;
 }

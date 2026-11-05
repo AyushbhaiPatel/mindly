@@ -253,11 +253,26 @@ export interface EventQuery {
   order?: 'asc' | 'desc';
 }
 
+/** Called synchronously after an event is appended in this process. */
+export type EventListener = (event: MindlyEvent) => void;
+
 export class EventRepo {
+  private readonly listeners = new Set<EventListener>();
+
   constructor(
     private readonly db: Db,
     private readonly clock: Clock,
   ) {}
+
+  /**
+   * Calls `listener` after every event this process appends (projections such as saves follow the
+   * log this way). A listener must not throw; errors are swallowed so an append never fails because
+   * of one. Returns a function that removes the listener.
+   */
+  subscribe(listener: EventListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 
   /**
    * Appends an event. Payloads must already be redacted by the caller. `id` may be supplied for
@@ -272,13 +287,22 @@ export class EventRepo {
   }): MindlyEvent {
     const now = this.clock.now();
     const id = input.id ?? uuidv7(now);
-    this.db
+    const res = this.db
       .prepare(
         `INSERT INTO events (id, project_id, session_id, type, payload, created_at)
          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
       )
       .run(id, input.projectId, input.sessionId, input.type, toJson(input.payload), now);
-    return this.getById(id) as MindlyEvent;
+    const event = this.getById(id) as MindlyEvent;
+    if (Number(res.changes) === 0) return event;
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {
+        // Listeners log their own failures; the event is stored either way.
+      }
+    }
+    return event;
   }
 
   getById(id: string): MindlyEvent | null {
