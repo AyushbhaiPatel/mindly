@@ -112,10 +112,12 @@ function headTail(segment: string): { head: string; tail: string } | null {
  * segments differ, when their literal trailing segments differ, or when their file-name patterns
  * have literal heads or tails that cannot both fit one name (`*.ts` and `*.css`). Anything
  * involving `**`, groups or classes at the point of comparison counts as a possible overlap.
+ * With `nocase`, literal text is compared ignoring letter case.
  */
-export function globsMayOverlap(a: string, b: string): boolean {
-  const A = globSegments(a);
-  const B = globSegments(b);
+export function globsMayOverlap(a: string, b: string, options: GlobOptions = {}): boolean {
+  const fold = (s: string): string => (options.nocase ? s.toLowerCase() : s);
+  const A = globSegments(fold(a));
+  const B = globSegments(fold(b));
   const literal = (s: string | undefined): s is string => s !== undefined && !WILDCARD.test(s);
   let i = 0;
   while (literal(A[i]) && literal(B[i])) {

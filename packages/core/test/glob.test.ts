@@ -46,4 +46,12 @@ describe('globsMayOverlap', () => {
     expect(globsMayOverlap(a, b)).toBe(expected);
     expect(globsMayOverlap(b, a)).toBe(expected);
   });
+
+  it('ignores letter case only with nocase', () => {
+    expect(globsMayOverlap('src/API/**', 'src/api/**')).toBe(false);
+    expect(globsMayOverlap('src/API/**', 'src/api/**', { nocase: true })).toBe(true);
+    expect(globsMayOverlap('*.TS', '*.ts')).toBe(false);
+    expect(globsMayOverlap('*.TS', '*.ts', { nocase: true })).toBe(true);
+    expect(globsMayOverlap('src/API/**', 'src/app/**', { nocase: true })).toBe(false);
+  });
 });

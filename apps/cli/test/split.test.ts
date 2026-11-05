@@ -426,6 +426,17 @@ describe('briefs and ownership through hook events (acceptance 2)', () => {
       writeTool(join(page, 'src/app/page.ts'), 'x'),
     );
     expect(own.hookSpecificOutput?.permissionDecision).toBeUndefined();
+    // Case never hides a file from its owner: src/API is src/api on macOS and Windows.
+    const cased = await hook(
+      sb,
+      page,
+      'page-session',
+      'PreToolUse',
+      writeTool(join(page, 'src/API/a.ts'), 'x'),
+    );
+    expect(cased.hookSpecificOutput?.permissionDecision).toBe('deny');
+    // (a case-insensitive file system may report the folder's own spelling)
+    expect(cased.hookSpecificOutput?.permissionDecisionReason).toMatch(/src\/(API|api)\/a\.ts/);
     expect((await statusJson(sb)).split.strict).toBe(true);
   });
 });

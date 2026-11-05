@@ -49,6 +49,8 @@ export const SPLIT_BRANCH_PREFIX = 'mindly';
 export const SPLIT_INTEGRATION_KEY = 'integration';
 const MAX_SLUG = 40;
 const MAX_FILES_FOR_OVERLAP = 20_000;
+/** Ownership ignores letter case: src/API and src/api are one folder on macOS and Windows. */
+const NOCASE = { nocase: true } as const;
 
 // ---------------------------------------------------------------------------------------------
 // Plan parsing and validation (pure)
@@ -167,7 +169,9 @@ export function validatePlan(
   }
   const cycle = findCycle(plan.parts);
   if (cycle) out.push(`parts depend on each other in a cycle: ${cycle.join(' \u2192 ')}`);
-  // Pairwise disjoint ownership: no current file and no owns pattern may match two parts.
+  // Pairwise disjoint ownership: no current file and no owns pattern may match two parts. Case
+  // is ignored on every OS: on a case-insensitive file system src/API and src/api are one folder,
+  // and a plan that tells them apart is confusing anywhere.
   const candidates = [
     ...new Set([...files.slice(0, MAX_FILES_FOR_OVERLAP), ...[...owns.values()].flat()]),
   ];
@@ -176,23 +180,27 @@ export function validatePlan(
     for (let j = i + 1; j < parts.length; j++) {
       const [a, aGlobs] = parts[i] as [string, string[]];
       const [b, bGlobs] = parts[j] as [string, string[]];
-      const hit = candidates.find((c) => matchesAnyGlob(c, aGlobs) && matchesAnyGlob(c, bGlobs));
-      if (hit !== undefined) {
-        out.push(
-          `parts "${a}" and "${b}" both own ${sanitizeLine(hit, 160)}; owns globs must not overlap`,
-        );
-        continue;
-      }
       // Parts mostly create files, so the patterns themselves must be disjoint, not just their
-      // matches today: a pair that cannot be proven disjoint is refused.
+      // matches today: a pair that cannot be proven disjoint is refused, naming a current file
+      // both match when there is one.
+      const hit = candidates.find(
+        (c) => matchesAnyGlob(c, aGlobs, NOCASE) && matchesAnyGlob(c, bGlobs, NOCASE),
+      );
+      let pair: [string, string] | null = null;
       for (const ga of aGlobs) {
-        const gb = bGlobs.find((g) => globsMayOverlap(ga, g));
-        if (gb === undefined) continue;
-        out.push(
-          `parts "${a}" and "${b}" could both own the same new files: ${sanitizeLine(ga, 160)} and ${sanitizeLine(gb, 160)} are not clearly disjoint; use patterns that cannot match the same path`,
-        );
-        break;
+        const gb = bGlobs.find((g) => globsMayOverlap(ga, g, NOCASE));
+        if (gb !== undefined) {
+          pair = [ga, gb];
+          break;
+        }
       }
+      if (hit === undefined && pair === null) continue;
+      const today = hit === undefined ? '' : `both own ${sanitizeLine(hit, 160)} and `;
+      out.push(
+        pair
+          ? `parts "${a}" and "${b}" ${today}could both own the same new files: ${sanitizeLine(pair[0], 160)} and ${sanitizeLine(pair[1], 160)} are not clearly disjoint; use patterns that cannot match the same path`
+          : `parts "${a}" and "${b}" both own ${sanitizeLine(hit as string, 160)}; owns globs must not overlap`,
+      );
     }
   }
   const names = new Set<string>();
@@ -1000,8 +1008,9 @@ export class SplitService {
     const warnings: string[] = [];
     const denied: string[] = [];
     for (const path of paths) {
-      if (matchesAnyGlob(path, part.owns)) continue;
-      const owner = others.find((o) => matchesAnyGlob(path, o.owns));
+      if (matchesAnyGlob(path, part.owns, NOCASE)) continue;
+      // Ignoring case can only add a warning, never miss one on a case-insensitive file system.
+      const owner = others.find((o) => matchesAnyGlob(path, o.owns, NOCASE));
       if (!owner) continue;
       denied.push(`${path} (part "${owner.title}", ${owner.agentKind})`);
       warnings.push(

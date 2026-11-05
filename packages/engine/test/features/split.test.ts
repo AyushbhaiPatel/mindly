@@ -235,6 +235,9 @@ describe('plan validation', () => {
     expect(check(two(['src/*.ts'], ['src/new.*']))).toMatch(/not clearly disjoint/);
     expect(check(two(['web/**'], ['**/billing/**']))).toMatch(/not clearly disjoint/);
     expect(check(two(['src/api/**'], ['src/app/**', 'docs/*.md']))).toBeNull();
+    // Letter case never tells two owners apart (src/API and src/api are one folder on macOS).
+    expect(check(two(['src/API/**'], ['src/api/**']))).toMatch(/could both own the same new files/);
+    expect(check(two(['src/API/**'], ['src/app/**']))).toBeNull();
     expect(check(two(['src/**/*.ts'], ['src/**/*.css']))).toBeNull();
     const withContract = (contract: unknown[]) => ({
       goal: 'g',
@@ -369,6 +372,11 @@ describe('split through hook events', () => {
       'src/app/page.ts is owned by part "Part page" (claude-code) of this split',
     );
     expect(other.context).toContain('your part "Part api" owns src/api/**');
+    // A path that differs from another part's owns only by case is still that part's file.
+    const cased = await mindly.hooks.handle(
+      event(apiWt, 'claude-code', 'api-1', 'pre_tool', { tool: writeTool('src/APP/page.ts', 'x') }),
+    );
+    expect(cased.context).toContain('src/APP/page.ts is owned by part "Part page"');
     // Files nobody owns are free.
     const free = await mindly.hooks.handle(
       event(apiWt, 'claude-code', 'api-1', 'pre_tool', { tool: writeTool('README.md', 'x') }),
@@ -397,6 +405,11 @@ describe('split through hook events', () => {
     expect(denied.decision).toBe('deny');
     expect(denied.reason).toContain('strict mode');
     expect(denied.reason).toContain('src/api/billing.ts (part "Part api", claude-code)');
+    const deniedCased = await mindly.hooks.handle(
+      event(pageWt, 'claude-code', 'page-1', 'pre_tool', { tool: writeTool('src/API/a.ts', 'x') }),
+    );
+    expect(deniedCased.decision).toBe('deny');
+    expect(deniedCased.reason).toContain('src/API/a.ts (part "Part api", claude-code)');
     const ok = await mindly.hooks.handle(
       event(pageWt, 'claude-code', 'page-1', 'pre_tool', {
         tool: writeTool('src/app/page.ts', 'x'),
