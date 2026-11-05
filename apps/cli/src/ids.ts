@@ -12,6 +12,7 @@ const KINDS: Record<IdKind, { one: string; many: string; list: string }> = {
   contract: { one: 'check', many: 'checks', list: 'mindly memory show <memory id>' },
   run: { one: 'run', many: 'runs', list: 'mindly dashboard' },
   save: { one: 'save', many: 'saves', list: 'mindly saves --all' },
+  split: { one: 'split', many: 'splits', list: 'mindly split status' },
 };
 
 /**

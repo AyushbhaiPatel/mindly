@@ -150,7 +150,10 @@ describe('read endpoints', () => {
       criticalConflicts: 1,
       openConflicts: 1,
       pendingHandoffs: 1,
+      blockedParts: 0,
+      failedMergeChecks: 0,
     });
+    expect(o.split).toBeNull();
     expect(o.lastSeq).toBe(d.mindly.store.events.maxSeq());
   });
 

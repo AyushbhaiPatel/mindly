@@ -23,6 +23,7 @@ import {
   renderSections,
   sessionLabel,
   sourceLabel,
+  splitOf,
   LIVE_WINDOW_MS,
   type Mindly,
   type Section,
@@ -602,6 +603,109 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         block([{ heading: 'Tasks', lines: tasks.map((x) => taskLine(mindly, x, t)) }], 'No tasks.'),
         { tasks: tasks.map(taskSummary) },
       );
+    },
+  );
+
+  tool(
+    'mindly_split_status',
+    {
+      title: 'Split status',
+      description:
+        'The current split of this project (a goal divided between agents in parallel worktrees): ' +
+        'your part and the files it owns, every other part and its progress, the shared contract ' +
+        'and the latest merge check. Read-only; the user creates, merges and aborts splits.',
+      input: z.strictObject({}),
+      annotations: READ_ONLY,
+    },
+    async (_args, { project, session }) => {
+      const svc = splitOf(mindly);
+      const current = svc.current(project.project.id);
+      if (!current) return ok('No split in this project.', { split: null });
+      const r = await svc.status(current.id);
+      const mine = svc.partForSession(session);
+      const t = now();
+      const partLine = (p: (typeof r.parts)[number]): string => {
+        const bits = [
+          `- [${p.state}] ${p.part.position + 1}. ${safeLine(p.part.title, 120)} (${p.part.agentKind}${mine?.id === p.part.id ? ', you' : ''})`,
+          `owns ${p.part.owns.map((g) => safeLine(g, 160)).join(', ')}`,
+        ];
+        if (p.part.dependsOn.length) bits.push(`depends on ${p.part.dependsOn.join(', ')}`);
+        if (p.filesChanged.length) bits.push(`${p.filesChanged.length} file(s) changed`);
+        if (p.conflicts.length) bits.push(`${p.conflicts.length} open conflict(s)`);
+        if (p.lastActivityAt !== null) bits.push(`active ${relativeTime(p.lastActivityAt, t)}`);
+        return bits.join(' \u00b7 ');
+      };
+      const check = r.mergeCheck;
+      const checkResult = check?.result as { clean?: boolean; conflictedPaths?: string[] } | null;
+      const sections: Section[] = [
+        {
+          heading: `Split "${safeLine(r.split.goal, 200)}" (${r.split.status}${r.split.strict ? ', strict' : ''})`,
+          lines: [
+            mine
+              ? `  Your part: "${safeLine(mine.title, 120)}" \u2014 edit only ${mine.owns.map((g) => safeLine(g, 160)).join(', ')}.`
+              : '  You are not working in a part of this split.',
+          ],
+        },
+        { heading: 'Parts', lines: r.parts.map(partLine) },
+        {
+          heading: 'Contract',
+          lines: r.contract.map(
+            (c) =>
+              `- ${safeLine(c.name, 120)} \u2014 ${safeLine(c.definition, 400)} (owned by part ${c.owner})`,
+          ),
+        },
+        {
+          heading: 'Merge check',
+          lines: check
+            ? [
+                `  ${check.status}, ${relativeTime(check.createdAt, t)}${
+                  checkResult?.clean === false && checkResult.conflictedPaths?.length
+                    ? `; conflicts in ${checkResult.conflictedPaths
+                        .slice(0, 10)
+                        .map((p) => safeLine(p, 200))
+                        .join(', ')}`
+                    : ''
+                }`,
+              ]
+            : ['  No merge check yet.'],
+        },
+      ];
+      return ok(block(sections, 'No split.'), {
+        split: {
+          id: r.split.id,
+          slug: r.split.slug,
+          goal: safeLine(r.split.goal, 500),
+          status: r.split.status,
+          strict: r.split.strict,
+          baseCommit: r.split.baseCommit,
+          integrationBranch: r.split.integrationBranch,
+        },
+        myPart: mine ? mine.key : null,
+        parts: r.parts.map((p) => ({
+          key: p.part.key,
+          title: safeLine(p.part.title, 120),
+          agentKind: p.part.agentKind,
+          owns: p.part.owns,
+          reads: p.part.reads,
+          dependsOn: p.part.dependsOn,
+          worktree: p.part.worktree,
+          branch: p.part.branch,
+          taskId: p.part.taskId,
+          state: p.state,
+          filesChanged: p.filesChanged.slice(0, 200),
+          conflicts: p.conflicts.length,
+          lastActivityAt: p.lastActivityAt,
+        })),
+        contract: r.contract.map((c) => ({
+          name: safeLine(c.name, 120),
+          owner: c.owner,
+          definition: safeText(c.definition, 2000),
+          memoryId: c.memoryId,
+        })),
+        mergeCheck: check
+          ? { id: check.id, status: check.status, createdAt: check.createdAt, result: check.result }
+          : null,
+      });
     },
   );
 

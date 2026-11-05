@@ -13,6 +13,7 @@ import {
   renderSavesCard,
   savesOf,
   snapshotService,
+  splitOf,
   standupService,
   type Mindly,
 } from '@mindly/engine';
@@ -48,6 +49,7 @@ import {
   SavesCardQuery,
   SavesQuery,
   SnapshotBody,
+  SplitsQuery,
   StandupQuery,
   TasksQuery,
   TrustBody,
@@ -123,6 +125,16 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       const conflicts = store.conflicts.list(pid);
       const proposed = store.memories.list(pid, { trust: ['proposed'], limit: 1000 });
       const memoryCounts: Record<Trust, number> = store.memories.count(pid);
+      const activeSplit = store.splits.active(pid);
+      const blockedParts = activeSplit
+        ? store.splits
+            .parts(activeSplit.id)
+            .filter((p) => store.tasks.get(p.taskId).status === 'blocked')
+            .map((p) => ({ key: p.key, title: p.title }))
+        : [];
+      const splitCheck = activeSplit ? splitOf(mindly).latestMergeCheck(activeSplit) : null;
+      const splitCheckFailed =
+        splitCheck !== null && (splitCheck.status === 'failed' || splitCheck.status === 'error');
       return {
         project,
         sessions: store.sessions.listLive(pid, LIVE_WINDOW_MS).filter((s) => s.status !== 'ended'),
@@ -139,7 +151,25 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
           openConflicts: conflicts.filter((c) => conflictNeedsUser(c)).length,
           pendingHandoffs: store.handoffs.list(pid, 200).filter((h) => h.status === 'pending')
             .length,
+          blockedParts: blockedParts.length,
+          failedMergeChecks: splitCheckFailed ? 1 : 0,
         },
+        split: activeSplit
+          ? {
+              id: activeSplit.id,
+              goal: activeSplit.goal,
+              blockedParts,
+              mergeCheck: splitCheck
+                ? {
+                    runId: splitCheck.id,
+                    status: splitCheck.status,
+                    conflictedPaths: Array.isArray(splitCheck.result?.['conflictedPaths'])
+                      ? (splitCheck.result['conflictedPaths'] as string[]).slice(0, 20)
+                      : [],
+                  }
+                : null,
+            }
+          : null,
         lastSeq: store.events.maxSeq(),
       };
     });
@@ -284,6 +314,20 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
     api.get('/api/projects/:projectId/handoffs', async (req) =>
       store.handoffs.list(projectOf(req).id),
     );
+
+    // ---- splits --------------------------------------------------------------------------
+    api.get('/api/projects/:projectId/splits', async (req) => {
+      const { status, limit } = parse(SplitsQuery, req.query);
+      return store.splits.list(projectOf(req).id, {
+        ...(status ? { statuses: [status] } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      });
+    });
+
+    api.get('/api/splits/:id', async (req) => {
+      const { id } = parse(IdParams, req.params);
+      return splitOf(mindly).status(id);
+    });
 
     // ---- runs ----------------------------------------------------------------------------
     api.get('/api/projects/:projectId/runs', async (req) => {

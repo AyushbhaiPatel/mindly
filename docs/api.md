@@ -56,6 +56,8 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 | GET    | `/api/projects/:projectId/intents`                                               | active `Intent[]`                                                                                                 |
 | GET    | `/api/projects/:projectId/deliveries?status`                                     | `Delivery[]`                                                                                                      |
 | GET    | `/api/projects/:projectId/handoffs`                                              | `Handoff[]`                                                                                                       |
+| GET    | `/api/projects/:projectId/splits?status&limit`                                   | `Split[]` (newest first)                                                                                          |
+| GET    | `/api/splits/:id`                                                                | `SplitStatus` (below)                                                                                             |
 | GET    | `/api/projects/:projectId/runs?kind&limit`                                       | `Run[]`                                                                                                           |
 | POST   | `/api/projects/:projectId/shadow-merge`                                          | queue a shadow merge → `Run` (202)                                                                                |
 | POST   | `/api/projects/:projectId/review`                                                | `{ sessionId, reviewer }` queue cross-agent review → `Run` (202)                                                  |
@@ -85,8 +87,32 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
   memoryCounts: Record<Trust, number>;
   pendingDeliveries: number;
   lastShadowMerge: Run | null;
-  needsYou: { proposedRules: number; proposedMemories: number; criticalConflicts: number; openConflicts: number; pendingHandoffs: number };
+  needsYou: { proposedRules: number; proposedMemories: number; criticalConflicts: number; openConflicts: number; pendingHandoffs: number; blockedParts: number; failedMergeChecks: number };
+  split: {                        // the active split, or null
+    id: string; goal: string;
+    blockedParts: { key: string; title: string }[];
+    mergeCheck: { runId: string; status: RunStatus; conflictedPaths: string[] } | null;
+  } | null;
   lastSeq: number;                // highest event seq, for the live feed
+}
+```
+
+`SplitStatus` (`GET /api/splits/:id`; `Split` and `SplitPart` are the core entities):
+
+```ts
+{
+  split: Split;                   // goal, slug, status: active | merged | aborted, baseCommit, strict, worktreeRoot, integrationBranch, contract
+  parts: {
+    part: SplitPart;              // key, title, agentKind, owns, reads, dependsOn, brief, worktree, branch, taskId
+    task: Task;                   // the part's child task
+    session: Session | null;      // the agent working on the part
+    state: 'waiting' | 'working' | 'done' | 'blocked';
+    filesChanged: string[];       // paths changed in the worktree since the split's base commit
+    lastActivityAt: number | null;
+    conflicts: Conflict[];        // open conflicts involving the part's session
+  }[];
+  contract: { name, owner, definition, memoryId }[];
+  mergeCheck: Run | null;         // latest shadow_merge run of this split (result below, with splitId/parts/merged)
 }
 ```
 

@@ -16,7 +16,11 @@ import type {
   Run,
   Save,
   SaveKind,
+  RunStatus,
   Session,
+  Split,
+  SplitContractItem,
+  SplitPart,
   Task,
   Trust,
 } from '@mindly/core';
@@ -49,11 +53,34 @@ export type {
   Session,
   Severity,
   Snapshot,
+  Split,
+  SplitContractItem,
+  SplitPart,
+  SplitStatus,
   MindlyEvent,
   Task,
   TaskStatus,
   Trust,
 } from '@mindly/core';
+
+/** One part of a split as `GET /api/splits/:id` reports it. */
+export interface SplitPartDetail {
+  part: SplitPart;
+  task: Task;
+  session: Session | null;
+  state: 'waiting' | 'working' | 'done' | 'blocked';
+  filesChanged: string[];
+  lastActivityAt: number | null;
+  conflicts: Conflict[];
+}
+
+/** `GET /api/splits/:id`: the split, its parts, the contract and the latest merge check. */
+export interface SplitDetail {
+  split: Split;
+  parts: SplitPartDetail[];
+  contract: SplitContractItem[];
+  mergeCheck: Run | null;
+}
 
 /* Duplicated as runtime values because core runtime code must never reach the bundle. */
 export const TRUST_LEVELS: readonly Trust[] = [
@@ -102,7 +129,18 @@ export interface Overview {
     /** Open conflicts that are more than FYI (same rule as `conflictNeedsUser` in core). */
     openConflicts: number;
     pendingHandoffs: number;
+    /** Parts of the active split whose task is blocked. */
+    blockedParts: number;
+    /** 1 when the active split's latest merge check failed or could not run. */
+    failedMergeChecks: number;
   };
+  /** The active split, if any: what of it needs the user. */
+  split: {
+    id: string;
+    goal: string;
+    blockedParts: { key: string; title: string }[];
+    mergeCheck: { runId: string; status: RunStatus; conflictedPaths: string[] } | null;
+  } | null;
   lastSeq: number;
 }
 

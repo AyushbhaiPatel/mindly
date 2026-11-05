@@ -1,0 +1,233 @@
+import type { Run, SplitPlan } from '@mindly/core';
+import type {
+  SplitAbortResult,
+  SplitMergeCheckResult,
+  SplitMergeResult,
+  SplitPartState,
+  SplitStatusReport,
+} from '@mindly/engine';
+import {
+  agentName,
+  count,
+  relativeTime,
+  sessionName,
+  type Marker,
+  type Row,
+  type Screen,
+  type Step,
+} from '../present/index.js';
+import { clean } from '../util.js';
+
+/** Plain words for a part's state. */
+export function partStateWord(state: SplitPartState): string {
+  switch (state) {
+    case 'waiting':
+      return 'waiting for its agent';
+    case 'working':
+      return 'working';
+    case 'done':
+      return 'done';
+    case 'blocked':
+      return 'blocked';
+  }
+}
+
+function partMarker(state: SplitPartState): Marker {
+  switch (state) {
+    case 'done':
+      return 'ok';
+    case 'blocked':
+      return 'fail';
+    case 'working':
+      return 'agent';
+    case 'waiting':
+      return 'idle';
+  }
+}
+
+/** The plan as a table: part, agent, owns, depends on; then the contract. */
+export function renderPlan(sc: Screen, plan: SplitPlan, plannedBy: string): void {
+  const by =
+    plannedBy === 'plan-file'
+      ? 'from your plan file'
+      : `planned by ${agentName(plannedBy)}, read-only`;
+  sc.summary(`Plan ${sc.sym.dot} ${clean(plan.goal, 120)}  (${by})`);
+  sc.blank();
+  sc.rows(
+    plan.parts.map((p, i): Row => {
+      const deps = p.dependsOn.length ? `depends on ${p.dependsOn.join(', ')}` : 'no dependencies';
+      return {
+        marker: 'item',
+        text: `${i + 1} ${clean(p.title, 60)} ${sc.sym.dot} ${agentName(p.agent)} ${sc.sym.dot} owns ${p.owns.map((g) => clean(g, 100)).join(', ')} ${sc.sym.dot} ${deps}`,
+        details: [clean(p.brief, 240)],
+      };
+    }),
+  );
+  if (plan.contract.length) {
+    sc.section('Shared contract');
+    sc.rows(
+      plan.contract.map((c): Row => ({
+        marker: 'item',
+        text: `${clean(c.name, 80)} ${sc.sym.dot} ${clean(c.definition, 160)} (owned by part ${c.owner})`,
+      })),
+    );
+  }
+}
+
+/** What `mindly split status` shows. */
+export function renderSplitStatus(sc: Screen, r: SplitStatusReport): void {
+  const { split, parts } = r;
+  const done = parts.filter((p) => p.state === 'done').length;
+  const blocked = parts.filter((p) => p.state === 'blocked').length;
+  const check = r.mergeCheck;
+  const checkWord = mergeCheckWord(check);
+  const state =
+    split.status === 'merged'
+      ? `merged into ${split.integrationBranch ?? 'the integration branch'}`
+      : split.status === 'aborted'
+        ? 'aborted'
+        : `${done}/${parts.length} parts done${blocked ? ` ${sc.sym.dot} ${count(blocked, 'part')} blocked` : ''}`;
+  sc.summary(
+    `Split ${sc.sym.dot} ${clean(split.goal, 100)} ${sc.sym.dot} ${state} ${sc.sym.dot} merge check: ${checkWord}  ${sc.ref(split.id)}`,
+  );
+  sc.section('Parts');
+  sc.rows(
+    parts.map((p): Row => {
+      const who = p.session ? sessionName(p.session) : agentName(p.part.agentKind);
+      const facts = [partStateWord(p.state)];
+      if (p.filesChanged.length) facts.push(`${count(p.filesChanged.length, 'file')} changed`);
+      if (p.lastActivityAt) facts.push(`active ${relativeTime(p.lastActivityAt, sc.now)}`);
+      if (p.conflicts.length) facts.push(`${count(p.conflicts.length, 'conflict')}`);
+      const details = [
+        `${clean(p.part.worktree, 200)} ${sc.sym.dot} branch ${clean(p.part.branch, 100)}`,
+      ];
+      if (p.task.blockers.length)
+        details.push(`Blocked: ${p.task.blockers.map((b) => clean(b, 100)).join('; ')}`);
+      return {
+        marker: partMarker(p.state),
+        text: `${p.part.position + 1} ${clean(p.part.title, 60)} ${sc.sym.dot} ${who} ${sc.sym.dot} ${facts.join(` ${sc.sym.dot} `)}`,
+        id: p.task.id,
+        details,
+      };
+    }),
+  );
+  if (r.contract.length) {
+    sc.section('Shared contract');
+    sc.rows(
+      r.contract.map((c): Row => ({
+        marker: 'item',
+        text: `${clean(c.name, 80)} ${sc.sym.dot} ${clean(c.definition, 160)} (owned by part ${c.owner})`,
+        ...(c.memoryId ? { id: c.memoryId } : {}),
+      })),
+    );
+  }
+  if (check) renderMergeCheck(sc, check);
+  sc.next(nextSteps(r));
+}
+
+function mergeCheckWord(run: Run | null): string {
+  if (!run) return 'not run yet';
+  const r = run.result as SplitMergeCheckResult | null;
+  switch (run.status) {
+    case 'passed':
+      return 'clean';
+    case 'failed':
+      return r && !r.clean ? 'conflicts' : 'checks failing';
+    case 'error':
+      return 'could not run';
+    default:
+      return 'running';
+  }
+}
+
+/** The latest merge check of the split. */
+export function renderMergeCheck(sc: Screen, run: Run): void {
+  const r = run.result as SplitMergeCheckResult | null;
+  sc.section(
+    `Merge check ${sc.sym.dot} ${mergeCheckWord(run)} ${sc.sym.dot} ${relativeTime(run.finishedAt ?? run.createdAt, sc.now)}`,
+  );
+  if (!r) return;
+  if (r.error) sc.text(`${sc.mark('fail')} ${clean(r.error, 200)}`, 2);
+  for (const c of r.conflicts) {
+    sc.text(
+      `${sc.mark('fail')} Part "${clean(c.part, 40)}" conflicts in ${c.paths.map((p) => clean(p, 120)).join(', ')}`,
+      2,
+    );
+  }
+  for (const c of r.checks) {
+    sc.text(
+      `${sc.mark(c.ok ? 'ok' : 'fail')} Check "${clean(c.name, 40)}": ${c.ok ? 'passing' : c.status}`,
+      2,
+    );
+  }
+  if (r.checksSkipped === 'untrusted')
+    sc.note('Checks skipped: the project config is not trusted (mindly trust).', 2);
+  else if (r.checksSkipped === 'none_configured')
+    sc.note('No checks configured in .mindly/config.json.', 2);
+}
+
+function nextSteps(r: SplitStatusReport): Step[] {
+  const { split, parts } = r;
+  if (split.status === 'merged') {
+    return [
+      {
+        cmd: `git log --oneline ${split.integrationBranch ?? ''}`.trim(),
+        why: 'review the merged branch and open a PR from it',
+      },
+      { cmd: 'mindly split abort', why: 'remove the part worktrees (the merged branch stays)' },
+    ];
+  }
+  if (split.status === 'aborted') return [];
+  const steps: Step[] = [];
+  const waiting = parts.filter((p) => p.state === 'waiting');
+  for (const p of waiting.slice(0, 3)) {
+    steps.push({
+      cmd: `cd ${p.part.worktree}`,
+      why: `start ${agentName(p.part.agentKind)} there for part "${clean(p.part.title, 40)}"`,
+    });
+  }
+  const check = r.mergeCheck;
+  const allDone = parts.length > 0 && parts.every((p) => p.state === 'done');
+  if (allDone && check?.status === 'passed') {
+    steps.push({ cmd: 'mindly split merge', why: 'merge every part into one integration branch' });
+  } else if (!check || check.status !== 'passed') {
+    steps.push({ cmd: 'mindly split check', why: 'merge every part in memory and run the checks' });
+  }
+  steps.push({ cmd: 'mindly split abort', why: 'remove the worktrees and branches' });
+  return steps;
+}
+
+export function renderMerged(sc: Screen, m: SplitMergeResult): void {
+  sc.summary(
+    `${sc.mark('ok')} Merged ${count(m.merged.length, 'part')} into ${m.branch} at ${m.commit.slice(0, 12)}.`,
+  );
+  if (m.checks) {
+    sc.blank();
+    for (const c of m.checks) {
+      sc.text(
+        `${sc.mark(c.ok ? 'ok' : 'fail')} Check "${clean(c.name, 40)}": ${c.ok ? 'passing' : c.status}`,
+        2,
+      );
+    }
+  } else if (m.checksSkipped === 'untrusted') {
+    sc.note('Checks skipped: the project config is not trusted (mindly trust).', 2);
+  }
+  sc.next([
+    { cmd: `git log --oneline ${m.branch}`, why: 'review the merged work' },
+    { cmd: `git push -u origin ${m.branch}`, why: 'push it and open a pull request' },
+    { cmd: 'mindly split abort', why: 'remove the part worktrees (the merged branch stays)' },
+  ]);
+}
+
+export function renderAborted(sc: Screen, a: SplitAbortResult): void {
+  sc.summary(
+    `${sc.mark('ok')} Split "${clean(a.split.goal, 80)}" closed: removed ${count(a.removedWorktrees.length, 'worktree')}${
+      a.keptBranches.length
+        ? `, kept ${count(a.keptBranches.length, 'branch', 'branches')}`
+        : `, deleted ${count(a.deletedBranches.length, 'branch', 'branches')}`
+    }.`,
+  );
+  if (a.keptBranches.length) sc.note(`Branches kept: ${a.keptBranches.join(', ')}`, 2);
+  if (a.split.integrationBranch)
+    sc.note(`The merged branch ${a.split.integrationBranch} stays.`, 2);
+}

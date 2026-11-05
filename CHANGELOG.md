@@ -29,12 +29,35 @@ All notable changes to `mindly-cli` are documented here. The project follows
   `GET /api/projects/:id/saves/card.svg`. Agents cannot create or change saves: there is no MCP
   tool for them.
 - Database schema v2 (a new `saves` table), applied automatically.
+- `mindly split "<goal>"` divides one goal between agents working at the same time. A connected
+  agent plans the split read-only (`claude -p --permission-mode plan` or
+  `codex exec --sandbox read-only`), or `--plan plan.json` takes a hand-written plan; the plan is
+  validated (2-6 parts, connected agents, no dependency cycles, non-overlapping `owns` globs) and
+  reviewed before anything is created. Mindly then creates one git worktree per part next to the
+  repository (`../<repo>.mindly/<split>-<part>` on branch `mindly/<split>/<part>`), a parent task
+  with one child task per part, and a brief that the next session of the part's agent started in
+  that folder receives at session start: its part, the files it owns, what it depends on and the
+  shared contract (stored as approved decisions). Writes to files owned by another part raise a
+  coordination warning, or are blocked with `--strict`; when a part changes an export or a contract
+  decision, the parts that depend on it get an impact update. `mindly split status` shows every
+  part's agent, state, changed files and conflicts with the latest merge check; `mindly split
+check` merges every part in memory and runs the trusted checks; `mindly split merge` merges the
+  parts in dependency order into `mindly/<split>/integration` (never pushes, never touches your
+  branch) and stops cleanly on a conflict; `mindly split abort [--keep-branches]` removes the
+  worktrees and branches the split created. Mission Control gets a Split view, the daemon
+  `GET /api/projects/:id/splits` and `GET /api/splits/:id`, and agents a read-only
+  `mindly_split_status` MCP tool; a blocked part or a failed split merge check shows under
+  "Needs you". Database schema v3 adds the `splits` and `split_parts` tables and a `worktree`
+  column on handoffs (the upgrade note for schema v2 below applies to v3 as well).
 
 ### Changed
 
 - Once a Mindly with schema v2 has upgraded your database, an older Mindly (0.2.0 or earlier)
   cannot open it any more. Upgrade every Mindly install on the machine together. Until the first
   hook or command upgrades a v1 database, the status line shows plain `mindly`.
+- Options now belong to the command they follow (`mindly split status --json` is the status
+  command's `--json`). The one visible effect: `mindly --version` must come before any command
+  name; `mindly <command> --version` is no longer accepted.
 
 ## 0.2.0 — 2026-11-05
 

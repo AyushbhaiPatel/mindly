@@ -18,12 +18,14 @@ import { MemoryView } from './views/Memory';
 import { OverviewView } from './views/Overview';
 import { RunsView } from './views/Runs';
 import { SettingsView } from './views/Settings';
+import { SplitView } from './views/Split';
 
-type TabKey = 'overview' | 'memory' | 'coordination' | 'runs' | 'insight' | 'settings';
+type TabKey = 'overview' | 'memory' | 'coordination' | 'split' | 'runs' | 'insight' | 'settings';
 const TABS: TabDef<TabKey>[] = [
   { key: 'overview', label: 'Mission Control' },
   { key: 'memory', label: 'Memory' },
   { key: 'coordination', label: 'Coordination' },
+  { key: 'split', label: 'Split' },
   { key: 'runs', label: 'Runs' },
   { key: 'insight', label: 'Insight' },
   { key: 'settings', label: 'Trust & settings' },
@@ -189,6 +191,7 @@ const TITLES: Record<TabKey, readonly [lead: string, accent: string]> = {
   overview: ['Mission', 'Control'],
   memory: ['', 'Memory'],
   coordination: ['', 'Coordination'],
+  split: ['', 'Split'],
   runs: ['', 'Runs'],
   insight: ['', 'Insight'],
   settings: ['Trust &', 'settings'],
@@ -224,6 +227,7 @@ const EMPTY_VERSIONS: Record<Topic, number> = {
   deliveries: 0,
   handoffs: 0,
   runs: 0,
+  splits: 0,
   snapshots: 0,
   xray: 0,
   saves: 0,
@@ -445,6 +449,7 @@ function Shell({
         {route.tab === 'overview' && <OverviewView key={projectId} />}
         {route.tab === 'memory' && <MemoryView key={projectId} />}
         {route.tab === 'coordination' && <CoordinationView key={projectId} />}
+        {route.tab === 'split' && <SplitView key={projectId} />}
         {route.tab === 'runs' && <RunsView key={projectId} />}
         {route.tab === 'insight' && <InsightView key={projectId} />}
         {route.tab === 'settings' && <SettingsView key={projectId} />}

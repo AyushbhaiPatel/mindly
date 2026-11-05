@@ -23,6 +23,9 @@ import type {
   Save,
   SavesResult,
   SaveStatus,
+  Split,
+  SplitDetail,
+  SplitStatus,
   Session,
   Snapshot,
   SnapshotDiff,
@@ -128,6 +131,8 @@ export interface MindlyClient {
   intents(projectId: string): Promise<Intent[]>;
   deliveries(projectId: string, status?: DeliveryStatus): Promise<Delivery[]>;
   handoffs(projectId: string): Promise<Handoff[]>;
+  splits(projectId: string, status?: SplitStatus): Promise<Split[]>;
+  split(id: string): Promise<SplitDetail>;
   runs(projectId: string, kind?: RunKind, limit?: number): Promise<Run[]>;
   shadowMerge(projectId: string): Promise<Run>;
   review(projectId: string, sessionId: string, reviewer: string): Promise<Run>;
@@ -263,6 +268,8 @@ export function createHttpClient(): MindlyClient {
     intents: (id) => get(`${proj(id)}/intents`),
     deliveries: (id, status) => get(`${proj(id)}/deliveries${buildQuery({ status })}`),
     handoffs: (id) => get(`${proj(id)}/handoffs`),
+    splits: (id, status) => get(`${proj(id)}/splits${buildQuery({ status })}`),
+    split: (id) => get(`/api/splits/${enc(id)}`),
     runs: (id, kind, limit) => get(`${proj(id)}/runs${buildQuery({ kind, limit })}`),
     shadowMerge: (id) => post(`${proj(id)}/shadow-merge`),
     review: (id, sessionId, reviewer) => post(`${proj(id)}/review`, { sessionId, reviewer }),

@@ -4,6 +4,7 @@ import {
   isUuid,
   MEMORY_KINDS,
   RUN_KINDS,
+  SPLIT_STATUSES,
   TASK_STATUSES,
   TRUST_LEVELS,
   DELIVERY_STATUSES,
@@ -93,6 +94,10 @@ export const ConflictStatusBody = z.strictObject({
 export const TasksQuery = z.object({ status: opt(z.enum(TASK_STATUSES)) });
 export const DeliveriesQuery = z.object({ status: opt(z.enum(DELIVERY_STATUSES)) });
 export const RunsQuery = z.object({ kind: opt(z.enum(RUN_KINDS)), limit: opt(int(1, 200)) });
+export const SplitsQuery = z.object({
+  status: opt(z.enum(SPLIT_STATUSES)),
+  limit: opt(int(1, 200)),
+});
 
 const RunnerAgent = z.string().refine(isRunnerAgentKind, 'unsupported agent');
 

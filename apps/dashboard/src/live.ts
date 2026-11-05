@@ -130,6 +130,7 @@ export type Topic =
   | 'deliveries'
   | 'handoffs'
   | 'runs'
+  | 'splits'
   | 'snapshots'
   | 'xray'
   | 'saves'
@@ -159,6 +160,8 @@ export function topicsFor(type: EventType | string): Topic[] {
       return ['handoffs', 'overview'];
     case 'run':
       return ['runs', 'overview'];
+    case 'split':
+      return ['splits', 'tasks', 'handoffs', 'overview'];
     case 'snapshot':
       return ['snapshots'];
     case 'context':

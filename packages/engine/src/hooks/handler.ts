@@ -50,15 +50,60 @@ export interface HookDeps {
   bus: EngineBus;
 }
 
+/** What a write guard says about the files a tool is about to change. */
+export interface WriteGuardResult {
+  /** Coordination warnings shown to the agent (mandatory context). */
+  warnings: string[];
+  /** When set, the tool call is denied with this reason (same path as user `enforce` rules). */
+  deny: string | null;
+}
+
+/**
+ * Consulted before a file-writing tool runs. Feature modules (e.g. split ownership) register
+ * guards; `paths` are relative to the agent's working tree. A guard that throws is ignored.
+ */
+export type WriteGuard = (
+  project: ProjectContext,
+  session: Session,
+  paths: readonly string[],
+) => WriteGuardResult | Promise<WriteGuardResult>;
+
 /**
  * Translates normalised hook events into engine operations. `handle` never throws: any internal
  * failure is logged and an empty result returned, so a Mindly bug can never block an agent.
  */
 export class HookHandler {
+  private readonly guards: WriteGuard[] = [];
+
   constructor(
     private readonly k: Kernel,
     private readonly d: HookDeps,
   ) {}
+
+  /** Registers a guard consulted before every file-writing tool call. */
+  useWriteGuard(guard: WriteGuard): void {
+    this.guards.push(guard);
+  }
+
+  private async consultGuards(
+    project: ProjectContext,
+    session: Session,
+    paths: readonly string[],
+  ): Promise<WriteGuardResult> {
+    const out: WriteGuardResult = { warnings: [], deny: null };
+    for (const guard of this.guards) {
+      try {
+        const r = await guard(project, session, paths);
+        out.warnings.push(...r.warnings);
+        out.deny ??= r.deny;
+      } catch (err) {
+        this.k.logger.warn('write guard failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return out;
+  }
 
   async handle(evt: NormalizedHookEvent): Promise<HookResult> {
     try {
@@ -219,7 +264,11 @@ export class HookHandler {
         return EMPTY_HOOK_RESULT;
       }
       const overlap = this.d.intents.noteEditing(session, paths);
-      const built = this.d.context.preWrite(project, session, paths, overlap.warnings);
+      const guard = await this.consultGuards(project, session, paths);
+      const built = this.d.context.preWrite(project, session, paths, [
+        ...overlap.warnings,
+        ...guard.warnings,
+      ]);
       if (overlap.overlaps.length > 0 || built.deny || pending.length > 0) {
         // What Mindly told the agent before this write: the evidence of overlap and rule saves.
         this.appendToolEvent(pid, session, 'tool.before', {
@@ -236,6 +285,9 @@ export class HookHandler {
           reason: `Blocked by a project rule the user marked as enforced: "${built.deny.title}". Ask the user before changing ${paths.map((x) => sanitizeLine(x, 160)).join(', ')}.`,
           context: built.text,
         };
+      }
+      if (guard.deny) {
+        return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: guard.deny, context: built.text };
       }
       return { ...EMPTY_HOOK_RESULT, context: built.text };
     }
