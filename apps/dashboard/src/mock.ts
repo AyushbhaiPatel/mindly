@@ -925,7 +925,7 @@ const saves: Save[] = [
   save(
     'mistake_avoided',
     'confirmed',
-    "Codex didn't repeat a command that failed before",
+    "Codex didn't run a command that failed before",
     [sCodex],
     [],
     26 * HOUR,

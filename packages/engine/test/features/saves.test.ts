@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import type { Save, SaveKind, UserConfig } from '@mindly/core';
+import { describe, expect, it, vi } from 'vitest';
+import type { Save, SaveKind } from '@mindly/core';
 import {
   createFailoverModule,
   SAVE_WINDOW_MS,
@@ -146,7 +146,7 @@ async function contractSetup() {
 }
 
 /** Claude Code hits its usage limit with a rate-limit handoff to Codex. */
-async function limitSetup(config?: (c: UserConfig) => void) {
+async function limitSetup(config?: NonNullable<Parameters<typeof make>[0]>['config']) {
   const env = make(config ? { config } : {});
   env.mindly.use(createFailoverModule({}));
   env.mindly.use(savesModule);
@@ -198,6 +198,41 @@ describe('saves: impact_warned', () => {
     expect(f.mindly.store.events.query(f.pid, { types: ['save.confirmed'] })).toHaveLength(1);
   });
 
+  it('is confirmed when the conflict is resolved within the window', async () => {
+    const f = await impactSetup();
+    await tellCodex(f);
+    const caught = only(f.mindly, f.pid, 'impact_warned');
+    expect(caught.status).toBe('caught');
+    // What `mindly conflict <id> resolve` does.
+    const c = f.mindly.store.conflicts.setStatus(caught.refs.conflictId!, 'resolved');
+    f.mindly.store.events.append({
+      projectId: f.pid,
+      sessionId: null,
+      type: 'conflict.updated',
+      payload: { conflictId: c.id, kind: c.kind, status: 'resolved', by: 'user' },
+    });
+    const s = only(f.mindly, f.pid, 'impact_warned');
+    expect(s.status).toBe('confirmed');
+    expectEvidence(f.mindly, s);
+    expect(total(f.mindly, f.pid)).toBe(1);
+  });
+
+  it('is not confirmed by a resolution after the window', async () => {
+    const f = await impactSetup();
+    await tellCodex(f);
+    const caught = only(f.mindly, f.pid, 'impact_warned');
+    f.clock.advance(SAVE_WINDOW_MS.impact_warned + 1);
+    const c = f.mindly.store.conflicts.setStatus(caught.refs.conflictId!, 'resolved');
+    f.mindly.store.events.append({
+      projectId: f.pid,
+      sessionId: null,
+      type: 'conflict.updated',
+      payload: { conflictId: c.id, kind: c.kind, status: 'resolved', by: 'user' },
+    });
+    expect(only(f.mindly, f.pid, 'impact_warned').status).toBe('caught');
+    expect(total(f.mindly, f.pid)).toBe(0);
+  });
+
   it('expires when no evidence arrives within 2 hours', async () => {
     const f = await impactSetup();
     await tellCodex(f);
@@ -205,21 +240,6 @@ describe('saves: impact_warned', () => {
     await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
     expect(only(f.mindly, f.pid, 'impact_warned').status).toBe('expired');
     expect(total(f.mindly, f.pid)).toBe(0);
-  });
-
-  it('is confirmed when its conflict is resolved within 2 hours', async () => {
-    const f = await impactSetup();
-    await tellCodex(f);
-    const s = only(f.mindly, f.pid, 'impact_warned');
-    const c = f.mindly.store.conflicts.setStatus(s.refs.conflictId!, 'resolved');
-    f.mindly.store.events.append({
-      projectId: f.pid,
-      sessionId: null,
-      type: 'conflict.updated',
-      payload: { conflictId: c.id, kind: c.kind, status: 'resolved', by: 'user' },
-    });
-    expect(only(f.mindly, f.pid, 'impact_warned').status).toBe('confirmed');
-    expect(total(f.mindly, f.pid)).toBe(1);
   });
 
   it('is not a save when the agent wrote the dependent file before it was told', async () => {
@@ -235,59 +255,102 @@ describe('saves: impact_warned', () => {
 });
 
 describe('saves: overlap_avoided', () => {
-  it('is confirmed when the warned agent works on something else instead', async () => {
+  /** Codex's later calls: it edits src/dashboard.ts instead, then runs the linter. */
+  async function codexWorksElsewhere(f: Awaited<ReturnType<typeof overlapSetup>>) {
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'pre_tool', { tool: writeTool('src/dashboard.ts', 'v') }),
+    );
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'v') }),
+    );
+    f.clock.advance(1000);
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'pre_tool', { tool: shellTool('cat src/auth.ts') }),
+    );
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('cat src/auth.ts') }),
+    );
+    f.clock.advance(1000);
+  }
+
+  it('is confirmed when the warned write did not run and the agent edits another file', async () => {
     const f = await overlapSetup();
     expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('caught');
-    await f.mindly.hooks.handle(
-      event(f.root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'x') }),
-    );
+    await codexWorksElsewhere(f);
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
+    // Nothing is decided before the window ends.
+    expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('caught');
+    f.clock.advance(SAVE_WINDOW_MS.overlap_avoided);
+    await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
     const s = only(f.mindly, f.pid, 'overlap_avoided');
     expect(s.status).toBe('confirmed');
     expect(s.sessionIds).toEqual([f.cx.id, f.cc.id]);
     expect(s.paths).toEqual(['src/auth.ts']);
     expect(s.title).toBe("Codex stopped before overwriting Claude Code's work");
     expectEvidence(f.mindly, s);
-    const proof = f.mindly.store.events.query(f.pid, { types: ['tool.after'] });
-    expect(s.evidence).toContain(proof[0]!.id);
+    const later = f.mindly.store.events.query(f.pid, { types: ['tool.before'] });
+    expect(s.evidence).toContain(later.find((e) => e.id !== s.evidence[0])!.id);
     expect(total(f.mindly, f.pid)).toBe(1);
   });
 
   it("is confirmed when the agent writes the file only after the other agent's intent closed", async () => {
     const f = await overlapSetup();
+    await codexWorksElsewhere(f);
+    await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
     await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'session_end'));
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'pre_tool', { tool: writeTool('src/auth.ts', 'b') }),
+    );
     await f.mindly.hooks.handle(
       event(f.root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/auth.ts', 'b') }),
     );
     expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('confirmed');
+    expect(total(f.mindly, f.pid)).toBe(1);
   });
 
-  it('expires when the agent only keeps talking, without a later tool call', async () => {
-    const f = await overlapSetup();
-    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'prompt', { prompt: 'go on' }));
-    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
-    expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('caught');
-    f.clock.advance(SAVE_WINDOW_MS.overlap_avoided + 1);
-    await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
-    expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('expired');
-    expect(total(f.mindly, f.pid)).toBe(0);
-  });
-
-  it('expires when the warned write ran and failed', async () => {
+  it('expires when the warned Edit fails and the agent stops', async () => {
     const f = await overlapSetup();
     await f.mindly.hooks.handle(
       event(f.root, 'codex', 'cx', 'post_tool', {
         tool: { ...writeTool('src/auth.ts', 'b')!, failed: true },
       }),
     );
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
     expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('expired');
-    await f.mindly.hooks.handle(
-      event(f.root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'x') }),
-    );
+    f.clock.advance(SAVE_WINDOW_MS.overlap_avoided + 1);
+    await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
     expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('expired');
     expect(total(f.mindly, f.pid)).toBe(0);
   });
 
-  it('is dropped when the warned write goes ahead (pre_tool, then post_tool)', async () => {
+  it('is dropped when the agent overwrites the file through the shell (sed -i)', async () => {
+    const f = await overlapSetup();
+    const sed = shellTool("sed -i 's/admin/root/' src/auth.ts");
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'pre_tool', { tool: sed }));
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'post_tool', { tool: sed }));
+    expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('rejected');
+    f.clock.advance(SAVE_WINDOW_MS.overlap_avoided + 1);
+    await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
+    expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('rejected');
+    expect(total(f.mindly, f.pid)).toBe(0);
+  });
+
+  it('is dropped when the shell writes the file by basename (cp, tee, mv)', async () => {
+    for (const command of [
+      'cp /tmp/auth.ts src/',
+      'echo x | tee auth.ts',
+      'mv draft.ts src/auth.ts',
+      'printf x > src/auth.ts',
+    ]) {
+      const f = await overlapSetup();
+      await f.mindly.hooks.handle(
+        event(f.root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }),
+      );
+      expect(only(f.mindly, f.pid, 'overlap_avoided').status, command).toBe('rejected');
+    }
+  });
+
+  it('is dropped when the warned write lands while the other intent is active', async () => {
     const f = await overlapSetup();
     await f.mindly.hooks.handle(
       event(f.root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/auth.ts', 'b') }),
@@ -299,14 +362,13 @@ describe('saves: overlap_avoided', () => {
     expect(total(f.mindly, f.pid)).toBe(0);
   });
 
-  it('is dropped when the agent writes the file through the shell', async () => {
+  it('expires when the warned agent makes no later tool call (a prompt is not one)', async () => {
     const f = await overlapSetup();
-    await f.mindly.hooks.handle(
-      event(f.root, 'codex', 'cx', 'post_tool', {
-        tool: shellTool("sed -i '' 's/admin/user/' src/auth.ts"),
-      }),
-    );
-    expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('rejected');
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'prompt', { prompt: 'go on' }));
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
+    f.clock.advance(SAVE_WINDOW_MS.overlap_avoided + 1);
+    await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
+    expect(only(f.mindly, f.pid, 'overlap_avoided').status).toBe('expired');
     expect(total(f.mindly, f.pid)).toBe(0);
   });
 });
@@ -315,9 +377,6 @@ describe('saves: rule_enforced', () => {
   it('is confirmed when the turn ends without the blocked write', async () => {
     const f = await ruleSetup();
     expect(only(f.mindly, f.pid, 'rule_enforced').status).toBe('caught');
-    await f.mindly.hooks.handle(
-      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('pnpm codegen') }),
-    );
     await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
     const s = only(f.mindly, f.pid, 'rule_enforced');
     expect(s.status).toBe('confirmed');
@@ -345,55 +404,112 @@ describe('saves: rule_enforced', () => {
     expect(total(f.mindly, f.pid)).toBe(0);
   });
 
-  it('is dropped when the blocked file is written through the shell', async () => {
+  it('is dropped when the denied file is then written through the shell', async () => {
     const f = await ruleSetup();
-    await f.mindly.hooks.handle(
-      event(f.root, 'codex', 'cx', 'post_tool', {
-        tool: shellTool('cp /tmp/api.ts src/generated/api.ts'),
-      }),
-    );
+    const cp = shellTool('cp x src/generated/api.ts');
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'pre_tool', { tool: cp }));
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'post_tool', { tool: cp }));
     await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
-    expect(only(f.mindly, f.pid, 'rule_enforced').status).toBe('rejected');
+    const s = only(f.mindly, f.pid, 'rule_enforced');
+    expect(s.status).toBe('rejected');
     expect(total(f.mindly, f.pid)).toBe(0);
+    const rejected = f.mindly.store.events.query(f.pid, { types: ['save.rejected'] });
+    expect(rejected.map((e) => e.payload.reason)).toEqual(['problem_occurred']);
+  });
+
+  it('is still confirmed when later shell commands only read the denied file', async () => {
+    const f = await ruleSetup();
+    const cat = shellTool('cat src/generated/api.ts | head -n 5');
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'pre_tool', { tool: cat }));
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'post_tool', { tool: cat }));
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
+    expect(only(f.mindly, f.pid, 'rule_enforced').status).toBe('confirmed');
   });
 });
 
+/** `failed` failed for Claude Code; Codex is warned before running `warned`. */
+async function mistakeOf(failed: string, warned: string) {
+  const f = await featureSetup();
+  await f.mindly.hooks.handle(
+    event(f.root, 'claude-code', 'cc', 'post_tool', {
+      tool: shellTool(failed, true, 'ERR! tests failed'),
+    }),
+  );
+  f.clock.advance(1000);
+  const res = await f.mindly.hooks.handle(
+    event(f.root, 'codex', 'cx', 'pre_tool', { tool: shellTool(warned) }),
+  );
+  expect(res.context).toContain('failed before');
+  f.clock.advance(1000);
+  return f;
+}
+
 describe('saves: mistake_avoided', () => {
-  it('is confirmed when the agent runs a different command instead', async () => {
-    const f = await mistakeSetup();
+  it('is not a save when the warned command itself runs and passes', async () => {
+    const f = await mistakeOf('pnpm test', 'pnpm test');
+    expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('caught');
+    expect(only(f.mindly, f.pid, 'mistake_avoided').title).toBe(
+      'Codex was warned about a command that failed before',
+    );
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('pnpm test', false) }),
+    );
+    expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('expired');
+    f.clock.advance(SAVE_WINDOW_MS.mistake_avoided + 1);
+    await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
+    expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('expired');
+    expect(total(f.mindly, f.pid)).toBe(0);
+  });
+
+  it('is not a save when the same command line runs with other spacing and passes', async () => {
+    const f = await mistakeOf('npm test', 'npm test');
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('  npm   test ', false) }),
+    );
+    expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('expired');
+    expect(total(f.mindly, f.pid)).toBe(0);
+  });
+
+  it('is confirmed when a changed command line succeeds instead', async () => {
+    const f = await mistakeOf('npm test', 'npm test');
+    // The warned call never ran; Codex runs a changed command line (warned again, same problem).
+    const changed = shellTool('npm test -- --runInBand');
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'pre_tool', { tool: changed }));
     expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('caught');
     await f.mindly.hooks.handle(
-      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('pnpm vitest run', false) }),
+      event(f.root, 'codex', 'cx', 'post_tool', {
+        tool: shellTool('npm test -- --runInBand', false),
+      }),
     );
     const s = only(f.mindly, f.pid, 'mistake_avoided');
     expect(s.status).toBe('confirmed');
-    expect(s.title).toBe("Codex didn't repeat a command that failed before");
+    expect(s.title).toBe('Codex changed a command it was warned about, and it succeeded');
     expect(s.sessionIds).toEqual([f.cx.id]);
     expectEvidence(f.mindly, s);
     expect(total(f.mindly, f.pid)).toBe(1);
   });
 
-  it('is confirmed when the warned call did not run and the agent continued', async () => {
-    const f = await mistakeSetup();
+  it('is confirmed when the warned call did not run and the agent kept working', async () => {
+    const f = await mistakeOf('npm test', 'npm test');
     await f.mindly.hooks.handle(
-      event(f.root, 'codex', 'cx', 'post_tool', { tool: writeTool('package.json', '"test"') }),
+      event(f.root, 'codex', 'cx', 'pre_tool', { tool: shellTool('pnpm vitest run') }),
     );
-    expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('confirmed');
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('pnpm vitest run', false) }),
+    );
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
+    expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('caught');
+    f.clock.advance(SAVE_WINDOW_MS.mistake_avoided);
+    await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
+    const s = only(f.mindly, f.pid, 'mistake_avoided');
+    expect(s.status).toBe('confirmed');
+    expect(s.title).toBe("Codex didn't run a command that failed before");
+    expectEvidence(f.mindly, s);
+    expect(total(f.mindly, f.pid)).toBe(1);
   });
 
-  it('is not a save when the warned command runs and passes (the warning changed nothing)', async () => {
-    const f = await mistakeSetup();
-    await f.mindly.hooks.handle(
-      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('npm test -- --run', false) }),
-    );
-    expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('rejected');
-    const [rejected] = f.mindly.store.events.query(f.pid, { types: ['save.rejected'] });
-    expect(rejected?.payload.reason).toBe('no_effect');
-    expect(total(f.mindly, f.pid)).toBe(0);
-  });
-
-  it('expires when the agent makes no further tool call in the window', async () => {
-    const f = await mistakeSetup();
+  it('expires when the agent makes no later tool call (a prompt is not one)', async () => {
+    const f = await mistakeOf('npm test', 'npm test');
     await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'prompt', { prompt: 'use pnpm' }));
     f.clock.advance(SAVE_WINDOW_MS.mistake_avoided + 1);
     await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
@@ -401,15 +517,45 @@ describe('saves: mistake_avoided', () => {
     expect(total(f.mindly, f.pid)).toBe(0);
   });
 
+  it('expires when the only later call is the warned command again, not run', async () => {
+    const f = await mistakeOf('npm test', 'npm test');
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'pre_tool', { tool: shellTool('npm test') }),
+    );
+    f.clock.advance(SAVE_WINDOW_MS.mistake_avoided + 1);
+    await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc', 'stop'));
+    expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('expired');
+  });
+
   it('is dropped when the command runs and fails again', async () => {
-    const f = await mistakeSetup();
+    const f = await mistakeOf('npm test', 'npm test');
     await f.mindly.hooks.handle(
       event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('npm test', true, 'ERR!') }),
     );
     expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('rejected');
-    const [rejected] = f.mindly.store.events.query(f.pid, { types: ['save.rejected'] });
-    expect(rejected?.payload.reason).toBe('problem_occurred');
     expect(total(f.mindly, f.pid)).toBe(0);
+  });
+
+  it('post_tool loads no mistake memories when no mistake save is pending', async () => {
+    const f = await mistakeOf('npm test', 'npm test');
+    const list = vi.spyOn(f.mindly.store.memories, 'list');
+    const search = vi.spyOn(f.mindly.store.memories, 'search');
+    // Claude Code has no pending save: its shell commands cost no memory lookups at all.
+    await f.mindly.hooks.handle(
+      event(f.root, 'claude-code', 'cc', 'post_tool', { tool: shellTool('npm test', false) }),
+    );
+    expect(list).not.toHaveBeenCalled();
+    expect(search).not.toHaveBeenCalled();
+    expect(f.mindly.store.events.query(f.pid, { types: ['tool.after'] })).toHaveLength(0);
+    // Codex has one: its post_tool is settled from the pending save, still without memories.
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('npm test', false) }),
+    );
+    expect(only(f.mindly, f.pid, 'mistake_avoided').status).toBe('expired');
+    expect(list).not.toHaveBeenCalled();
+    expect(search).not.toHaveBeenCalled();
+    list.mockRestore();
+    search.mockRestore();
   });
 });
 
@@ -472,14 +618,15 @@ describe('saves: limit_handoff', () => {
     expect(total(f.mindly, f.pid)).toBe(0);
   });
 
-  it('is not a save when the same kind of agent picks the work up again', async () => {
+  it('is not a save when the same agent kind claims the handoff', async () => {
     // With no other agent in the failover order the handoff is open to any agent.
-    const f = await limitSetup((cfg) => {
-      cfg.failover.order = ['claude-code'];
+    const f = await limitSetup((c) => {
+      c.failover.order = ['claude-code'];
     });
     expect(f.mindly.store.handoffs.list(f.pid)[0]?.toAgentKind).toBeNull();
+    expect(only(f.mindly, f.pid, 'limit_handoff').status).toBe('caught');
     await f.mindly.hooks.handle(event(f.root, 'claude-code', 'cc2', 'session_start'));
-    expect(f.mindly.store.handoffs.list(f.pid)[0]?.status).toBe('claimed');
+    expect(f.mindly.store.handoffs.list(f.pid)[0]?.status).not.toBe('pending');
     expect(only(f.mindly, f.pid, 'limit_handoff').status).toBe('rejected');
     expect(total(f.mindly, f.pid)).toBe(0);
   });
@@ -565,7 +712,7 @@ describe('saves: one problem counts once (AC3)', () => {
       event(f.root, 'codex', 'cx', 'pre_tool', { tool: shellTool('npm test') }),
     );
     await f.mindly.hooks.handle(
-      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('pnpm test', false) }),
+      event(f.root, 'codex', 'cx', 'post_tool', { tool: shellTool('npm test -- --ci', false) }),
     );
     await f.mindly.hooks.handle(
       event(f.root, 'codex', 'cx', 'pre_tool', { tool: shellTool('npm test') }),

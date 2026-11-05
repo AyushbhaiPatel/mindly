@@ -111,7 +111,7 @@ describe('mindly saves', () => {
     expect(r.stdout).toMatch(/^Mindly - mindly-cli-repo-\w+ - 1 save in the last 7 days/);
     expect(r.stdout).toContain('A write by Codex was blocked by your rule');
     expect(r.stdout).toContain('Pending (waiting for evidence, not counted yet)');
-    expect(r.stdout).toContain("Codex didn't repeat a command that failed before");
+    expect(r.stdout).toContain('Codex was warned about a command that failed before');
     expect(r.stdout).toMatch(/mindly saves reject [0-9a-f]{8}/);
     expect(r.stdout).not.toMatch(/rule_enforced|mistake_avoided|caught|confirmed/);
   });

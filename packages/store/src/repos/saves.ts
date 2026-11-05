@@ -170,6 +170,25 @@ export class SaveRepo {
     ).map(toSave);
   }
 
+  /**
+   * Caught saves of `kinds` whose helped session (the first session id) is `sessionId`. One range
+   * scan of the caught rows of a project on the `saves_project` index; hooks call it on every tool
+   * event, so it returns at most `max` rows.
+   */
+  caughtFor(projectId: string, sessionId: string, kinds: readonly SaveKind[], max = 50): Save[] {
+    if (kinds.length === 0) return [];
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM saves WHERE project_id = ? AND status = 'caught'
+             AND kind IN (${kinds.map(() => '?').join(', ')})
+             AND json_extract(session_ids, '$[0]') = ?
+           ORDER BY created_at DESC, id DESC LIMIT ?`,
+        )
+        .all(projectId, ...kinds, sessionId, limit(max, 50, 500)) as Row[]
+    ).map(toSave);
+  }
+
   /** Confirmed saves created at or after `since` (one indexed range count). */
   countConfirmed(projectId: string, since: number): number {
     const r = this.db

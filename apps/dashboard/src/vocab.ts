@@ -359,7 +359,7 @@ export function saveKindWords(kind: SaveKind | string): string {
     case 'rule_enforced':
       return 'Write blocked by your rule';
     case 'mistake_avoided':
-      return 'Failed command not repeated';
+      return 'Known pitfall avoided';
     case 'merge_conflict_early':
       return 'Merge conflict found before merging';
     case 'check_broken_early':
@@ -1011,7 +1011,12 @@ export function describeEvent(
     }
     case 'tool.after': {
       const cmd = str(p, 'command');
-      if (cmd) return line(`ran \`${cmd}\`${p.failed === true ? ', which failed again' : ''}`);
+      if (cmd) {
+        // `again: false`: a command of a session waiting for evidence, not the one it was warned about.
+        const failed =
+          p.failed === true ? (p.again === false ? ', which failed' : ', which failed again') : '';
+        return line(`ran \`${cmd}\`${failed}`);
+      }
       return line(`ran ${str(p, 'tool') ?? 'a tool'}${f ? ` on ${f}` : ''}`);
     }
     case 'file.changed': {

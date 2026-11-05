@@ -58,18 +58,6 @@ export interface BusEvents {
     source: string | null;
   };
   'session.ended': { projectId: string; projectRoot: string; session: Session };
-  /** A tool call finished (`post_tool`), whatever the tool. */
-  'tool.used': {
-    projectId: string;
-    session: Session;
-    tool: { name: string; writes: boolean; shell: boolean; failed: boolean };
-    /** Paths the tool edited as the agent gave them, relative or absolute (write tools only). */
-    paths: string[];
-    /** Comparable, redacted key of a shell command (program and subcommand). */
-    command: string | null;
-    /** The full shell command, in memory only (never stored). */
-    commandText: string | null;
-  };
 }
 
 type Handler<K extends keyof BusEvents> = (payload: BusEvents[K]) => Promise<void> | void;

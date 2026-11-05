@@ -147,6 +147,17 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   does not follow the event log for them. Saves are settled only from events Mindly records
   itself, and the only user action is rejecting one. Save titles are plain sentences without code,
   and commands are stored redacted.
+- A save counts only on positive evidence from the helped agent's own later hook events. While a
+  session has a save waiting for evidence, its tool calls are recorded without their content: the
+  tool name, written paths, the redacted command key, a fingerprint of the normalized command line
+  (never the line itself) and which watched files a shell command may have written. A shell
+  command that names a watched file (path or basename) and is not made only of read-only programs
+  counts as writing it, so a write through the shell (`sed -i`, `cp`, `mv`, `>`, `tee`) drops the
+  save instead of confirming it.
+- Fingerprints are decided once. The first save for an underlying problem settles it for good: if
+  it expires or is rejected, later attempts at the same problem (the same rule and paths, the same
+  other agent's intent, the same known pitfall and command) never create a new save. This can only
+  under-count, never inflate.
 - The saves share card contains counts by kind and agent names only. The project name, save
   sentences and file paths are added only on explicit request (`--details`, the Mission Control
   checkbox); it never contains code. The card is rendered locally and never uploaded.

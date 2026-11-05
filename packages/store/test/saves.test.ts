@@ -12,7 +12,7 @@ function save(
   fingerprint: string,
   opts: { kind?: SaveKind; evidence?: string[]; confirmed?: boolean } = {},
 ) {
-  const res = store.saves.record({
+  const recorded = store.saves.record({
     projectId,
     kind: opts.kind ?? 'rule_enforced',
     title: 'A write by Codex was blocked by your rule',
@@ -22,8 +22,8 @@ function save(
     fingerprint,
     refs: { ruleId: 'r1' },
   });
-  if (!opts.confirmed) return res;
-  return { ...res, save: store.saves.settle(res.save.id, 'confirmed')! };
+  if (!opts.confirmed || !recorded.created) return recorded;
+  return { ...recorded, save: store.saves.settle(recorded.save.id, 'confirmed')! };
 }
 
 describe('saves schema (v2)', () => {
@@ -98,6 +98,21 @@ describe('SaveRepo', () => {
     expect(store.saves.settle(b.id, 'confirmed')).toBeNull();
     expect(store.saves.settle(b.id, 'rejected')).toBeNull();
     expect(store.saves.settle('missing', 'confirmed')).toBeNull();
+  });
+
+  it('finds the caught saves of a helped session by kind', () => {
+    const { store, project } = setup();
+    const mine = save(store, project.id, 'a', { kind: 'mistake_avoided' }).save;
+    save(store, project.id, 'b', { kind: 'limit_handoff' });
+    save(store, project.id, 'c', { kind: 'mistake_avoided', confirmed: true });
+    store.saves.record({ ...mine, fingerprint: 'other-session', sessionIds: ['s2', 's1'] });
+    expect(
+      store.saves
+        .caughtFor(project.id, 's1', ['mistake_avoided', 'overlap_avoided'])
+        .map((s) => s.id),
+    ).toEqual([mine.id]);
+    expect(store.saves.caughtFor(project.id, 's1', [])).toEqual([]);
+    expect(store.saves.caughtFor(project.id, 'nobody', ['mistake_avoided'])).toEqual([]);
   });
 
   it('keeps the first evidence and the latest ones, at most 20', () => {

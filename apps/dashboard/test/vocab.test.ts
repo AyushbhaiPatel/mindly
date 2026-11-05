@@ -380,6 +380,9 @@ describe('describeEvent', () => {
     expect(say('tool.after', { command: 'npm test', failed: true }, CODEX.id).text).toBe(
       'ran `npm test`, which failed again',
     );
+    expect(
+      say('tool.after', { command: 'pnpm lint', failed: true, again: false }, CODEX.id).text,
+    ).toBe('ran `pnpm lint`, which failed');
     const confirmed = say('save.confirmed', { title: 'A write by Codex was blocked by your rule' });
     expect(confirmed.text).toBe('Mindly saved you: A write by Codex was blocked by your rule');
     expect(confirmed.tone).toBe('good');

@@ -482,7 +482,10 @@ export interface SaveRefs {
   intentId?: string;
   ruleId?: string;
   memoryId?: string;
+  /** Comparable key of the warned command (program and subcommand), redacted. */
   command?: string;
+  /** Fingerprint of the warned command's normalized command line (never the text itself). */
+  commandLine?: string;
   contractId?: string;
   handoffId?: string;
   deliveryId?: string;
