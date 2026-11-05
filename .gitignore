@@ -11,3 +11,6 @@ coverage/
 .turbo/
 .claude/
 release/
+
+# Private notes, roadmap and specs (never pushed)
+.private/
