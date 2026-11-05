@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { withProject, type ProjectScope } from '../context.js';
 import { confirm, type CliIo } from '../io.js';
 import { agentName, count } from '../present/index.js';
-import { HintedError, UsageError, splitList, type Out } from '../util.js';
+import { clean, HintedError, UsageError, splitList, type Out } from '../util.js';
 import {
   renderAborted,
   renderMergeCheck,
@@ -92,13 +92,15 @@ function readPlanFile(cwd: string, file: string): unknown {
 function editInEditor(io: CliIo, text: string): string | null {
   const editor = (io.env['VISUAL'] ?? io.env['EDITOR'] ?? '').trim();
   if (!editor) return null;
-  const [bin, ...args] = editor.split(/\s+/);
-  if (!bin) return null;
   const dir = mkdtempSync(join(tmpdir(), 'mindly-plan-'));
   const file = join(dir, 'plan.json');
   try {
     writeFileSync(file, text, { mode: 0o600 });
-    const r = spawnSync(bin, [...args, file], { stdio: 'inherit', env: io.env });
+    // Like git: the editor setting is a shell fragment (it may carry flags or a quoted path).
+    const r = spawnSync('sh', ['-c', `${editor} "$@"`, 'mindly', file], {
+      stdio: 'inherit',
+      env: io.env,
+    });
     if (r.error || r.status !== 0) {
       io.stderr.write(
         `The editor exited with ${r.error ? r.error.message : `code ${r.status}`}; the plan is unchanged.\n`,
@@ -215,7 +217,7 @@ export async function split(out: Out, goalWords: string[], raw: unknown): Promis
     let plannedBy: string;
     if (o.plan) {
       plan = parsePlan(readPlanFile(out.io.cwd, o.plan));
-      if (goal) plan = { ...plan, goal };
+      if (goal) plan = parsePlan({ ...plan, goal });
       plannedBy = 'plan-file';
     } else {
       ({ plan, plannedBy } = await planWithAgent(
@@ -309,7 +311,7 @@ export async function split(out: Out, goalWords: string[], raw: unknown): Promis
     sc.rows(
       created.parts.map((p) => ({
         marker: 'item' as const,
-        text: `${p.position + 1} ${p.title} ${sc.sym.dot} ${agentName(p.agentKind)} ${sc.sym.dot} ${p.worktree}`,
+        text: `${p.position + 1} ${clean(p.title, 60)} ${sc.sym.dot} ${agentName(p.agentKind)} ${sc.sym.dot} ${p.worktree}`,
       })),
     );
     if (created.split.strict)
@@ -317,7 +319,7 @@ export async function split(out: Out, goalWords: string[], raw: unknown): Promis
     sc.next([
       ...created.parts.slice(0, 3).map((p) => ({
         cmd: `cd ${p.worktree}`,
-        why: `start ${agentName(p.agentKind)} there; Mindly briefs it on part "${p.title}" when the session starts`,
+        why: `start ${agentName(p.agentKind)} there; Mindly briefs it on part "${clean(p.title, 60)}" when the session starts`,
       })),
       { cmd: 'mindly split status', why: 'see progress, conflicts and the merge check' },
     ]);

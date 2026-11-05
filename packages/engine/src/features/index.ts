@@ -16,6 +16,7 @@ export * from './saves.js';
 export * from './saves-card.js';
 export * from './self-healing.js';
 export * from './split.js';
+export { contractTitle, liveContract, SPLIT_FINGERPRINT_PREFIX } from './split-contract.js';
 export * from './xray.js';
 
 /** The feature modules every entry point installs by default, in registration order. */

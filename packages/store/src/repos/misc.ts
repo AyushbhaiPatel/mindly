@@ -491,6 +491,18 @@ export class RunRepo {
   latest(projectId: string, kind: RunKind): Run | null {
     return this.list(projectId, { kind, limit: 1 })[0] ?? null;
   }
+
+  /** The newest run of `kind` whose `input.<field>` equals `value` (e.g. the merge check of one split). */
+  latestWithInput(projectId: string, kind: RunKind, field: string, value: string): Run | null {
+    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(field)) throw new Error(`unsafe input field ${field}`);
+    const r = this.db
+      .prepare(
+        `SELECT * FROM runs WHERE project_id = ? AND kind = ? AND json_extract(input, '$.${field}') = ?
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(projectId, kind, value) as Row | undefined;
+    return r ? toRun(r) : null;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

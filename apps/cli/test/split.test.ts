@@ -236,6 +236,8 @@ describe('mindly split --plan (acceptance 1: hand-written plan)', () => {
     };
     const cases: [Plan | string, RegExp][] = [
       [bad((p) => (p.parts[1]!.owns = ['src/**'])), /both own src\/api\/billing\.ts/],
+      [bad((p) => (p.parts[1]!.owns = ['**/*.test.ts'])), /not clearly disjoint/],
+      [bad((p) => p.contract.push({ ...p.contract[0]! })), /more than once/],
       [bad((p) => (p.parts[2]!.agent = 'codex')), /"codex", which is not connected/],
       [bad((p) => (p.parts[2]!.agent = 'not-an-agent')), /problem/],
       [bad((p) => (p.parts[0]!.dependsOn = ['page'])), /cycle: api (→|->) page (→|->) api/],
@@ -265,6 +267,24 @@ describe('mindly split --plan (acceptance 1: hand-written plan)', () => {
     const status = await cli(sb, ['split', 'status']);
     expect(status.code).toBe(1);
     expect(status.stderr).toContain('No split in this project');
+  });
+
+  it('reads --json wherever it is typed, bounds a goal given with --plan and cleans planner text', async () => {
+    const sb = await splitSandbox();
+    const plan = structuredClone(PLAN);
+    plan.parts[0]!.title = 'Billing \u001b[31mAPI\u001b[0m';
+    const r = await cli(sb, ['split', '--plan', planFile(sb, plan), '--name', 'billing', '--yes']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain('\u001b');
+    const early = await cli(sb, ['split', '--json', 'status']);
+    expect(early.code).toBe(0);
+    expect(JSON.parse(early.stdout)).toMatchObject({ split: { status: 'active' } });
+    const late = await cli(sb, ['split', 'status', '--json']);
+    expect(late.stdout).toBe(early.stdout);
+    const long = await cli(sb, ['split', '--plan', planFile(sb, PLAN), 'x'.repeat(501), '--yes']);
+    expect(long.code).toBe(1);
+    expect(long.stderr).toMatch(/goal/);
+    expect((await cli(sb, ['split', 'abort', '-y'])).code).toBe(0);
   });
 
   it('--dry-run shows the plan and creates nothing; without a terminal the review needs --yes', async () => {
@@ -352,6 +372,31 @@ describe('briefs and ownership through hook events (acceptance 2)', () => {
     );
     expect(own.hookSpecificOutput?.permissionDecision).toBeUndefined();
     expect(own.hookSpecificOutput?.additionalContext ?? '').not.toContain('owned by part');
+  });
+
+  it("guards shell commands that may write another part's files", async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb, ['--strict']);
+    const api = partDir(sb, 'api');
+    await hook(sb, api, 'api-session', 'SessionStart', { source: 'startup' });
+    const bash = (command: string) => ({
+      tool_name: 'Bash',
+      tool_input: { command },
+      tool_use_id: 'toolu_2',
+    });
+    const read = await hook(sb, api, 'api-session', 'PreToolUse', bash('cat src/app/page.ts'));
+    expect(read.hookSpecificOutput?.permissionDecision).toBeUndefined();
+    const denied = await hook(
+      sb,
+      api,
+      'api-session',
+      'PreToolUse',
+      bash("sed -i '' 's/x/y/' src/app/page.ts"),
+    );
+    expect(denied.hookSpecificOutput?.permissionDecision).toBe('deny');
+    expect(denied.hookSpecificOutput?.permissionDecisionReason).toContain('src/app/page.ts');
+    const own = await hook(sb, api, 'api-session', 'PreToolUse', bash('echo x > src/api/new.ts'));
+    expect(own.hookSpecificOutput?.permissionDecision).toBeUndefined();
   });
 
   it('denies writes to other parts with --strict', async () => {
@@ -542,6 +587,35 @@ describe('split status, merge and abort (acceptance 4)', () => {
     expect(merged.stdout).toContain('git log --oneline mindly/billing/integration');
     expect(merged.stdout).not.toContain('git push --force');
     expect(git(sb.repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('main');
+    // The briefs of a finished split are cancelled: a late session in a part folder gets none.
+    const late = await hook(sb, partDir(sb, 'page'), 'late-session', 'SessionStart', {
+      source: 'startup',
+    });
+    expect(late.hookSpecificOutput?.additionalContext ?? '').not.toContain(
+      'Your part of the split',
+    );
+    const handoffs = await cli(sb, ['handoffs', '--json']);
+    expect((JSON.parse(handoffs.stdout) as { status: string }[]).map((h) => h.status)).toEqual([
+      'cancelled',
+      'cancelled',
+      'cancelled',
+    ]);
+  });
+
+  it('abort keeps a branch the user has checked out and never moves HEAD', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    git(sb.repo, 'worktree', 'remove', '--force', partDir(sb, 'api'));
+    git(sb.repo, 'checkout', '-q', 'mindly/billing/api');
+    const head = git(sb.repo, 'rev-parse', 'HEAD').trim();
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('kept 1 branch');
+    expect(r.stdout).toContain('mindly/billing/api');
+    expect(git(sb.repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('mindly/billing/api');
+    expect(git(sb.repo, 'rev-parse', 'HEAD').trim()).toBe(head);
+    expect(branches(sb)).toEqual(['mindly/billing/api']);
+    expect(existsSync(worktreeRoot(sb))).toBe(false);
   });
 
   it('stops cleanly on a conflict between parts', async () => {
@@ -599,9 +673,10 @@ describe('split status, merge and abort (acceptance 4)', () => {
     expect(
       (JSON.parse(handoffs.stdout) as { status: string }[]).map((h) => h.status).sort(),
     ).toEqual(['cancelled', 'cancelled', 'claimed']);
-    // The memory history survives.
-    const memories = await cli(sb, ['memory', 'list', '--json']);
-    expect(memories.stdout).toContain('GET /api/billing');
+    // The contract decisions of an aborted split are archived, not deleted.
+    expect((await cli(sb, ['memory', 'list', '--json'])).stdout).not.toContain('GET /api/billing');
+    const archived = await cli(sb, ['memory', 'list', '--archived', '--json']);
+    expect(archived.stdout).toContain('[split billing] GET /api/billing');
     const again = await cli(sb, ['split', 'abort', '--yes']);
     expect(again.code).toBe(1);
     expect(again.stderr).toContain('already aborted');

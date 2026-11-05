@@ -149,8 +149,9 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
           proposedMemories: proposed.filter((m) => m.kind !== 'rule').length,
           criticalConflicts: conflicts.filter((c) => c.severity === 'critical').length,
           openConflicts: conflicts.filter((c) => conflictNeedsUser(c)).length,
-          pendingHandoffs: store.handoffs.list(pid, 200).filter((h) => h.status === 'pending')
-            .length,
+          pendingHandoffs: store.handoffs
+            .list(pid, 200)
+            .filter((h) => h.status === 'pending' && !h.packet.split).length,
           blockedParts: blockedParts.length,
           failedMergeChecks: splitCheckFailed ? 1 : 0,
         },

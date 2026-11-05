@@ -87,3 +87,59 @@ export function matchesAnyGlob(
 ): boolean {
   return globs.some((g) => matchesGlob(path, g, options));
 }
+
+const WILDCARD = /[*?[{]/;
+
+/** Segments of a glob as `matchesGlob` reads it: a pattern without a slash matches a basename anywhere. */
+function globSegments(glob: string): string[] {
+  const g = glob.includes('/') ? glob.replace(/^\.\//, '') : `**/${glob}`;
+  return g.split('/').filter((s) => s !== '' && s !== '.');
+}
+
+/** A file-name pattern without `**`, groups or classes: its literal head (before the first wildcard) and tail (after the last). */
+function headTail(segment: string): { head: string; tail: string } | null {
+  if (segment.includes('**') || /[[{]/.test(segment)) return null;
+  const first = segment.search(/[*?]/);
+  if (first === -1) return { head: segment, tail: segment };
+  let last = segment.length - 1;
+  while (last >= 0 && !/[*?]/.test(segment[last] as string)) last--;
+  return { head: segment.slice(0, first), tail: segment.slice(last + 1) };
+}
+
+/**
+ * Whether two globs could match the same path, decided from the patterns alone (no file list):
+ * false only when they are provably disjoint. Two globs are disjoint when their literal leading
+ * segments differ, when their literal trailing segments differ, or when their file-name patterns
+ * have literal heads or tails that cannot both fit one name (`*.ts` and `*.css`). Anything
+ * involving `**`, groups or classes at the point of comparison counts as a possible overlap.
+ */
+export function globsMayOverlap(a: string, b: string): boolean {
+  const A = globSegments(a);
+  const B = globSegments(b);
+  const literal = (s: string | undefined): s is string => s !== undefined && !WILDCARD.test(s);
+  let i = 0;
+  while (literal(A[i]) && literal(B[i])) {
+    if (A[i] !== B[i]) return false;
+    i++;
+  }
+  if (i === A.length && i === B.length) return true;
+  // A fully literal path cannot also be a folder of the other pattern's literal continuation.
+  if (i === A.length) return !literal(B[i]);
+  if (i === B.length) return !literal(A[i]);
+  let ai = A.length - 1;
+  let bi = B.length - 1;
+  while (ai > i && bi > i && literal(A[ai]) && literal(B[bi])) {
+    if (A[ai] !== B[bi]) return false;
+    ai--;
+    bi--;
+  }
+  if (ai !== A.length - 1 || bi !== B.length - 1) return true;
+  const x = headTail(A[ai] as string);
+  const y = headTail(B[bi] as string);
+  if (!x || !y) return true;
+  const fits = (p: string, q: string): boolean => p.startsWith(q) || q.startsWith(p);
+  const ends = (p: string, q: string): boolean => p.endsWith(q) || q.endsWith(p);
+  if (x.head && y.head && !fits(x.head, y.head)) return false;
+  if (x.tail && y.tail && !ends(x.tail, y.tail)) return false;
+  return true;
+}

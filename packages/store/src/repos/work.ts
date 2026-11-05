@@ -529,7 +529,16 @@ export class ConflictRepo {
   }
 
   /** Resolves open conflicts of `kind` whose fingerprint is not in `stillPresent`. */
-  resolveMissing(projectId: string, kind: ConflictKind, stillPresent: readonly string[]): number {
+  /**
+   * Resolves the open conflicts of `kind` whose fingerprint is not in `stillPresent`. Conflicts
+   * whose fingerprint starts with `exceptPrefix` belong to another reporter and are left alone.
+   */
+  resolveMissing(
+    projectId: string,
+    kind: ConflictKind,
+    stillPresent: readonly string[],
+    opts: { exceptPrefix?: string } = {},
+  ): number {
     const open = this.db
       .prepare(
         `SELECT id, fingerprint FROM conflicts WHERE project_id = ? AND kind = ? AND status IN ('open', 'acknowledged')`,
@@ -538,7 +547,9 @@ export class ConflictRepo {
     const keep = new Set(stillPresent);
     let n = 0;
     for (const r of open) {
-      if (!keep.has(str(r, 'fingerprint'))) {
+      const fp = str(r, 'fingerprint');
+      if (opts.exceptPrefix !== undefined && fp.startsWith(opts.exceptPrefix)) continue;
+      if (!keep.has(fp)) {
         this.setStatus(str(r, 'id'), 'resolved');
         n++;
       }

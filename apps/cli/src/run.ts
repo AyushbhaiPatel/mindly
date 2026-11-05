@@ -40,10 +40,7 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
       writeErr: (s) => io.stderr.write(s),
     })
     .showSuggestionAfterError()
-    .helpCommand(true)
-    // `mindly split` and its subcommands share option names (--json, --yes): a command's options
-    // belong to it alone, and the program's own options come before the command name.
-    .enablePositionalOptions();
+    .helpCommand(true);
 
   // ---- agent entry points ------------------------------------------------------------------
   program
@@ -457,19 +454,28 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
           (await import('./commands/split.js')).split(out, goal, o),
       ),
     );
+  // `split` and its subcommands share --json and -y: wherever they are typed, the subcommand
+  // reads them from its own and its parent's options.
+  const sub = (cmd: Command): object => cmd.optsWithGlobals();
   splitCmd
     .command('status')
     .description('Progress of every part, conflicts and the merge check')
     .option('--json', 'machine-readable output')
     .action(
-      act((o: object) => async (out) => (await import('./commands/split.js')).splitStatus(out, o)),
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/split.js')).splitStatus(out, sub(cmd)),
+      ),
     );
   splitCmd
     .command('check')
     .description('Merge every part in memory and run the trusted checks now')
     .option('--json', 'machine-readable output')
     .action(
-      act((o: object) => async (out) => (await import('./commands/split.js')).splitCheck(out, o)),
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/split.js')).splitCheck(out, sub(cmd)),
+      ),
     );
   splitCmd
     .command('merge')
@@ -477,7 +483,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .option('--force', 'merge even if some parts are not marked done')
     .option('--json', 'machine-readable output')
     .action(
-      act((o: object) => async (out) => (await import('./commands/split.js')).splitMerge(out, o)),
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/split.js')).splitMerge(out, sub(cmd)),
+      ),
     );
   splitCmd
     .command('abort')
@@ -486,7 +495,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .option('-y, --yes', 'do not ask')
     .option('--json', 'machine-readable output')
     .action(
-      act((o: object) => async (out) => (await import('./commands/split.js')).splitAbort(out, o)),
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/split.js')).splitAbort(out, sub(cmd)),
+      ),
     );
 
   program

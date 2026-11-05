@@ -238,6 +238,23 @@ export class HookHandler {
     return out;
   }
 
+  /** Project-relative paths a shell command names and may write (text reading only). */
+  private async shellWriteTargets(
+    project: ProjectContext,
+    cwd: string,
+    command: string,
+  ): Promise<string[]> {
+    const tokens = command
+      .split(/\s+/)
+      .map((t) => t.replace(/^[<>'"`(]+|['"`;|&)]+$/g, ''))
+      .filter((t) => t !== '' && !t.startsWith('-') && /[./]/.test(t) && t.length <= 1024)
+      .slice(0, 30);
+    if (tokens.length === 0) return [];
+    return (await this.projectPaths(project, cwd, tokens))
+      .map((p) => p.rel)
+      .filter((rel) => shellMayWrite(command, rel));
+  }
+
   private async preTool(
     project: ProjectContext,
     session: Session,
@@ -300,16 +317,30 @@ export class HookHandler {
           ...(mistakes.length > 0 ? { mistakes: mistakes.map((m) => m.id) } : {}),
         });
       }
-      if (mistakes.length === 0) return EMPTY_HOOK_RESULT;
-      return {
-        ...EMPTY_HOOK_RESULT,
-        context: renderSections([
-          {
-            heading: 'A similar command failed before in this project',
-            lines: mistakes.map((m) => memoryLine(m)),
-          },
-        ]),
-      };
+      // A command that may write a file (sed -i, cat > file, mv) answers to the same guards as an
+      // editing tool: the paths it names that are not read-only uses.
+      const guard = await this.consultGuards(
+        project,
+        session,
+        await this.shellWriteTargets(project, evt.cwd, tool.command),
+      );
+      const sections = [
+        ...(mistakes.length > 0
+          ? [
+              {
+                heading: 'A similar command failed before in this project',
+                lines: mistakes.map((m) => memoryLine(m)),
+              },
+            ]
+          : []),
+        ...(guard.warnings.length > 0
+          ? [{ heading: 'Coordination warning', lines: guard.warnings.map((w) => `- ${w}`) }]
+          : []),
+      ];
+      const context = sections.length > 0 ? renderSections(sections) : null;
+      if (guard.deny)
+        return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: guard.deny, context };
+      return context === null ? EMPTY_HOOK_RESULT : { ...EMPTY_HOOK_RESULT, context };
     }
     if (pending.length > 0) this.appendToolEvent(pid, session, 'tool.before', { tool: toolName });
     return EMPTY_HOOK_RESULT;

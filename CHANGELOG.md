@@ -41,7 +41,8 @@ All notable changes to `mindly-cli` are documented here. The project follows
   coordination warning, or are blocked with `--strict`; when a part changes an export or a contract
   decision, the parts that depend on it get an impact update. `mindly split status` shows every
   part's agent, state, changed files and conflicts with the latest merge check; `mindly split
-check` merges every part in memory and runs the trusted checks; `mindly split merge` merges the
+check` merges every part in memory and runs the trusted checks (the daemon does the same on its
+  shadow-merge schedule while an agent works in a part); `mindly split merge` merges the
   parts in dependency order into `mindly/<split>/integration` (never pushes, never touches your
   branch) and stops cleanly on a conflict; `mindly split abort [--keep-branches]` removes the
   worktrees and branches the split created. Mission Control gets a Split view, the daemon
@@ -55,9 +56,6 @@ check` merges every part in memory and runs the trusted checks; `mindly split me
 - Once a Mindly with schema v2 has upgraded your database, an older Mindly (0.2.0 or earlier)
   cannot open it any more. Upgrade every Mindly install on the machine together. Until the first
   hook or command upgrades a v1 database, the status line shows plain `mindly`.
-- Options now belong to the command they follow (`mindly split status --json` is the status
-  command's `--json`). The one visible effect: `mindly --version` must come before any command
-  name; `mindly <command> --version` is no longer accepted.
 
 ## 0.2.0 — 2026-11-05
 

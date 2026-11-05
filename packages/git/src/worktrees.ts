@@ -59,7 +59,7 @@ export async function addWorktree(
     config: await driverOverrides(root),
     timeoutMs: 120_000,
   });
-  return { path: realpathSync(target), branch, commit };
+  return { path: realpathSync.native(target), branch, commit };
 }
 
 /**
@@ -89,13 +89,23 @@ export async function removeWorktree(repoRoot: string, path: string): Promise<bo
   return true;
 }
 
-/** Deletes `refs/heads/<branch>` whatever its merge state. Returns false when it did not exist. */
+/**
+ * Deletes `refs/heads/<branch>` whatever its merge state. Returns false when it did not exist and
+ * refuses (`conflict`) a branch that is checked out in any working tree, so work under someone's
+ * HEAD is never dropped.
+ */
 export async function deleteBranch(repoRoot: string, branch: string): Promise<boolean> {
   assertValidBranchName(branch);
   const root = await findRepoRoot(repoRoot);
   const ref = `refs/heads/${branch}`;
   const commit = await resolveCommit(root, ref);
   if (!commit) return false;
+  const checkedOut = (await listWorktrees(root)).find((w) => w.branch === ref);
+  if (checkedOut) {
+    throw new MindlyError('conflict', `branch ${branch} is checked out at ${checkedOut.path}`, {
+      details: { branch, path: checkedOut.path },
+    });
+  }
   await runGit(['update-ref', '-d', ref, commit], { cwd: root });
   return true;
 }

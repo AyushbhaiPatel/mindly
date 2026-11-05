@@ -1,5 +1,11 @@
 import { fingerprint, sanitizeLine, shortId, type Run, type Session } from '@mindly/core';
-import { LIVE_WINDOW_MS, savesOf, sessionLabel } from '@mindly/engine';
+import {
+  LIVE_WINDOW_MS,
+  savesOf,
+  sessionLabel,
+  SPLIT_FINGERPRINT_PREFIX,
+  splitOf,
+} from '@mindly/engine';
 import { materializeTree, runChecks, shadowMerge, type CheckResult } from '@mindly/git';
 import { captureSession, type SessionCapture } from './git-helpers.js';
 import {
@@ -14,12 +20,26 @@ import {
 
 const MAX_SIDES = 8;
 
-/** Live sessions of a project with distinct, existing worktrees (most recently seen first). */
+/** Worktrees of the parts of the project's active split, if any. */
+function activePartWorktrees(ctx: JobContext, projectId: string): string[] {
+  const split = ctx.mindly.store.splits.active(projectId);
+  return split ? ctx.mindly.store.splits.parts(split.id).map((p) => p.worktree) : [];
+}
+
+const inAny = (worktree: string, roots: readonly string[]): boolean =>
+  roots.some((r) => worktree === r || worktree.startsWith(`${r}/`));
+
+/**
+ * Live sessions of a project with distinct, existing worktrees (most recently seen first).
+ * Sessions working in the parts of an active split are left out: the split's merge check merges
+ * those as one set (see `shadowMergeTick`).
+ */
 export function mergeCandidates(ctx: JobContext, projectId: string): Session[] {
   const seen = new Set<string>();
   const out: Session[] = [];
+  const parts = activePartWorktrees(ctx, projectId);
   for (const s of ctx.mindly.store.sessions.listLive(projectId, LIVE_WINDOW_MS)) {
-    if (s.status === 'ended' || seen.has(s.worktree)) continue;
+    if (s.status === 'ended' || seen.has(s.worktree) || inAny(s.worktree, parts)) continue;
     seen.add(s.worktree);
     out.push(s);
     if (out.length >= MAX_SIDES) break;
@@ -193,7 +213,9 @@ export async function executeShadowMerge(ctx: JobContext, run: Run): Promise<Run
         });
       }
     }
-    mindly.store.conflicts.resolveMissing(projectId, 'merge_conflict', present);
+    mindly.store.conflicts.resolveMissing(projectId, 'merge_conflict', present, {
+      exceptPrefix: SPLIT_FINGERPRINT_PREFIX,
+    });
 
     let failed = !merge.clean;
     if (!merge.clean) result.checksSkipped = 'conflicts';
@@ -279,10 +301,27 @@ export async function executeShadowMerge(ctx: JobContext, run: Run): Promise<Run
   }
 }
 
-/** Scheduler entry: runs a shadow merge for every project with two or more live worktrees. */
+/**
+ * Scheduler entry: runs a shadow merge for every project with two or more live worktrees, and
+ * the merge check of an active split (every part's worktree as one set) while an agent works in
+ * one of its parts.
+ */
 export async function shadowMergeTick(ctx: JobContext): Promise<void> {
   if (!ctx.mindly.config.shadowMerge.enabled) return;
   for (const p of ctx.mindly.store.projects.list().slice(0, 200)) {
+    const split = ctx.mindly.store.splits.active(p.id);
+    if (split) {
+      const parts = activePartWorktrees(ctx, p.id);
+      const live = ctx.mindly.store.sessions
+        .listLive(p.id, LIVE_WINDOW_MS)
+        .some((s) => s.status !== 'ended' && inAny(s.worktree, parts));
+      const key = `split-check:${p.id}`;
+      if (live && !ctx.scheduler.busy(key)) {
+        await ctx.scheduler.enqueue(key, async () => {
+          await splitOf(ctx.mindly).mergeCheck(split.id, 'schedule');
+        });
+      }
+    }
     if (mergeCandidates(ctx, p.id).length < 2) continue;
     const key = `shadow:${p.id}`;
     if (ctx.scheduler.busy(key)) continue;

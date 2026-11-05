@@ -102,6 +102,7 @@ describe('SplitRepo', () => {
   it('allows one active split per project and keeps finished ones in the list', () => {
     const { store, project, clock } = setup();
     const { split } = store.splits.create(splitInput(store, project.id));
+    expect(() => store.splits.create(splitInput(store, project.id, 'again'))).toThrow();
     clock.advance(1000);
     const merged = store.splits.update(split.id, {
       status: 'merged',
@@ -122,6 +123,26 @@ describe('SplitRepo', () => {
     ]);
     expect(store.splits.list(project.id, { limit: 1 })).toHaveLength(1);
     expect(() => store.splits.update(split.id, { status: 'nope' as never })).toThrow();
+  });
+
+  it('finds the newest merge check of a split among many later runs', () => {
+    const { store, project, clock } = setup();
+    const run = (input: Record<string, unknown>) =>
+      store.runs.create({ projectId: project.id, kind: 'shadow_merge', title: 'check', input });
+    run({ trigger: 'user', splitId: 's-1' });
+    clock.advance(10);
+    const mine = run({ trigger: 'schedule', splitId: 's-1' });
+    for (let i = 0; i < 120; i++) {
+      clock.advance(10);
+      run({ trigger: 'schedule' });
+    }
+    expect(store.runs.latestWithInput(project.id, 'shadow_merge', 'splitId', 's-1')?.id).toBe(
+      mine.id,
+    );
+    expect(store.runs.latestWithInput(project.id, 'shadow_merge', 'splitId', 's-2')).toBeNull();
+    expect(() =>
+      store.runs.latestWithInput(project.id, 'shadow_merge', "a') or ('1", 'x'),
+    ).toThrow();
   });
 
   it('deletes splits with the project', () => {

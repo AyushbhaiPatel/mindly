@@ -31,6 +31,7 @@ CREATE TABLE splits (
   finished_at         INTEGER
 );
 CREATE INDEX splits_project ON splits (project_id, status, updated_at);
+CREATE UNIQUE INDEX splits_one_active ON splits (project_id) WHERE status = 'active';
 
 CREATE TABLE split_parts (
   id          TEXT PRIMARY KEY,

@@ -80,6 +80,15 @@ describe('worktrees', () => {
     expect(await deleteBranch(root, 'mindly/demo/p')).toBe(true);
     expect(await branchExists(root, 'mindly/demo/p')).toBe(false);
     expect(await deleteBranch(root, 'mindly/demo/p')).toBe(false);
+    // A branch checked out in any working tree is never deleted.
+    const held = join(tempDir(), 'held');
+    await addWorktree(root, held, 'mindly/demo/h', 'HEAD');
+    await expect(deleteBranch(root, 'mindly/demo/h')).rejects.toSatisfy((e) =>
+      isMindlyError(e, 'conflict'),
+    );
+    expect(await branchExists(root, 'mindly/demo/h')).toBe(true);
+    await removeWorktree(root, held);
+    expect(await deleteBranch(root, 'mindly/demo/h')).toBe(true);
     const plain = tempDir();
     expect(await removeWorktree(root, plain)).toBe(false);
     expect(existsSync(plain)).toBe(true);

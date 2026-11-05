@@ -1,8 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Project } from '@mindly/core';
 import { splitOf, type CreatedSplit } from '@mindly/engine';
-import type { Daemon } from '../src/index.js';
-import { bearer, git, repo, seedSession, testDaemon, write, type TestDaemon } from './helpers.js';
+import {
+  createShadowMergeRun,
+  executeShadowMerge,
+  mergeCandidates,
+  shadowMergeTick,
+  type Daemon,
+} from '../src/index.js';
+import {
+  bearer,
+  git,
+  linkedWorktree,
+  repo,
+  seedSession,
+  testDaemon,
+  write,
+  type TestDaemon,
+} from './helpers.js';
 
 let t: TestDaemon;
 let d: Daemon;
@@ -107,6 +122,50 @@ describe('split endpoints', () => {
       headers: { host: bearer(d)['host'] as string },
     });
     expect(noAuth.statusCode).toBe(401);
+  });
+
+  it('does not count unclaimed briefs as handoffs waiting for the user', async () => {
+    const ov = (await get(`/api/projects/${project.id}/overview`)).json() as {
+      needsYou: { pendingHandoffs: number };
+    };
+    expect(
+      d.mindly.store.handoffs.list(project.id, 10).filter((h) => h.status === 'pending'),
+    ).toHaveLength(2);
+    expect(ov.needsYou.pendingHandoffs).toBe(0);
+  });
+
+  it('merge-checks the parts as one set on the schedule and keeps their conflicts out of the daemon merge', async () => {
+    const [api, page] = created.parts as [
+      CreatedSplit['parts'][number],
+      CreatedSplit['parts'][number],
+    ];
+    seedSession(d, root, { worktree: api.worktree });
+    seedSession(d, root, { agentKind: 'codex', worktree: page.worktree });
+    for (const [wt, text] of [
+      [api.worktree, 'from api\n'],
+      [page.worktree, 'from page\n'],
+    ] as const) {
+      write(wt, 'shared.txt', text);
+      git(wt, 'add', '-A');
+      git(wt, 'commit', '-q', '-m', 'shared');
+    }
+    await shadowMergeTick(d.jobs);
+    const check = splitOf(d.mindly).latestMergeCheck(created.split);
+    expect(check?.input).toMatchObject({ trigger: 'schedule', splitId: created.split.id });
+    expect(check?.status).toBe('failed');
+    expect(check?.result?.['conflictedPaths']).toEqual(['shared.txt']);
+    const open = () =>
+      d.mindly.store.conflicts.list(project.id).filter((c) => c.kind === 'merge_conflict');
+    expect(open()).toHaveLength(1);
+    expect(open()[0]!.fingerprint.startsWith('split:')).toBe(true);
+    // The parts are not merged pairwise by the daemon; a merge of other sessions leaves the
+    // split's conflict alone instead of resolving it as "gone".
+    expect(mergeCandidates(d.jobs, project.id)).toHaveLength(0);
+    seedSession(d, root);
+    seedSession(d, root, { worktree: linkedWorktree(root, 'other') });
+    expect(mergeCandidates(d.jobs, project.id)).toHaveLength(2);
+    await executeShadowMerge(d.jobs, createShadowMergeRun(d.jobs, project.id, 'user'));
+    expect(open()).toHaveLength(1);
   });
 
   it('puts a blocked part and a failed merge check under "needs you" in the overview', async () => {

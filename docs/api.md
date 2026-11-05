@@ -88,6 +88,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
   pendingDeliveries: number;
   lastShadowMerge: Run | null;
   needsYou: { proposedRules: number; proposedMemories: number; criticalConflicts: number; openConflicts: number; pendingHandoffs: number; blockedParts: number; failedMergeChecks: number };
+                                  // pendingHandoffs leaves out split briefs (they wait for a session in their worktree)
   split: {                        // the active split, or null
     id: string; goal: string;
     blockedParts: { key: string; title: string }[];
@@ -111,7 +112,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
     lastActivityAt: number | null;
     conflicts: Conflict[];        // open conflicts involving the part's session
   }[];
-  contract: { name, owner, definition, memoryId }[];
+  contract: { name, owner, definition, memoryId }[];  // items still approved as decisions, with their current text
   mergeCheck: Run | null;         // latest shadow_merge run of this split (result below, with splitId/parts/merged)
 }
 ```

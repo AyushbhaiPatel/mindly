@@ -2,6 +2,7 @@ import { existsSync, realpathSync, rmdirSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
   fingerprint,
+  globsMayOverlap,
   invalidInput,
   matchesAnyGlob,
   MindlyError,
@@ -27,6 +28,12 @@ import { cleanScopePaths, USER, type MemoryService } from '../memory/service.js'
 import type { Mindly, MindlyModule } from '../mindly.js';
 import type { SplitCheckResult, SplitGitPort } from '../ports.js';
 import type { ProjectService } from '../projects.js';
+import {
+  contractLines,
+  contractTitle,
+  liveContract,
+  SPLIT_FINGERPRINT_PREFIX,
+} from './split-contract.js';
 import { ImpactService } from './impact.js';
 import { liveSessions, serviceOf } from './shared.js';
 import { isValidBranchName } from './snapshots.js';
@@ -174,10 +181,29 @@ export function validatePlan(
         out.push(
           `parts "${a}" and "${b}" both own ${sanitizeLine(hit, 160)}; owns globs must not overlap`,
         );
+        continue;
+      }
+      // Parts mostly create files, so the patterns themselves must be disjoint, not just their
+      // matches today: a pair that cannot be proven disjoint is refused.
+      for (const ga of aGlobs) {
+        const gb = bGlobs.find((g) => globsMayOverlap(ga, g));
+        if (gb === undefined) continue;
+        out.push(
+          `parts "${a}" and "${b}" could both own the same new files: ${sanitizeLine(ga, 160)} and ${sanitizeLine(gb, 160)} are not clearly disjoint; use patterns that cannot match the same path`,
+        );
+        break;
       }
     }
   }
+  const names = new Set<string>();
   for (const c of plan.contract) {
+    const name = sanitizeLine(c.name, 120).trim();
+    if (!name || !sanitizeLine(c.definition, 2000).trim()) {
+      out.push(`contract item "${sanitizeLine(c.name, 80)}" needs a readable name and definition`);
+    }
+    const norm = name.toLowerCase().replace(/\s+/g, ' ');
+    if (names.has(norm)) out.push(`contract item "${name}" appears more than once`);
+    names.add(norm);
     if (!keys.includes(c.owner)) {
       out.push(`contract item "${sanitizeLine(c.name, 80)}" is owned by unknown part "${c.owner}"`);
     }
@@ -205,21 +231,13 @@ function insideDir(path: string, dir: string): boolean {
   return path === dir || path.startsWith(`${dir}/`);
 }
 
+/** Canonical path (symlinks and, on case-insensitive file systems, letter case resolved). */
 function safeRealpath(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return path;
   }
-}
-
-function contractLines(
-  contract: readonly { name: string; owner: string; definition: string }[],
-): string[] {
-  return contract.map(
-    (c) =>
-      `${sanitizeLine(c.name, 120)} \u2014 ${sanitizeLine(c.definition, 400)} (owned by part ${c.owner})`,
-  );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -357,6 +375,15 @@ export class SplitService {
     if (insideDir(worktreeRoot, root)) {
       throw new MindlyError('invalid_input', 'cannot place worktrees next to the repository');
     }
+    for (const c of plan.contract) {
+      const title = contractTitle(slug, c.name);
+      if (this.memory.findSameTitle(input.projectId, 'decision', title, null)) {
+        throw new MindlyError(
+          'conflict',
+          `a decision titled "${sanitizeLine(title, 120)}" already exists (from an earlier split with this name?); choose another name with --name`,
+        );
+      }
+    }
     const branches = [
       ...plan.parts.map((p) => splitBranch(slug, p.key)),
       splitBranch(slug, SPLIT_INTEGRATION_KEY),
@@ -379,6 +406,8 @@ export class SplitService {
       }
     }
 
+    // Anything created before a failure (a worktree, a branch, or the database rows when the
+    // transaction fails after the worktrees exist) is removed again.
     const created: { key: string; worktree: string; branch: string }[] = [];
     try {
       for (const [i, p] of plan.parts.entries()) {
@@ -386,6 +415,7 @@ export class SplitService {
         const worktree = await git.addWorktree(root, folders[i] as string, branch, baseCommit);
         created.push({ key: p.key, worktree, branch });
       }
+      return this.record(input, plan, slug, baseCommit, baseBranch, worktreeRoot, created);
     } catch (err) {
       for (const c of created) {
         await git.removeWorktree(root, c.worktree).catch(() => undefined);
@@ -393,9 +423,23 @@ export class SplitService {
       }
       throw err;
     }
+  }
 
+  private record(
+    input: CreateSplitInput,
+    plan: SplitPlan,
+    slug: string,
+    baseCommit: string,
+    baseBranch: string | null,
+    worktreeRoot: string,
+    created: readonly { key: string; worktree: string; branch: string }[],
+  ): CreatedSplit {
+    const root = this.projects.byId(input.projectId).root;
     const owner = (key: string): string => plan.parts.find((p) => p.key === key)?.title ?? key;
     return this.k.store.transaction(() => {
+      if (this.k.store.splits.active(input.projectId)) {
+        throw new MindlyError('conflict', 'a split is already active; merge or abort it first');
+      }
       const task = this.tasks.create({
         projectId: input.projectId,
         title: plan.goal,
@@ -403,20 +447,21 @@ export class SplitService {
         plan: plan.parts.map((p) => p.title),
       });
       const contract: SplitContractItem[] = plan.contract.map((c) => {
+        // A new decision per item (the title prefix keeps it apart from every other decision).
         const m = this.memory.remember({
           projectId: input.projectId,
           projectRoot: root,
           kind: 'decision',
-          title: c.name,
-          body: `${c.definition}\n\nShared contract of the split "${plan.goal}" (${slug}); owned by part "${owner(c.owner)}" (${c.owner}).`,
+          title: contractTitle(slug, c.name),
+          body: c.definition,
           tags: ['split', `split-${slug}`],
           source: USER,
           trust: 'approved',
-          reason: `contract of split ${slug}`,
+          reason: `contract of the split "${sanitizeLine(plan.goal, 80)}" (${slug}), owned by part "${owner(c.owner)}" (${c.owner})`,
         });
         return { ...c, memoryId: m.id };
       });
-      const lines = contractLines(plan.contract);
+      const lines = contractLines(contract);
       const parts = plan.parts.map((p, i) => {
         const c = created[i] as { worktree: string; branch: string };
         const child = this.tasks.create({
@@ -545,11 +590,12 @@ export class SplitService {
 
   /** The latest merge check of a split. */
   latestMergeCheck(split: Split): Run | null {
-    return (
-      this.k.store.runs
-        .list(split.projectId, { kind: 'shadow_merge', limit: 100 })
-        .find((r) => r.input['splitId'] === split.id) ?? null
-    );
+    return this.k.store.runs.latestWithInput(split.projectId, 'shadow_merge', 'splitId', split.id);
+  }
+
+  /** The contract items that are still approved decisions, with their current text. */
+  contract(split: Split): SplitContractItem[] {
+    return liveContract(this.k.store, split);
   }
 
   /** Full status of a split (asks git for the files each part changed). */
@@ -592,7 +638,12 @@ export class SplitService {
           : [],
       });
     }
-    return { split, parts, contract: split.contract, mergeCheck: this.latestMergeCheck(split) };
+    return {
+      split,
+      parts,
+      contract: this.contract(split),
+      mergeCheck: this.latestMergeCheck(split),
+    };
   }
 
   // ------------------------------------------------------------------ merge check
@@ -680,7 +731,8 @@ export class SplitService {
         result.conflicts.push({ part: c.label, sessionIds: ids, paths });
         for (const p of paths)
           if (!result.conflictedPaths.includes(p)) result.conflictedPaths.push(p);
-        const fp = fingerprint('split_merge', split.id, c.label, ...paths);
+        const fp =
+          SPLIT_FINGERPRINT_PREFIX + fingerprint('split_merge', split.id, c.label, ...paths);
         present.push(fp);
         this.reportConflict({
           projectId: split.projectId,
@@ -839,6 +891,7 @@ export class SplitService {
       integrationBranch: into,
       finishedAt: this.k.clock.now(),
     });
+    for (const p of parts) this.k.store.handoffs.cancelForWorktree(split.projectId, p.worktree);
     this.tasks.update(split.taskId, { status: 'done' }, null);
     this.k.store.events.append({
       projectId: split.projectId,
@@ -858,7 +911,10 @@ export class SplitService {
 
   /**
    * Removes the worktrees the split created (and their branches unless kept), cancels unclaimed
-   * briefs, closes the parts' intents and tasks and marks the split aborted. Memories stay.
+   * briefs, closes the parts' intents and tasks and marks the split aborted; the contract
+   * decisions of an aborted split are archived. A branch the user has checked out somewhere is
+   * kept and reported. A merged split only loses its worktrees and part branches: it stays merged
+   * and keeps its integration branch.
    */
   async abort(
     splitId: string,
@@ -875,12 +931,26 @@ export class SplitService {
     for (const part of this.k.store.splits.parts(split.id)) {
       if (await git.removeWorktree(root, part.worktree)) removedWorktrees.push(part.worktree);
       if (options.keepBranches) keptBranches.push(part.branch);
-      else if (await git.deleteBranch(root, part.branch)) deletedBranches.push(part.branch);
+      else {
+        try {
+          if (await git.deleteBranch(root, part.branch)) deletedBranches.push(part.branch);
+        } catch (err) {
+          if (!(err instanceof MindlyError && err.code === 'conflict')) throw err;
+          keptBranches.push(part.branch);
+          this.k.logger.warn('split abort: branch kept', {
+            branch: part.branch,
+            error: err.message,
+          });
+        }
+      }
       this.k.store.handoffs.cancelForWorktree(split.projectId, part.worktree);
       const task = this.k.store.tasks.get(part.taskId);
       if (task.ownerSessionId)
         this.k.store.intents.closeForSession(task.ownerSessionId, 'abandoned');
       if (task.status !== 'done') this.tasks.update(task.id, { status: 'abandoned' }, null);
+    }
+    if (split.status === 'merged' && removedWorktrees.length + deletedBranches.length === 0) {
+      throw new MindlyError('conflict', 'the split is merged and its worktrees are already gone');
     }
     try {
       rmdirSync(split.worktreeRoot);
@@ -895,10 +965,19 @@ export class SplitService {
         null,
       );
     }
-    const updated = this.k.store.splits.update(split.id, {
-      status: 'aborted',
-      finishedAt: this.k.clock.now(),
-    });
+    if (split.status !== 'merged') {
+      for (const c of split.contract) {
+        const m = c.memoryId ? this.k.store.memories.find(c.memoryId) : null;
+        if (m && m.status === 'active') this.memory.archive(m.id);
+      }
+    }
+    const updated =
+      split.status === 'merged'
+        ? split
+        : this.k.store.splits.update(split.id, {
+            status: 'aborted',
+            finishedAt: this.k.clock.now(),
+          });
     this.k.store.events.append({
       projectId: split.projectId,
       sessionId: null,

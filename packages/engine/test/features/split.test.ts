@@ -16,7 +16,7 @@ import {
   type SplitGitPort,
   type SplitMergeCheck,
 } from '../../src/index.js';
-import { event, FakeClock, fakeGit, writeTool } from '../helpers.js';
+import { event, FakeClock, fakeGit, shellTool, writeTool } from '../helpers.js';
 
 const FILES = ['README.md', 'src/api/billing.ts', 'src/app/page.ts', 'src/webhooks/stripe.ts'];
 
@@ -216,6 +216,44 @@ describe('plan validation', () => {
     expect(existsSync(worktreeRoot)).toBe(false);
   });
 
+  it('refuses owns globs that could match the same new file, and unreadable or repeated contract items', () => {
+    const check = (plan: unknown): string | null => {
+      try {
+        validatePlan(parsePlan(plan), FILES, null);
+        return null;
+      } catch (e) {
+        return (e as Error).message;
+      }
+    };
+    const two = (a: string[], b: string[]) => ({
+      goal: 'g',
+      parts: [part('a', a), part('b', b)],
+      contract: [],
+    });
+    // No file matches both today, but a new file could.
+    expect(check(two(['src/billing/**'], ['**/*.test.ts']))).toMatch(/not clearly disjoint/);
+    expect(check(two(['src/*.ts'], ['src/new.*']))).toMatch(/not clearly disjoint/);
+    expect(check(two(['web/**'], ['**/billing/**']))).toMatch(/not clearly disjoint/);
+    expect(check(two(['src/api/**'], ['src/app/**', 'docs/*.md']))).toBeNull();
+    expect(check(two(['src/**/*.ts'], ['src/**/*.css']))).toBeNull();
+    const withContract = (contract: unknown[]) => ({
+      goal: 'g',
+      parts: [part('a', ['a/**']), part('b', ['b/**'])],
+      contract,
+    });
+    expect(check(withContract([{ name: '\u200b', owner: 'a', definition: 'x' }]))).toMatch(
+      /readable name/,
+    );
+    expect(
+      check(
+        withContract([
+          { name: 'GET /x', owner: 'a', definition: 'x' },
+          { name: 'get  /x', owner: 'b', definition: 'y' },
+        ]),
+      ),
+    ).toMatch(/more than once/);
+  });
+
   it('orders parts by dependency and derives branch names', () => {
     expect(
       orderParts([
@@ -259,7 +297,12 @@ describe('split through hook events', () => {
         .sort(),
     ).toEqual(['Part api', 'Part page']);
     const decision = mindly.store.memories.get(created.split.contract[0]!.memoryId as string);
-    expect(decision).toMatchObject({ kind: 'decision', trust: 'approved', title: 'GET /billing' });
+    expect(decision).toMatchObject({
+      kind: 'decision',
+      trust: 'approved',
+      title: '[split billing] GET /billing',
+      body: 'returns { plan }',
+    });
     expect(mindly.store.handoffs.list(pid).filter((h) => h.status === 'pending')).toHaveLength(2);
     // A second split cannot start while this one is active.
     await expect(
@@ -360,6 +403,84 @@ describe('split through hook events', () => {
       }),
     );
     expect(ok.decision ?? null).toBeNull();
+  });
+
+  it("guards shell commands that may write another part's files", async () => {
+    const { mindly, svc, pid } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const apiWt = created.parts[0]!.worktree;
+    await mindly.hooks.handle(event(apiWt, 'claude-code', 'api-1', 'session_start'));
+    const shell = (command: string) =>
+      mindly.hooks.handle(
+        event(apiWt, 'claude-code', 'api-1', 'pre_tool', { tool: shellTool(command) }),
+      );
+    const read = await shell('cat src/app/page.ts | grep page');
+    expect(read.decision ?? null).toBeNull();
+    expect(read.context ?? '').not.toContain('owned by part');
+    for (const command of ['sed -i "" s/a/b/ src/app/page.ts', 'cat tpl > src/app/page.ts']) {
+      const r = await shell(command);
+      expect(r.decision ?? null).toBeNull();
+      expect(r.context).toContain('src/app/page.ts is owned by part "Part page"');
+    }
+    const own = await shell('echo x > src/api/new.ts');
+    expect(own.context ?? '').not.toContain('owned by part');
+  });
+
+  it('keeps other decisions untouched, shows the contract as it is now and archives it on abort', async () => {
+    const { mindly, svc, pid, root } = await setup();
+    const before = mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'decision',
+      title: 'GET /billing',
+      body: 'the old one',
+      tags: [],
+      source: USER,
+      trust: 'approved',
+      reason: 'test',
+    });
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const id = created.split.contract[0]!.memoryId as string;
+    expect(id).not.toBe(before.id);
+    expect(mindly.store.memories.get(before.id)).toMatchObject({ body: 'the old one', version: 1 });
+    expect(mindly.store.memories.get(id)).toMatchObject({
+      title: '[split billing] GET /billing',
+      body: 'returns { plan }',
+    });
+    expect(svc.contract(created.split)).toEqual([
+      { name: 'GET /billing', owner: 'api', definition: 'returns { plan }', memoryId: id },
+    ]);
+    // The user edits the decision: status and later briefs show the new text.
+    mindly.memory.update(id, { body: 'returns { plan, id }' }, USER, 'edited');
+    expect((await svc.status(created.split.id)).contract[0]!.definition).toBe(
+      'returns { plan, id }',
+    );
+    const page = await mindly.hooks.handle(
+      event(created.parts[1]!.worktree, 'claude-code', 'page-1', 'session_start'),
+    );
+    expect(page.context).toContain('GET /billing \u2014 returns { plan, id }');
+    // A rejected item is no longer part of the contract.
+    mindly.memory.reject(id);
+    expect((await svc.status(created.split.id)).contract).toEqual([]);
+    // A second split with the same name cannot reuse the title; abort archives the decision.
+    await svc.abort(created.split.id);
+    expect(mindly.store.memories.get(id).status).toBe('archived');
+    expect(mindly.store.memories.get(before.id)).toMatchObject({
+      status: 'active',
+      body: 'the old one',
+    });
   });
 
   it('tells dependants when a contract decision changes', async () => {
@@ -504,7 +625,8 @@ describe('split through hook events', () => {
     expect(aborted.deletedBranches.sort()).toEqual(['mindly/billing/api', 'mindly/billing/page']);
     expect([...fake.branches].sort()).toEqual(['keep-me', 'mindly/billing/integration']);
     expect(existsSync(worktreeRoot)).toBe(false);
-    expect(mindly.store.splits.get(created.split.id).status).toBe('aborted');
+    // Cleaning up after a merge does not turn the split into an aborted one.
+    expect(mindly.store.splits.get(created.split.id).status).toBe('merged');
     expect(mindly.store.splits.partForWorktree(pid, api.worktree)).toBeNull();
     await expect(svc.abort(created.split.id)).rejects.toSatisfy((e) =>
       isMindlyError(e, 'conflict'),

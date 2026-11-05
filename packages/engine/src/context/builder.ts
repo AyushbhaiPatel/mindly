@@ -19,6 +19,7 @@ import { rankTrust } from '../memory/service.js';
 import { sessionLabel } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { memoryLine, relativeTime, renderSections, type Section } from './render.js';
+import { contractLines, liveContract } from '../features/split-contract.js';
 
 interface Candidate {
   item: ContextItem;
@@ -341,6 +342,11 @@ export class ContextBuilder {
       session.id,
       safeRealpath(session.worktree),
     )) {
+      // A brief of a split that is no longer active is not for anyone.
+      if (h.packet.split) {
+        const split = this.k.store.splits.find(h.packet.split.splitId);
+        if (!split || split.status !== 'active') continue;
+      }
       if (this.k.store.handoffs.claim(h.id, session.id)) {
         this.k.store.events.append({
           projectId: session.projectId,
@@ -362,7 +368,11 @@ export class ContextBuilder {
   }
 
   private handoffCandidates(h: Handoff): Candidate[] {
-    if (h.packet.split) return [splitBriefCandidate(h, h.packet.split)];
+    if (h.packet.split) {
+      const split = this.k.store.splits.find(h.packet.split.splitId);
+      const contract = split ? contractLines(liveContract(this.k.store, split)) : [];
+      return [splitBriefCandidate(h, h.packet.split, contract)];
+    }
     const from = this.k.store.sessions.find(h.fromSessionId);
     const who = from ? sessionLabel(from) : 'another agent';
     const p = h.packet;
@@ -510,7 +520,7 @@ export class ContextBuilder {
 }
 
 /** The brief of a split part, rendered as the first section of the session. */
-function splitBriefCandidate(h: Handoff, brief: HandoffSplitBrief): Candidate {
+function splitBriefCandidate(h: Handoff, brief: HandoffSplitBrief, contract: string[]): Candidate {
   const globs = (g: readonly string[]): string => g.map((x) => sanitizeLine(x, 160)).join(', ');
   const lines = [
     `You are working on part "${sanitizeLine(brief.title, 120)}" of the split "${sanitizeLine(brief.goal, 300)}" in this worktree (branch ${sanitizeLine(h.packet.branch ?? '', 120)}). Other agents work on the other parts in their own worktrees.`,
@@ -528,9 +538,9 @@ function splitBriefCandidate(h: Handoff, brief: HandoffSplitBrief): Candidate {
       ? 'Writes to files owned by another part are blocked (strict mode): ask the user instead.'
       : 'Writing to files owned by another part raises a coordination warning: coordinate first.',
   );
-  if (brief.contract.length) {
+  if (contract.length) {
     lines.push(
-      `Shared contract (approved decisions): ${brief.contract.map((c) => sanitizeLine(c, 300)).join('; ')}`,
+      `Shared contract (approved decisions): ${contract.map((c) => sanitizeLine(c, 300)).join('; ')}`,
     );
   }
   lines.push('When your part is finished, mark its task done (mindly_update_task).');
@@ -552,7 +562,7 @@ function splitBriefCandidate(h: Handoff, brief: HandoffSplitBrief): Candidate {
 
 function safeRealpath(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return path;
   }

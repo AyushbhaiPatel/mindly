@@ -273,7 +273,8 @@ export class MemoryService {
     return memory;
   }
 
-  private findSameTitle(
+  /** The active memory of `kind` with the same normalised title on `branch`, if any. */
+  findSameTitle(
     projectId: string,
     kind: MemoryKind,
     title: string,
