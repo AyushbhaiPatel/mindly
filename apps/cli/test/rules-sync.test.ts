@@ -89,7 +89,9 @@ describe('rules sync', () => {
     await addRule(sb, 'Use pnpm, never npm');
     const r = await cli(sb, ['rules', 'sync', '--yes']);
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain('its Mindly markers are incomplete or repeated');
+    expect(r.stdout).toContain(
+      'its Mindly markers are incomplete, repeated or inside a code block',
+    );
     expect(read(sb, 'AGENTS.md')).toBe(START + '\n- half\n');
   });
 
@@ -113,15 +115,16 @@ describe('rules sync', () => {
 
     const yes = await cli(sb, ['init'], { answers: ['y'] });
     expect(yes.code).toBe(0);
-    expect(yes.stdout).toContain('Wrote the rules section to AGENTS.md.');
+    // The only rule came from AGENTS.md, so there is nothing to add: no near-empty section.
+    expect(yes.stdout).toContain('Rules sync is on. AGENTS.md already states every approved rule');
     expect(lstatSync(join(sb.repo, 'CLAUDE.md')).isSymbolicLink()).toBe(true);
+    expect(read(sb, 'AGENTS.md')).toBe('# Agents\n\n- Run the linter before every commit.\n');
+    await addRule(sb, 'Use pnpm, never npm');
     const text = read(sb, 'AGENTS.md');
     expect(text.split(START)).toHaveLength(2);
-    // The rule came from AGENTS.md, so it is not repeated there.
+    expect(text).toContain('- Use pnpm, never npm\n\n' + END);
+    // The imported rule is not repeated in the section.
     expect(text.match(/Run the linter/g)).toHaveLength(1);
-    expect(text).toContain('_Every approved rule is already written elsewhere in this file._');
-    await addRule(sb, 'Use pnpm, never npm');
-    expect(read(sb, 'AGENTS.md')).toContain('- Use pnpm, never npm\n\n' + END);
 
     // Re-importing the file finds nothing new: the section is Mindly's own.
     const again = await cli(sb, ['rules', 'import', '--dry-run']);

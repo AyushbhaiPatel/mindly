@@ -21,7 +21,8 @@ const SKIP_WORDS: Record<RulesFileSkip, string> = {
   denied: 'skipped: Mindly never writes this path',
   broken_link: 'skipped: it is a broken link',
   unreadable: 'skipped: not readable as UTF-8 text',
-  damaged: 'skipped: its Mindly markers are incomplete or repeated; fix or remove them',
+  damaged:
+    'skipped, needs attention: its Mindly markers are incomplete, repeated or inside a code block, or the file ends inside an unclosed code block (```); fix it, then sync again',
   changed: 'skipped: it changed while Mindly was writing; run the command again',
   unwritable: 'skipped: Mindly could not write it',
 };
@@ -117,6 +118,12 @@ export async function rulesSync(
         : `Writing ${count(rules, 'approved rule')} into your agent instruction files`,
     );
     if (root !== project.root) sc.note(`In this worktree: ${root}`);
+    const awaiting = svc.awaitingApproval(pid).length;
+    if (awaiting > 0) {
+      sc.note(
+        `${count(awaiting, 'rule')} Mindly picked up from your prompts ${awaiting === 1 ? 'is' : 'are'} not written until you approve ${awaiting === 1 ? 'it' : 'them'} with: mindly rules --approve <id>`,
+      );
+    }
     const n = printRulesFileChanges(out, plan);
     const writable = plan.filter((c) => c.skipped === null);
     if (o.dryRun === true) {
@@ -186,7 +193,9 @@ export async function offerRulesSync(out: Out, o: { yes?: boolean }): Promise<vo
     const written = done.filter((c) => c.skipped === null && c.next !== c.previous);
     warnEdited(out, done);
     sc.text(
-      `${sc.mark('ok')} Wrote the rules section to ${listWords(written.length ? written.map((c) => c.path) : plan.map((c) => c.path))}.`,
+      written.length > 0
+        ? `${sc.mark('ok')} Wrote the rules section to ${listWords(written.map((c) => c.path))}.`
+        : `${sc.mark('ok')} Rules sync is on. ${listWords(plan.map((c) => c.path))} already ${plan.length === 1 ? 'states' : 'state'} every approved rule, so no section was added yet.`,
     );
   });
 }

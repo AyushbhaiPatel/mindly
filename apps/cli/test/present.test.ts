@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { REPO_FILE_SOURCE } from '@mindly/core';
 import {
   agentName,
   argvWords,
@@ -12,6 +13,7 @@ import {
   sessionName,
   sessionStatusWord,
   severityWord,
+  sourceWord,
   symbolsFor,
   trustWord,
   useAscii,
@@ -119,6 +121,10 @@ describe('vocabulary', () => {
     expect(trustWord('proposed', { type: 'user', sessionId: null, agentKind: 'claude-code' })).toBe(
       'you said it in Claude Code, waiting for you',
     );
+    expect(trustWord('proposed', REPO_FILE_SOURCE)).toBe(
+      'imported from a repository file, waiting for you',
+    );
+    expect(sourceWord(REPO_FILE_SOURCE)).toBe('a repository file');
     expect(memoryKindWord('mistake')).toBe('known pitfall');
     expect(handoffStatusWord('pending', 'cursor')).toBe('waiting for Cursor');
     expect(handoffStatusWord('pending', null)).toBe('waiting for any agent');

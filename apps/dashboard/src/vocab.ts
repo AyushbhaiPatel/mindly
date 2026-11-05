@@ -226,6 +226,10 @@ export function sourceWords(
   if (src.type === 'user') return 'you';
   if (src.type === 'system') return 'Mindly';
   if (src.type === 'code') return 'the code';
+  // Rules imported from AGENTS.md, CLAUDE.md, … (same check as isRepoFileSource in @mindly/core).
+  if (src.type === 'agent' && src.sessionId === null && src.agentKind === 'repo-file') {
+    return 'a repository file';
+  }
   const s = src.sessionId ? sessions.get(src.sessionId) : undefined;
   return s ? productName(s.agentKind) : productName(src.agentKind);
 }

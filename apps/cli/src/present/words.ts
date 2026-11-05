@@ -14,6 +14,7 @@ import type {
   TaskStatus,
   Trust,
 } from '@mindly/core';
+import { isRepoFileSource } from '@mindly/core';
 import { agentName } from './agents.js';
 
 /*
@@ -70,6 +71,7 @@ export function sourceWord(source: MemorySource): string {
   if (source.type === 'user') return 'you';
   if (source.type === 'code') return 'the code';
   if (source.type === 'system') return 'Mindly';
+  if (isRepoFileSource(source)) return 'a repository file';
   return source.agentKind ? agentName(source.agentKind) : 'an agent';
 }
 
@@ -84,6 +86,9 @@ export function trustWord(trust: Trust, source?: MemorySource): string {
     case 'verified':
       return 'confirmed in the code';
     case 'proposed': {
+      if (source && isRepoFileSource(source)) {
+        return 'imported from a repository file, waiting for you';
+      }
       const who = source ? sourceWord(source) : 'an agent';
       if (who !== 'you') return `suggested by ${who}, waiting for you`;
       // Rules the user stated in an agent session are captured as suggestions to confirm.

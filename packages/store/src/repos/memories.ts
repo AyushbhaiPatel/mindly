@@ -185,8 +185,17 @@ export class MemoryRepo {
     return this.get(id);
   }
 
-  /** Applies a patch as a new version. No-op patches do not create versions. */
-  update(id: string, patch: MemoryPatch, changedBy: MemorySource, reason: string | null): Memory {
+  /**
+   * Applies a patch as a new version. No-op patches do not create versions unless `record` is set
+   * (used to record a user's explicit approval of a memory that was already approved).
+   */
+  update(
+    id: string,
+    patch: MemoryPatch,
+    changedBy: MemorySource,
+    reason: string | null,
+    record = false,
+  ): Memory {
     return transaction(this.db, () => {
       const cur = this.get(id);
       const next: Memory = {
@@ -209,6 +218,7 @@ export class MemoryRepo {
           patch.lastVerifiedAt === undefined ? cur.lastVerifiedAt : patch.lastVerifiedAt,
       };
       const versioned =
+        record ||
         next.title !== cur.title ||
         next.body !== cur.body ||
         toJson(next.tags) !== toJson(cur.tags) ||
@@ -347,6 +357,23 @@ export class MemoryRepo {
         .prepare('SELECT * FROM memory_versions WHERE memory_id = ? ORDER BY version ASC')
         .all(id) as Row[]
     ).map(toVersion);
+  }
+
+  /**
+   * Ids of the project's memories the user approved directly: at least one version that is active
+   * and approved was written by the user outside any agent session (the CLI, Mission Control or an
+   * interactive prompt), not captured from what they typed to an agent.
+   */
+  userApprovedIds(projectId: string): Set<string> {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT v.memory_id AS id FROM memory_versions v
+           JOIN memories m ON m.id = v.memory_id
+         WHERE m.project_id = ? AND v.trust = 'approved' AND v.status = 'active'
+           AND v.changed_by_type = 'user' AND v.changed_by_session IS NULL`,
+      )
+      .all(projectId) as Row[];
+    return new Set(rows.map((r) => str(r, 'id')));
   }
 
   /** Memory state as of a timestamp (time travel). Null if it did not exist yet. */

@@ -1,4 +1,4 @@
-import { sanitizeLine, type Memory, type Session } from '@mindly/core';
+import { REPO_FILE_SOURCE, sanitizeLine, type Memory, type Session } from '@mindly/core';
 import { DELIVERY_TTL_MS, LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
 import {
   dedupeRules,
@@ -6,7 +6,7 @@ import {
   type InstructionFile,
   type InstructionRule,
 } from './instructions.js';
-import { USER, type MemoryService } from './service.js';
+import type { MemoryService } from './service.js';
 
 /** What importing the project's instruction files would do. */
 export interface InstructionImportPlan {
@@ -195,7 +195,8 @@ export class RuleService {
   }
 
   /**
-   * Stores rules from {@link planImport}. They are `approved` only when the user read the list and
+   * Stores rules from {@link planImport} with the repository file as their source. They are
+   * `approved` (by the user, recorded as the user's approval) only when the user read the list and
    * confirmed it; otherwise they are `proposed` and wait for approval like any suggested rule.
    * Each rule keeps its source line as evidence, so it is marked stale when that line is edited
    * out of the file. Returns the rules stored.
@@ -221,23 +222,22 @@ export class RuleService {
     for (const r of rules) {
       const where = `Imported from ${r.file}, line ${r.line}.`;
       try {
-        out.push(
-          this.memory.remember({
-            projectId,
-            projectRoot,
-            kind: 'rule',
-            title: r.title,
-            body: r.title.endsWith('…') ? `${r.text}\n\n${where}` : where,
-            tags: ['imported'],
-            scopePaths: r.scopePaths,
-            source: USER,
-            trust,
-            evidence: [
-              r.excerpt === null ? { path: r.file } : { path: r.file, excerpt: r.excerpt },
-            ],
-            reason: `imported from ${r.file}`,
-          }),
-        );
+        // The repository wrote the rule, not the user: it is stored as a proposal from the file,
+        // and becomes approved only through the user's own approval.
+        const stored = this.memory.remember({
+          projectId,
+          projectRoot,
+          kind: 'rule',
+          title: r.title,
+          body: r.title.endsWith('…') ? `${r.text}\n\n${where}` : where,
+          tags: ['imported'],
+          scopePaths: r.scopePaths,
+          source: REPO_FILE_SOURCE,
+          trust: 'proposed',
+          evidence: [r.excerpt === null ? { path: r.file } : { path: r.file, excerpt: r.excerpt }],
+          reason: `imported from ${r.file}`,
+        });
+        out.push(trust === 'approved' ? this.memory.approve(stored.id) : stored);
       } catch {
         // The file changed since it was read, or the path is now denied: skip that rule.
       }
