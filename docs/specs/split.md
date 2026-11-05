@@ -52,7 +52,7 @@ Plan · add billing                                    (planned by Claude Code, 
   plan; an LLM provider from config may also be used.
 - Plan schema (zod-validated):
   `{ goal, parts: [{ key, title, agent, owns: glob[], reads?: glob[], dependsOn: key[], brief }],
-   contract: [{ name, owner: key, definition }] }`.
+ contract: [{ name, owner: key, definition }] }`.
 - Validation before anything is created: `owns` globs are project-relative, pass
   `cleanScopePaths`, and are **pairwise disjoint** (checked against the current file list plus the
   glob patterns); every agent is connected (`detect()` + Mindly hooks installed); the dependency
