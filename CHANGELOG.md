@@ -3,7 +3,7 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
-## Unreleased
+## 0.2.0 — 2026-11-05
 
 ### Added
 
@@ -54,7 +54,8 @@ All notable changes to `mindly-cli` are documented here. The project follows
 - The rules section is found with CommonMark fence rules (closing fence of the same character and
   at least the opener's length; indented code ignored). An unclosed or nested code fence used to
   hide the markers, and every sync appended another section. A file that mentions the markers but
-  has no well-formed section is now left alone and reported as needing attention.
+  has no well-formed section, or that ends inside an unclosed code block, is now left alone and
+  reported as needing attention.
 - Rules imported from a repository's instruction files are labelled as coming from that file
   (`from AGENTS.md`), not from the user, while they wait for approval; agents cannot edit them.
   Rules you confirm during `init` are recorded as approved by you.
@@ -66,6 +67,7 @@ All notable changes to `mindly-cli` are documented here. The project follows
   project-wide; a file with no valid glob is skipped.
 - Rule directories (`.cursor/rules`, …) that are links leading out of the project are no longer
   scanned.
+- Dependencies: the `glob`/`minimatch` advisories reported by `pnpm audit` are resolved.
 
 ## 0.1.3 — 2026-11-04
 
