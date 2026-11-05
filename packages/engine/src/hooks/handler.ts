@@ -250,23 +250,14 @@ export class HookHandler {
     const tool = evt.tool;
     if (!tool) return EMPTY_HOOK_RESULT;
     this.k.store.sessions.touch(session.id);
-    if (tool.shell && tool.command) {
-      // A command with a known pitfall ran: whether it failed again is the evidence of a
-      // mistake save (or of the mistake happening anyway).
-      const known = this.d.mistakes.forCommand(project.project.id, tool.command);
-      if (known.length > 0) {
-        this.k.store.events.append({
-          projectId: project.project.id,
-          sessionId: session.id,
-          type: 'tool.after',
-          payload: {
-            tool: sanitizeLine(tool.name, 40),
-            command: this.commandKey(tool.command),
-            failed: tool.failed,
-          },
-        });
-      }
-    }
+    await this.d.bus.emit('tool.used', {
+      projectId: project.project.id,
+      session,
+      tool: { name: tool.name, writes: tool.writes, shell: tool.shell, failed: tool.failed },
+      paths: tool.writes ? tool.edits.slice(0, 50).map((e) => e.path) : [],
+      command: tool.shell && tool.command ? this.commandKey(tool.command) : null,
+      commandText: tool.shell && tool.command ? tool.command : null,
+    });
     if (tool.shell && tool.failed && tool.command) {
       this.d.mistakes.recordFailedCommand({
         projectId: project.project.id,

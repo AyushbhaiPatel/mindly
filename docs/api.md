@@ -206,6 +206,11 @@ interface SavesResult {
 }
 ```
 
+A fingerprint names the underlying problem (the overlapping intent, the rule and paths, the
+conflict, the command and pitfall, …) and is decided once: after a problem's save was confirmed,
+expired or rejected, the same problem never creates another save, so a rejected first attempt
+also blocks later ones. This under-counts rather than inflates.
+
 `GET …/saves/card.svg` renders the confirmed saves since `since` (default 7 days ago) as a 1200×630
 SVG: counts by kind and agent names only. `details=1` adds the project name and each save's sentence
 and files; without it the card contains no project name, path or code.

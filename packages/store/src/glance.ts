@@ -115,18 +115,12 @@ export function readGlance(
     `SELECT COUNT(*) AS n FROM conflicts WHERE project_id = ? AND status = 'open' AND severity != 'info'`,
     project.id,
   );
-  // One range count on the saves_project index (project_id, status, created_at). A database a
-  // writer has not migrated to v2 yet has no saves table: no saves then.
-  let saves: number;
-  try {
-    saves = count(
-      db,
-      `SELECT COUNT(*) AS n FROM saves WHERE project_id = ? AND status = 'confirmed' AND created_at >= ?`,
-      project.id,
-      startOfLocalDay(input.now),
-    );
-  } catch {
-    saves = 0;
-  }
+  // One range count on the saves_project index (project_id, status, created_at).
+  const saves = count(
+    db,
+    `SELECT COUNT(*) AS n FROM saves WHERE project_id = ? AND status = 'confirmed' AND created_at >= ?`,
+    project.id,
+    startOfLocalDay(input.now),
+  );
   return { projectName: project.name, rules, updates, conflicts, ...(saves > 0 ? { saves } : {}) };
 }

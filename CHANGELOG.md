@@ -25,7 +25,9 @@ All notable changes to `mindly-cli` are documented here. The project follows
 - Daemon API: `GET /api/projects/:id/saves`, `POST /api/saves/:id/reject` and
   `GET /api/projects/:id/saves/card.svg`. Agents cannot create or change saves: there is no MCP
   tool for them.
-- Database schema v2 (a new `saves` table), applied automatically.
+- Database schema v2 (a new `saves` table), applied automatically. Once upgraded, older
+  versions of Mindly refuse to open the database (the status line falls back to `mindly`), so
+  upgrade every Mindly install on a machine together.
 
 ## 0.2.0 — 2026-11-05
 

@@ -173,20 +173,6 @@ describe('readGlance', () => {
     }
   });
 
-  it('has no saves before a writer migrated the database to v2', () => {
-    const { root, path, store } = fixture();
-    store.db.exec('DROP TABLE saves');
-    store.close();
-    const db = openDatabaseReadOnly(path);
-    try {
-      expect(
-        readGlance(db, { dir: root, agentKind: 'claude-code', externalSessionId: null, now: NOW }),
-      ).toEqual({ projectName: 'repo', rules: 0, updates: 0, conflicts: 0 });
-    } finally {
-      db.close();
-    }
-  });
-
   it('returns null outside known projects and never writes', () => {
     const { dir, path, store } = fixture();
     store.close();

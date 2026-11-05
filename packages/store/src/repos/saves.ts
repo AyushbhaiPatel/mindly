@@ -36,8 +36,6 @@ export interface SaveCreate {
   evidence: string[];
   fingerprint: string;
   refs: SaveRefs;
-  /** Kinds whose evidence is complete when they are caught are recorded confirmed. */
-  confirmed?: boolean;
 }
 
 const MAX_EVIDENCE = 20;
@@ -75,7 +73,7 @@ export class SaveRepo {
         id,
         input.projectId,
         input.kind,
-        input.confirmed ? 'confirmed' : 'caught',
+        'caught',
         input.title,
         toJson(input.sessionIds),
         toJson(input.paths),
@@ -83,7 +81,7 @@ export class SaveRepo {
         input.fingerprint,
         toJson(input.refs),
         now,
-        input.confirmed ? now : null,
+        null,
       );
     if (Number(res.changes) === 1) return { save: this.get(id), created: true };
     const existing = this.db

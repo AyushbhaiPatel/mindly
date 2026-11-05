@@ -73,6 +73,16 @@ describe('saves card (AC6)', () => {
     expect(svg).not.toContain('<script');
   });
 
+  it('names the period it covers', () => {
+    const until = 1_750_000_200_000;
+    const month = renderSavesCard({
+      summary: { ...summary, since: until - 30 * 86_400_000 },
+      until,
+    });
+    expect(month).toContain('saves in 30 days');
+    expect(month).not.toContain('this week');
+  });
+
   it('draws an empty week without inventing anything', () => {
     const svg = renderSavesCard({
       summary: { since: 0, total: 0, byKind: {}, byAgent: {}, recent: [] },

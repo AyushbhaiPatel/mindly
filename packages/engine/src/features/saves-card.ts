@@ -98,13 +98,15 @@ export function renderSavesCard(input: SavesCardInput): string {
 
   // The number.
   const noun = summary.total === 1 ? 'save' : 'saves';
+  const days = Math.round((input.until - summary.since) / 86_400_000);
+  const span = days <= 7 ? 'this week' : `in ${days} days`;
   t(X, 250, 132, String(summary.total), `font-family="${SERIF}" fill="#141413"`);
   const numberWidth = String(summary.total).length * 66 + 24;
   t(
     X + numberWidth,
     250,
     40,
-    `${noun} this week`,
+    `${noun} ${span}`,
     `font-family="${SERIF}" font-style="italic" fill="#3d3d3a"`,
   );
   t(
@@ -179,7 +181,7 @@ export function renderSavesCard(input: SavesCardInput): string {
   );
 
   return [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(`Mindly: ${summary.total} ${noun} this week`)}">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(`Mindly: ${summary.total} ${noun} ${span}`)}">`,
     '<defs>',
     '<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbfdff"/><stop offset=".38" stop-color="#edf8ff"/><stop offset=".66" stop-color="#e8f4fb"/><stop offset="1" stop-color="#fbfdff"/></linearGradient>',
     '<radialGradient id="glow"><stop offset="0" stop-color="#93d2f8" stop-opacity=".5"/><stop offset=".52" stop-color="#bae6fd" stop-opacity=".3"/><stop offset=".76" stop-color="#bae6fd" stop-opacity="0"/></radialGradient>',

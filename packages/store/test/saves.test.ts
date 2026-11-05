@@ -12,7 +12,7 @@ function save(
   fingerprint: string,
   opts: { kind?: SaveKind; evidence?: string[]; confirmed?: boolean } = {},
 ) {
-  return store.saves.record({
+  const res = store.saves.record({
     projectId,
     kind: opts.kind ?? 'rule_enforced',
     title: 'A write by Codex was blocked by your rule',
@@ -21,8 +21,9 @@ function save(
     evidence: opts.evidence ?? ['e1'],
     fingerprint,
     refs: { ruleId: 'r1' },
-    ...(opts.confirmed ? { confirmed: true } : {}),
   });
+  if (!opts.confirmed) return res;
+  return { ...res, save: store.saves.settle(res.save.id, 'confirmed')! };
 }
 
 describe('saves schema (v2)', () => {

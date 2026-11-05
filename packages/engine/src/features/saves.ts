@@ -3,14 +3,13 @@ import {
   fingerprint,
   sanitizeLine,
   type Conflict,
-  type EventType,
   type MindlyEvent,
   type Save,
   type SaveKind,
   type SaveRefs,
   type Session,
 } from '@mindly/core';
-import type { Kernel } from '../kernel.js';
+import type { BusEvents, Kernel } from '../kernel.js';
 import type { Mindly } from '../mindly.js';
 import { attachService } from './shared.js';
 
@@ -37,17 +36,14 @@ export const SAVE_WINDOW_MS: Readonly<Record<SaveKind, number>> = {
   limit_handoff: 24 * HOUR,
 };
 
-/** Hook events that show a session was running and reporting to Mindly. */
-const ACTIVITY_TYPES: readonly EventType[] = [
-  'prompt.submitted',
-  'tool.before',
-  'tool.after',
-  'file.changed',
-  'turn.completed',
-];
-
 /** Why a save was rejected (payload of `save.rejected`). */
-export type SaveRejectReason = 'user' | 'conflict_dismissed' | 'problem_occurred';
+export type SaveRejectReason =
+  | 'user'
+  | 'conflict_dismissed'
+  /** What Mindly warned about happened anyway. */
+  | 'problem_occurred'
+  /** The agent did what it was warned about, so the warning changed nothing. */
+  | 'no_effect';
 
 /** Confirmed saves of a period (`summary`). */
 export interface SavesSummary {
@@ -95,6 +91,12 @@ const strings = (v: unknown, max = 50): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, max) : [];
 const text = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
 
+/** Whether a shell command names a file: its project path or its file name. */
+function mentions(command: string, path: string): boolean {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  return command.includes(path) || (name !== '' && command.includes(name));
+}
+
 /**
  * Records, confirms and drops saves. Every method is synchronous apart from the merge-conflict
  * producer (it asks git which branches are merged) and never throws into its caller.
@@ -110,8 +112,6 @@ export class SavesService {
       switch (e.type) {
         case 'tool.before':
           return this.onAdvice(e);
-        case 'tool.after':
-          return this.onCommand(e);
         case 'file.changed':
           return this.onFilesChanged(e);
         case 'turn.completed':
@@ -185,43 +185,76 @@ export class SavesService {
     }
   }
 
-  /** A command with a known pitfall ran: success confirms the warning helped, failure drops it. */
-  private onCommand(e: MindlyEvent): void {
-    const command = text(e.payload.command);
-    if (!command || !e.sessionId) return;
-    for (const s of this.caughtOf(e.projectId, 'mistake_avoided', e.sessionId)) {
-      if (s.refs.command !== command) continue;
-      if (e.payload.failed === true) this.reject(s, 'problem_occurred', [e.id]);
-      else this.confirm(s, [e.id]);
-    }
-  }
-
+  /** It went back to the code it was told about: the impact warning was acted on. */
   private onFilesChanged(e: MindlyEvent): void {
     const changed = new Set(strings(e.payload.paths, 50));
     if (!e.sessionId || changed.size === 0) return;
-    const now = this.k.clock.now();
-    for (const s of this.caughtOf(e.projectId, null, e.sessionId)) {
-      if (!s.paths.some((p) => changed.has(p))) continue;
-      switch (s.kind) {
-        case 'impact_warned':
-          // It went back to the code it was told about: the warning was acted on.
-          this.confirm(s, [e.id]);
-          break;
-        case 'overlap_avoided': {
-          const intent = s.refs.intentId ? this.findIntent(s.refs.intentId) : null;
-          const stillActive =
-            intent !== null && intent.status === 'active' && intent.expiresAt >= now;
-          if (stillActive) this.reject(s, 'problem_occurred', [e.id]);
-          else this.confirm(s, [e.id]);
-          break;
+    for (const s of this.caughtOf(e.projectId, 'impact_warned', e.sessionId)) {
+      if (s.paths.some((p) => changed.has(p))) this.confirm(s, [e.id]);
+    }
+  }
+
+  /**
+   * The warned agent's next tool calls are the evidence for overlap, mistake and rule saves:
+   * - overlap: a call that does not touch the file confirms it; touching it while the other
+   *   agent's intent is active drops it, after it closed confirms it; a failed write to it expires
+   *   it (the warning did not stop the attempt);
+   * - mistake: a call other than the warned command (it did not run) confirms it; the warned
+   *   command running drops it, whether it passed (no effect) or failed again;
+   * - rule: a write or shell command touching a blocked path drops it (confirmed at turn end).
+   * The tool call is recorded as a `tool.after` event only when it settles a save.
+   */
+  onToolUsed(p: BusEvents['tool.used']): void {
+    try {
+      const caught = this.caughtOf(p.projectId, null, p.session.id).filter(
+        (s) =>
+          s.kind === 'overlap_avoided' ||
+          s.kind === 'mistake_avoided' ||
+          s.kind === 'rule_enforced',
+      );
+      if (caught.length === 0) return;
+      let proof: string | null = null;
+      const evidence = (): string[] => {
+        proof ??= this.k.store.events.append({
+          projectId: p.projectId,
+          sessionId: p.session.id,
+          type: 'tool.after',
+          payload: {
+            tool: sanitizeLine(p.tool.name, 40),
+            ...(p.command !== null ? { command: p.command } : {}),
+            failed: p.tool.failed,
+          },
+        }).id;
+        return [proof];
+      };
+      const touches = (paths: readonly string[]): boolean =>
+        paths.some(
+          (f) =>
+            p.paths.some((x) => x === f || x.endsWith(`/${f}`)) ||
+            (p.commandText !== null && mentions(p.commandText, f)),
+        );
+      const now = this.k.clock.now();
+      for (const s of caught) {
+        if (s.kind === 'overlap_avoided') {
+          if (!touches(s.paths)) {
+            this.confirm(s, evidence());
+          } else if (p.tool.failed) {
+            this.k.store.saves.settle(s.id, 'expired', { evidence: evidence() });
+          } else {
+            const intent = s.refs.intentId ? this.findIntent(s.refs.intentId) : null;
+            const active = intent !== null && intent.status === 'active' && intent.expiresAt >= now;
+            if (active) this.reject(s, 'problem_occurred', evidence());
+            else this.confirm(s, evidence());
+          }
+        } else if (s.kind === 'mistake_avoided') {
+          if (p.command === null || p.command !== s.refs.command) this.confirm(s, evidence());
+          else this.reject(s, p.tool.failed ? 'problem_occurred' : 'no_effect', evidence());
+        } else if (!p.tool.failed && touches(s.paths)) {
+          this.reject(s, 'problem_occurred', evidence());
         }
-        case 'rule_enforced':
-          // The blocked file was written anyway.
-          this.reject(s, 'problem_occurred', [e.id]);
-          break;
-        default:
-          break;
       }
+    } catch (err) {
+      this.k.logger.error('saves: tool call not followed', { error: describeError(err) });
     }
   }
 
@@ -453,9 +486,8 @@ export class SavesService {
   // ------------------------------------------------------------------ housekeeping
 
   /**
-   * Settles caught saves whose window passed: an agent that kept working without repeating the
-   * problem confirms an overlap or mistake save; everything else expires. Also drops saves whose
-   * conflict was dismissed. Returns how many saves changed. Never throws.
+   * Expires caught saves whose window passed without evidence and drops saves whose conflict was
+   * dismissed. Returns how many saves changed. Never throws.
    */
   sweep(projectId?: string): { confirmed: number; expired: number; rejected: number } {
     const out = { confirmed: 0, expired: 0, rejected: 0 };
@@ -471,15 +503,7 @@ export class SavesService {
             if (this.reject(s, 'conflict_dismissed', [])) out.rejected++;
             continue;
           }
-          const window = SAVE_WINDOW_MS[s.kind];
-          if (now - s.createdAt < window) continue;
-          if (s.kind === 'overlap_avoided' || s.kind === 'mistake_avoided') {
-            const active = this.activityAfter(s, window);
-            if (active && this.confirm(s, [active.id])) {
-              out.confirmed++;
-              continue;
-            }
-          }
+          if (now - s.createdAt < SAVE_WINDOW_MS[s.kind]) continue;
           if (this.k.store.saves.settle(s.id, 'expired')) out.expired++;
         }
       }
@@ -487,23 +511,6 @@ export class SavesService {
       this.k.logger.error('saves: sweep failed', { error: describeError(err) });
     }
     return out;
-  }
-
-  /** A hook event of the helped session inside the window after the save was caught. */
-  private activityAfter(s: Save, window: number): MindlyEvent | null {
-    const sessionId = s.sessionIds[0];
-    if (!sessionId) return null;
-    return (
-      this.k.store.events
-        .query(s.projectId, {
-          sessionId,
-          types: ACTIVITY_TYPES,
-          since: s.createdAt,
-          until: s.createdAt + window + 1,
-          limit: 50,
-        })
-        .find((e) => !s.evidence.includes(e.id)) ?? null
-    );
   }
 
   // ------------------------------------------------------------------ the user
@@ -646,4 +653,5 @@ export class SavesService {
 export const savesModule = (mindly: Mindly): void => {
   const service = attachService(mindly, 'saves', new SavesService(mindly.kernel));
   mindly.store.events.subscribe((e) => service.observe(e));
+  mindly.bus.on('tool.used', 'saves', (p) => service.onToolUsed(p));
 };
