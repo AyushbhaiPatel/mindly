@@ -14,6 +14,8 @@ import type {
   MemoryVersion,
   Project,
   Run,
+  Save,
+  SaveKind,
   Session,
   Task,
   Trust,
@@ -41,6 +43,9 @@ export type {
   Run,
   RunKind,
   RunStatus,
+  Save,
+  SaveKind,
+  SaveStatus,
   Session,
   Severity,
   Snapshot,
@@ -64,6 +69,17 @@ export const CONFLICT_ACTIONS: readonly Exclude<ConflictStatus, 'open'>[] = [
   'resolved',
   'dismissed',
 ];
+
+/** `GET /api/projects/:id/saves`: confirmed totals of the period and the saves themselves. */
+export interface SavesResult {
+  since: number;
+  summary: {
+    total: number;
+    byKind: Partial<Record<SaveKind, number>>;
+    byAgent: Record<string, number>;
+  };
+  saves: Save[];
+}
 
 export interface Health {
   ok: true;

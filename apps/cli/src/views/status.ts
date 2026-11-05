@@ -48,6 +48,8 @@ export interface StatusData {
   /** The project has a `.mindly/config.json` that is not trusted (or is invalid). */
   config: 'none' | 'trusted' | 'untrusted' | 'invalid';
   sessionOf: SessionLookup;
+  /** Confirmed saves caught since local midnight (absent means none). */
+  savesToday?: number;
 }
 
 /** Number of items in "Needs you". */
@@ -107,6 +109,11 @@ const MAX_ITEMS = 8;
 export function renderStatus(sc: Screen, d: StatusData): void {
   const sep = sc.sym.dot;
   sc.summary(summary(d, sep));
+  if (d.savesToday) {
+    sc.text(
+      `${sc.mark('ok')} Mindly saved you ${d.savesToday === 1 ? 'once' : `${d.savesToday} times`} today ${sep} mindly saves`,
+    );
+  }
   if (d.agents.length === 0 && needsYouCount(d) === 0 && d.tasks.length === 0) {
     sc.note('No agent is working in this project right now. Agents appear here when they start.');
     return;

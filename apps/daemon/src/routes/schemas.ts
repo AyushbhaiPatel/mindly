@@ -7,6 +7,7 @@ import {
   TASK_STATUSES,
   TRUST_LEVELS,
   DELIVERY_STATUSES,
+  SAVE_STATUSES,
   type EventType,
 } from '@mindly/core';
 import { isValidBranchName } from '@mindly/engine';
@@ -119,6 +120,18 @@ export const ProvenanceQuery = z.object({
 });
 
 export const StandupQuery = z.object({ since: opt(int(0, Number.MAX_SAFE_INTEGER)) });
+
+/** `GET …/saves`: `status` is one status or `all`; default confirmed and caught (pending). */
+export const SavesQuery = z.object({
+  since: opt(int(0, Number.MAX_SAFE_INTEGER)),
+  status: opt(z.enum([...SAVE_STATUSES, 'all'])),
+});
+
+/** `GET …/saves/card.svg`: `details=1` adds the project name, sentences and files. */
+export const SavesCardQuery = z.object({
+  since: opt(int(0, Number.MAX_SAFE_INTEGER)),
+  details: opt(z.enum(['0', '1'])),
+});
 
 export const SnapshotBody = z.strictObject({ label: z.string().trim().min(1).max(80) });
 

@@ -20,6 +20,15 @@ export interface Glance {
   updates: number;
   /** Open conflicts that need the user (same rule as `conflictNeedsUser`). */
   conflicts: number;
+  /** Confirmed saves caught since local midnight (absent means 0). */
+  saves?: number;
+}
+
+/** Local midnight of the day containing `now`. */
+export function startOfLocalDay(now: number): number {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 }
 
 /**
@@ -106,5 +115,18 @@ export function readGlance(
     `SELECT COUNT(*) AS n FROM conflicts WHERE project_id = ? AND status = 'open' AND severity != 'info'`,
     project.id,
   );
-  return { projectName: project.name, rules, updates, conflicts };
+  // One range count on the saves_project index (project_id, status, created_at). A database a
+  // writer has not migrated to v2 yet has no saves table: no saves then.
+  let saves: number;
+  try {
+    saves = count(
+      db,
+      `SELECT COUNT(*) AS n FROM saves WHERE project_id = ? AND status = 'confirmed' AND created_at >= ?`,
+      project.id,
+      startOfLocalDay(input.now),
+    );
+  } catch {
+    saves = 0;
+  }
+  return { projectName: project.name, rules, updates, conflicts, ...(saves > 0 ? { saves } : {}) };
 }

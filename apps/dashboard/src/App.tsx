@@ -226,6 +226,7 @@ const EMPTY_VERSIONS: Record<Topic, number> = {
   runs: 0,
   snapshots: 0,
   xray: 0,
+  saves: 0,
   overview: 0,
 };
 

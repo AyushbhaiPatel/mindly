@@ -21,10 +21,14 @@ export const NEUTRAL_LINE = 'mindly';
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-/** Formats the counts: `mindly · 3 rules · 1 update · 0 conflicts`. */
+/**
+ * Formats the counts: `mindly · 3 rules · 1 update · 0 conflicts`, led by today's confirmed saves
+ * when there are any (`mindly · 2 saves today · 3 rules · …`).
+ */
 export function formatGlance(g: Glance): string {
   return [
     'mindly',
+    ...(g.saves ? [`${plural(g.saves, 'save')} today`] : []),
     plural(g.rules, 'rule'),
     plural(g.updates, 'update'),
     plural(g.conflicts, 'conflict'),
@@ -51,8 +55,8 @@ async function readPayload(io: CliIo): Promise<unknown> {
 
 /**
  * `mindly statusline`: Claude Code's status line command. Reads the session JSON on stdin and
- * prints one line with the rules in effect, updates waiting for this session and conflicts that
- * need the user, e.g. `mindly · 3 rules · 1 update · 0 conflicts`.
+ * prints one line with today's saves (when there are any), the rules in effect, updates waiting
+ * for this session and conflicts that need the user, e.g. `mindly · 3 rules · 1 update · 0 conflicts`.
  *
  * Read-only and fail-soft: it never writes to the database, never needs the daemon, and always
  * exits 0 with a short line (`mindly`, or `mindly · not set up here` outside known projects) so

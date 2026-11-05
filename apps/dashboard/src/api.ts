@@ -20,6 +20,9 @@ import type {
   RestoreResult,
   Run,
   RunKind,
+  Save,
+  SavesResult,
+  SaveStatus,
   Session,
   Snapshot,
   SnapshotDiff,
@@ -139,9 +142,44 @@ export interface MindlyClient {
   trust(projectId: string): Promise<TrustStatus>;
   /** `configHash` must be the hash shown to the user; the daemon rejects a mismatch. */
   trustConfig(projectId: string, configHash: string): Promise<TrustStatus>;
+  /** Saves since `since` (default: the last 7 days); default status: confirmed and pending. */
+  saves(
+    projectId: string,
+    query?: { since?: number; status?: SaveStatus | 'all' },
+  ): Promise<SavesResult>;
+  /** "Not a save": removes it from every total. */
+  rejectSave(id: string): Promise<Save>;
+  /** The share card as SVG text; `details` adds the project name, sentences and files. */
+  savesCard(projectId: string, details: boolean): Promise<string>;
 }
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+
+/** GET of a non-JSON resource (the share card SVG) as text. */
+async function getText(path: string, accept: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      headers: { Accept: accept },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error',
+    });
+  } catch {
+    throw new ApiError(0, 'network', FRIENDLY.network!);
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+    throw toApiError(res.status, parsed);
+  }
+  return text;
+}
 
 async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' };
@@ -239,6 +277,14 @@ export function createHttpClient(): MindlyClient {
       post(`/api/snapshots/${enc(id)}/restore`, branch ? { branch } : {}),
     trust: (id) => get(`${proj(id)}/trust`),
     trustConfig: (id, configHash) => post(`${proj(id)}/trust`, { configHash }),
+    saves: (id, q = {}) =>
+      get(`${proj(id)}/saves${buildQuery({ since: q.since, status: q.status })}`),
+    rejectSave: (id) => post(`/api/saves/${enc(id)}/reject`),
+    savesCard: (id, details) =>
+      getText(
+        `${proj(id)}/saves/card.svg${buildQuery({ details: details ? 1 : undefined })}`,
+        'image/svg+xml',
+      ),
   };
 }
 

@@ -104,6 +104,31 @@ export const RUN_STATUSES = [
 ] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
+/**
+ * Kinds of save: a moment Mindly demonstrably helped. Each kind has its own
+ * trigger and confirmation rule in `engine/features/saves.ts`.
+ */
+export const SAVE_KINDS = [
+  'impact_warned',
+  'overlap_avoided',
+  'rule_enforced',
+  'mistake_avoided',
+  'merge_conflict_early',
+  'check_broken_early',
+  'limit_handoff',
+] as const;
+export const SaveKindSchema = z.enum(SAVE_KINDS);
+export type SaveKind = (typeof SAVE_KINDS)[number];
+
+/**
+ * `caught`: Mindly intervened; `confirmed`: evidence the problem was avoided (the only status that
+ * counts); `expired`: no evidence in time; `rejected`: not a save (the problem happened anyway, its
+ * conflict was dismissed, or the user said so).
+ */
+export const SAVE_STATUSES = ['caught', 'confirmed', 'expired', 'rejected'] as const;
+export const SaveStatusSchema = z.enum(SAVE_STATUSES);
+export type SaveStatus = (typeof SAVE_STATUSES)[number];
+
 export const EVENT_TYPES = [
   'session.started',
   'session.ended',
@@ -136,6 +161,9 @@ export const EVENT_TYPES = [
   'run.started',
   'run.finished',
   'turn.completed',
+  'save.caught',
+  'save.confirmed',
+  'save.rejected',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -446,6 +474,38 @@ export interface Run {
   startedAt: number | null;
   finishedAt: number | null;
   createdAt: number;
+}
+
+/** Records a save refers to, used to confirm or drop it (never shown). */
+export interface SaveRefs {
+  conflictId?: string;
+  intentId?: string;
+  ruleId?: string;
+  memoryId?: string;
+  command?: string;
+  contractId?: string;
+  handoffId?: string;
+  deliveryId?: string;
+}
+
+export interface Save {
+  id: string;
+  projectId: string;
+  kind: SaveKind;
+  status: SaveStatus;
+  /** One plain sentence with agent names; never paths or code. */
+  title: string;
+  /** The session that was helped first, then the other sessions involved. */
+  sessionIds: string[];
+  /** Project-relative paths involved (shown only in detail views, never on the share card). */
+  paths: string[];
+  /** Ids of the events that prove the intervention and its outcome, oldest first. */
+  evidence: string[];
+  /** Same underlying problem, same fingerprint: counted once. */
+  fingerprint: string;
+  refs: SaveRefs;
+  createdAt: number;
+  confirmedAt: number | null;
 }
 
 export interface MindlyEvent {

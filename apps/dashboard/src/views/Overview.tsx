@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { ActivityStream } from '../components/activity';
 import { ChecksTable } from '../components/runs';
+import { SavesPanel } from '../components/saves';
 import {
   Age,
   CodeText,
@@ -71,11 +72,12 @@ export function OverviewView() {
     [project.id],
     ['memories', 'handoffs'],
   );
+  const saves = useResource(() => client.saves(project.id), [project.id], ['saves']);
   return (
     <Loaded res={res}>
       {(ov) => (
         <div className="overview view">
-          <Stats ov={ov} />
+          <Stats ov={ov} saves={saves.data?.summary.total} />
           <NeedsYou
             ov={ov}
             memories={waiting.data?.[0] ?? []}
@@ -92,6 +94,7 @@ export function OverviewView() {
           >
             <ConflictTable conflicts={ov.conflicts} onChange={res.reload} />
           </Panel>
+          <SavesPanel res={saves.data} onChange={saves.reload} />
           <MergeCheckPanel ov={ov} onQueued={res.reload} />
           <MemoryLine ov={ov} />
           <ActivityPanel events={events} />
@@ -106,13 +109,14 @@ function needsTotal(ov: Overview): number {
   return n.proposedRules + n.proposedMemories + n.openConflicts + n.pendingHandoffs;
 }
 
-function Stats({ ov }: { ov: Overview }) {
+function Stats({ ov, saves }: { ov: Overview; saves: number | undefined }) {
   const last = ov.lastShadowMerge;
   return (
     <StatRow
       stats={overviewStats({
         sessions: ov.sessions,
         needsYou: needsTotal(ov),
+        ...(saves !== undefined ? { saves } : {}),
         lastMergeCheck: last
           ? { status: last.status, at: last.finishedAt ?? last.startedAt ?? last.createdAt }
           : null,

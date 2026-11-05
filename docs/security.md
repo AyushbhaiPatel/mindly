@@ -143,6 +143,13 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   section is reported as needing attention and never written, so a section is never appended twice.
   Rule import and evidence checks ignore the section, so Mindly never treats its own output as the
   user's instructions or as proof of a rule.
+- Agents cannot create, confirm or edit saves: there is no MCP tool for saves and the MCP server
+  does not follow the event log for them. Saves are settled only from events Mindly records
+  itself, and the only user action is rejecting one. Save titles are plain sentences without code,
+  and commands are stored redacted.
+- The saves share card contains counts by kind and agent names only. The project name, save
+  sentences and file paths are added only on explicit request (`--details`, the Mission Control
+  checkbox); it never contains code. The card is rendered locally and never uploaded.
 - Failed command output is never stored or replayed; mistake memories keep only the command.
 - Trusting a project config requires the hash the user reviewed; a changed file is refused.
 - Config files are read with `lstat` + `O_NOFOLLOW | O_NONBLOCK` and a byte cap, so a config that

@@ -58,7 +58,7 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
   program
     .command('statusline')
     .description(
-      'Print the Claude Code status line: rules, updates and conflicts (reads JSON on stdin)',
+      'Print the Claude Code status line: saves, rules, updates and conflicts (reads JSON on stdin)',
     )
     .action(
       act(() => async () => {
@@ -332,6 +332,34 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .option('--json', 'machine-readable output')
     .action(
       act((o: object) => async (out) => (await import('./commands/insight.js')).standup(out, o)),
+    );
+
+  const saves = program
+    .command('saves')
+    .description('Times Mindly demonstrably helped, with evidence')
+    .option('--since <duration>', 'e.g. 24h, 7d (default: 7d)')
+    .option('--all', 'also list saves that were not counted')
+    .option('--json', 'machine-readable output')
+    .action(act((o: object) => async (out) => (await import('./commands/saves.js')).saves(out, o)));
+  saves
+    .command('reject')
+    .argument('<id>')
+    .description('Not a save: remove it from every total')
+    .action(
+      act(
+        (id: string) => async (out) => (await import('./commands/saves.js')).savesReject(out, id),
+      ),
+    );
+  saves
+    .command('card')
+    .description('A card of your saves to share (SVG; counts and agent names only)')
+    .option('--week', 'this calendar week (since Monday) instead of the last 7 days')
+    .option('--since <duration>', 'e.g. 24h, 14d (default: 7d)')
+    .option('--details', 'also show the project name, file paths and what each save was')
+    .option('--out <file>', 'write to an .svg file instead of stdout')
+    .option('--force', 'overwrite an existing file')
+    .action(
+      act((o: object) => async (out) => (await import('./commands/saves.js')).savesCard(out, o)),
     );
 
   program

@@ -21,6 +21,9 @@ import type {
   Overview,
   Project,
   Run,
+  Save,
+  SaveKind,
+  SavesResult,
   Session,
   Snapshot,
   MindlyEvent,
@@ -878,6 +881,65 @@ const snapshots: Snapshot[] = [
   },
 ];
 
+function save(
+  kind: SaveKind,
+  status: Save['status'],
+  title: string,
+  s: Session[],
+  paths: string[],
+  ago: number,
+): Save {
+  return {
+    id: uid(),
+    projectId: P1,
+    kind,
+    status,
+    title,
+    sessionIds: s.map((x) => x.id),
+    paths,
+    evidence: [uid(), uid()],
+    fingerprint: uid(),
+    refs: {},
+    createdAt: NOW - ago,
+    confirmedAt: status === 'confirmed' ? NOW - ago + 4 * MIN : null,
+  };
+}
+
+const saves: Save[] = [
+  save(
+    'impact_warned',
+    'confirmed',
+    'Codex was told Claude Code changed code it uses before it wrote code using it',
+    [sCodex, sClaude],
+    ['src/webhooks/stripe.ts'],
+    40 * MIN,
+  ),
+  save(
+    'rule_enforced',
+    'confirmed',
+    'A write by Cursor was blocked by your rule',
+    [sCursor],
+    ['src/generated/api.ts'],
+    3 * HOUR,
+  ),
+  save(
+    'mistake_avoided',
+    'confirmed',
+    "Codex didn't repeat a command that failed before",
+    [sCodex],
+    [],
+    26 * HOUR,
+  ),
+  save(
+    'overlap_avoided',
+    'caught',
+    "Claude Code stopped before overwriting Codex's work",
+    [sClaude, sCodex],
+    ['src/auth/session.ts'],
+    4 * MIN,
+  ),
+];
+
 let seq = 0;
 const events: MindlyEvent[] = [];
 function emit(
@@ -1397,6 +1459,39 @@ export function createMockClient(): MindlyClient {
       if (!p) return notFound();
       p.trustedConfigHash = 'b1946ac92492d2347c6235b4d2611184';
       return createMockClient().trust(id);
+    },
+    saves: (id, q = {}) => {
+      const since = q.since ?? Date.now() - 7 * 24 * HOUR;
+      const mine = byProject(saves, id).filter((s) => s.createdAt >= since);
+      const confirmed = mine.filter((s) => s.status === 'confirmed');
+      const byKind: SavesResult['summary']['byKind'] = {};
+      const byAgent: Record<string, number> = {};
+      for (const s of confirmed) {
+        byKind[s.kind] = (byKind[s.kind] ?? 0) + 1;
+        const kind = sessions.find((x) => x.id === s.sessionIds[0])?.agentKind;
+        if (kind) byAgent[kind] = (byAgent[kind] ?? 0) + 1;
+      }
+      const shown =
+        q.status === 'all'
+          ? mine
+          : mine.filter((s) =>
+              q.status ? s.status === q.status : s.status !== 'expired' && s.status !== 'rejected',
+            );
+      return delay({ since, summary: { total: confirmed.length, byKind, byAgent }, saves: shown });
+    },
+    rejectSave: (id) => {
+      const s = saves.find((x) => x.id === id);
+      if (!s) return notFound();
+      s.status = 'rejected';
+      publish(s.projectId, null, 'save.rejected', { saveId: s.id, kind: s.kind, title: s.title });
+      return delay(s);
+    },
+    savesCard: (id, details) => {
+      const n = byProject(saves, id).filter((s) => s.status === 'confirmed').length;
+      const name = details ? (projects.find((x) => x.id === id)?.name ?? '') : '';
+      return delay(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><rect width="1200" height="630" fill="#edf8ff"/><text x="64" y="250" font-size="132" font-family="Georgia, serif">${n}</text><text x="64" y="320" font-size="32" font-family="Georgia, serif">saves this week ${name}</text></svg>`,
+      );
     },
   };
 }

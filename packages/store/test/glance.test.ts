@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError, type Severity } from '@mindly/core';
-import { openDatabaseReadOnly, readGlance, Store } from '../src/index.js';
+import { openDatabaseReadOnly, readGlance, startOfLocalDay, Store } from '../src/index.js';
 
 const user = { type: 'user' as const, sessionId: null, agentKind: null };
 const NOW = Date.now();
@@ -116,6 +116,72 @@ describe('readGlance', () => {
           now: NOW + 120_000,
         })?.updates,
       ).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('counts confirmed saves of today with one indexed query, within the status-line budget', () => {
+    const { root, path, store, project } = fixture();
+    const today = startOfLocalDay(NOW);
+    const add = (
+      n: number,
+      status: 'caught' | 'confirmed' | 'expired' | 'rejected',
+      at: number,
+    ) => {
+      const insert = store.db.prepare(
+        `INSERT INTO saves (id, project_id, kind, status, title, fingerprint, created_at)
+         VALUES (?, ?, 'rule_enforced', ?, 't', ?, ?)`,
+      );
+      store.transaction(() => {
+        for (let i = 0; i < n; i++) {
+          const id = `${status}-${at}-${i}`;
+          insert.run(id, project.id, status, id, at);
+        }
+      });
+    };
+    // A long history: many saves before today and many that do not count.
+    add(20_000, 'confirmed', today - 86_400_000);
+    add(5_000, 'expired', today + 1);
+    add(5_000, 'caught', today + 1);
+    add(1, 'rejected', today + 1);
+    add(2, 'confirmed', today + 1);
+    store.close();
+
+    const db = openDatabaseReadOnly(path);
+    try {
+      const input = { dir: root, agentKind: 'claude-code', externalSessionId: null, now: NOW };
+      expect(readGlance(db, input)?.saves).toBe(2);
+      const plan = db
+        .prepare(
+          `EXPLAIN QUERY PLAN SELECT COUNT(*) AS n FROM saves
+           WHERE project_id = ? AND status = 'confirmed' AND created_at >= ?`,
+        )
+        .all(project.id, today) as { detail: string }[];
+      expect(plan.map((p) => p.detail).join(' ')).toMatch(/USING (COVERING )?INDEX saves_project/);
+      const times: number[] = [];
+      for (let i = 0; i < 5; i++) {
+        const started = performance.now();
+        readGlance(db, input);
+        times.push(performance.now() - started);
+      }
+      // The whole glance (four counts) stays far below the status line's budget.
+      expect(Math.min(...times)).toBeLessThan(50);
+      expect(() => db.exec('DELETE FROM saves')).toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('has no saves before a writer migrated the database to v2', () => {
+    const { root, path, store } = fixture();
+    store.db.exec('DROP TABLE saves');
+    store.close();
+    const db = openDatabaseReadOnly(path);
+    try {
+      expect(
+        readGlance(db, { dir: root, agentKind: 'claude-code', externalSessionId: null, now: NOW }),
+      ).toEqual({ projectName: 'repo', rules: 0, updates: 0, conflicts: 0 });
     } finally {
       db.close();
     }

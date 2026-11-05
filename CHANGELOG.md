@@ -3,6 +3,30 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## Unreleased
+
+### Added
+
+- Saves: Mindly records each time it demonstrably helped, with the events that prove it. Seven
+  kinds: an agent told about a changed export before it used it, an agent that stopped before
+  overwriting another agent's work, a write blocked by an enforced rule, a failed command not
+  repeated, a merge conflict found before either branch was merged, a broken check fixed before
+  merging, and work picked up by another agent after a usage limit. A save starts pending and
+  counts only once later events confirm the problem was avoided; otherwise it expires. Dismissed
+  conflicts drop their saves, and the same problem is counted once across sessions and retries.
+- `mindly saves [--since 7d] [--all] [--json]` lists saves in plain sentences;
+  `mindly saves reject <id>` removes one from every total ("not a save").
+- `mindly saves card [--week] [--details] [--out card.svg]`: a shareable SVG card of your week.
+  It shows counts and agent names only, never project names, paths or code unless `--details`.
+  Mission Control has the same card behind the Share button of its new Saves panel (SVG or PNG).
+- Saves show up where you already look: first on the status line (`mindly · 2 saves today · …`),
+  a line in `mindly status`, a section in `mindly standup`, and a "saves this week" stat and
+  Saves panel in Mission Control.
+- Daemon API: `GET /api/projects/:id/saves`, `POST /api/saves/:id/reject` and
+  `GET /api/projects/:id/saves/card.svg`. Agents cannot create or change saves: there is no MCP
+  tool for them.
+- Database schema v2 (a new `saves` table), applied automatically.
+
 ## 0.2.0 — 2026-11-05
 
 ### Added

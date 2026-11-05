@@ -24,29 +24,38 @@ the docs understands what they see, knows what matters, and knows what to do nex
 
 ## Vocabulary
 
-| Internal concept                                           | Say                                                | Example                                                      |
-| ---------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------ |
-| agent kind `claude-code`                                   | the product name                                   | Claude Code, Codex, Cursor, Gemini CLI                       |
-| session                                                    | the agent plus its short tag                       | Claude Code · 4409d433                                       |
-| session status active / idle / rate_limited / ended        | working / idle / hit its usage limit / finished    |                                                              |
-| intent                                                     | "is editing" / "plans to edit"                     | Codex is editing `src/dash.ts`                               |
-| delivery                                                   | update for an agent                                | 1 update waiting for Codex                                   |
-| delivered / acked                                          | seen                                               |                                                              |
-| conflict                                                   | conflict (with a plain description of the problem) | Claude Code changed `login()`; Codex's `src/dash.ts` uses it |
-| severity info / warning / critical                         | FYI / check this / urgent                          |                                                              |
-| conflict status open / acknowledged / resolved / dismissed | open / seen / resolved / dismissed                 |                                                              |
-| trust approved                                             | approved by you                                    |                                                              |
-| trust verified                                             | confirmed in the code                              |                                                              |
-| trust proposed                                             | suggested by _agent_, waiting for you              |                                                              |
-| trust stale                                                | may be outdated (code changed)                     |                                                              |
-| trust rejected                                             | rejected                                           |                                                              |
-| memory kind rule / decision / fact / mistake / note        | rule / decision / fact / known pitfall / note      |                                                              |
-| handoff pending / claimed                                  | waiting for _agent_ / picked up by _agent_         |                                                              |
-| context packet                                             | context sent to an agent                           |                                                              |
-| tokens                                                     | (do not show; at most "short / long")              |                                                              |
-| run shadow_merge / review / replay                         | merge check / review / replay                      |                                                              |
-| contract                                                   | check                                              | "Check: `login` returns `user.role`: passing"                |
-| snapshot                                                   | snapshot                                           |                                                              |
+| Internal concept                                           | Say                                                                           | Example                                                                                  |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| agent kind `claude-code`                                   | the product name                                                              | Claude Code, Codex, Cursor, Gemini CLI                                                   |
+| session                                                    | the agent plus its short tag                                                  | Claude Code · 4409d433                                                                   |
+| session status active / idle / rate_limited / ended        | working / idle / hit its usage limit / finished                               |                                                                                          |
+| intent                                                     | "is editing" / "plans to edit"                                                | Codex is editing `src/dash.ts`                                                           |
+| delivery                                                   | update for an agent                                                           | 1 update waiting for Codex                                                               |
+| delivered / acked                                          | seen                                                                          |                                                                                          |
+| conflict                                                   | conflict (with a plain description of the problem)                            | Claude Code changed `login()`; Codex's `src/dash.ts` uses it                             |
+| severity info / warning / critical                         | FYI / check this / urgent                                                     |                                                                                          |
+| conflict status open / acknowledged / resolved / dismissed | open / seen / resolved / dismissed                                            |                                                                                          |
+| trust approved                                             | approved by you                                                               |                                                                                          |
+| trust verified                                             | confirmed in the code                                                         |                                                                                          |
+| trust proposed                                             | suggested by _agent_, waiting for you                                         |                                                                                          |
+| trust stale                                                | may be outdated (code changed)                                                |                                                                                          |
+| trust rejected                                             | rejected                                                                      |                                                                                          |
+| memory kind rule / decision / fact / mistake / note        | rule / decision / fact / known pitfall / note                                 |                                                                                          |
+| handoff pending / claimed                                  | waiting for _agent_ / picked up by _agent_                                    |                                                                                          |
+| context packet                                             | context sent to an agent                                                      |                                                                                          |
+| tokens                                                     | (do not show; at most "short / long")                                         |                                                                                          |
+| run shadow_merge / review / replay                         | merge check / review / replay                                                 |                                                                                          |
+| contract                                                   | check                                                                         | "Check: `login` returns `user.role`: passing"                                            |
+| snapshot                                                   | snapshot                                                                      |                                                                                          |
+| save                                                       | save ("Mindly saved you")                                                     | Mindly saved you 2 times today                                                           |
+| save status caught / confirmed / expired / rejected        | pending (waiting for evidence) / counted / not confirmed in time / not a save |                                                                                          |
+| save kind impact_warned                                    | told about a change before building on it                                     | Codex was told Claude Code changed code it uses before it wrote code using it            |
+| save kind overlap_avoided                                  | stopped before overwriting another agent's work                               | Codex stopped before overwriting Claude Code's work                                      |
+| save kind rule_enforced                                    | write blocked by your rule                                                    | A write by Codex was blocked by your rule                                                |
+| save kind mistake_avoided                                  | failed command not repeated                                                   | Codex didn't repeat a command that failed before                                         |
+| save kind merge_conflict_early                             | merge conflict found before merging                                           | A merge conflict between Claude Code and Codex was found before either branch was merged |
+| save kind check_broken_early                               | broken check fixed before merging                                             | A check Claude Code broke was caught and fixed before merging                            |
+| save kind limit_handoff                                    | work continued after a usage limit                                            | Work continued in Codex after Claude Code hit its usage limit                            |
 
 ## Symbols and colour
 
@@ -75,6 +84,12 @@ Needs you
 ```
 
 ## Mission Control
+
+Saves are counted only once confirmed: totals, the status line (`mindly · 2 saves today · …`,
+first and only when there are any), `mindly status`, the standup and the "saves this week" stat
+never include pending, expired or rejected saves. Pending ones may appear in detail views, labelled
+as not counted yet. The share card shows counts and agent names only unless the user asks for
+details.
 
 Same vocabulary, same order of importance: summary bar, "Needs you", agents, activity. Every
 badge has text, every number has a label, every empty panel has a one-line explanation of what will

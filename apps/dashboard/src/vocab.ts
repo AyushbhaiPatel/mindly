@@ -16,6 +16,8 @@ import type {
   MindlyEvent,
   RunKind,
   RunStatus,
+  SaveKind,
+  SaveStatus,
   Session,
   Severity,
   TaskStatus,
@@ -347,6 +349,44 @@ export function handoffReasonWords(reason: Handoff['reason']): string {
   }
 }
 
+/** What one save of each kind is (the share card uses the same words for its counts). */
+export function saveKindWords(kind: SaveKind | string): string {
+  switch (kind) {
+    case 'impact_warned':
+      return 'Told about a change before building on it';
+    case 'overlap_avoided':
+      return "Stopped before overwriting another agent's work";
+    case 'rule_enforced':
+      return 'Write blocked by your rule';
+    case 'mistake_avoided':
+      return 'Failed command not repeated';
+    case 'merge_conflict_early':
+      return 'Merge conflict found before merging';
+    case 'check_broken_early':
+      return 'Broken check fixed before merging';
+    case 'limit_handoff':
+      return 'Work continued after a usage limit';
+    default:
+      return 'Save';
+  }
+}
+
+/** A save's status in plain words. */
+export function saveStatusWords(status: SaveStatus | string): string {
+  switch (status) {
+    case 'caught':
+      return 'pending';
+    case 'confirmed':
+      return 'counted';
+    case 'expired':
+      return 'not confirmed in time';
+    case 'rejected':
+      return 'not a save';
+    default:
+      return status;
+  }
+}
+
 /** Run kind: merge check / review / replay / checks. */
 export function runKindWords(kind: RunKind | string | null | undefined): string {
   switch (kind) {
@@ -414,13 +454,16 @@ export type Term =
   | 'tasks'
   | 'runs'
   | 'standup'
-  | 'configTrust';
+  | 'configTrust'
+  | 'saves';
 
 /**
  * Explanations shown only in the "?" tooltip next to a section label. The page itself states
  * facts; anything that explains a concept belongs here.
  */
 export const TERMS: Record<Term, string> = {
+  saves:
+    'Save: a time Mindly demonstrably helped, for example an agent was told about a change before it wrote code using it. A save counts only when what happened next shows the problem was avoided, and it links to the events that prove it.',
   intent:
     'Intent: what an agent says it is about to edit, so other agents can stay out of the way. An intent expires unless the agent renews it.',
   conflict:
@@ -464,6 +507,8 @@ export interface StatInput {
   sessions: readonly Pick<Session, 'status'>[];
   needsYou: number;
   lastMergeCheck: { status: string; at: number | null } | null;
+  /** Confirmed saves of the last 7 days; the stat is left out while unknown. */
+  saves?: number;
 }
 
 export interface Stat {
@@ -492,6 +537,13 @@ export function overviewStats(input: StatInput): Stat[] {
     label: 'need you',
     tone: input.needsYou > 0 ? 'bad' : 'neutral',
   });
+  if (input.saves !== undefined) {
+    out.push({
+      value: String(input.saves),
+      label: input.saves === 1 ? 'save this week' : 'saves this week',
+      tone: input.saves > 0 ? 'good' : 'neutral',
+    });
+  }
   const m = input.lastMergeCheck;
   if (!m) {
     out.push({ value: 'none', label: 'merge check', tone: 'neutral' });
@@ -674,6 +726,8 @@ export const EMPTY = {
   givenTo: 'Not given to any agent yet.',
   provenance: 'No agent edit recorded for this line.',
   configChecks: 'No checks defined.',
+  saves:
+    'No saves this week. One appears when Mindly warns or stops an agent and what happens next shows the problem was avoided.',
 } as const;
 
 /* ------------------------------------------------------------------------------------------ */
@@ -942,10 +996,24 @@ export function describeEvent(
       return line('hit its usage limit', 'warn');
     case 'prompt.submitted':
       return line(`got a new prompt${title ? `: ${quote(title)}` : ''}`);
-    case 'tool.before':
+    case 'tool.before': {
+      if (str(p, 'deniedBy')) {
+        return line(`was stopped by your rule from editing ${f ?? 'a file'}`, 'warn');
+      }
+      if (Array.isArray(p.overlaps) && p.overlaps.length > 0) {
+        return line(`was told another agent is editing ${f ?? 'the same file'}`, 'warn');
+      }
+      const cmd = str(p, 'command');
+      if (cmd && list(p, 'mistakes').length > 0) {
+        return line(`was reminded that \`${cmd}\` failed before`, 'warn');
+      }
       return line(`is running ${str(p, 'tool') ?? 'a tool'}${f ? ` on ${f}` : ''}`);
-    case 'tool.after':
+    }
+    case 'tool.after': {
+      const cmd = str(p, 'command');
+      if (cmd) return line(`ran \`${cmd}\`${p.failed === true ? ', which failed again' : ''}`);
       return line(`ran ${str(p, 'tool') ?? 'a tool'}${f ? ` on ${f}` : ''}`);
+    }
     case 'file.changed': {
       const add = typeof p.addedLines === 'number' ? p.addedLines : null;
       const rem = typeof p.removedLines === 'number' ? p.removedLines : null;
@@ -1048,6 +1116,12 @@ export function describeEvent(
     }
     case 'turn.completed':
       return line(`finished a step${title ? `: ${title}` : ''}`);
+    case 'save.caught':
+      return sys(`Possible save, waiting for evidence${title ? `: ${title}` : ''}`, 'info');
+    case 'save.confirmed':
+      return sys(`Mindly saved you${title ? `: ${title}` : ''}`, 'good');
+    case 'save.rejected':
+      return sys(`Not counted as a save${title ? `: ${title}` : ''}`);
     default:
       return line('did something Mindly does not describe yet');
   }

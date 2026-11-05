@@ -9,6 +9,7 @@ export const ID_KINDS = [
   'handoff',
   'contract',
   'run',
+  'save',
 ] as const;
 export type IdKind = (typeof ID_KINDS)[number];
 
@@ -24,6 +25,7 @@ const SPECS: Record<IdKind, { table: string; title: string }> = {
   handoff: { table: 'handoffs', title: 'summary' },
   contract: { table: 'contracts', title: 'kind' },
   run: { table: 'runs', title: 'title' },
+  save: { table: 'saves', title: 'title' },
 };
 
 /** One record an id reference may point to. */

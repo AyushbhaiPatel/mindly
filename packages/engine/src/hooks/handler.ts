@@ -15,7 +15,7 @@ import { memoryLine, renderSections } from '../context/render.js';
 import type { IntentService } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { LIVE_WINDOW_MS, type ChangedFile, type EngineBus, type Kernel } from '../kernel.js';
-import type { MistakeService } from '../memory/mistakes.js';
+import { commandKey, type MistakeService } from '../memory/mistakes.js';
 import type { RuleService } from '../memory/rules.js';
 import type { ProjectContext, ProjectService } from '../projects.js';
 
@@ -192,6 +192,20 @@ export class HookHandler {
       if (paths.length === 0) return EMPTY_HOOK_RESULT;
       const overlap = this.d.intents.noteEditing(session, paths);
       const built = this.d.context.preWrite(project, session, paths, overlap.warnings);
+      if (overlap.overlaps.length > 0 || built.deny) {
+        // What Mindly told the agent before this write: the evidence of overlap and rule saves.
+        this.k.store.events.append({
+          projectId: project.project.id,
+          sessionId: session.id,
+          type: 'tool.before',
+          payload: {
+            tool: sanitizeLine(tool.name, 40),
+            paths,
+            overlaps: overlap.overlaps,
+            deniedBy: built.deny?.id ?? null,
+          },
+        });
+      }
       if (built.deny) {
         return {
           ...EMPTY_HOOK_RESULT,
@@ -205,6 +219,16 @@ export class HookHandler {
     if (tool.shell && tool.command) {
       const mistakes = this.d.mistakes.forCommand(project.project.id, tool.command);
       if (mistakes.length === 0) return EMPTY_HOOK_RESULT;
+      this.k.store.events.append({
+        projectId: project.project.id,
+        sessionId: session.id,
+        type: 'tool.before',
+        payload: {
+          tool: sanitizeLine(tool.name, 40),
+          command: this.commandKey(tool.command),
+          mistakes: mistakes.map((m) => m.id),
+        },
+      });
       return {
         ...EMPTY_HOOK_RESULT,
         context: renderSections([
@@ -226,6 +250,23 @@ export class HookHandler {
     const tool = evt.tool;
     if (!tool) return EMPTY_HOOK_RESULT;
     this.k.store.sessions.touch(session.id);
+    if (tool.shell && tool.command) {
+      // A command with a known pitfall ran: whether it failed again is the evidence of a
+      // mistake save (or of the mistake happening anyway).
+      const known = this.d.mistakes.forCommand(project.project.id, tool.command);
+      if (known.length > 0) {
+        this.k.store.events.append({
+          projectId: project.project.id,
+          sessionId: session.id,
+          type: 'tool.after',
+          payload: {
+            tool: sanitizeLine(tool.name, 40),
+            command: this.commandKey(tool.command),
+            failed: tool.failed,
+          },
+        });
+      }
+    }
     if (tool.shell && tool.failed && tool.command) {
       this.d.mistakes.recordFailedCommand({
         projectId: project.project.id,
@@ -282,6 +323,14 @@ export class HookHandler {
       files: changed,
     });
     return EMPTY_HOOK_RESULT;
+  }
+
+  /** The comparable key of a shell command (program and subcommand), redacted. */
+  private commandKey(command: string): string {
+    return sanitizeLine(
+      redactText(commandKey(command), { extraPatterns: this.k.config.redaction.extraPatterns }),
+      120,
+    );
   }
 
   /**

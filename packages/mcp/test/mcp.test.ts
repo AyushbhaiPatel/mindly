@@ -107,6 +107,88 @@ function assertNoForgery(out: ToolOut): void {
 }
 
 describe('mindly MCP server', () => {
+  it('exposes no tool that creates, changes or rejects saves', async () => {
+    const h = await harness();
+    const { tools } = await h.client.listTools();
+    expect(tools.length).toBeGreaterThan(0);
+    for (const t of tools) {
+      const surface = JSON.stringify({
+        name: t.name,
+        description: t.description,
+        input: t.inputSchema,
+      });
+      expect(surface, t.name).not.toMatch(/\bsaves?\b|save_id|saveId/i);
+    }
+  });
+
+  it('never records saves in the MCP process, whatever the agent does', async () => {
+    const root = repo();
+    // What startMcpServer opens: the default modules without saves.
+    const mindly = Mindly.open({ inMemory: true, ports: { git: createGitPort() } });
+    installDefaultModules(mindly, { saves: false });
+    try {
+      await mindly.hooks.handle(
+        hook(root, 'claude-code', 'cc', 'pre_tool', {
+          tool: {
+            name: 'Bash',
+            writes: false,
+            shell: true,
+            edits: [],
+            command: 'npm test',
+            failed: false,
+            outputExcerpt: null,
+          },
+        }),
+      );
+      await mindly.hooks.handle(
+        hook(root, 'claude-code', 'cc', 'post_tool', {
+          tool: {
+            name: 'Bash',
+            writes: false,
+            shell: true,
+            edits: [],
+            command: 'npm test',
+            failed: true,
+            outputExcerpt: 'ERR!',
+          },
+        }),
+      );
+      await mindly.hooks.handle(
+        hook(root, 'codex', 'cx', 'pre_tool', {
+          tool: {
+            name: 'Bash',
+            writes: false,
+            shell: true,
+            edits: [],
+            command: 'npm test',
+            failed: false,
+            outputExcerpt: null,
+          },
+        }),
+      );
+      await mindly.hooks.handle(
+        hook(root, 'codex', 'cx', 'post_tool', {
+          tool: {
+            name: 'Bash',
+            writes: false,
+            shell: true,
+            edits: [],
+            command: 'npm test',
+            failed: false,
+            outputExcerpt: null,
+          },
+        }),
+      );
+      const pid = mindly.store.projects.list()[0]!.id;
+      expect(mindly.store.events.query(pid, { types: ['tool.before'] })).toHaveLength(1);
+      expect(
+        mindly.store.saves.list(pid, { statuses: ['caught', 'confirmed', 'expired', 'rejected'] }),
+      ).toEqual([]);
+    } finally {
+      mindly.close();
+    }
+  });
+
   it('exposes every tool with annotations', async () => {
     const h = await harness();
     const { tools } = await h.client.listTools();

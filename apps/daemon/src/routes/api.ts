@@ -10,6 +10,8 @@ import {
   LIVE_WINDOW_MS,
   USER,
   provenanceOf,
+  renderSavesCard,
+  savesOf,
   snapshotService,
   standupService,
   type Mindly,
@@ -43,6 +45,8 @@ import {
   RestoreBody,
   ReviewBody,
   RunsQuery,
+  SavesCardQuery,
+  SavesQuery,
   SnapshotBody,
   StandupQuery,
   TasksQuery,
@@ -367,6 +371,51 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       const svc = standupService(mindly);
       const digest = svc.build(pid, since);
       return { digest, markdown: svc.render(digest) };
+    });
+
+    // ---- saves (read and reject only; nothing here creates or confirms a save) -----------
+    const WEEK_MS = 7 * 86_400_000;
+    api.get('/api/projects/:projectId/saves', async (req) => {
+      const pid = projectOf(req).id;
+      const q = parse(SavesQuery, req.query);
+      const since = q.since ?? mindly.kernel.clock.now() - WEEK_MS;
+      const svc = savesOf(mindly);
+      const { total, byKind, byAgent } = svc.summary(pid, since);
+      const saves = svc.list(pid, {
+        since,
+        limit: 500,
+        ...(q.status === 'all'
+          ? {}
+          : { statuses: q.status ? [q.status] : (['confirmed', 'caught'] as const) }),
+      });
+      return { since, summary: { total, byKind, byAgent }, saves };
+    });
+
+    api.post('/api/saves/:id/reject', async (req) => {
+      const id = idOf(req);
+      store.saves.get(id);
+      return savesOf(mindly).rejectByUser(id);
+    });
+
+    api.get('/api/projects/:projectId/saves/card.svg', async (req, reply) => {
+      const project = projectOf(req);
+      const q = parse(SavesCardQuery, req.query);
+      const now = mindly.kernel.clock.now();
+      const summary = savesOf(mindly).summary(project.id, q.since ?? now - WEEK_MS);
+      const svg = renderSavesCard({
+        summary,
+        until: now,
+        ...(q.details === '1'
+          ? {
+              details: {
+                projectName: project.name,
+                saves: summary.recent.map((s) => ({ title: s.title, paths: s.paths })),
+              },
+            }
+          : {}),
+      });
+      reply.type('image/svg+xml; charset=utf-8');
+      return svg;
     });
 
     api.get('/api/projects/:projectId/snapshots', async (req) =>

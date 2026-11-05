@@ -1,0 +1,649 @@
+import {
+  describeError,
+  fingerprint,
+  sanitizeLine,
+  type Conflict,
+  type EventType,
+  type MindlyEvent,
+  type Save,
+  type SaveKind,
+  type SaveRefs,
+  type Session,
+} from '@mindly/core';
+import type { Kernel } from '../kernel.js';
+import type { Mindly } from '../mindly.js';
+import { attachService } from './shared.js';
+
+/*
+ * Saves: every time Mindly demonstrably helped, with the events that prove it. Saves are a
+ * projection of the event log: the service follows the events this process appends (hooks, CLI,
+ * daemon) and settles each save on evidence only. A save starts `caught` when Mindly intervened
+ * and becomes `confirmed` only when later events show the problem did not happen; without that
+ * evidence it expires. Only confirmed saves count. The MCP server never installs this module, so
+ * nothing an agent calls through MCP can create or change a save.
+ */
+
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+
+/** How long a caught save waits for its evidence before it expires. */
+export const SAVE_WINDOW_MS: Readonly<Record<SaveKind, number>> = {
+  impact_warned: 2 * HOUR,
+  overlap_avoided: 10 * MIN,
+  rule_enforced: 2 * HOUR,
+  mistake_avoided: 10 * MIN,
+  merge_conflict_early: 24 * HOUR,
+  check_broken_early: 24 * HOUR,
+  limit_handoff: 24 * HOUR,
+};
+
+/** Hook events that show a session was running and reporting to Mindly. */
+const ACTIVITY_TYPES: readonly EventType[] = [
+  'prompt.submitted',
+  'tool.before',
+  'tool.after',
+  'file.changed',
+  'turn.completed',
+];
+
+/** Why a save was rejected (payload of `save.rejected`). */
+export type SaveRejectReason = 'user' | 'conflict_dismissed' | 'problem_occurred';
+
+/** Confirmed saves of a period (`summary`). */
+export interface SavesSummary {
+  since: number;
+  total: number;
+  byKind: Partial<Record<SaveKind, number>>;
+  /** Agent kind of the helped session -> confirmed saves. */
+  byAgent: Record<string, number>;
+  /** Most recent confirmed saves first (at most 10). */
+  recent: Save[];
+}
+
+const PRODUCT_NAMES: Record<string, string> = {
+  'claude-code': 'Claude Code',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  'gemini-cli': 'Gemini CLI',
+  generic: 'An agent',
+};
+
+/** Product name of an agent kind (`claude-code` -> `Claude Code`), for plain sentences. */
+export function agentProductName(kind: string | null | undefined): string {
+  if (!kind) return 'An agent';
+  const known = PRODUCT_NAMES[kind];
+  if (known) return known;
+  const words = sanitizeLine(kind, 32)
+    .split('-')
+    .filter(Boolean)
+    .map((w) => `${w[0]?.toUpperCase() ?? ''}${w.slice(1)}`);
+  return words.length ? words.join(' ') : 'An agent';
+}
+
+interface SaveInput {
+  kind: SaveKind;
+  title: string;
+  sessionIds: string[];
+  paths: string[];
+  fingerprint: string;
+  refs: SaveRefs;
+}
+
+const UUID_IN_KEY_RE = /^impact:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):/;
+
+const strings = (v: unknown, max = 50): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, max) : [];
+const text = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
+
+/**
+ * Records, confirms and drops saves. Every method is synchronous apart from the merge-conflict
+ * producer (it asks git which branches are merged) and never throws into its caller.
+ */
+export class SavesService {
+  constructor(private readonly k: Kernel) {}
+
+  // ------------------------------------------------------------------ the event log
+
+  /** Follows one appended event. Called by the store for every event of this process. */
+  observe(e: MindlyEvent): void {
+    try {
+      switch (e.type) {
+        case 'tool.before':
+          return this.onAdvice(e);
+        case 'tool.after':
+          return this.onCommand(e);
+        case 'file.changed':
+          return this.onFilesChanged(e);
+        case 'turn.completed':
+          this.onTurnCompleted(e);
+          return void this.sweep(e.projectId);
+        case 'delivery.delivered':
+          return this.onDelivered(e);
+        case 'conflict.updated':
+          return this.onConflictUpdated(e);
+        case 'contract.result':
+          return this.onContractResult(e);
+        case 'session.ended':
+          return this.onSessionEnded(e);
+        case 'handoff.created':
+          return this.onHandoffCreated(e);
+        case 'handoff.claimed':
+          return this.onHandoffClaimed(e);
+        default:
+          return;
+      }
+    } catch (err) {
+      this.k.logger.error('saves: event not followed', { type: e.type, error: describeError(err) });
+    }
+  }
+
+  /** `pre_tool` told a session about another agent's work, an enforced rule or a known pitfall. */
+  private onAdvice(e: MindlyEvent): void {
+    const helped = e.sessionId ? this.k.store.sessions.find(e.sessionId) : null;
+    if (!helped) return;
+    const p = e.payload;
+    const ruleId = text(p.deniedBy);
+    // A write a rule blocked is the rule's save; it says nothing about the other agent's work.
+    const overlaps =
+      !ruleId && Array.isArray(p.overlaps) ? (p.overlaps as Record<string, unknown>[]) : [];
+    for (const o of overlaps.slice(0, 10)) {
+      const intentId = text(o.intentId);
+      const other = text(o.sessionId) ? this.k.store.sessions.find(o.sessionId as string) : null;
+      const files = strings(o.files, 20);
+      if (!intentId || !other || files.length === 0) continue;
+      this.record(e, {
+        kind: 'overlap_avoided',
+        title: `${this.name(helped)} stopped before overwriting ${this.name(other)}'s work`,
+        sessionIds: [helped.id, other.id],
+        paths: files,
+        fingerprint: fingerprint('overlap_avoided', intentId),
+        refs: { intentId, ...(text(o.conflictId) ? { conflictId: o.conflictId as string } : {}) },
+      });
+    }
+    const paths = strings(p.paths, 20);
+    if (ruleId && paths.length > 0) {
+      this.record(e, {
+        kind: 'rule_enforced',
+        title: `A write by ${this.name(helped)} was blocked by your rule`,
+        sessionIds: [helped.id],
+        paths,
+        fingerprint: fingerprint('rule_enforced', ruleId, ...[...paths].sort()),
+        refs: { ruleId },
+      });
+    }
+    const command = text(p.command);
+    const mistakes = strings(p.mistakes, 5);
+    if (command && mistakes.length > 0) {
+      this.record(e, {
+        kind: 'mistake_avoided',
+        title: `${this.name(helped)} didn't repeat a command that failed before`,
+        sessionIds: [helped.id],
+        paths: [],
+        fingerprint: fingerprint('mistake_avoided', mistakes[0], command),
+        refs: { memoryId: mistakes[0] as string, command },
+      });
+    }
+  }
+
+  /** A command with a known pitfall ran: success confirms the warning helped, failure drops it. */
+  private onCommand(e: MindlyEvent): void {
+    const command = text(e.payload.command);
+    if (!command || !e.sessionId) return;
+    for (const s of this.caughtOf(e.projectId, 'mistake_avoided', e.sessionId)) {
+      if (s.refs.command !== command) continue;
+      if (e.payload.failed === true) this.reject(s, 'problem_occurred', [e.id]);
+      else this.confirm(s, [e.id]);
+    }
+  }
+
+  private onFilesChanged(e: MindlyEvent): void {
+    const changed = new Set(strings(e.payload.paths, 50));
+    if (!e.sessionId || changed.size === 0) return;
+    const now = this.k.clock.now();
+    for (const s of this.caughtOf(e.projectId, null, e.sessionId)) {
+      if (!s.paths.some((p) => changed.has(p))) continue;
+      switch (s.kind) {
+        case 'impact_warned':
+          // It went back to the code it was told about: the warning was acted on.
+          this.confirm(s, [e.id]);
+          break;
+        case 'overlap_avoided': {
+          const intent = s.refs.intentId ? this.findIntent(s.refs.intentId) : null;
+          const stillActive =
+            intent !== null && intent.status === 'active' && intent.expiresAt >= now;
+          if (stillActive) this.reject(s, 'problem_occurred', [e.id]);
+          else this.confirm(s, [e.id]);
+          break;
+        }
+        case 'rule_enforced':
+          // The blocked file was written anyway.
+          this.reject(s, 'problem_occurred', [e.id]);
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  /** The turn ended without the blocked write happening: the rule held. */
+  private onTurnCompleted(e: MindlyEvent): void {
+    if (!e.sessionId) return;
+    for (const s of this.caughtOf(e.projectId, 'rule_enforced', e.sessionId)) {
+      this.confirm(s, [e.id]);
+    }
+  }
+
+  /** An impact warning reached the session (hook context) before it wrote dependent code. */
+  private onDelivered(e: MindlyEvent): void {
+    if (!e.sessionId) return;
+    const helped = this.k.store.sessions.find(e.sessionId);
+    if (!helped) return;
+    const now = this.k.clock.now();
+    for (const id of strings(e.payload.ids, 50)) {
+      const d = this.k.store.deliveries.find(id);
+      if (!d || d.kind !== 'impact' || !d.dedupeKey) continue;
+      const conflictId = UUID_IN_KEY_RE.exec(d.dedupeKey)?.[1];
+      const conflict = conflictId ? this.k.store.conflicts.find(conflictId) : null;
+      if (!conflict || conflict.kind !== 'impact' || conflict.status === 'dismissed') continue;
+      const changedFile = conflict.paths[0];
+      if (changedFile === undefined) continue;
+      const mine = new Set<string>();
+      for (const i of this.k.store.intents.activeForSession(helped.id)) {
+        for (const f of i.targets.files) mine.add(f);
+      }
+      for (const c of this.k.store.fileChanges.forSession(helped.id, now - 2 * HOUR)) {
+        mine.add(c.path);
+      }
+      let told = conflict.paths.slice(1).filter((p) => mine.has(p));
+      if (told.length === 0 && mine.has(changedFile)) told = [changedFile];
+      if (told.length === 0) continue;
+      // Wrote one of those files after the change but before hearing about it: too late.
+      const wroteFirst = this.k.store.fileChanges
+        .forSession(helped.id, d.createdAt)
+        .some((c) => told.includes(c.path));
+      if (wroteFirst) continue;
+      const changer = d.sourceSessionId ? this.k.store.sessions.find(d.sourceSessionId) : null;
+      this.record(e, {
+        kind: 'impact_warned',
+        title: `${this.name(helped)} was told ${changer ? `${this.name(changer)} changed` : 'about a change to'} code it uses before it wrote code using it`,
+        sessionIds: changer ? [helped.id, changer.id] : [helped.id],
+        paths: told.slice(0, 20),
+        fingerprint: fingerprint('impact_warned', conflict.id),
+        refs: { conflictId: conflict.id, deliveryId: d.id },
+      });
+    }
+  }
+
+  /** A dismissed conflict was not a real problem, so neither was its save. */
+  private onConflictUpdated(e: MindlyEvent): void {
+    const conflictId = text(e.payload.conflictId);
+    const status = text(e.payload.status);
+    if (!conflictId) return;
+    for (const s of this.linkedTo(e.projectId, conflictId)) {
+      if (status === 'dismissed') this.reject(s, 'conflict_dismissed', [e.id]);
+      else if (status === 'resolved' && s.kind === 'impact_warned' && s.status === 'caught') {
+        if (this.k.clock.now() - s.createdAt <= SAVE_WINDOW_MS.impact_warned)
+          this.confirm(s, [e.id]);
+      }
+    }
+  }
+
+  /** A check broke during a session (caught), or passed again (confirmed if it still runs). */
+  private onContractResult(e: MindlyEvent): void {
+    const contractId = text(e.payload.contractId);
+    if (!contractId) return;
+    const state = e.payload.state;
+    const previous = e.payload.previous;
+    if (previous === 'passing' && state === 'failing' && e.sessionId) {
+      const breaker = this.k.store.sessions.find(e.sessionId);
+      if (!breaker) return;
+      const path = this.contractPath(contractId);
+      this.record(e, {
+        kind: 'check_broken_early',
+        title: `A check ${this.name(breaker)} broke was caught and fixed before merging`,
+        sessionIds: [breaker.id],
+        paths: path ? [path] : [],
+        fingerprint: fingerprint('check_broken_early', 'contract', contractId, breaker.id),
+        refs: { contractId },
+      });
+    } else if (previous === 'failing' && state === 'passing') {
+      for (const s of this.caughtOf(e.projectId, 'check_broken_early', null)) {
+        if (s.refs.contractId !== contractId) continue;
+        const breaker = this.k.store.sessions.find(s.sessionIds[0] ?? '');
+        if (breaker && breaker.status !== 'ended') this.confirm(s, [e.id]);
+      }
+    }
+  }
+
+  /** The session that broke a check ended with the check still failing. */
+  private onSessionEnded(e: MindlyEvent): void {
+    if (!e.sessionId) return;
+    for (const s of this.caughtOf(e.projectId, 'check_broken_early', e.sessionId)) {
+      if (!s.refs.contractId) continue;
+      const state = this.contractState(s.refs.contractId);
+      if (state === 'failing') this.reject(s, 'problem_occurred', [e.id]);
+    }
+  }
+
+  private onHandoffCreated(e: MindlyEvent): void {
+    const handoffId = text(e.payload.handoffId);
+    if (e.payload.reason !== 'rate_limit' || !handoffId || !e.sessionId) return;
+    const from = this.k.store.sessions.find(e.sessionId);
+    if (!from) return;
+    this.record(e, {
+      kind: 'limit_handoff',
+      title: `Work continued in another agent after ${this.name(from)} hit its usage limit`,
+      sessionIds: [from.id],
+      paths: [],
+      fingerprint: fingerprint('limit_handoff', from.id),
+      refs: { handoffId },
+    });
+  }
+
+  /** Picked up by another agent: confirmed. Picked up by the same agent again: not a save. */
+  private onHandoffClaimed(e: MindlyEvent): void {
+    const handoffId = text(e.payload.handoffId);
+    if (!handoffId || !e.sessionId) return;
+    const claimer = this.k.store.sessions.find(e.sessionId);
+    if (!claimer) return;
+    for (const s of this.caughtOf(e.projectId, 'limit_handoff', null)) {
+      if (s.refs.handoffId !== handoffId) continue;
+      const from = this.k.store.sessions.find(s.sessionIds[0] ?? '');
+      if (!from || from.agentKind === claimer.agentKind) {
+        this.reject(s, 'problem_occurred', [e.id]);
+        continue;
+      }
+      this.confirm(s, [e.id], {
+        title: `Work continued in ${this.name(claimer)} after ${this.name(from)} hit its usage limit`,
+        sessionIds: [claimer.id, from.id],
+      });
+    }
+  }
+
+  // ------------------------------------------------------------------ daemon producers
+
+  /**
+   * The shadow merge found a new merge conflict between live sessions. Confirmed at once when the
+   * conflicting work of every side is still unmerged (uncommitted in its worktree, or on a branch
+   * not merged into the base branch); dropped when a side's change was already merged; left
+   * caught (and so expiring) when that cannot be told.
+   */
+  async mergeConflictFound(input: {
+    conflict: Conflict;
+    eventId: string;
+    sides: { session: Session; changed: readonly string[]; branch: string | null }[];
+    repoRoot: string;
+    baseBranch: string | null;
+  }): Promise<Save | null> {
+    try {
+      const { conflict } = input;
+      const states: ('pending' | 'merged' | 'unknown')[] = [];
+      for (const side of input.sides) {
+        states.push(await this.sideState(side, conflict.paths, input.repoRoot, input.baseBranch));
+      }
+      const names = [...new Set(input.sides.map((s) => this.name(s.session)))];
+      const saved = this.recordWith(conflict.projectId, input.eventId, {
+        kind: 'merge_conflict_early',
+        title: `A merge conflict between ${names.join(' and ') || 'two agents'} was found before either branch was merged`,
+        sessionIds: input.sides.map((s) => s.session.id),
+        paths: conflict.paths.slice(0, 20),
+        fingerprint: fingerprint('merge_conflict_early', conflict.fingerprint),
+        refs: { conflictId: conflict.id },
+      });
+      if (!saved) return null;
+      if (states.includes('merged')) return this.reject(saved, 'problem_occurred', []);
+      if (states.length >= 2 && states.every((s) => s === 'pending')) {
+        return this.confirm(saved, [input.eventId]);
+      }
+      return saved;
+    } catch (err) {
+      this.k.logger.error('saves: merge conflict not recorded', { error: describeError(err) });
+      return null;
+    }
+  }
+
+  private async sideState(
+    side: { changed: readonly string[]; branch: string | null },
+    paths: readonly string[],
+    repoRoot: string,
+    baseBranch: string | null,
+  ): Promise<'pending' | 'merged' | 'unknown'> {
+    if (side.changed.some((p) => paths.includes(p))) return 'pending';
+    if (side.branch === null || baseBranch === null) return 'unknown';
+    if (side.branch === baseBranch) return 'merged';
+    const isMerged = this.k.ports.git.isMerged;
+    if (!isMerged) return 'unknown';
+    return (await isMerged(repoRoot, side.branch, baseBranch)) ? 'merged' : 'pending';
+  }
+
+  /** A check failed on the shadow merge of live sessions' work (a new `check_failed` conflict). */
+  mergeCheckFailed(conflict: Conflict, eventId: string): Save | null {
+    const sessions = conflict.sessionIds
+      .map((id) => this.k.store.sessions.find(id))
+      .filter((s): s is Session => s !== null);
+    const names = [...new Set(sessions.map((s) => this.name(s)))];
+    return this.recordWith(conflict.projectId, eventId, {
+      kind: 'check_broken_early',
+      title: `A check broken by ${names.join(' and ') || 'an agent'} was caught and fixed before merging`,
+      sessionIds: sessions.map((s) => s.id),
+      paths: conflict.paths.slice(0, 20),
+      fingerprint: fingerprint(
+        'check_broken_early',
+        'merge',
+        conflict.id,
+        ...[...conflict.sessionIds].sort(),
+      ),
+      refs: { conflictId: conflict.id },
+    });
+  }
+
+  /**
+   * A shadow merge of live sessions ran its checks: failing checks whose conflict it resolved
+   * pass again before anything was merged.
+   */
+  mergeChecksPassed(projectId: string, conflictIds: readonly string[], eventId: string): void {
+    const ids = new Set(conflictIds);
+    for (const s of this.caughtOf(projectId, 'check_broken_early', null)) {
+      if (!s.refs.conflictId || !ids.has(s.refs.conflictId)) continue;
+      const live = s.sessionIds.every((id) => this.k.store.sessions.find(id)?.status !== 'ended');
+      if (live) this.confirm(s, [eventId]);
+    }
+  }
+
+  // ------------------------------------------------------------------ housekeeping
+
+  /**
+   * Settles caught saves whose window passed: an agent that kept working without repeating the
+   * problem confirms an overlap or mistake save; everything else expires. Also drops saves whose
+   * conflict was dismissed. Returns how many saves changed. Never throws.
+   */
+  sweep(projectId?: string): { confirmed: number; expired: number; rejected: number } {
+    const out = { confirmed: 0, expired: 0, rejected: 0 };
+    try {
+      const projects = projectId ? [projectId] : this.k.store.projects.list().map((p) => p.id);
+      const now = this.k.clock.now();
+      for (const pid of projects.slice(0, 200)) {
+        for (const s of this.k.store.saves.list(pid, { statuses: ['caught'], limit: 500 })) {
+          const conflict = s.refs.conflictId
+            ? this.k.store.conflicts.find(s.refs.conflictId)
+            : null;
+          if (conflict?.status === 'dismissed') {
+            if (this.reject(s, 'conflict_dismissed', [])) out.rejected++;
+            continue;
+          }
+          const window = SAVE_WINDOW_MS[s.kind];
+          if (now - s.createdAt < window) continue;
+          if (s.kind === 'overlap_avoided' || s.kind === 'mistake_avoided') {
+            const active = this.activityAfter(s, window);
+            if (active && this.confirm(s, [active.id])) {
+              out.confirmed++;
+              continue;
+            }
+          }
+          if (this.k.store.saves.settle(s.id, 'expired')) out.expired++;
+        }
+      }
+    } catch (err) {
+      this.k.logger.error('saves: sweep failed', { error: describeError(err) });
+    }
+    return out;
+  }
+
+  /** A hook event of the helped session inside the window after the save was caught. */
+  private activityAfter(s: Save, window: number): MindlyEvent | null {
+    const sessionId = s.sessionIds[0];
+    if (!sessionId) return null;
+    return (
+      this.k.store.events
+        .query(s.projectId, {
+          sessionId,
+          types: ACTIVITY_TYPES,
+          since: s.createdAt,
+          until: s.createdAt + window + 1,
+          limit: 50,
+        })
+        .find((e) => !s.evidence.includes(e.id)) ?? null
+    );
+  }
+
+  // ------------------------------------------------------------------ the user
+
+  /** `mindly saves reject`: "not a save". Removes it from every total. */
+  rejectByUser(id: string): Save {
+    const s = this.k.store.saves.get(id);
+    return this.reject(s, 'user', []) ?? this.k.store.saves.get(id);
+  }
+
+  // ------------------------------------------------------------------ reading
+
+  /** Saves of a project, newest first. */
+  list(
+    projectId: string,
+    opts: { since?: number; statuses?: readonly Save['status'][]; limit?: number } = {},
+  ): Save[] {
+    return this.k.store.saves.list(projectId, opts);
+  }
+
+  /** Confirmed saves caught at or after `since`: totals by kind and by helped agent. */
+  summary(projectId: string, since: number): SavesSummary {
+    const confirmed = this.k.store.saves.list(projectId, {
+      since,
+      statuses: ['confirmed'],
+      limit: 1000,
+    });
+    const byKind: Partial<Record<SaveKind, number>> = {};
+    const byAgent: Record<string, number> = {};
+    for (const s of confirmed) {
+      byKind[s.kind] = (byKind[s.kind] ?? 0) + 1;
+      const kind = this.k.store.sessions.find(s.sessionIds[0] ?? '')?.agentKind;
+      if (kind) byAgent[kind] = (byAgent[kind] ?? 0) + 1;
+    }
+    return { since, total: confirmed.length, byKind, byAgent, recent: confirmed.slice(0, 10) };
+  }
+
+  // ------------------------------------------------------------------ helpers
+
+  private name(s: Session): string {
+    return agentProductName(s.agentKind);
+  }
+
+  private record(e: MindlyEvent, input: SaveInput): Save | null {
+    return this.recordWith(e.projectId, e.id, input);
+  }
+
+  /**
+   * Records a caught save proven by `eventId`. Returns it while it is still caught; null when the
+   * same problem was already settled (counted once).
+   */
+  private recordWith(projectId: string, eventId: string, input: SaveInput): Save | null {
+    const { save, created } = this.k.store.saves.record({
+      projectId,
+      ...input,
+      title: sanitizeLine(input.title, 200),
+      evidence: [eventId],
+    });
+    if (!created) return save.status === 'caught' ? save : null;
+    this.k.store.events.append({
+      projectId,
+      sessionId: null,
+      type: 'save.caught',
+      payload: { saveId: save.id, kind: save.kind, title: save.title },
+    });
+    return save;
+  }
+
+  private confirm(
+    s: Save,
+    evidence: string[],
+    change: { title?: string; sessionIds?: string[] } = {},
+  ): Save | null {
+    const saved = this.k.store.saves.settle(s.id, 'confirmed', { evidence, ...change });
+    if (!saved) return null;
+    this.k.store.events.append({
+      projectId: saved.projectId,
+      sessionId: null,
+      type: 'save.confirmed',
+      payload: { saveId: saved.id, kind: saved.kind, title: saved.title, evidence: saved.evidence },
+    });
+    return saved;
+  }
+
+  private reject(s: Save, reason: SaveRejectReason, evidence: string[]): Save | null {
+    const saved = this.k.store.saves.settle(s.id, 'rejected', { evidence });
+    if (!saved) return null;
+    this.k.store.events.append({
+      projectId: saved.projectId,
+      sessionId: null,
+      type: 'save.rejected',
+      payload: { saveId: saved.id, kind: saved.kind, title: saved.title, reason },
+    });
+    return saved;
+  }
+
+  /** Caught saves of a project, optionally of one kind and helped session (indexed by status). */
+  private caughtOf(projectId: string, kind: SaveKind | null, sessionId: string | null): Save[] {
+    return this.k.store.saves
+      .list(projectId, { statuses: ['caught'], ...(kind ? { kinds: [kind] } : {}), limit: 500 })
+      .filter((s) => sessionId === null || s.sessionIds[0] === sessionId);
+  }
+
+  /** Caught or confirmed saves about a conflict. */
+  private linkedTo(projectId: string, conflictId: string): Save[] {
+    return this.k.store.saves
+      .list(projectId, { statuses: ['caught', 'confirmed'], limit: 1000 })
+      .filter((s) => s.refs.conflictId === conflictId);
+  }
+
+  private findIntent(id: string): { status: string; expiresAt: number } | null {
+    try {
+      return this.k.store.intents.get(id);
+    } catch {
+      return null;
+    }
+  }
+
+  private contractPath(id: string): string | null {
+    try {
+      return this.k.store.contracts.get(id).spec.path ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private contractState(id: string): string | null {
+    try {
+      return this.k.store.contracts.get(id).state;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Feature module: follows the event log of this process. Installed by every entry point except
+ * the MCP server (agents must not be able to create or change saves).
+ */
+export const savesModule = (mindly: Mindly): void => {
+  const service = attachService(mindly, 'saves', new SavesService(mindly.kernel));
+  mindly.store.events.subscribe((e) => service.observe(e));
+};

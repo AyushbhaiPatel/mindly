@@ -60,8 +60,11 @@ export interface StartMcpOptions {
  * when the client disconnects. stdout carries only the protocol; logs go to the Mindly log file.
  */
 export async function startMcpServer(options: StartMcpOptions): Promise<void> {
+  // Agents must not be able to create or change saves: the MCP process never follows the event
+  // log for them.
   const mindly = openMindly({
     env: options.env,
+    saves: false,
     ...(options.home !== undefined ? { home: options.home } : {}),
   });
   const logger = mindly.kernel.logger.child({ component: 'mcp', agent: options.agentKind });

@@ -62,28 +62,27 @@ export function safeMessage(err: unknown): string {
 }
 
 /**
- * Reports a conflict and records `conflict.opened` when it is new. Returns the conflict and
- * whether it is new.
+ * Reports a conflict and records `conflict.opened` when it is new. Returns the conflict, whether
+ * it is new and the id of the `conflict.opened` event (null when it is not new).
  */
 export function reportConflict(
   ctx: JobContext,
   report: ConflictReport,
-): { conflict: Conflict; isNew: boolean } {
+): { conflict: Conflict; isNew: boolean; eventId: string | null } {
   const res = ctx.mindly.store.conflicts.report(report);
-  if (res.isNew) {
-    ctx.mindly.store.events.append({
-      projectId: report.projectId,
-      sessionId: null,
-      type: 'conflict.opened',
-      payload: {
-        conflictId: res.conflict.id,
-        kind: res.conflict.kind,
-        severity: res.conflict.severity,
-        title: res.conflict.title,
-      },
-    });
-  }
-  return res;
+  if (!res.isNew) return { ...res, eventId: null };
+  const event = ctx.mindly.store.events.append({
+    projectId: report.projectId,
+    sessionId: null,
+    type: 'conflict.opened',
+    payload: {
+      conflictId: res.conflict.id,
+      kind: res.conflict.kind,
+      severity: res.conflict.severity,
+      title: res.conflict.title,
+    },
+  });
+  return { ...res, eventId: event.id };
 }
 
 /** Sends a pager notification (titles and counts only). Never throws. */

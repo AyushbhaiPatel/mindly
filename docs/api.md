@@ -63,6 +63,9 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 | GET    | `/api/sessions/:id/xray?limit`                                                   | `ContextPacket[]`                                                                                                 |
 | GET    | `/api/projects/:projectId/provenance?file&line`                                  | provenance result (`ProvenanceService.why`)                                                                       |
 | GET    | `/api/projects/:projectId/standup?since`                                         | `{ digest, markdown }`                                                                                            |
+| GET    | `/api/projects/:projectId/saves?since&status`                                    | `SavesResult` (below)                                                                                             |
+| POST   | `/api/saves/:id/reject`                                                          | "not a save": removes it from every total → `Save`; 404 if unknown                                                |
+| GET    | `/api/projects/:projectId/saves/card.svg?since&details`                          | the share card as `image/svg+xml` (below)                                                                         |
 | GET    | `/api/projects/:projectId/snapshots`                                             | `Snapshot[]`                                                                                                      |
 | POST   | `/api/projects/:projectId/snapshots`                                             | `{ label }` → `Snapshot`                                                                                          |
 | GET    | `/api/snapshots/:id/diff`                                                        | snapshot diff                                                                                                     |
@@ -148,6 +151,71 @@ commit with the project's current working tree (omitted when git cannot answer).
 
 Restore: the engine's `RestoreResult` `{ snapshot, memoriesRestored, memoriesArchived,
 memoriesMissing, tasksRestored, branch: string | null }`.
+
+### Saves
+
+A save is a time Mindly demonstrably helped, with the events that prove it. Saves are recorded and settled
+by Mindly itself from the event log; the API only reads them and lets the user reject one. There is
+no endpoint (and no MCP tool) that creates, confirms or edits a save.
+
+```ts
+type SaveKind =
+  | 'impact_warned'
+  | 'overlap_avoided'
+  | 'rule_enforced'
+  | 'mistake_avoided'
+  | 'merge_conflict_early'
+  | 'check_broken_early'
+  | 'limit_handoff';
+type SaveStatus = 'caught' | 'confirmed' | 'expired' | 'rejected';
+
+interface Save {
+  id: string;
+  projectId: string;
+  kind: SaveKind;
+  status: SaveStatus; // caught: waiting for evidence; only confirmed saves count
+  title: string; // plain sentence, no code
+  sessionIds: string[]; // the helped session first
+  paths: string[];
+  evidence: string[]; // ids of the events that prove it (the intervention first)
+  fingerprint: string; // one underlying problem is one save
+  refs: {
+    conflictId?;
+    intentId?;
+    ruleId?;
+    memoryId?;
+    command?;
+    contractId?;
+    handoffId?;
+    deliveryId?;
+  };
+  createdAt: number; // when it was caught (ms)
+  confirmedAt: number | null;
+}
+
+// GET …/saves: since defaults to 7 days ago; status is one SaveStatus or `all`
+// (default: confirmed and caught). saves are newest first, at most 500.
+interface SavesResult {
+  since: number;
+  summary: {
+    total: number; // confirmed saves since `since`
+    byKind: Partial<Record<SaveKind, number>>; // confirmed only
+    byAgent: Record<string, number>; // agent kind of the helped session
+  };
+  saves: Save[];
+}
+```
+
+`GET …/saves/card.svg` renders the confirmed saves since `since` (default 7 days ago) as a 1200×630
+SVG: counts by kind and agent names only. `details=1` adds the project name and each save's sentence
+and files; without it the card contains no project name, path or code.
+
+## CLI `--json`
+
+`mindly saves [--since 7d] [--all] --json` prints the same object as `GET …/saves`:
+`{ since, summary: { total, byKind, byAgent }, saves: Save[] }`. Without `--all` it lists confirmed
+and caught saves; with it every status. `mindly saves card` writes SVG (stdout, or `--out card.svg`),
+not JSON. The `--json` output of existing commands (`status`, `standup`, …) does not include saves.
 
 Review requests need a runner agent (`claude-code`, `codex`) different from the session's agent;
 replay takes 1-4 distinct runner agents. Replay checks only come from a trusted project config.

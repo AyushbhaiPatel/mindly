@@ -115,6 +115,8 @@ export interface OverlapReport {
   conflicts: Conflict[];
   /** Human-readable warnings for the acting agent. */
   warnings: string[];
+  /** Which active intent of which other session each warning is about. */
+  overlaps: { intentId: string; sessionId: string; conflictId: string; files: string[] }[];
 }
 
 export class IntentService {
@@ -159,7 +161,7 @@ export class IntentService {
    * these files. Then checks for overlap with other sessions.
    */
   noteEditing(session: Session, files: string[]): OverlapReport {
-    if (files.length === 0) return { conflicts: [], warnings: [] };
+    if (files.length === 0) return { conflicts: [], warnings: [], overlaps: [] };
     const existing = this.k.store.intents
       .activeForSession(session.id)
       .find((i) => i.summary.startsWith('Editing'));
@@ -180,7 +182,7 @@ export class IntentService {
   }
 
   private checkOverlap(session: Session, files: string[]): OverlapReport {
-    const report: OverlapReport = { conflicts: [], warnings: [] };
+    const report: OverlapReport = { conflicts: [], warnings: [], overlaps: [] };
     const others = this.k.store.intents.othersTargetingFiles(session.projectId, session.id, files);
     for (const other of others) {
       const otherSession = this.k.store.sessions.find(other.sessionId);
@@ -198,6 +200,12 @@ export class IntentService {
         fingerprint: fingerprint('intent_overlap', ...pair, ...shared.sort()),
       });
       report.conflicts.push(conflict);
+      report.overlaps.push({
+        intentId: other.id,
+        sessionId: otherSession.id,
+        conflictId: conflict.id,
+        files: shared,
+      });
       report.warnings.push(
         `${sessionLabel(otherSession)} is also working on ${shared.join(', ')} ("${other.summary}"). Coordinate before overwriting its changes.`,
       );
