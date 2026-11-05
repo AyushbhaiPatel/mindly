@@ -397,6 +397,8 @@ describe('describeEvent', () => {
         /rule_enforced|save\./,
       );
     }
+  });
+
   it('describes split events without ids or type names', () => {
     expect(
       describeEvent(
