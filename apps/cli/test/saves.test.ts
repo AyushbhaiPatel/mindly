@@ -165,6 +165,14 @@ describe('mindly saves card (AC6)', () => {
     expect(svg).not.toMatch(/[\w-]+\/[\w.-]+\.(?:ts|js|json|md)/);
   });
 
+  it('names the period it covers', async () => {
+    expect((await cli(sb, ['saves', 'card'])).stdout).toContain('save in the last 7 days');
+    expect((await cli(sb, ['saves', 'card', '--week'])).stdout).toContain('save this week');
+    const month = (await cli(sb, ['saves', 'card', '--since', '30d'])).stdout;
+    expect(month).toContain('save in the last 30 days');
+    expect(month).not.toContain('this week');
+  });
+
   it('adds the project name, sentences and files only with --details', async () => {
     const r = await cli(sb, ['saves', 'card', '--details']);
     expect(r.code).toBe(0);

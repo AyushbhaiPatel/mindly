@@ -48,6 +48,32 @@ function day(ms: number): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()] ?? ''}`;
 }
 
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Monday 00:00 local time of the week containing `ms`. */
+export function startOfLocalWeek(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return d.getTime();
+}
+
+/**
+ * The period of `[since, until)` in words, as the card says it: `this week` when it starts on
+ * this week's Monday, otherwise `in the last 7 days`, `in the last 30 days`, `in the last 12 hours`.
+ */
+export function savesPeriodWords(since: number, until: number): string {
+  if (since === startOfLocalWeek(until - 1)) return 'this week';
+  const span = Math.max(0, until - since);
+  if (span >= DAY_MS) {
+    const days = Math.round(span / DAY_MS);
+    return days === 1 ? 'in the last day' : `in the last ${days} days`;
+  }
+  const hours = Math.max(1, Math.round(span / HOUR_MS));
+  return hours === 1 ? 'in the last hour' : `in the last ${hours} hours`;
+}
+
 /** Escapes text for SVG content and attributes. */
 function esc(value: string): string {
   return value
@@ -98,13 +124,14 @@ export function renderSavesCard(input: SavesCardInput): string {
 
   // The number.
   const noun = summary.total === 1 ? 'save' : 'saves';
+  const when = savesPeriodWords(summary.since, input.until);
   t(X, 250, 132, String(summary.total), `font-family="${SERIF}" fill="#141413"`);
   const numberWidth = String(summary.total).length * 66 + 24;
   t(
     X + numberWidth,
     250,
     40,
-    `${noun} this week`,
+    `${noun} ${when}`,
     `font-family="${SERIF}" font-style="italic" fill="#3d3d3a"`,
   );
   t(
@@ -179,7 +206,7 @@ export function renderSavesCard(input: SavesCardInput): string {
   );
 
   return [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(`Mindly: ${summary.total} ${noun} this week`)}">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(`Mindly: ${summary.total} ${noun} ${when}`)}">`,
     '<defs>',
     '<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbfdff"/><stop offset=".38" stop-color="#edf8ff"/><stop offset=".66" stop-color="#e8f4fb"/><stop offset="1" stop-color="#fbfdff"/></linearGradient>',
     '<radialGradient id="glow"><stop offset="0" stop-color="#93d2f8" stop-opacity=".5"/><stop offset=".52" stop-color="#bae6fd" stop-opacity=".3"/><stop offset=".76" stop-color="#bae6fd" stop-opacity="0"/></radialGradient>',

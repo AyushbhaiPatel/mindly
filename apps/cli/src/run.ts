@@ -359,7 +359,11 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .option('--out <file>', 'write to an .svg file instead of stdout')
     .option('--force', 'overwrite an existing file')
     .action(
-      act((o: object) => async (out) => (await import('./commands/saves.js')).savesCard(out, o)),
+      // `--since` is also an option of `saves`, so commander may hand it to the parent command.
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/saves.js')).savesCard(out, cmd.optsWithGlobals()),
+      ),
     );
 
   program

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Save } from '@mindly/core';
-import { renderSavesCard, SAVE_KIND_LABELS, type SavesSummary } from '../../src/index.js';
+import {
+  renderSavesCard,
+  SAVE_KIND_LABELS,
+  savesPeriodWords,
+  startOfLocalWeek,
+  type SavesSummary,
+} from '../../src/index.js';
 
 const SECRET_PATH = 'services/billing/zebra-ledger.ts';
 const CODE = 'if (user.role === "admin") { grant(); }';
@@ -71,6 +77,19 @@ describe('saves card (AC6)', () => {
     expect(svg).toContain(SECRET_PATH);
     expect(svg).toContain('Codex was told');
     expect(svg).not.toContain('<script');
+  });
+
+  it('names the period it covers, not always "this week"', () => {
+    const now = new Date(2026, 10, 5, 15, 0).getTime(); // a Thursday
+    const day = 86_400_000;
+    expect(savesPeriodWords(startOfLocalWeek(now), now)).toBe('this week');
+    expect(savesPeriodWords(now - 7 * day, now)).toBe('in the last 7 days');
+    expect(savesPeriodWords(now - 30 * day, now)).toBe('in the last 30 days');
+    expect(savesPeriodWords(now - day, now)).toBe('in the last day');
+    expect(savesPeriodWords(now - 3_600_000 * 12, now)).toBe('in the last 12 hours');
+    const svg = renderSavesCard({ summary: { ...summary, since: now - 30 * day }, until: now });
+    expect(svg).toContain('saves in the last 30 days');
+    expect(svg).not.toContain('this week');
   });
 
   it('draws an empty week without inventing anything', () => {

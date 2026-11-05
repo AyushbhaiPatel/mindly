@@ -1,7 +1,7 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { shortId } from '@mindly/core';
-import { renderSavesCard, savesOf } from '@mindly/engine';
+import { renderSavesCard, savesOf, startOfLocalWeek } from '@mindly/engine';
 import { withProject } from '../context.js';
 import { resolveId } from '../ids.js';
 import { clean, HintedError, parseDuration, UsageError, type Out } from '../util.js';
@@ -105,7 +105,7 @@ export async function savesCard(
     const svc = savesOf(mindly);
     svc.sweep(pid);
     const now = mindly.kernel.clock.now();
-    const since = o.week ? startOfWeek(now) : now - span;
+    const since = o.week ? startOfLocalWeek(now) : now - span;
     const summary = svc.summary(pid, since);
     const svg = renderSavesCard({
       summary,
@@ -136,12 +136,4 @@ export async function savesCard(
     );
     return 0;
   });
-}
-
-/** Monday 00:00 local time of the week containing `now`. */
-function startOfWeek(now: number): number {
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-  return d.getTime();
 }
