@@ -8,7 +8,8 @@ import { z } from 'zod';
  * Timestamps are integer Unix milliseconds. Ids are UUIDv7 strings.
  */
 
-export const AGENT_KIND_RE = /^[a-z][a-z0-9-]{1,31}$/;
+/** Agent kind slugs. `repo-file` is reserved for {@link REPO_FILE_SOURCE}. */
+export const AGENT_KIND_RE = /^(?!repo-file$)[a-z][a-z0-9-]{1,31}$/;
 export const KNOWN_AGENT_KINDS = ['claude-code', 'codex', 'cursor', 'generic'] as const;
 /** Agent kinds are open-ended so community adapters can add their own, but must be slug-shaped. */
 export const AgentKindSchema = z.string().regex(AGENT_KIND_RE, 'invalid agent kind');
@@ -181,6 +182,30 @@ export interface MemorySource {
   type: SourceType;
   sessionId: string | null;
   agentKind: AgentKind | null;
+}
+
+/** Agent kind recorded for rules imported from a repository's instruction files. Reserved. */
+export const REPO_FILE_AGENT_KIND = 'repo-file';
+
+/**
+ * Source of rules imported from a repository's instruction files (AGENTS.md, CLAUDE.md, …). The
+ * repository is untrusted until the user approves a rule, so these are stored like agent proposals
+ * (never approved on creation), but no agent may edit them: only the user approves, edits or
+ * rejects them.
+ */
+export const REPO_FILE_SOURCE: MemorySource = Object.freeze({
+  type: 'agent',
+  sessionId: null,
+  agentKind: REPO_FILE_AGENT_KIND,
+});
+
+/** True for {@link REPO_FILE_SOURCE}. */
+export function isRepoFileSource(source: MemorySource): boolean {
+  return (
+    source.type === 'agent' &&
+    source.sessionId === null &&
+    source.agentKind === REPO_FILE_AGENT_KIND
+  );
 }
 
 export interface Memory {

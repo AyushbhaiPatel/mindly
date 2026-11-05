@@ -235,9 +235,22 @@ export class RulesFileService {
     return found.length > 0 ? found : ['AGENTS.md'];
   }
 
-  /** The approved, active, branch-independent rules of the project. */
+  /**
+   * The rules written to the files: active, branch-independent rules the user approved explicitly
+   * (see {@link MemoryService.userApprovedIds}). Rules auto-approved from a prompt's wording reach
+   * connected agents but are never committed to the repository until the user approves them.
+   */
   rules(projectId: string): Memory[] {
-    return this.memory
+    return this.partition(projectId).synced;
+  }
+
+  /** Approved rules left out of the files because the user has not approved them explicitly. */
+  awaitingApproval(projectId: string): Memory[] {
+    return this.partition(projectId).awaiting;
+  }
+
+  private partition(projectId: string): { synced: Memory[]; awaiting: Memory[] } {
+    const approved = this.memory
       .list(projectId, {
         kinds: ['rule'],
         trust: ['approved', 'verified'],
@@ -245,6 +258,11 @@ export class RulesFileService {
         limit: 1000,
       })
       .filter((m) => m.scope.branch === null);
+    const explicit = this.memory.userApprovedIds(projectId);
+    return {
+      synced: approved.filter((m) => explicit.has(m.id)),
+      awaiting: approved.filter((m) => !explicit.has(m.id)),
+    };
   }
 
   /**
@@ -379,6 +397,12 @@ export class RulesFileService {
       }
       const names = new Set([t.target, t.path, ...t.aliases]);
       const kept = rules.filter((r) => ![...(sources.get(r.id) ?? [])].some((f) => names.has(f)));
+      if (bounds === null && kept.length === 0 && rules.length > 0) {
+        // Every rule is already written in this file: a section would only say so. An existing
+        // section is kept (with that note) until sync is turned off.
+        out.push({ ...base, previous, next: previous, skipped: null });
+        continue;
+      }
       const section = renderRulesSection(kept, eolOf(previous ?? ''), rules.length - kept.length);
       const current = bounds ? (previous ?? '').slice(bounds.start, bounds.end) : null;
       const edited =

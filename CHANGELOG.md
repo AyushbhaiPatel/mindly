@@ -41,6 +41,31 @@ All notable changes to `mindly-cli` are documented here. The project follows
   repeated 20 times) are rejected when the contract is created, with a message saying why, instead
   of stalling evaluation on long lines. An existing contract with such a pattern reports why it
   cannot run, and `mindly doctor` lists it; add it again with a simpler pattern.
+- `mindly rules sync` with every approved rule already written in a file no longer adds a section
+  that only says so. An existing section keeps that note until `rules sync --off`.
+- A timing test of the `mindly hook` binary asserts the median and fastest of several cold starts
+  instead of the slowest, so machine load no longer fails it.
+
+### Security
+
+- Rule import from instruction files is linear in the file size. A crafted `AGENTS.md` (for
+  example a long line of `' **a'`) could make `mindly init` spend seconds to minutes in regex
+  backtracking; `init` also reads the files once instead of up to three times.
+- The rules section is found with CommonMark fence rules (closing fence of the same character and
+  at least the opener's length; indented code ignored). An unclosed or nested code fence used to
+  hide the markers, and every sync appended another section. A file that mentions the markers but
+  has no well-formed section is now left alone and reported as needing attention.
+- Rules imported from a repository's instruction files are labelled as coming from that file
+  (`from AGENTS.md`), not from the user, while they wait for approval; agents cannot edit them.
+  Rules you confirm during `init` are recorded as approved by you.
+- Rules sync writes only rules you approved explicitly (`memory add`, `rules --approve`, Mission
+  Control, or confirming an import). Rules auto-approved because a prompt said "always …" still
+  reach connected agents but are not committed to `AGENTS.md`/`CLAUDE.md` until you approve them;
+  `mindly rules sync` lists how many are waiting.
+- An imported rule file with one invalid glob keeps its valid globs instead of becoming
+  project-wide; a file with no valid glob is skipped.
+- Rule directories (`.cursor/rules`, …) that are links leading out of the project are no longer
+  scanned.
 
 ## 0.1.3 — 2026-11-04
 

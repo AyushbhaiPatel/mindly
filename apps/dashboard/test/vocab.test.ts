@@ -111,6 +111,10 @@ describe('status words', () => {
     expect(sourceWords({ type: 'agent', sessionId: null, agentKind: 'cursor' }, sessions)).toBe(
       'Cursor',
     );
+    // Rules imported from AGENTS.md and similar files are never shown as the user's.
+    expect(sourceWords({ type: 'agent', sessionId: null, agentKind: 'repo-file' }, sessions)).toBe(
+      'a repository file',
+    );
   });
 
   it('translates handoffs and runs', () => {

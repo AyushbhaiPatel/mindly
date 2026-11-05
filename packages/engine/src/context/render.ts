@@ -1,4 +1,10 @@
-import { sanitizeForContext, sanitizeLine, type Memory, type Trust } from '@mindly/core';
+import {
+  isRepoFileSource,
+  sanitizeForContext,
+  sanitizeLine,
+  type Memory,
+  type Trust,
+} from '@mindly/core';
 
 /*
  * Rendering of context packets. Everything Mindly puts in front of an agent goes through here, so
@@ -38,8 +44,21 @@ export function trustLabel(t: Trust): string {
   }
 }
 
+/** Body line Mindly writes for an imported rule; names the project file it came from. */
+const IMPORTED_FROM = /(?:^|\n)Imported from ([^\n]{1,300}), line \d+\.$/;
+
+/** The project file an imported rule came from, or null when its body no longer says. */
+export function importedFile(m: Memory): string | null {
+  const file = IMPORTED_FROM.exec(m.body)?.[1];
+  return file === undefined ? null : sanitizeLine(file, 120);
+}
+
 export function sourceLabel(m: Memory): string {
   if (m.source.type === 'user') return 'user';
+  if (isRepoFileSource(m.source)) {
+    const file = importedFile(m);
+    return file ? `from ${file}` : 'repository file';
+  }
   if (m.source.type === 'agent') return m.source.agentKind ?? 'agent';
   return m.source.type;
 }
@@ -48,7 +67,12 @@ export function sourceLabel(m: Memory): string {
 export function memoryLine(m: Memory, bodyChars = 280): string {
   const body = sanitizeForContext(m.body, bodyChars).replace(/\s*\n\s*/g, ' ');
   const title = sanitizeLine(m.title, 160);
-  const labels = [m.kind, trustLabel(m.trust), sourceLabel(m)];
+  // A rule imported from a repository file and not approved yet was not written by an agent.
+  const trust =
+    m.trust === 'proposed' && isRepoFileSource(m.source)
+      ? 'proposed, not approved by the user'
+      : trustLabel(m.trust);
+  const labels = [m.kind, trust, sourceLabel(m)];
   if (m.scope.paths.length) {
     labels.push(
       `applies to ${m.scope.paths

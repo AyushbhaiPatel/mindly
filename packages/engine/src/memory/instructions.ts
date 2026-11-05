@@ -54,6 +54,11 @@ const MAX_DIR_DEPTH = 3;
 const MAX_RULES_PER_FILE = 200;
 const MAX_RULE_CHARS = 1000;
 const MIN_RULE_CHARS = 12;
+/**
+ * Items and sentences longer than this can never become a rule, so they are skipped before any
+ * markdown is stripped from them: a hostile file cannot slow parsing down with one huge line.
+ */
+const MAX_ITEM_CHARS = 2 * MAX_RULE_CHARS;
 
 /** One rule found in an instruction file. */
 export interface InstructionRule {
@@ -79,8 +84,11 @@ export interface InstructionFile {
   path: string;
   agents: string;
   rules: InstructionRule[];
-  /** Why the file was not parsed: applied only on request, too large, or unreadable. */
-  skipped: 'manual' | 'too_large' | 'unreadable' | null;
+  /**
+   * Why the file was not parsed: applied only on request, too large, unreadable, or scoped to
+   * paths none of which Mindly can use.
+   */
+  skipped: 'manual' | 'too_large' | 'unreadable' | 'invalid_scope' | null;
 }
 
 /** Result of parsing one file's content. */
@@ -89,6 +97,8 @@ export interface ParsedInstructions {
   scopePaths: string[];
   /** The file is only applied when asked for (Cursor manual rules, Kiro `inclusion: manual`, …). */
   manual: boolean;
+  /** The file is scoped to globs, none of which is usable; it yields no rules. */
+  invalidScope: boolean;
 }
 
 /** Finds the instruction files at `root`, skipping deny-listed paths and links leaving the root. */
@@ -119,14 +129,34 @@ export function scanInstructionFiles(
     }
     if (source.dir !== true) {
       if (!isDir) add(abs, source.agents);
-    } else if (isDir) {
-      for (const file of listFiles(abs, source.ext ?? ['.md'], 0)) add(file, source.agents);
+    } else if (isDir && tryResolveInsideRoot(root, abs)) {
+      for (const file of listFiles(root, abs, source.ext ?? ['.md'], 0)) add(file, source.agents);
     }
   }
   return out;
 }
 
-function listFiles(dir: string, ext: readonly string[], depth: number): string[] {
+/**
+ * Whether the project has any instruction file or rules directory at all. Only checks that the
+ * paths exist (nothing is read or parsed), so callers can skip work for the many projects that
+ * have none.
+ */
+export function hasInstructionFiles(root: string): boolean {
+  return INSTRUCTION_SOURCES.some((source) => {
+    try {
+      const st = statSync(join(root, source.path));
+      return source.dir === true ? st.isDirectory() : st.isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Lists rule files under `dir`. A directory (or a link to one) is only entered when its real path
+ * stays inside `root`, so a link such as `.cursor/rules -> /` never walks the rest of the disk.
+ */
+function listFiles(root: string, dir: string, ext: readonly string[], depth: number): string[] {
   let entries: string[];
   try {
     entries = readdirSync(dir).sort();
@@ -145,8 +175,9 @@ function listFiles(dir: string, ext: readonly string[], depth: number): string[]
     } catch {
       continue;
     }
-    if (isDir && depth < MAX_DIR_DEPTH) out.push(...listFiles(abs, ext, depth + 1));
-    else if (isFile && ext.some((e) => name.toLowerCase().endsWith(e))) out.push(abs);
+    if (isDir && depth < MAX_DIR_DEPTH && tryResolveInsideRoot(root, abs)) {
+      out.push(...listFiles(root, abs, ext, depth + 1));
+    } else if (isFile && ext.some((e) => name.toLowerCase().endsWith(e))) out.push(abs);
     if (out.length >= MAX_FILES) break;
   }
   return out;
@@ -169,6 +200,7 @@ function readInstructionFile(abs: string, rel: string, agents: string): Instruct
   if (content === null) return { ...base, skipped: 'unreadable' };
   const parsed = parseInstructions(content);
   if (parsed.manual) return { ...base, skipped: 'manual' };
+  if (parsed.invalidScope) return { ...base, skipped: 'invalid_scope' };
   // Evidence excerpts are matched against the file read as UTF-8, so UTF-16 files keep only the
   // file and line as provenance.
   return {
@@ -250,12 +282,9 @@ export function parseInstructions(content: string): ParsedInstructions {
       continue;
     }
     if (inFence) continue;
-    let line = raw.replace(/<!--.*?-->/g, '');
-    if (line.includes('<!--')) {
-      inComment = true;
-      line = line.slice(0, line.indexOf('<!--'));
-    }
-    line = line.replace(/^\s{0,3}>\s?/, '');
+    const stripped = stripComments(raw);
+    inComment = stripped.open;
+    const line = stripped.text.replace(/^\s{0,3}>\s?/, '');
     const trimmed = line.trim();
     if (trimmed === '') {
       flush();
@@ -264,7 +293,7 @@ export function parseInstructions(content: string): ParsedInstructions {
     const setext = current === null && SETEXT.test(lines[i + 1] ?? '') && !BULLET.test(line);
     const atx = HEADING.exec(line);
     if (atx) {
-      breakBlock({ level: (atx[1] ?? '#').length, text: trimmed.replace(/^#+\s*|\s*#+$/g, '') });
+      breakBlock({ level: (atx[1] ?? '#').length, text: headingText(trimmed) });
       continue;
     }
     if (setext) {
@@ -311,22 +340,31 @@ export function parseInstructions(content: string): ParsedInstructions {
 
   const rules: Omit<InstructionRule, 'file'>[] = [];
   const headings: { level: number; text: string }[] = [];
+  /** The list items the current item is nested under, with their lead-in text (or null). */
+  const parents: { indent: number; leadIn: string | null }[] = [];
   let paragraphLeadIn: string | null = null;
   for (let i = 0; i < items.length && rules.length < MAX_RULES_PER_FILE; i++) {
     const item = items[i] as Item;
+    if (item.indent < 0) parents.length = 0;
     if (item.indent === -2) {
       if (item.heading) {
         const level = item.heading.level;
         while ((headings.at(-1)?.level ?? 0) >= level) headings.pop();
-        headings.push({ level, text: inline(item.heading.text) });
+        headings.push({ level, text: inline(bounded(item.heading.text)) });
       }
       paragraphLeadIn = null;
       continue;
     }
-    const text = inline(item.text);
+    // Text far longer than any rule is never a rule or a lead-in; it is not worth parsing.
+    const long = item.text.length > MAX_ITEM_CHARS;
+    const text = long ? '' : inline(item.text);
+    const leadIn = !long && isLeadIn(text);
+    while (parents.length > 0 && (parents.at(-1)?.indent ?? -1) >= item.indent) parents.pop();
+    const ancestors = parents.flatMap((p) => (p.leadIn === null ? [] : [p.leadIn]));
+    if (item.indent >= 0) parents.push({ indent: item.indent, leadIn: leadIn ? bare(text) : null });
     const next = items[i + 1];
     // A lead-in ("When writing tests:", "Never do these:") is folded into the items under it.
-    if (next !== undefined && next.indent > item.indent && isLeadIn(text)) {
+    if (next !== undefined && next.indent > item.indent && leadIn) {
       if (item.indent === -1) paragraphLeadIn = bare(text);
       continue;
     }
@@ -336,15 +374,20 @@ export function parseInstructions(content: string): ParsedInstructions {
     const context = [
       ...headings.filter((h) => negating(h.text)).map((h) => bare(h.text)),
       ...(item.indent >= 0 && paragraphLeadIn ? [paragraphLeadIn] : []),
-      ...ancestorLeadIns(items, i),
+      ...ancestors,
     ];
     const prefix = context.length > 0 ? `${context.join(': ')}:` : null;
     const pieces = item.rows ? sentences(item.text) : [{ text: item.text, at: 0 }];
+    let row = 0;
     for (const piece of pieces) {
+      if (rules.length >= MAX_RULES_PER_FILE) break;
+      // Pieces come in order, so the row a piece starts on only ever moves forward.
+      while (item.rows && (item.rows[row + 1]?.at ?? Infinity) <= piece.at) row++;
+      if (piece.text.length > MAX_ITEM_CHARS) continue;
       const body = inline(piece.text);
       const full = prefix ? `${prefix} ${lowerFirst(body)}` : body;
       if (!keep(full)) continue;
-      const source = item.rows?.filter((r) => r.at <= piece.at).at(-1) ?? item;
+      const source = item.rows?.[row] ?? item;
       rules.push({
         line: source.line,
         text: full,
@@ -354,7 +397,14 @@ export function parseInstructions(content: string): ParsedInstructions {
       });
     }
   }
-  return { rules, scopePaths: meta.scopePaths, manual: meta.manual };
+  // Rules whose scope cannot be kept are not imported: they would otherwise apply everywhere.
+  if (meta.invalidScope) rules.length = 0;
+  return {
+    rules,
+    scopePaths: meta.scopePaths,
+    manual: meta.manual,
+    invalidScope: meta.invalidScope,
+  };
 }
 
 /** Blanks Mindly's own rules section, keeping its line breaks so line numbers stay right. */
@@ -363,21 +413,6 @@ function withoutManagedSection(content: string): string {
   if (bounds === null || bounds === 'damaged') return content;
   const section = content.slice(bounds.start, bounds.end).replace(/[^\n]/g, '');
   return content.slice(0, bounds.start) + section + content.slice(bounds.end);
-}
-
-/** Lead-ins of the list items a nested item sits under, outermost first. */
-function ancestorLeadIns(items: readonly Item[], index: number): string[] {
-  const out: string[] = [];
-  let indent = (items[index] as Item).indent;
-  for (let j = index - 1; j >= 0 && indent > 0; j--) {
-    const p = items[j] as Item;
-    if (p.indent < 0) break;
-    if (p.indent >= indent) continue;
-    indent = p.indent;
-    const text = inline(p.text);
-    if (isLeadIn(text)) out.unshift(bare(text));
-  }
-  return out;
 }
 
 /** Text that introduces the items below it rather than stating a rule of its own. */
@@ -404,14 +439,95 @@ function words(text: string): number {
 
 /** Removes emphasis and link syntax, keeping code spans as written. */
 function inline(text: string): string {
-  return text
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label: string, url: string) =>
-      label === url ? url : `${label} (${url})`,
-    )
-    .replace(/(\*\*|__)(\S(?:.*?\S)?)\1/g, '$2')
+  return stripStrong(
+    text
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label: string, url: string) =>
+        label === url ? url : `${label} (${url})`,
+      ),
+  )
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** `text` cut to {@link MAX_ITEM_CHARS}; used for headings, which are only context. */
+function bounded(text: string): string {
+  return text.length > MAX_ITEM_CHARS ? text.slice(0, MAX_ITEM_CHARS) : text;
+}
+
+const SPACE = /\s/;
+const LINE_BREAK = /[\n\r\u2028\u2029]/;
+
+/**
+ * Removes `**strong**` and `__strong__` markers. Gives the same result as replacing
+ * `/(\*\*|__)(\S(?:.*?\S)?)\1/g` with `$2`, but in linear time: every possible closing marker
+ * (one after a non-space character) is listed once up front, so looking for the closer of an
+ * opener never rescans the text. The regex is quadratic on text such as `' **a'` repeated.
+ * Exported for tests.
+ */
+export function stripStrong(text: string): string {
+  const closers: Record<string, number[]> = { '**': [], __: [] };
+  const nextCloser: Record<string, number> = { '**': 0, __: 0 };
+  for (let k = 1; k + 1 < text.length; k++) {
+    const pair = text.slice(k, k + 2);
+    if ((pair === '**' || pair === '__') && !SPACE.test(text.charAt(k - 1))) {
+      closers[pair]?.push(k);
+    }
+  }
+  // `.` in the regex stops at line breaks: an opener never pairs with a closer past one.
+  const breaks: number[] = [];
+  for (let k = 0; k < text.length; k++) if (LINE_BREAK.test(text.charAt(k))) breaks.push(k);
+  let nextBreak = 0;
+  let out = '';
+  let copied = 0;
+  let i = 0;
+  while (i + 2 < text.length) {
+    const pair = text.slice(i, i + 2);
+    const list = closers[pair];
+    if (list && !SPACE.test(text.charAt(i + 2))) {
+      let n = nextCloser[pair] ?? 0;
+      // Like the regex's greedy `(?:.*?\S)?`: the nearest closer leaving at least two characters
+      // of content (from i + 4), and only without one a single character of content (i + 3).
+      while (n < list.length && (list[n] as number) < i + 4) n++;
+      nextCloser[pair] = n;
+      while (nextBreak < breaks.length && (breaks[nextBreak] as number) < i + 2) nextBreak++;
+      const limit = breaks[nextBreak] ?? Infinity;
+      let close = list[n];
+      if (close === undefined || close > limit) {
+        close = text.startsWith(pair, i + 3) ? i + 3 : undefined;
+      }
+      if (close !== undefined) {
+        out += text.slice(copied, i) + text.slice(i + 2, close);
+        i = close + 2;
+        copied = i;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out + text.slice(copied);
+}
+
+/** Removes HTML comments in linear time; `open` is true when a comment continues past the line. */
+function stripComments(line: string): { text: string; open: boolean } {
+  let out = '';
+  let at = 0;
+  for (;;) {
+    const start = line.indexOf('<!--', at);
+    if (start < 0) return { text: out + line.slice(at), open: false };
+    out += line.slice(at, start);
+    const end = line.indexOf('-->', start + 4);
+    if (end < 0) return { text: out, open: true };
+    at = end + 3;
+  }
+}
+
+/** An ATX heading's text without its `#` markers, in linear time. */
+function headingText(line: string): string {
+  const text = line.replace(/^#+\s*/, '');
+  let end = text.length;
+  while (end > 0 && text.charAt(end - 1) === '#') end--;
+  return end === text.length ? text : text.slice(0, end).trimEnd();
 }
 
 /** Splits a paragraph into sentences; "e.g." and similar abbreviations stay intact. */
@@ -454,11 +570,13 @@ interface FrontMatter {
   bodyStart: number;
   scopePaths: string[];
   manual: boolean;
+  /** The front matter names globs, but none of them is usable. */
+  invalidScope: boolean;
 }
 
 /** Reads the YAML front matter of Cursor, Windsurf, Kiro and Copilot rule files. */
 function frontMatter(lines: readonly string[]): FrontMatter {
-  const none: FrontMatter = { bodyStart: 0, scopePaths: [], manual: false };
+  const none: FrontMatter = { bodyStart: 0, scopePaths: [], manual: false, invalidScope: false };
   if ((lines[0] ?? '').trim() !== '---') return none;
   const end = lines.findIndex((l, i) => i > 0 && i < 60 && l.trim() === '---');
   if (end < 0) return none;
@@ -478,18 +596,23 @@ function frontMatter(lines: readonly string[]): FrontMatter {
   const globs = ['globs', 'applyto', 'filematchpattern']
     .flatMap((k) => fields.get(k) ?? [])
     .filter((g) => !['**', '**/*', '*'].includes(g));
-  let scopePaths: string[];
-  try {
-    scopePaths = cleanScopePaths(globs);
-  } catch {
-    scopePaths = [];
-  }
+  // A glob Mindly cannot use (absolute, leaving the project, malformed) is dropped on its own; the
+  // file's other globs still apply. Dropping all of them would widen the rules to the whole
+  // project, so then the file is not imported at all.
+  const scopePaths = globs.flatMap((g) => {
+    try {
+      return cleanScopePaths([g]);
+    } catch {
+      return [];
+    }
+  });
   const manual =
     one('inclusion') === 'manual' ||
     one('trigger') === 'manual' ||
     one('trigger') === 'model_decision' ||
     (one('alwaysapply') === 'false' && globs.length === 0);
-  return { bodyStart: end + 1, scopePaths, manual };
+  const invalidScope = globs.length > 0 && scopePaths.length === 0;
+  return { bodyStart: end + 1, scopePaths: scopePaths.slice(0, 20), manual, invalidScope };
 }
 
 function yamlList(value: string): string[] {

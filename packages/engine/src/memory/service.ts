@@ -4,6 +4,7 @@ import {
   hasUnsafeChars,
   invalidInput,
   isDeniedPath,
+  isRepoFileSource,
   normalizeLine,
   redactText,
   sanitizeForContext,
@@ -192,7 +193,7 @@ export class MemoryService {
     if (input.kind === 'fact' && substantial && trust === 'proposed') trust = 'verified';
 
     const existing = this.findSameTitle(input.projectId, input.kind, title, input.branch ?? null);
-    if (existing && existing.source.type === 'user' && input.source.type !== 'user') {
+    if (existing && agentLocked(existing) && input.source.type !== 'user') {
       // Restating a user memory would otherwise let an agent rewrite it while keeping user trust.
       throw new MindlyError(
         'forbidden',
@@ -301,7 +302,13 @@ export class MemoryService {
     };
   }
 
-  update(id: string, patch: MemoryPatch, by: MemorySource, reason: string | null): Memory {
+  update(
+    id: string,
+    patch: MemoryPatch,
+    by: MemorySource,
+    reason: string | null,
+    record = false,
+  ): Memory {
     const cur = this.k.store.memories.get(id);
     const clean: MemoryPatch = { ...patch };
     if (patch.title !== undefined) clean.title = sanitizeLine(redactText(patch.title), MAX_TITLE);
@@ -312,15 +319,14 @@ export class MemoryService {
     }
     if (by.type !== 'user') {
       // Agents may refine content of their own proposals but cannot change trust or enforcement.
-      if (cur.source.type === 'user')
-        throw new MindlyError('forbidden', 'agents cannot edit user memories');
+      if (agentLocked(cur)) throw new MindlyError('forbidden', 'agents cannot edit user memories');
       delete clean.trust;
       delete clean.enforce;
       delete clean.pinned;
       if (patch.status === 'archived' && cur.source.sessionId !== by.sessionId) delete clean.status;
     }
     if (clean.enforce && cur.kind !== 'rule') delete clean.enforce;
-    const m = this.k.store.memories.update(id, clean, by, reason);
+    const m = this.k.store.memories.update(id, clean, by, reason, record && by.type === 'user');
     this.k.store.events.append({
       projectId: m.projectId,
       sessionId: by.sessionId,
@@ -331,8 +337,21 @@ export class MemoryService {
     return m;
   }
 
+  /**
+   * The user's explicit approval. Always recorded as a version written by the user, even when the
+   * memory was approved already (a rule captured from a prompt), because rules file sync only
+   * writes rules the user approved this way (see {@link userApprovedIds}).
+   */
   approve(id: string): Memory {
-    return this.update(id, { trust: 'approved' }, USER, 'approved by user');
+    return this.update(id, { trust: 'approved' }, USER, 'approved by user', true);
+  }
+
+  /**
+   * Ids of the project's memories the user approved explicitly: added or approved with the CLI,
+   * in Mission Control or by confirming an import, as opposed to auto-approved from a prompt.
+   */
+  userApprovedIds(projectId: string): Set<string> {
+    return this.k.store.memories.userApprovedIds(projectId);
   }
 
   reject(id: string): Memory {
@@ -379,6 +398,14 @@ export class MemoryService {
   list(projectId: string, filter: MemoryFilter = {}): Memory[] {
     return this.k.store.memories.list(projectId, filter);
   }
+}
+
+/**
+ * Memories only the user may change: their own, and rules imported from the repository's
+ * instruction files (which wait for the user's approval and must not be rewritten by an agent).
+ */
+function agentLocked(m: Memory): boolean {
+  return m.source.type === 'user' || isRepoFileSource(m.source);
 }
 
 export const USER: MemorySource = { type: 'user', sessionId: null, agentKind: null };

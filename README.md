@@ -127,7 +127,9 @@ so review the diff before you commit. Mindly writes only between `<!-- mindly:ru
 `<!-- mindly:rules:end -->`, and everything else in the file stays exactly as you wrote it. Each
 rule is one bullet with its details, path-scoped rules are grouped under the paths they apply to,
 and re-syncing unchanged rules changes nothing. A rule imported from a file is not repeated in that
-file. Edits inside the section are replaced (with a warning), so change rules with `mindly rules`
+file. Only rules you approved yourself are written: a rule Mindly picked up from a prompt ("always
+use pnpm") reaches your connected agents right away but goes into the files only after
+`mindly rules --approve <id>`. Edits inside the section are replaced (with a warning), so change rules with `mindly rules`
 or in Mission Control. Each linked git worktree is turned on separately and gets its own copy.
 `mindly rules sync --off` removes the section from the current checkout; `mindly uninstall`
 removes it everywhere.

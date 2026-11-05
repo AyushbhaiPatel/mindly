@@ -2,6 +2,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import { defaultUserConfig, homePaths, mindlyHome } from '@mindly/core';
 import {
   dedupeRules,
+  hasInstructionFiles,
   scanInstructionFiles,
   type InstructionFile,
   type InstructionImportPlan,
@@ -41,7 +42,8 @@ export async function offerRuleImport(
     root = realpathSync(out.io.cwd);
   }
   // Most repositories have none of these files: do not open storage or register anything for them.
-  if (from === 'init' && scanInstructionFiles(root).length === 0) return 0;
+  // Only checks that the paths exist; the files are read and parsed once, for the plan below.
+  if (from === 'init' && !hasInstructionFiles(root)) return 0;
   if (o.dryRun) return present(out, dryRunPlan(out, root), o, from, null);
   return withProject(out.io, ({ mindly, project }) => {
     const pid = project.project.id;
@@ -159,6 +161,8 @@ function fileWords(f: InstructionFile): string {
       return `${f.agents} · skipped: file is too large`;
     case 'unreadable':
       return `${f.agents} · skipped: not readable as text`;
+    case 'invalid_scope':
+      return `${f.agents} · skipped: none of the paths it applies to is a valid project path`;
     case null:
       return `${f.agents} · ${count(f.rules.length, 'rule')}${scope.length ? ` for ${scope.join(', ')}` : ''}`;
   }

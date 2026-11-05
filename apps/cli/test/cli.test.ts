@@ -288,6 +288,10 @@ describe('rule import', () => {
       const rules = await ruleTitles(sb);
       expect(rules.approved).toEqual([]);
       expect(rules.proposed.sort()).toEqual([injected, 'Run the linter before every commit']);
+      // Shown as coming from the file, never as the user's own rules.
+      const listed = (await cli(sb, ['rules'])).stdout.replace(/\s+/g, ' ');
+      expect(listed).toContain('imported from a repository file, waiting for you');
+      expect(listed).not.toContain('approved by you');
     }
   });
 
@@ -449,14 +453,23 @@ describe('hook', () => {
   });
 
   it('cold in-process hook latency stays well under a second', async () => {
-    const sb = sandbox();
-    const payload = JSON.stringify({ ...fixture('claude-code.SessionStart'), cwd: sb.repo });
-    const started = performance.now();
-    const r = await cli(sb, ['hook', 'claude-code', 'SessionStart'], { stdin: payload });
-    const ms = performance.now() - started;
-    expect(r.code).toBe(0);
-    console.info(`cold in-process hook (new home, migrations, git): ${ms.toFixed(0)} ms`);
-    expect(ms).toBeLessThan(1000);
+    // Three cold starts, each with a new home (migrations, git). The fastest and the median are
+    // asserted, so one run slowed by machine load does not fail the suite.
+    const times: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const sb = sandbox();
+      const payload = JSON.stringify({ ...fixture('claude-code.SessionStart'), cwd: sb.repo });
+      const started = performance.now();
+      const r = await cli(sb, ['hook', 'claude-code', 'SessionStart'], { stdin: payload });
+      times.push(performance.now() - started);
+      expect(r.code).toBe(0);
+    }
+    console.info(
+      `cold in-process hook (new home, migrations, git): ${times.map((t) => t.toFixed(0)).join(' / ')} ms`,
+    );
+    const sorted = [...times].sort((a, b) => a - b);
+    expect(sorted[0]).toBeLessThan(1000);
+    expect(sorted[1]).toBeLessThan(1500);
   });
 });
 
@@ -488,7 +501,11 @@ describe.skipIf(!existsSync(BUILT_MAIN))('built binary', () => {
         .map((t) => t.toFixed(0))
         .join(' / ')} ms`,
     );
-    expect(Math.max(...times)).toBeLessThan(1500);
+    // The median and the fastest run, not the slowest: one start delayed by machine load must not
+    // fail the suite, while a hook that is slow every time still does.
+    const sorted = [...times].sort((a, b) => a - b);
+    expect(sorted[Math.floor(sorted.length / 2)]).toBeLessThan(1500);
+    expect(sorted[0]).toBeLessThan(1000);
   });
 
   it('malformed stdin to the binary exits 0 with no output', () => {

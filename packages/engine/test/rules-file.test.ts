@@ -29,7 +29,7 @@ import {
   writeSection,
 } from '../src/index.js';
 import { featureSetup } from './features/fixtures.js';
-import { setup } from './helpers.js';
+import { event, setup } from './helpers.js';
 
 function rule(title: string, paths: string[] = [], id = title, body = ''): Memory {
   return { id, title, body, scope: { paths, branch: null } } as unknown as Memory;
@@ -158,13 +158,41 @@ describe('managed section editing', () => {
 
   it('ignores markers in code blocks and refuses damaged markers', () => {
     const fenced = `# Docs\n\n\`\`\`md\n${RULES_START}\n${RULES_END}\n\`\`\`\n`;
-    expect(findSection(fenced)).toBeNull();
+    // Markers only inside code: not a section, and never safe to append another one.
+    expect(findSection(fenced)).toBe('damaged');
+    expect(findSection(`${fenced}\n${sec}\n`)).toEqual({
+      start: fenced.length + 1,
+      end: fenced.length + 1 + sec.length,
+    });
+    expect(findSection('# Plain notes\n')).toBeNull();
     expect(findSection(`${RULES_START}\n- a\n`)).toBe('damaged');
     expect(findSection(`${RULES_END}\n${RULES_START}\n`)).toBe('damaged');
     expect(findSection(`${RULES_START}\n${RULES_END}\n${RULES_START}\n${RULES_END}\n`)).toBe(
       'damaged',
     );
     expect(stripManagedSection(`a\n${sec}\nb\n`)).toBe('a\n\nb\n');
+  });
+
+  it('follows CommonMark fences: same character, closer at least as long, up to 3 spaces', () => {
+    const at = (before: string): number => before.length;
+    // A ```` block containing a ``` line is still open at the ``` line.
+    const nested = '````md\n```\nexample\n```\n````\n\n';
+    expect(findSection(nested + sec)).toEqual({ start: at(nested), end: at(nested) + sec.length });
+    // ~~~ does not close a ``` fence, and a fence indented by up to 3 spaces counts.
+    const mixed = '   ```\n~~~\n```\n\n';
+    expect(findSection(mixed + sec)).toEqual({ start: at(mixed), end: at(mixed) + sec.length });
+    // An unclosed fence runs to the end of the file: the markers after it are code.
+    expect(findSection(`\`\`\`\nunclosed\n\n${sec}\n`)).toBe('damaged');
+    // ``` with a backtick in its info string is inline code, not a fence.
+    const inline = '``` a ` b\n\n';
+    expect(findSection(inline + sec)).toEqual({ start: at(inline), end: at(inline) + sec.length });
+    // Markers in an indented code block (4+ spaces) are not markers.
+    const indented = `Example:\n\n    ${RULES_START}\n    ${RULES_END}\n\n`;
+    expect(findSection(indented + sec)).toEqual({
+      start: at(indented),
+      end: at(indented) + sec.length,
+    });
+    expect(findSection(indented)).toBe('damaged');
   });
 });
 
@@ -318,6 +346,87 @@ describe('rules file sync', () => {
     expect(readFileSync(join(outside, 'elsewhere.md'), 'utf8')).toBe('# Elsewhere\n');
   });
 
+  it('never adds a second section to a file with unbalanced or nested fences', () => {
+    const p = project();
+    p.add('Use pnpm, never npm');
+    p.files.sync(p.pid, p.root);
+    const synced = section(p.read('AGENTS.md'));
+    const files: Record<string, string> = {
+      // An unclosed fence before the section hides its markers.
+      unclosed: `# Agents\n\n\`\`\`sh\npnpm test\n\n${synced}\n`,
+      // A ``` line inside a ```` block toggled the old parser out of the fence.
+      nested: `# Agents\n\n\`\`\`\`md\n\`\`\`\nexample\n\`\`\`\`\n\n${synced}\n`,
+      // A start marker shown in indented code, then the real section.
+      indented: `# Agents\n\n    ${RULES_START}\n\n${synced}\n`,
+    };
+    for (const [name, text] of Object.entries(files)) {
+      writeFileSync(join(p.root, 'AGENTS.md'), text);
+      for (let i = 0; i < 3; i++) {
+        p.files.sync(p.pid, p.root);
+        p.add(`Rule number ${i} for the ${name} file`);
+        p.files.refresh(p.pid);
+      }
+      const after = p.read('AGENTS.md');
+      const starts = after.split('\n').filter((l) => l === RULES_START).length;
+      expect(starts, name).toBeLessThanOrEqual(1);
+      if (name === 'unclosed') {
+        // The section cannot be recognised: the file is reported and left alone.
+        expect(after, name).toBe(text);
+        expect(p.files.planSync(p.pid, p.root)[0]?.skipped).toBe('damaged');
+      } else {
+        expect(section(after), name).toContain(`- Rule number 2 for the ${name} file`);
+      }
+    }
+  });
+
+  it('writes only rules the user approved explicitly, not ones auto-approved from a prompt', async () => {
+    const p = project();
+    writeFileSync(join(p.root, 'AGENTS.md'), '# Agents\n');
+    p.add('Use pnpm, never npm');
+    p.files.sync(p.pid, p.root);
+    await p.mindly.hooks.handle(event(p.root, 'claude-code', 'cc', 'session_start'));
+    await p.mindly.hooks.handle(
+      event(p.root, 'claude-code', 'cc', 'prompt', {
+        prompt: 'From now on always run the linter before every commit.',
+      }),
+    );
+    const captured = p.mindly.memory
+      .list(p.pid, { kinds: ['rule'] })
+      .find((m) => m.tags.includes('say-it-once'));
+    // Auto-approved for connected agents, but not committed to the repository.
+    expect(captured?.trust).toBe('approved');
+    expect(p.read('AGENTS.md')).not.toContain('linter');
+    expect(p.files.rules(p.pid).map((m) => m.title)).toEqual(['Use pnpm, never npm']);
+    expect(p.files.awaitingApproval(p.pid).map((m) => m.id)).toEqual([captured?.id]);
+
+    // `mindly rules --approve`, Mission Control and an import confirmation all call approve().
+    p.mindly.memory.approve(captured!.id);
+    expect(section(p.read('AGENTS.md'))).toContain('linter before every commit');
+    expect(p.files.awaitingApproval(p.pid)).toEqual([]);
+  });
+
+  it('does not add a section that would only say every rule is already in the file', () => {
+    const p = project();
+    const agents = '# Agents\n\n- Keep commits small and focused.\n';
+    writeFileSync(join(p.root, 'AGENTS.md'), agents);
+    const plan = p.mindly.rules.planImport(p.pid, p.root);
+    p.mindly.rules.importRules(p.pid, p.root, plan.fresh, 'approved');
+    const changes = p.files.sync(p.pid, p.root);
+    expect(changes[0]).toMatchObject({ path: 'AGENTS.md', skipped: null, next: agents });
+    expect(p.read('AGENTS.md')).toBe(agents);
+    expect(p.files.enabledFiles(p.pid, p.root)).toEqual(['AGENTS.md']);
+
+    // A rule from elsewhere adds the section; once it is gone again the section stays, with a note.
+    const other = p.add('Use pnpm, never npm');
+    expect(section(p.read('AGENTS.md'))).toContain('- Use pnpm, never npm');
+    p.mindly.memory.archive(other.id);
+    expect(section(p.read('AGENTS.md'))).toContain(
+      '_Every approved rule is already written elsewhere in this file._',
+    );
+    p.files.remove(p.pid, p.root);
+    expect(p.read('AGENTS.md')).toBe(agents);
+  });
+
   it('is never imported back and is not evidence for the rules it lists', () => {
     const p = project();
     writeFileSync(join(p.root, 'AGENTS.md'), '# Agents\n\n- Keep commits small and focused.\n');
@@ -343,10 +452,8 @@ describe('rules file sync', () => {
     mindly.rules.importRules(pid, root, plan.fresh, 'approved');
     mindly.rulesFile.sync(pid, root);
     const read = (f: string): string => readFileSync(join(root, f), 'utf8');
-    expect(section(read('AGENTS.md'))).toContain(
-      '_Every approved rule is already written elsewhere in this file._',
-    );
-    expect(read('AGENTS.md').match(/Keep commits small/g)).toHaveLength(1);
+    // Every rule is already in AGENTS.md: no section there yet.
+    expect(read('AGENTS.md')).toBe(agents);
     expect(section(read('GEMINI.md'))).toContain('- Use pnpm, never npm or yarn\n');
 
     mindly.memory.remember({

@@ -120,11 +120,29 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   and their prompts are never captured as rules. Headless Claude Code runs load only user settings.
 - Rules imported from a repository's instruction files (`CLAUDE.md`, `AGENTS.md`, …) are approved
   only when the user confirms the list on a terminal; with `--yes` or without a terminal they are
-  added as suggestions that wait for approval, and they are never `enforce` rules.
-- Rules sync is opt-in per project and asks before its first write. It writes only approved rules,
-  only between Mindly's markers in `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` inside the project, and
-  rule text cannot close the section. Rule import and evidence checks ignore that section, so
-  Mindly never treats its own output as the user's instructions or as proof of a rule.
+  added as suggestions that wait for approval, and they are never `enforce` rules. Their source is
+  the repository file (`{ type: 'agent', agentKind: 'repo-file', sessionId: null }`, an agent kind
+  no real agent may use), so agents see them labelled "from AGENTS.md", never as the user's. No
+  agent can edit, restate or archive them; a confirmed import is recorded as the user's approval.
+- Instruction file import is linear in the file size: items and sentences longer than twice the
+  rule length cap are skipped before any markdown is stripped, emphasis and comments are removed
+  without backtracking regexes, and each `mindly init` reads the files once. A file scoped to globs
+  keeps only its valid globs, and is skipped when none is valid, so its rules never widen to the
+  whole project. Rule directories are only entered when their real path stays inside the project.
+- Rules sync is opt-in per project and asks before its first write. It writes only rules the user
+  approved explicitly, only between Mindly's markers in `AGENTS.md`, `CLAUDE.md` and `GEMINI.md`
+  inside the project, and rule text cannot close the section. A rule counts as explicitly approved
+  when one of its versions was written as approved by the user outside any agent session
+  (`changed_by_type = 'user'` with no session): `mindly memory add`, `mindly rules --approve`,
+  `mindly memory approve`, Mission Control, or confirming an import. Rules auto-approved because a
+  prompt said "always …" are sent to connected agents but are not committed to the repository
+  until the user approves them; approving an already approved rule still records a version.
+- The section's markers are only recognised outside code, following CommonMark: a fence closes only
+  on a run of the same character at least as long as the opener, an unclosed fence runs to the end
+  of the file, and indented code is ignored. A file that contains a marker but no well-formed
+  section is reported as needing attention and never written, so a section is never appended twice.
+  Rule import and evidence checks ignore the section, so Mindly never treats its own output as the
+  user's instructions or as proof of a rule.
 - Failed command output is never stored or replayed; mistake memories keep only the command.
 - Trusting a project config requires the hash the user reviewed; a changed file is refused.
 - Config files are read with `lstat` + `O_NOFOLLOW | O_NONBLOCK` and a byte cap, so a config that
