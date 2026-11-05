@@ -22,7 +22,7 @@ const SKIP_WORDS: Record<RulesFileSkip, string> = {
   broken_link: 'skipped: it is a broken link',
   unreadable: 'skipped: not readable as UTF-8 text',
   damaged:
-    'skipped, needs attention: its Mindly markers are incomplete, repeated or inside a code block; fix or remove them',
+    'skipped, needs attention: its Mindly markers are incomplete, repeated or inside a code block, or the file ends inside an unclosed code block (```); fix it, then sync again',
   changed: 'skipped: it changed while Mindly was writing; run the command again',
   unwritable: 'skipped: Mindly could not write it',
 };

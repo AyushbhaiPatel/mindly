@@ -566,3 +566,12 @@ describe('rules file sync', () => {
     expect(p.read('AGENTS.md')).not.toContain('British English');
   });
 });
+
+describe('file ending inside an unclosed code block', () => {
+  it('is never appended to, so the section cannot land inside the code block', async () => {
+    const { findSection } = await import('../src/memory/managed-section.js');
+    expect(findSection('# Notes\n\n```js\nunclosed fence\n')).toBe('damaged');
+    expect(findSection('# Notes\n\n```js\nclosed\n```\n')).toBeNull();
+    expect(findSection('~~~~\ninner ~~~\n')).toBe('damaged');
+  });
+});

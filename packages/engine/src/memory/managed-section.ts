@@ -35,7 +35,8 @@ function isMarker(line: string, marker: string): boolean {
  *
  * Returns null when the text has no marker at all, and 'damaged' when the markers are not exactly
  * one start followed by one end, or when the marker text appears in the file but not as a section
- * (for example inside a code block that is never closed). A damaged file is never written to, so
+ * (for example inside a code block that is never closed), or when there is no section and the file
+ * ends inside an unclosed code block. A damaged file is never written to, so
  * Mindly cannot append a second section to a file whose existing one it fails to recognise.
  */
 export function findSection(text: string): SectionBounds | null | 'damaged' {
@@ -63,7 +64,9 @@ export function findSection(text: string): SectionBounds | null | 'damaged' {
     at = nl + 1;
   }
   const mentioned = text.includes(RULES_START) || text.includes(RULES_END);
-  if (starts.length === 0 && ends.length === 0) return mentioned ? 'damaged' : null;
+  // A file that ends inside an unclosed code block cannot take a new section: appended at the end,
+  // it would land inside the code block, where agents read it as code and later syncs refuse it.
+  if (starts.length === 0 && ends.length === 0) return mentioned || fence ? 'damaged' : null;
   const [s] = starts;
   const [e] = ends;
   if (starts.length !== 1 || ends.length !== 1 || !s || !e || e.start < s.end) return 'damaged';
