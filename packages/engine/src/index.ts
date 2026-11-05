@@ -7,7 +7,7 @@ export {
   sessionLabel,
   type OverlapReport,
 } from './coordination/work.js';
-export { HookHandler } from './hooks/handler.js';
+export { HookHandler, type WriteGuard, type WriteGuardResult } from './hooks/handler.js';
 export * from './kernel.js';
 export { commandKey, MistakeService } from './memory/mistakes.js';
 export {

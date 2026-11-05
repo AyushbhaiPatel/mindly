@@ -26,6 +26,9 @@ import type {
   SavesResult,
   Session,
   Snapshot,
+  Split,
+  SplitDetail,
+  SplitPart,
   MindlyEvent,
   Task,
   Trust,
@@ -642,8 +645,138 @@ const handoffs: Handoff[] = [
   },
 ];
 
+const SPLIT_ID = uid();
+const tSplit = task(P1, 'Add billing: API, webhook handler, dashboard page', 'in_progress', null);
+const tApi = task(P1, 'Billing API', 'done', sClaude);
+const tWebhook = task(P1, 'Stripe webhook handler', 'in_progress', sCodex);
+const tPage = task(P1, 'Billing page', 'open', null);
+tasks.push(tSplit, tApi, tWebhook, tPage);
+function part(
+  key: string,
+  position: number,
+  title: string,
+  agentKind: string,
+  owns: string[],
+  dependsOn: string[],
+  brief: string,
+  taskId: string,
+): SplitPart {
+  return {
+    id: uid(),
+    splitId: SPLIT_ID,
+    projectId: P1,
+    key,
+    position,
+    title,
+    agentKind,
+    owns,
+    reads: ['src/billing/types.ts'],
+    dependsOn,
+    brief,
+    worktree: `/Users/dev/code/payments-api.mindly/billing-${key}`,
+    branch: `mindly/billing/${key}`,
+    taskId,
+    handoffId: uid(),
+    createdAt: NOW - 50 * MIN,
+  };
+}
+const splitParts: SplitPart[] = [
+  part(
+    'api',
+    0,
+    'Billing API',
+    'claude-code',
+    ['src/api/billing/**'],
+    [],
+    'Add GET /api/billing returning { plan, status, renewsAt } and the Stripe customer lookup behind it.',
+    tApi.id,
+  ),
+  part(
+    'webhook',
+    1,
+    'Stripe webhook handler',
+    'codex',
+    ['src/webhooks/stripe/**'],
+    ['api'],
+    'Handle invoice.paid and customer.subscription.updated; verify signatures; update the plan through the billing API.',
+    tWebhook.id,
+  ),
+  part(
+    'page',
+    2,
+    'Billing page',
+    'cursor',
+    ['src/app/billing/**'],
+    ['api'],
+    'Show the current plan, status and renewal date from GET /api/billing; link to the Stripe portal.',
+    tPage.id,
+  ),
+];
+const splitContractMemoryId = uid();
+const splits: Split[] = [
+  {
+    id: SPLIT_ID,
+    projectId: P1,
+    slug: 'billing',
+    goal: 'Add billing: API, webhook handler, dashboard page',
+    status: 'active',
+    taskId: tSplit.id,
+    baseCommit: '7f3a1c9e2b4d5a6f7e8d9c0b1a2f3e4d5c6b7a89',
+    baseBranch: 'main',
+    strict: false,
+    worktreeRoot: '/Users/dev/code/payments-api.mindly',
+    integrationBranch: null,
+    contract: [
+      {
+        name: 'GET /api/billing',
+        owner: 'api',
+        definition:
+          'Returns { plan: string, status: "active" | "past_due" | "canceled", renewsAt: string | null }.',
+        memoryId: splitContractMemoryId,
+      },
+    ],
+    plannedBy: 'claude-code',
+    createdAt: NOW - 50 * MIN,
+    updatedAt: NOW - 10 * MIN,
+    finishedAt: null,
+  },
+];
+
 const tail = (lines: string[]) => lines.join('\n');
 const runs: Run[] = [
+  {
+    id: uid(),
+    projectId: P1,
+    kind: 'shadow_merge',
+    status: 'passed',
+    title: 'Merge check of split "Add billing: API, webhook handler, dashboard page"',
+    input: { trigger: 'user', splitId: SPLIT_ID },
+    result: {
+      splitId: SPLIT_ID,
+      clean: true,
+      parts: ['api', 'webhook', 'page'],
+      merged: ['api', 'webhook', 'page'],
+      conflicts: [],
+      conflictedPaths: [],
+      checks: [
+        {
+          name: 'typecheck',
+          ok: true,
+          status: 'pass',
+          exitCode: 0,
+          durationMs: 7900,
+          outputTail: '',
+        },
+      ],
+      checksSkipped: null,
+      sessionIds: [sClaude.id, sCodex.id],
+      skipped: [],
+      mergedTree: 'c0ffee1234567890c0ffee1234567890c0ffee12',
+    },
+    startedAt: NOW - 12 * MIN,
+    finishedAt: NOW - 11 * MIN,
+    createdAt: NOW - 12 * MIN,
+  },
   {
     id: uid(),
     projectId: P1,
@@ -1141,7 +1274,18 @@ export function createMockClient(): MindlyClient {
           criticalConflicts: pc.filter((c) => c.severity === 'critical' && c.status === 'open')
             .length,
           pendingHandoffs: byProject(handoffs, id).filter((h) => h.status === 'pending').length,
+          blockedParts: 0,
+          failedMergeChecks: 0,
         },
+        split:
+          id === P1
+            ? {
+                id: SPLIT_ID,
+                goal: splits[0]!.goal,
+                blockedParts: [],
+                mergeCheck: { runId: runs[0]!.id, status: runs[0]!.status, conflictedPaths: [] },
+              }
+            : null,
         lastSeq: seq,
       };
       return delay(ov);
@@ -1272,6 +1416,43 @@ export function createMockClient(): MindlyClient {
     deliveries: (id, status) =>
       delay(byProject(deliveries, id).filter((d) => !status || d.status === status)),
     handoffs: (id) => delay(byProject(handoffs, id)),
+    splits: (id, status) =>
+      delay(byProject(splits, id).filter((s) => !status || s.status === status)),
+    split: (id) => {
+      const split = splits.find((s) => s.id === id);
+      if (!split) return notFound();
+      const detail: SplitDetail = {
+        split,
+        parts: splitParts.map((p) => {
+          const t = tasks.find((x) => x.id === p.taskId) as Task;
+          const session = t.ownerSessionId
+            ? (sessions.find((s) => s.id === t.ownerSessionId) ?? null)
+            : null;
+          return {
+            part: p,
+            task: t,
+            session,
+            state:
+              t.status === 'done'
+                ? 'done'
+                : t.status === 'blocked'
+                  ? 'blocked'
+                  : session
+                    ? 'working'
+                    : 'waiting',
+            filesChanged: p.key === 'page' ? [] : p.owns.map((g) => g.replace('**', 'index.ts')),
+            lastActivityAt: session?.lastSeenAt ?? null,
+            conflicts: [],
+          };
+        }),
+        contract: split.contract,
+        mergeCheck:
+          byProject(runs, id === split.projectId ? id : split.projectId).find(
+            (r) => r.kind === 'shadow_merge' && r.input['splitId'] === split.id,
+          ) ?? null,
+      };
+      return delay(detail);
+    },
     runs: (id, kind, limit = 50) =>
       delay(
         byProject(runs, id)

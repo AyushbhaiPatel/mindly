@@ -94,6 +94,7 @@ export function statusTone(status: string): Tone {
     case 'completed':
     case 'claimed':
     case 'resolved':
+    case 'merged':
       return 'good';
     case 'failed':
     case 'failing':
@@ -105,9 +106,11 @@ export function statusTone(status: string): Tone {
     case 'in_progress':
     case 'delivered':
     case 'queued':
+    case 'working':
       return 'info';
     case 'pending':
     case 'open':
+    case 'waiting':
     case 'acknowledged':
     case 'idle':
       return 'warn';

@@ -5,6 +5,7 @@ import { provenanceModule, ProvenanceService } from './provenance.js';
 import { savesModule, SavesService } from './saves.js';
 import { selfHealingModule, SelfHealingService } from './self-healing.js';
 import { serviceOf } from './shared.js';
+import { splitModule } from './split.js';
 import { xrayModule, XRayService } from './xray.js';
 import { continuityModules } from './continuity.js';
 
@@ -14,6 +15,8 @@ export * from './provenance.js';
 export * from './saves.js';
 export * from './saves-card.js';
 export * from './self-healing.js';
+export * from './split.js';
+export { contractTitle, liveContract, SPLIT_FINGERPRINT_PREFIX } from './split-contract.js';
 export * from './xray.js';
 
 /** The feature modules every entry point installs by default, in registration order. */
@@ -25,6 +28,7 @@ export const defaultModules: readonly MindlyModule[] = [
   xrayModule,
   continuityModules,
   savesModule,
+  splitModule,
 ];
 
 /**

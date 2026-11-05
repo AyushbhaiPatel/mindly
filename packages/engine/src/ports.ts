@@ -46,6 +46,73 @@ export interface GitPort {
   restoreSnapshotToBranch?(repoRoot: string, id: string, branch: string): Promise<void>;
   /** Optional (memory branches): whether `branch` is fully merged into `into`. */
   isMerged?(repoRoot: string, branch: string, into: string): Promise<boolean>;
+  /** Optional (splits): the operations `mindly split` needs; absent when git is unavailable. */
+  split?: SplitGitPort;
+}
+
+/** One side of a split merge check: a part's worktree. */
+export interface SplitMergeSide {
+  label: string;
+  worktree: string;
+}
+
+/** Result of a split merge check (shadow merge of every part's worktree). */
+export interface SplitMergeCheck {
+  supported: boolean;
+  reason?: string;
+  clean: boolean;
+  /** Sides whose work is in the merged tree. */
+  merged: string[];
+  /** Sides whose merge conflicted, with the conflicting paths. */
+  conflicts: { label: string; paths: string[] }[];
+  /** Synthetic commit of the merged tree (every cleanly merging side), or null. */
+  commit: string | null;
+}
+
+/** Outcome of one check command run against a tree. */
+export interface SplitCheckResult {
+  name: string;
+  status: 'pass' | 'fail' | 'timeout' | 'error';
+  exitCode: number | null;
+  durationMs: number;
+  output: string;
+}
+
+/** Git operations behind `mindly split`. Every method may throw a `MindlyError`. */
+export interface SplitGitPort {
+  /** Tracked and untracked (non-ignored) files of the working tree, repository-relative. */
+  listFiles(repoRoot: string): Promise<string[]>;
+  branchExists(repoRoot: string, branch: string): Promise<boolean>;
+  /** Creates branch `branch` at `startPoint` in a new worktree at `path`; refuses existing ones. */
+  addWorktree(repoRoot: string, path: string, branch: string, startPoint: string): Promise<string>;
+  /** Removes a linked worktree (and its uncommitted work). False when it was not a worktree. */
+  removeWorktree(repoRoot: string, path: string): Promise<boolean>;
+  deleteBranch(repoRoot: string, branch: string): Promise<boolean>;
+  /** Paths that differ between `base` and the worktree's current content (committed or not). */
+  changedSince(repoRoot: string, worktree: string, base: string): Promise<string[]>;
+  /** Shadow-merges the sides' worktrees (uncommitted work included) on top of `base`. */
+  mergeCheck(
+    repoRoot: string,
+    base: string,
+    sides: readonly SplitMergeSide[],
+  ): Promise<SplitMergeCheck>;
+  /** Merges `branches` in order onto `base` into the NEW branch `into` with merge commits. */
+  mergeBranches(
+    repoRoot: string,
+    into: string,
+    base: string,
+    branches: readonly { label: string; branch: string }[],
+  ): Promise<
+    | { status: 'merged'; commit: string }
+    | { status: 'conflicted'; label: string; paths: string[] }
+    | { status: 'unsupported'; reason: string }
+  >;
+  /** Runs the project's checks against `commit` in a temporary tree. */
+  runChecks(
+    repoRoot: string,
+    commit: string,
+    checks: readonly { name: string; argv: readonly string[]; timeoutSec: number }[],
+  ): Promise<SplitCheckResult[]>;
 }
 
 export interface LlmPort {

@@ -149,13 +149,15 @@ export class HandoffRepo {
     reason: Handoff['reason'];
     summary: string;
     packet: HandoffPacket;
+    /** Only a session started in this worktree (or below it) may claim the handoff. */
+    worktree?: string | null;
   }): Handoff {
     const now = this.clock.now();
     const id = uuidv7(now);
     this.db
       .prepare(
         `INSERT INTO handoffs (id, project_id, from_session_id, to_agent_kind, task_id, reason, summary,
-           packet, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+           packet, status, created_at, worktree) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
       )
       .run(
         id,
@@ -167,6 +169,7 @@ export class HandoffRepo {
         input.summary,
         toJson(input.packet),
         now,
+        input.worktree ?? null,
       );
     return this.get(id);
   }
@@ -177,17 +180,38 @@ export class HandoffRepo {
     return toHandoff(r);
   }
 
-  /** Pending handoffs a new session of `agentKind` may pick up (excluding its own). */
-  pendingFor(projectId: string, agentKind: string, sessionId: string): Handoff[] {
+  /**
+   * Pending handoffs a new session of `agentKind` may pick up (excluding its own). A handoff
+   * targeted at a worktree is only offered to a session whose `worktree` is that folder or one
+   * below it; the others are offered to every session of the agent kind.
+   */
+  pendingFor(
+    projectId: string,
+    agentKind: string,
+    sessionId: string,
+    worktree: string | null = null,
+  ): Handoff[] {
     return (
       this.db
         .prepare(
           `SELECT * FROM handoffs WHERE project_id = ? AND status = 'pending'
              AND (to_agent_kind IS NULL OR to_agent_kind = ?) AND from_session_id != ?
-           ORDER BY created_at DESC LIMIT 5`,
+             AND (worktree IS NULL OR worktree = ? OR substr(?, 1, length(worktree) + 1) = worktree || '/')
+           ORDER BY (worktree IS NOT NULL) DESC, created_at DESC LIMIT 5`,
         )
-        .all(projectId, agentKind, sessionId) as Row[]
+        .all(projectId, agentKind, sessionId, worktree ?? '', worktree ?? '') as Row[]
     ).map(toHandoff);
+  }
+
+  /** Cancels every pending handoff targeted at `worktree`. Returns how many. */
+  cancelForWorktree(projectId: string, worktree: string): number {
+    return Number(
+      this.db
+        .prepare(
+          `UPDATE handoffs SET status = 'cancelled' WHERE project_id = ? AND status = 'pending' AND worktree = ?`,
+        )
+        .run(projectId, worktree).changes,
+    );
   }
 
   /** Atomically claims a pending handoff. Returns false if someone else claimed it first. */
@@ -466,6 +490,18 @@ export class RunRepo {
 
   latest(projectId: string, kind: RunKind): Run | null {
     return this.list(projectId, { kind, limit: 1 })[0] ?? null;
+  }
+
+  /** The newest run of `kind` whose `input.<field>` equals `value` (e.g. the merge check of one split). */
+  latestWithInput(projectId: string, kind: RunKind, field: string, value: string): Run | null {
+    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(field)) throw new Error(`unsafe input field ${field}`);
+    const r = this.db
+      .prepare(
+        `SELECT * FROM runs WHERE project_id = ? AND kind = ? AND json_extract(input, '$.${field}') = ?
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(projectId, kind, value) as Row | undefined;
+    return r ? toRun(r) : null;
   }
 }
 

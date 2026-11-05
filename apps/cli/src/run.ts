@@ -435,6 +435,72 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
       ),
     );
 
+  const splitCmd = program
+    .command('split')
+    .description('Divide a goal between agents working in parallel worktrees')
+    .argument('[goal...]', 'what to build, e.g. "add billing: API, webhook handler, page"')
+    .option('--plan <file>', 'use a hand-written JSON plan instead of asking an agent')
+    .option('--planner <agent>', 'agent that plans the split: claude-code or codex (read-only)')
+    .option('--parts <n>', 'number of parts to ask the planner for (2-6)', positiveInt(6))
+    .option('--agents <list>', 'comma-separated agents the parts may be given to')
+    .option('--strict', 'block writes to files owned by another part instead of warning')
+    .option('--name <slug>', 'name used in branches and folders (default: from the goal)')
+    .option('-y, --yes', 'create without asking')
+    .option('--dry-run', 'show the plan and create nothing')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (goal: string[], o: object) => async (out) =>
+          (await import('./commands/split.js')).split(out, goal, o),
+      ),
+    );
+  // `split` and its subcommands share --json and -y: wherever they are typed, the subcommand
+  // reads them from its own and its parent's options.
+  const sub = (cmd: Command): object => cmd.optsWithGlobals();
+  splitCmd
+    .command('status')
+    .description('Progress of every part, conflicts and the merge check')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/split.js')).splitStatus(out, sub(cmd)),
+      ),
+    );
+  splitCmd
+    .command('check')
+    .description('Merge every part in memory and run the trusted checks now')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/split.js')).splitCheck(out, sub(cmd)),
+      ),
+    );
+  splitCmd
+    .command('merge')
+    .description('Merge the parts into one integration branch (no push)')
+    .option('--force', 'merge even if some parts are not marked done')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/split.js')).splitMerge(out, sub(cmd)),
+      ),
+    );
+  splitCmd
+    .command('abort')
+    .description('Remove the worktrees (and branches) the split created')
+    .option('--keep-branches', 'keep the part branches')
+    .option('-y, --yes', 'do not ask')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/split.js')).splitAbort(out, sub(cmd)),
+      ),
+    );
+
   program
     .command('conflicts')
     .description('List open conflicts')

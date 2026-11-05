@@ -3,10 +3,14 @@ import { basename, dirname } from 'node:path';
 import type { UserConfig } from '@mindly/core';
 import type { GitPort, LlmPort, NotifierPort } from '@mindly/engine';
 import {
+  addWorktree,
+  branchExists,
   buildImportGraph,
+  captureWorktreeCommit,
   changedFiles,
   createSnapshotRef,
   currentBranch,
+  deleteBranch,
   diffExportSurface,
   extractExports,
   fileAtRef,
@@ -14,12 +18,102 @@ import {
   headCommit,
   hunkHashes,
   languageOf,
+  listFiles,
+  materializeTree,
+  mergeIntoNewBranch,
+  removeWorktree,
   restoreSnapshotToBranch,
+  runChecks,
   runGit,
+  shadowMerge,
   assertValidBranchName,
   type ExportedSymbol,
   type ImportGraph,
 } from '@mindly/git';
+import type { SplitGitPort } from '@mindly/engine';
+
+/** `SplitGitPort` backed by `@mindly/git`. Errors propagate: split commands report them. */
+export function createSplitGitPort(): SplitGitPort {
+  return {
+    listFiles: (repoRoot) => listFiles(repoRoot),
+    branchExists: (repoRoot, branch) => branchExists(repoRoot, branch),
+    addWorktree: async (repoRoot, path, branch, startPoint) =>
+      (await addWorktree(repoRoot, path, branch, startPoint)).path,
+    removeWorktree: (repoRoot, path) => removeWorktree(repoRoot, path),
+    deleteBranch: (repoRoot, branch) => deleteBranch(repoRoot, branch),
+    changedSince: async (repoRoot, worktree, base) => {
+      const captured = await captureWorktreeCommit(worktree, { message: 'mindly split status' });
+      const res = await runGit(
+        ['diff', '--name-only', '-z', '--no-renames', base, captured.commit, '--'],
+        { cwd: repoRoot, timeoutMs: 30_000 },
+      );
+      return res.stdout.split('\0').filter((p) => p !== '');
+    },
+    mergeCheck: async (repoRoot, base, sides) => {
+      const captured: { label: string; commit: string }[] = [];
+      for (const side of sides) {
+        const c = await captureWorktreeCommit(side.worktree, {
+          message: `mindly split capture ${side.label}`,
+        });
+        captured.push({ label: side.label, commit: c.commit });
+      }
+      const result = await shadowMerge({
+        repoRoot,
+        base,
+        sides: [{ label: 'base', commit: base }, ...captured],
+      });
+      if (!result.supported) {
+        return {
+          supported: false,
+          reason: result.reason,
+          clean: false,
+          merged: [],
+          conflicts: [],
+          commit: null,
+        };
+      }
+      return {
+        supported: true,
+        clean: result.clean,
+        merged: result.merged.filter((l) => l !== 'base'),
+        conflicts: result.steps
+          .filter((s) => s.status === 'conflicted')
+          .map((s) => ({ label: s.label, paths: s.conflicts })),
+        commit: result.commit,
+      };
+    },
+    mergeBranches: async (repoRoot, into, base, branches) => {
+      const r = await mergeIntoNewBranch({
+        repoRoot,
+        branch: into,
+        base,
+        sources: branches.map((b) => ({ label: b.label, ref: `refs/heads/${b.branch}` })),
+      });
+      if (r.status === 'merged') return { status: 'merged', commit: r.commit };
+      if (r.status === 'conflicted')
+        return { status: 'conflicted', label: r.label, paths: r.paths };
+      return { status: 'unsupported', reason: r.reason };
+    },
+    runChecks: async (repoRoot, commit, checks) => {
+      const tree = await materializeTree(repoRoot, commit);
+      try {
+        const results = await runChecks(
+          tree.path,
+          checks.map((c) => ({ name: c.name, argv: c.argv, timeoutSec: c.timeoutSec })),
+        );
+        return results.map((c) => ({
+          name: c.name,
+          status: c.status,
+          exitCode: c.exitCode,
+          durationMs: c.durationMs,
+          output: c.output,
+        }));
+      } finally {
+        await tree.dispose();
+      }
+    },
+  };
+}
 import { createLlmHelpers, createProvider } from '@mindly/llm';
 import { createNotifier } from '@mindly/notify';
 
@@ -122,6 +216,7 @@ export function createGitPort(): GitPort {
         );
         return res.exitCode === 0;
       }, false),
+    split: createSplitGitPort(),
   };
 }
 

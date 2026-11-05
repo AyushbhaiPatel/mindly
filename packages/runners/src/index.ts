@@ -74,6 +74,9 @@ export type { NumstatEntry, ReplayAgentResult, ReplayComparison, ReplayInput } f
 export { launchTask } from './launch.js';
 export type { LaunchInput, LaunchResult } from './launch.js';
 
+export { MAX_PLAN_FILES, buildPlanPrompt, extractPlanJson, runPlanner } from './plan.js';
+export type { PlanInput, PlanResult } from './plan.js';
+
 /** The runner surface the engine consumes (constructor-injected so tests can fake it). */
 export interface RunnerPort {
   /** Cross-agent review in read-only mode. */

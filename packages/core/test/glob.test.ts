@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchesGlob } from '../src/glob.js';
+import { globsMayOverlap, matchesGlob } from '../src/glob.js';
 
 describe('matchesGlob', () => {
   it.each([
@@ -18,5 +18,40 @@ describe('matchesGlob', () => {
     ['axb.ts', 'a.b.ts', false],
   ])('%s vs %s -> %s', (path, glob, expected) => {
     expect(matchesGlob(path, glob)).toBe(expected);
+  });
+});
+
+describe('globsMayOverlap', () => {
+  it.each([
+    ['src/billing/**', '**/*.test.ts', true],
+    ['src/*.ts', 'src/new.*', true],
+    ['web/**', '**/billing/**', true],
+    ['src/**', 'src/api/**', true],
+    ['src/*.ts', 'src/*.test.ts', true],
+    ['src/**/index.ts', 'src/**/*.ts', true],
+    ['*.md', 'docs/**', true],
+    ['src/a.ts', 'src/a.ts', true],
+    ['src/{a,b}/**', 'src/c/**', true],
+    ['src/api/**', 'src/app/**', false],
+    ['api/**', 'web/**', false],
+    ['src/**/*.ts', 'src/**/*.css', false],
+    ['src/**/index.ts', 'src/**/*.css', false],
+    ['src/**/index.ts', 'src/**/main.ts', false],
+    ['src/api/*.ts', 'src/api/x.*', true],
+    ['src/api.ts', 'src/api.ts/**', true],
+    ['src/api.ts', 'src/api.ts/x.ts', false],
+    ['docs/*.md', 'docs/*.txt', false],
+    ['src/user-*.ts', 'src/admin-*.ts', false],
+  ])('%s vs %s may overlap: %s', (a, b, expected) => {
+    expect(globsMayOverlap(a, b)).toBe(expected);
+    expect(globsMayOverlap(b, a)).toBe(expected);
+  });
+
+  it('ignores letter case only with nocase', () => {
+    expect(globsMayOverlap('src/API/**', 'src/api/**')).toBe(false);
+    expect(globsMayOverlap('src/API/**', 'src/api/**', { nocase: true })).toBe(true);
+    expect(globsMayOverlap('*.TS', '*.ts')).toBe(false);
+    expect(globsMayOverlap('*.TS', '*.ts', { nocase: true })).toBe(true);
+    expect(globsMayOverlap('src/API/**', 'src/app/**', { nocase: true })).toBe(false);
   });
 });

@@ -50,15 +50,60 @@ export interface HookDeps {
   bus: EngineBus;
 }
 
+/** What a write guard says about the files a tool is about to change. */
+export interface WriteGuardResult {
+  /** Coordination warnings shown to the agent (mandatory context). */
+  warnings: string[];
+  /** When set, the tool call is denied with this reason (same path as user `enforce` rules). */
+  deny: string | null;
+}
+
+/**
+ * Consulted before a file-writing tool runs. Feature modules (e.g. split ownership) register
+ * guards; `paths` are relative to the agent's working tree. A guard that throws is ignored.
+ */
+export type WriteGuard = (
+  project: ProjectContext,
+  session: Session,
+  paths: readonly string[],
+) => WriteGuardResult | Promise<WriteGuardResult>;
+
 /**
  * Translates normalised hook events into engine operations. `handle` never throws: any internal
  * failure is logged and an empty result returned, so a Mindly bug can never block an agent.
  */
 export class HookHandler {
+  private readonly guards: WriteGuard[] = [];
+
   constructor(
     private readonly k: Kernel,
     private readonly d: HookDeps,
   ) {}
+
+  /** Registers a guard consulted before every file-writing tool call. */
+  useWriteGuard(guard: WriteGuard): void {
+    this.guards.push(guard);
+  }
+
+  private async consultGuards(
+    project: ProjectContext,
+    session: Session,
+    paths: readonly string[],
+  ): Promise<WriteGuardResult> {
+    const out: WriteGuardResult = { warnings: [], deny: null };
+    for (const guard of this.guards) {
+      try {
+        const r = await guard(project, session, paths);
+        out.warnings.push(...r.warnings);
+        out.deny ??= r.deny;
+      } catch (err) {
+        this.k.logger.warn('write guard failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return out;
+  }
 
   async handle(evt: NormalizedHookEvent): Promise<HookResult> {
     try {
@@ -193,6 +238,23 @@ export class HookHandler {
     return out;
   }
 
+  /** Project-relative paths a shell command names and may write (text reading only). */
+  private async shellWriteTargets(
+    project: ProjectContext,
+    cwd: string,
+    command: string,
+  ): Promise<string[]> {
+    const tokens = command
+      .split(/\s+/)
+      .map((t) => t.replace(/^[<>'"`(]+|['"`;|&)]+$/g, ''))
+      .filter((t) => t !== '' && !t.startsWith('-') && /[./]/.test(t) && t.length <= 1024)
+      .slice(0, 30);
+    if (tokens.length === 0) return [];
+    return (await this.projectPaths(project, cwd, tokens))
+      .map((p) => p.rel)
+      .filter((rel) => shellMayWrite(command, rel));
+  }
+
   private async preTool(
     project: ProjectContext,
     session: Session,
@@ -219,7 +281,11 @@ export class HookHandler {
         return EMPTY_HOOK_RESULT;
       }
       const overlap = this.d.intents.noteEditing(session, paths);
-      const built = this.d.context.preWrite(project, session, paths, overlap.warnings);
+      const guard = await this.consultGuards(project, session, paths);
+      const built = this.d.context.preWrite(project, session, paths, [
+        ...overlap.warnings,
+        ...guard.warnings,
+      ]);
       if (overlap.overlaps.length > 0 || built.deny || pending.length > 0) {
         // What Mindly told the agent before this write: the evidence of overlap and rule saves.
         this.appendToolEvent(pid, session, 'tool.before', {
@@ -237,6 +303,9 @@ export class HookHandler {
           context: built.text,
         };
       }
+      if (guard.deny) {
+        return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: guard.deny, context: built.text };
+      }
       return { ...EMPTY_HOOK_RESULT, context: built.text };
     }
     if (tool.shell && tool.command) {
@@ -248,16 +317,30 @@ export class HookHandler {
           ...(mistakes.length > 0 ? { mistakes: mistakes.map((m) => m.id) } : {}),
         });
       }
-      if (mistakes.length === 0) return EMPTY_HOOK_RESULT;
-      return {
-        ...EMPTY_HOOK_RESULT,
-        context: renderSections([
-          {
-            heading: 'A similar command failed before in this project',
-            lines: mistakes.map((m) => memoryLine(m)),
-          },
-        ]),
-      };
+      // A command that may write a file (sed -i, cat > file, mv) answers to the same guards as an
+      // editing tool: the paths it names that are not read-only uses.
+      const guard = await this.consultGuards(
+        project,
+        session,
+        await this.shellWriteTargets(project, evt.cwd, tool.command),
+      );
+      const sections = [
+        ...(mistakes.length > 0
+          ? [
+              {
+                heading: 'A similar command failed before in this project',
+                lines: mistakes.map((m) => memoryLine(m)),
+              },
+            ]
+          : []),
+        ...(guard.warnings.length > 0
+          ? [{ heading: 'Coordination warning', lines: guard.warnings.map((w) => `- ${w}`) }]
+          : []),
+      ];
+      const context = sections.length > 0 ? renderSections(sections) : null;
+      if (guard.deny)
+        return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: guard.deny, context };
+      return context === null ? EMPTY_HOOK_RESULT : { ...EMPTY_HOOK_RESULT, context };
     }
     if (pending.length > 0) this.appendToolEvent(pid, session, 'tool.before', { tool: toolName });
     return EMPTY_HOOK_RESULT;

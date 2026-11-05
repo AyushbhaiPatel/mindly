@@ -71,6 +71,16 @@ export type {
   ShadowMergeResult,
 } from './merge.js';
 
+export {
+  addWorktree,
+  branchExists,
+  deleteBranch,
+  listFiles,
+  mergeIntoNewBranch,
+  removeWorktree,
+} from './worktrees.js';
+export type { MergeIntoBranchResult, MergeSource } from './worktrees.js';
+
 export { DEFAULT_CHECK_OUTPUT_BYTES, checkEnv, runChecks } from './checks.js';
 export type { CheckResult, CheckSpec, CheckStatus, RunChecksOptions } from './checks.js';
 

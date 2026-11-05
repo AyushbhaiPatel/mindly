@@ -61,7 +61,7 @@ export function OverviewView() {
   const res = useResource(
     () => client.overview(project.id),
     [project.id],
-    ['overview', 'sessions', 'intents', 'conflicts', 'runs'],
+    ['overview', 'sessions', 'intents', 'conflicts', 'runs', 'splits', 'tasks'],
   );
   const waiting = useResource(
     () =>
@@ -106,7 +106,14 @@ export function OverviewView() {
 
 function needsTotal(ov: Overview): number {
   const n = ov.needsYou;
-  return n.proposedRules + n.proposedMemories + n.openConflicts + n.pendingHandoffs;
+  return (
+    n.proposedRules +
+    n.proposedMemories +
+    n.openConflicts +
+    n.pendingHandoffs +
+    n.blockedParts +
+    n.failedMergeChecks
+  );
 }
 
 function Stats({ ov, saves }: { ov: Overview; saves: number | undefined }) {
@@ -201,6 +208,50 @@ function NeedsYou({
         </button>
       ),
     });
+  }
+  if (ov.split) {
+    const open = (
+      <TextLink go onClick={() => navigate('split')}>
+        {needActionWords('split')}
+      </TextLink>
+    );
+    for (const p of ov.split.blockedParts) {
+      items.push({
+        key: `sp:${p.key}`,
+        kind: 'split',
+        tone: 'bad',
+        text: (
+          <>
+            Part {quoted(humanizeAgentText(p.title))} is blocked
+            <span className="muted">
+              {' — '}
+              {humanizeAgentText(ov.split.goal)}
+            </span>
+          </>
+        ),
+        action: open,
+      });
+    }
+    const check = ov.split.mergeCheck;
+    if (check && (check.status === 'failed' || check.status === 'error')) {
+      items.push({
+        key: `sc:${check.runId}`,
+        kind: 'split',
+        tone: 'bad',
+        text: (
+          <>
+            {check.status === 'failed' ? 'Merge check failed' : 'Merge check could not run'}
+            <span className="muted">
+              {' — '}
+              {humanizeAgentText(ov.split.goal)}
+              {check.conflictedPaths.length > 0 &&
+                `; conflicts in ${check.conflictedPaths.join(', ')}`}
+            </span>
+          </>
+        ),
+        action: open,
+      });
+    }
   }
   for (const h of handoffs) {
     items.push({

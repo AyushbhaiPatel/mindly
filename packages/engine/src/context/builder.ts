@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import {
   estimateTokens,
   matchesAnyGlob,
@@ -7,6 +8,7 @@ import {
   type ContextPacket,
   type Delivery,
   type Handoff,
+  type HandoffSplitBrief,
   type Memory,
   type Session,
 } from '@mindly/core';
@@ -17,6 +19,7 @@ import { rankTrust } from '../memory/service.js';
 import { sessionLabel } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { memoryLine, relativeTime, renderSections, type Section } from './render.js';
+import { contractLines, liveContract } from '../features/split-contract.js';
 
 interface Candidate {
   item: ContextItem;
@@ -337,7 +340,13 @@ export class ContextBuilder {
       session.projectId,
       session.agentKind,
       session.id,
+      safeRealpath(session.worktree),
     )) {
+      // A brief of a split that is no longer active is not for anyone.
+      if (h.packet.split) {
+        const split = this.k.store.splits.find(h.packet.split.splitId);
+        if (!split || split.status !== 'active') continue;
+      }
       if (this.k.store.handoffs.claim(h.id, session.id)) {
         this.k.store.events.append({
           projectId: session.projectId,
@@ -359,6 +368,11 @@ export class ContextBuilder {
   }
 
   private handoffCandidates(h: Handoff): Candidate[] {
+    if (h.packet.split) {
+      const split = this.k.store.splits.find(h.packet.split.splitId);
+      const contract = split ? contractLines(liveContract(this.k.store, split)) : [];
+      return [splitBriefCandidate(h, h.packet.split, contract)];
+    }
     const from = this.k.store.sessions.find(h.fromSessionId);
     const who = from ? sessionLabel(from) : 'another agent';
     const p = h.packet;
@@ -502,6 +516,55 @@ export class ContextBuilder {
       },
     });
     return { text, packet, deliveries };
+  }
+}
+
+/** The brief of a split part, rendered as the first section of the session. */
+function splitBriefCandidate(h: Handoff, brief: HandoffSplitBrief, contract: string[]): Candidate {
+  const globs = (g: readonly string[]): string => g.map((x) => sanitizeLine(x, 160)).join(', ');
+  const lines = [
+    `You are working on part "${sanitizeLine(brief.title, 120)}" of the split "${sanitizeLine(brief.goal, 300)}" in this worktree (branch ${sanitizeLine(h.packet.branch ?? '', 120)}). Other agents work on the other parts in their own worktrees.`,
+    `Your part: ${sanitizeForContext(h.packet.goal, 3000).replace(/\n/g, ' ')}`,
+    `Files you own (edit only these): ${globs(brief.owns)}`,
+  ];
+  if (brief.reads.length) lines.push(`Files you may read for context: ${globs(brief.reads)}`);
+  if (brief.dependsOn.length) {
+    lines.push(
+      `Your part depends on part(s): ${globs(brief.dependsOn)}; build against the shared contract, not against their unfinished code.`,
+    );
+  }
+  lines.push(
+    brief.strict
+      ? 'Writes to files owned by another part are blocked (strict mode): ask the user instead.'
+      : 'Writing to files owned by another part raises a coordination warning: coordinate first.',
+  );
+  if (contract.length) {
+    lines.push(
+      `Shared contract (approved decisions): ${contract.map((c) => sanitizeLine(c, 300)).join('; ')}`,
+    );
+  }
+  lines.push('When your part is finished, mark its task done (mindly_update_task).');
+  return {
+    item: {
+      ref: h.id,
+      kind: 'handoff',
+      title: h.summary,
+      score: 2,
+      tokens: 0,
+      reason: 'split brief',
+    },
+    section: 'Your part of the split',
+    order: 0,
+    line: lines.join('\n'),
+    mandatory: true,
+  };
+}
+
+function safeRealpath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
   }
 }
 

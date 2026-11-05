@@ -164,6 +164,9 @@ export const EVENT_TYPES = [
   'save.caught',
   'save.confirmed',
   'save.rejected',
+  'split.created',
+  'split.merged',
+  'split.aborted',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -401,6 +404,22 @@ export interface HandoffPacket {
   nextSteps: string[];
   branch: string | null;
   headCommit: string | null;
+  /** Set on the brief of a split part (`mindly split`); absent on ordinary handoffs. */
+  split?: HandoffSplitBrief;
+}
+
+/** What a split part's brief tells the agent that claims it. */
+export interface HandoffSplitBrief {
+  splitId: string;
+  goal: string;
+  partKey: string;
+  title: string;
+  owns: string[];
+  reads: string[];
+  dependsOn: string[];
+  /** Shared contract items: `name — definition (owned by part key)`. */
+  contract: string[];
+  strict: boolean;
 }
 
 export interface ContractSpec {
@@ -527,4 +546,100 @@ export interface MindlyEvent {
  */
 export function conflictNeedsUser(c: Pick<Conflict, 'status' | 'severity'>): boolean {
   return c.status === 'open' && c.severity !== 'info';
+}
+
+// ---------------------------------------------------------------------------------------------
+// Splits (`mindly split`): one goal divided into non-overlapping parts, each in its own worktree.
+// ---------------------------------------------------------------------------------------------
+
+export const SPLIT_STATUSES = ['active', 'merged', 'aborted'] as const;
+export type SplitStatus = (typeof SPLIT_STATUSES)[number];
+
+/** Minimum and maximum number of parts in a split plan. */
+export const SPLIT_MIN_PARTS = 2;
+export const SPLIT_MAX_PARTS = 6;
+
+/** Part keys name branches and folders, so they are short lowercase slugs. */
+export const SPLIT_KEY_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+const SplitGlob = z.string().trim().min(1).max(300);
+const SplitKey = z.string().regex(SPLIT_KEY_RE, 'must be a short lowercase slug (a-z, 0-9, -)');
+
+export const SplitPlanPartSchema = z.strictObject({
+  key: SplitKey,
+  title: z.string().trim().min(1).max(120),
+  agent: AgentKindSchema,
+  owns: z.array(SplitGlob).min(1).max(20),
+  reads: z.array(SplitGlob).max(20).default([]),
+  dependsOn: z.array(SplitKey).max(SPLIT_MAX_PARTS).default([]),
+  brief: z.string().trim().min(1).max(4000),
+});
+
+export const SplitPlanContractSchema = z.strictObject({
+  name: z.string().trim().min(1).max(120),
+  owner: SplitKey,
+  definition: z.string().trim().min(1).max(2000),
+});
+
+/** A split plan, hand-written (`--plan`) or produced by a planning agent. Structure only. */
+export const SplitPlanSchema = z.strictObject({
+  goal: z.string().trim().min(1).max(500),
+  parts: z.array(SplitPlanPartSchema).min(SPLIT_MIN_PARTS).max(SPLIT_MAX_PARTS),
+  contract: z.array(SplitPlanContractSchema).max(20).default([]),
+});
+export type SplitPlan = z.infer<typeof SplitPlanSchema>;
+export type SplitPlanPart = z.infer<typeof SplitPlanPartSchema>;
+export type SplitPlanContract = z.infer<typeof SplitPlanContractSchema>;
+
+/** A contract item as stored on the split, with the decision memory it became. */
+export interface SplitContractItem extends SplitPlanContract {
+  memoryId: string | null;
+}
+
+export interface Split {
+  id: string;
+  projectId: string;
+  /** Short slug used in branch names (`mindly/<slug>/<key>`) and folder names. */
+  slug: string;
+  goal: string;
+  status: SplitStatus;
+  /** Parent task holding one child task per part. */
+  taskId: string;
+  /** Commit every part branch started from. */
+  baseCommit: string;
+  baseBranch: string | null;
+  /** Writes to files owned by another part are denied instead of warned. */
+  strict: boolean;
+  /** Folder holding the part worktrees (`../<repo>.mindly`). */
+  worktreeRoot: string;
+  /** Branch `split merge` produced, once it ran. */
+  integrationBranch: string | null;
+  contract: SplitContractItem[];
+  /** Agent kind that planned the split, or `plan-file` for a hand-written plan. */
+  plannedBy: string;
+  createdAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+}
+
+export interface SplitPart {
+  id: string;
+  splitId: string;
+  projectId: string;
+  key: string;
+  /** Position in the plan (0-based). */
+  position: number;
+  title: string;
+  agentKind: AgentKind;
+  owns: string[];
+  reads: string[];
+  dependsOn: string[];
+  brief: string;
+  /** Absolute path of the part's worktree. */
+  worktree: string;
+  branch: string;
+  /** Child task of the split's task; its owner session is the agent working on the part. */
+  taskId: string;
+  handoffId: string | null;
+  createdAt: number;
 }

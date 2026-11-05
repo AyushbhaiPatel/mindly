@@ -27,6 +27,8 @@ import {
   shortId,
   sourceWords,
   splitCode,
+  splitPartStateWords,
+  splitStatusWords,
   shortAge,
   trustShort,
   trustWords,
@@ -206,6 +208,8 @@ describe('overviewStats', () => {
     expect(needKindWords('rule')).toBe('Rule');
     expect(needActionWords('conflict')).toBe('Resolve');
     expect(needActionWords('memory')).toBe('Review');
+    expect(needKindWords('split')).toBe('Split');
+    expect(needActionWords('split')).toBe('Open');
   });
 });
 
@@ -395,6 +399,25 @@ describe('describeEvent', () => {
     }
   });
 
+  it('describes split events without ids or type names', () => {
+    expect(
+      describeEvent(
+        ev('split.created', { splitId: 'x', slug: 'billing', parts: ['api', 'page'] }),
+        sessions,
+      ),
+    ).toEqual({
+      actor: null,
+      text: 'Split started with 2 parts',
+      tone: 'accent',
+    });
+    expect(
+      describeEvent(ev('split.merged', { branch: 'mindly/billing/integration' }), sessions).text,
+    ).toBe('Split merged into mindly/billing/integration');
+    const aborted = describeEvent(ev('split.aborted', { removedWorktrees: 2 }), sessions);
+    expect(aborted.text).toBe('Split abandoned; its worktrees were removed');
+    expect(aborted.tone).toBe('warn');
+  });
+
   it('never leaks unknown event types', () => {
     const line = describeEvent(ev('weird.thing_happened', {}, CODEX.id), sessions);
     expect(line.text).not.toMatch(/weird|thing_happened/);
@@ -403,5 +426,17 @@ describe('describeEvent', () => {
   it('counts with plurals', () => {
     expect(count(1, 'item')).toBe('1 item');
     expect(count(2, 'memory', 'memories')).toBe('2 memories');
+  });
+});
+
+describe('split words', () => {
+  it('names part states and split statuses', () => {
+    expect(splitPartStateWords('waiting')).toBe('waiting for an agent');
+    expect(splitPartStateWords('working')).toBe('in progress');
+    expect(splitPartStateWords('done')).toBe('done');
+    expect(splitPartStateWords('blocked')).toBe('blocked');
+    expect(splitStatusWords('active')).toBe('in progress');
+    expect(splitStatusWords('merged')).toBe('merged');
+    expect(splitStatusWords('aborted')).toBe('abandoned');
   });
 });

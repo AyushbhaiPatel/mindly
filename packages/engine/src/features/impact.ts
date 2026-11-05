@@ -33,11 +33,29 @@ export function surfaceKey(projectId: string, path: string): string {
  * Impact radar: notices when an agent changes the exported surface of a module (removed or
  * changed exports) and tells the other live sessions whose work depends on that module.
  */
+/**
+ * Extra recipients of an impact update. Returns live sessions that must hear about a changed
+ * export surface of `path` even when they never touched the file (e.g. the dependants of a split
+ * part), each with the one-line reason shown to them.
+ */
+export type ImpactRecipientResolver = (
+  projectId: string,
+  actor: Session,
+  path: string,
+) => { session: Session; note: string }[];
+
 export class ImpactService {
+  private readonly resolvers: ImpactRecipientResolver[] = [];
+
   constructor(
     private readonly k: Kernel,
     private readonly telepathy: TelepathyService,
   ) {}
+
+  /** Registers a resolver consulted for every export-surface change. */
+  addRecipientResolver(fn: ImpactRecipientResolver): void {
+    this.resolvers.push(fn);
+  }
 
   /** Analyses every supported file of a `files.changed` event (bounded). Never throws. */
   async onFilesChanged(p: BusEvents['files.changed']): Promise<ImpactReport[]> {
@@ -99,6 +117,14 @@ export class ImpactService {
     ].slice(0, MAX_DEPENDENTS);
     const targets = new Set([file.path, ...dependents]);
     const affected = this.affectedSessions(projectId, session, targets);
+    for (const resolve of this.resolvers) {
+      for (const r of resolve(projectId, session, file.path)) {
+        if (r.session.id === session.id) continue;
+        const existing = affected.find((a) => a.session.id === r.session.id);
+        if (existing) existing.note = r.note;
+        else affected.push({ session: r.session, files: [], note: r.note });
+      }
+    }
     if (affected.length === 0 && dependents.length === 0) {
       return { path: file.path, diff, dependents, affected: [], conflict: null };
     }
@@ -135,7 +161,17 @@ export class ImpactService {
     }
     const diffKey = fingerprint(...diff.removed, '|', ...diff.changed, '|', ...diff.added);
     for (const a of affected) {
-      this.send(projectId, session, a.session, file.path, summary, a.files, diffKey, conflict);
+      this.send(
+        projectId,
+        session,
+        a.session,
+        file.path,
+        summary,
+        a.files,
+        diffKey,
+        conflict,
+        a.note,
+      );
     }
     return {
       path: file.path,
@@ -155,10 +191,12 @@ export class ImpactService {
     files: string[],
     diffKey: string,
     conflict: Conflict,
+    note?: string,
   ): void {
     const theirs = files.filter((f) => f !== path);
     const lines = [`${summary}.`];
-    if (theirs.length) lines.push(`Your files that import it: ${nameList(theirs, 10)}.`);
+    if (note) lines.push(note);
+    else if (theirs.length) lines.push(`Your files that import it: ${nameList(theirs, 10)}.`);
     else lines.push(`You are working on ${path} as well.`);
     lines.push('Re-check usages of these exports before continuing.');
     // The telepathy service sanitises and redacts title and body.
@@ -179,9 +217,9 @@ export class ImpactService {
     projectId: string,
     actor: Session,
     targets: ReadonlySet<string>,
-  ): { session: Session; files: string[] }[] {
+  ): { session: Session; files: string[]; note?: string }[] {
     const since = this.k.clock.now() - RECENT_CHANGES_MS;
-    const out: { session: Session; files: string[] }[] = [];
+    const out: { session: Session; files: string[]; note?: string }[] = [];
     for (const s of liveSessions(this.k, projectId)) {
       if (s.id === actor.id) continue;
       const files = new Set<string>();

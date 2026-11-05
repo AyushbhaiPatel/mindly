@@ -111,6 +111,11 @@ export function cleanScopePaths(paths: readonly string[] | undefined): string[] 
 
 export class MemoryService {
   private readonly ruleListeners: ((projectId: string) => void)[] = [];
+  private readonly updateListeners: ((
+    memory: Memory,
+    previous: Memory,
+    by: MemorySource,
+  ) => void)[] = [];
   private batchDepth = 0;
   private readonly pendingRuleChanges = new Set<string>();
 
@@ -119,6 +124,11 @@ export class MemoryService {
   /** Calls `fn` with the project id after any rule of that project is created or changed. */
   onRulesChanged(fn: (projectId: string) => void): void {
     this.ruleListeners.push(fn);
+  }
+
+  /** Calls `fn` after `update` changed a memory, with the new and the previous version. */
+  onUpdated(fn: (memory: Memory, previous: Memory, by: MemorySource) => void): void {
+    this.updateListeners.push(fn);
   }
 
   /** Runs `fn`, reporting rule changes made inside it once per project when it returns. */
@@ -263,7 +273,8 @@ export class MemoryService {
     return memory;
   }
 
-  private findSameTitle(
+  /** The active memory of `kind` with the same normalised title on `branch`, if any. */
+  findSameTitle(
     projectId: string,
     kind: MemoryKind,
     title: string,
@@ -334,6 +345,15 @@ export class MemoryService {
       payload: { memoryId: m.id, version: m.version, trust: m.trust, reason },
     });
     this.rulesChanged(m);
+    for (const fn of this.updateListeners) {
+      try {
+        fn(m, cur, by);
+      } catch (err) {
+        this.k.logger.warn('memory update listener failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     return m;
   }
 

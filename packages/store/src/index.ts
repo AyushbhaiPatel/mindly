@@ -12,6 +12,7 @@ import {
   RunRepo,
   SnapshotRepo,
 } from './repos/misc.js';
+import { SplitRepo } from './repos/splits.js';
 import { ConflictRepo, DeliveryRepo, FileChangeRepo, IntentRepo, TaskRepo } from './repos/work.js';
 
 export * from './db.js';
@@ -22,6 +23,7 @@ export * from './repos/ids.js';
 export * from './repos/memories.js';
 export * from './repos/misc.js';
 export * from './repos/saves.js';
+export * from './repos/splits.js';
 export * from './repos/work.js';
 
 /**
@@ -45,6 +47,7 @@ export class Store {
   readonly runs: RunRepo;
   readonly kv: KvRepo;
   readonly saves: SaveRepo;
+  readonly splits: SplitRepo;
   /** Resolves full, short and prefix ids typed by people (CLI, dashboard search). */
   readonly ids: IdRepo;
 
@@ -68,6 +71,7 @@ export class Store {
     this.runs = new RunRepo(db, clock);
     this.kv = new KvRepo(db, clock);
     this.saves = new SaveRepo(db, clock);
+    this.splits = new SplitRepo(db, clock);
     this.ids = new IdRepo(db);
   }
 

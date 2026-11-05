@@ -6,7 +6,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { NormalizedHookEvent } from '@mindly/core';
-import { CONTEXT_CLOSE, CONTEXT_OPEN, installDefaultModules, Mindly } from '@mindly/engine';
+import {
+  CONTEXT_CLOSE,
+  CONTEXT_OPEN,
+  installDefaultModules,
+  Mindly,
+  splitOf,
+} from '@mindly/engine';
 import { createGitPort } from '@mindly/runtime';
 import { createMcpServer, startMcpServer, type McpContext } from '../src/index.js';
 
@@ -53,10 +59,13 @@ function repo(): string {
   return dir;
 }
 
-async function harness(ctx: Partial<McpContext> = {}): Promise<Harness> {
-  const root = repo();
-  const mindly = Mindly.open({ inMemory: true, ports: { git: createGitPort() } });
-  installDefaultModules(mindly);
+async function harness(
+  ctx: Partial<McpContext> = {},
+  base: { root: string; mindly: Mindly } | null = null,
+): Promise<Harness> {
+  const root = base?.root ?? repo();
+  const mindly = base?.mindly ?? Mindly.open({ inMemory: true, ports: { git: createGitPort() } });
+  if (!base) installDefaultModules(mindly);
   const server = createMcpServer(mindly, { agentKind: 'claude-code', cwd: root, ...ctx });
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0.0.0' });
@@ -205,6 +214,7 @@ describe('mindly MCP server', () => {
         'mindly_remember',
         'mindly_search_memory',
         'mindly_send_message',
+        'mindly_split_status',
         'mindly_status',
         'mindly_task_claim',
         'mindly_task_create',
@@ -215,7 +225,13 @@ describe('mindly MCP server', () => {
       ].sort(),
     );
     const byName = new Map(tools.map((t) => [t.name, t]));
-    for (const n of ['mindly_context', 'mindly_search_memory', 'mindly_tasks', 'mindly_why']) {
+    for (const n of [
+      'mindly_context',
+      'mindly_search_memory',
+      'mindly_split_status',
+      'mindly_tasks',
+      'mindly_why',
+    ]) {
       expect(byName.get(n)?.annotations?.readOnlyHint).toBe(true);
     }
     expect(byName.get('mindly_remember')?.annotations?.readOnlyHint).toBe(false);
@@ -607,6 +623,92 @@ describe('mindly MCP server', () => {
     });
     expect(status.text).toContain('(you)');
     assertNoForgery(status);
+  });
+});
+
+describe('mindly_split_status', () => {
+  it('shows the calling agent its part, the other parts and the contract, read-only', async () => {
+    const h = await harness();
+    const empty = await h.call('mindly_split_status');
+    expect(empty.isError).toBe(false);
+    expect(empty.text).toBe('No split in this project.');
+    expect(empty.structured).toEqual({ split: null });
+
+    const pid = (await h.mindly.projects.resolve(h.root)).project.id;
+    const created = await splitOf(h.mindly).create({
+      projectId: pid,
+      plan: {
+        goal: 'Add billing',
+        parts: [
+          {
+            key: 'api',
+            title: 'Billing API',
+            agent: 'claude-code',
+            owns: ['src/api/**'],
+            reads: [],
+            dependsOn: [],
+            brief: 'api',
+          },
+          {
+            key: 'page',
+            title: 'Billing page',
+            agent: 'codex',
+            owns: ['src/app/**'],
+            reads: [],
+            dependsOn: ['api'],
+            brief: 'page',
+          },
+        ],
+        contract: [{ name: 'GET /billing', owner: 'api', definition: 'returns { plan }' }],
+      },
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    // An MCP session started in the page worktree sees its own part marked.
+    const page = created.parts[1]!;
+    const inPart = await harness(
+      { cwd: page.worktree, agentKind: 'codex' },
+      { root: h.root, mindly: h.mindly },
+    );
+    const r = await inPart.call('mindly_split_status');
+    expect(r.isError).toBe(false);
+    expect(r.text).toContain('Split "Add billing" (active)');
+    expect(r.text).toContain('Your part: "Billing page"');
+    expect(r.text).toContain('edit only src/app/**');
+    expect(r.text).toContain('[waiting] 1. Billing API (claude-code)');
+    expect(r.text).toContain('[working] 2. Billing page (codex, you)');
+    expect(r.text).toContain('depends on api');
+    expect(r.text).toContain('GET /billing');
+    expect(r.text).toContain('No merge check yet');
+    assertNoForgery(r);
+    expect(r.structured).toMatchObject({
+      split: { id: created.split.id, slug: 'billing', status: 'active', strict: false },
+      myPart: 'page',
+      mergeCheck: null,
+    });
+    const parts = r.structured?.['parts'] as { key: string; state: string; owns: string[] }[];
+    expect(parts.map((p) => [p.key, p.state])).toEqual([
+      ['api', 'waiting'],
+      ['page', 'working'],
+    ]);
+    const contract = r.structured?.['contract'] as {
+      name: string;
+      owner: string;
+      memoryId: string;
+    }[];
+    expect(contract[0]).toMatchObject({ name: 'GET /billing', owner: 'api' });
+    expect(contract[0]!.memoryId).toBe(created.split.contract[0]!.memoryId);
+    // From the main checkout: no part of its own.
+    const main = await h.call('mindly_split_status');
+    expect(main.text).toContain('You are not working in a part of this split.');
+    expect(main.structured?.['myPart']).toBeNull();
+    // Agents cannot create, merge or abort splits: no such tool exists.
+    const names = (await h.client.listTools()).tools.map((t) => t.name);
+    expect(names.filter((n) => n.includes('split'))).toEqual(['mindly_split_status']);
+    expect((await h.call('mindly_split_status', { extra: 1 })).isError).toBe(true);
+    await splitOf(h.mindly).abort(created.split.id);
+    expect((await h.call('mindly_split_status')).text).toContain('(aborted)');
   });
 });
 

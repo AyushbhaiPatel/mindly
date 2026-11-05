@@ -415,6 +415,32 @@ export function runStatusWords(status: RunStatus | string): string {
   }
 }
 
+/** State of a split part in words. */
+export function splitPartStateWords(
+  state: 'waiting' | 'working' | 'done' | 'blocked' | string,
+): string {
+  switch (state) {
+    case 'waiting':
+      return 'waiting for an agent';
+    case 'working':
+      return 'in progress';
+    default:
+      return String(state);
+  }
+}
+
+/** Status of a split in words. */
+export function splitStatusWords(status: 'active' | 'merged' | 'aborted' | string): string {
+  switch (status) {
+    case 'active':
+      return 'in progress';
+    case 'aborted':
+      return 'abandoned';
+    default:
+      return String(status);
+  }
+}
+
 /** Check (contract) state in words. */
 export function checkStateWords(state: string): string {
   switch (state) {
@@ -453,6 +479,7 @@ export type Term =
   | 'agents'
   | 'tasks'
   | 'runs'
+  | 'split'
   | 'standup'
   | 'configTrust'
   | 'saves';
@@ -488,12 +515,14 @@ export const TERMS: Record<Term, string> = {
   provenance:
     'Provenance: which agent wrote a line, when, and in response to what. Lines written by a person or before Mindly was installed have no record.',
   needsYou:
-    'Needs you: decisions only you can make. Suggested rules and memories are hints to agents until you approve them; a handoff is picked up by the next session of the agent it names.',
+    'Needs you: decisions only you can make. Suggested rules and memories are hints to agents until you approve them; a handoff is picked up by the next session of the agent it names; a blocked split part or a failed split merge check waits for you.',
   agents:
     'Agents: Claude Code, Codex and Cursor sessions active in this project in the last 30 minutes. Editing lists the files each agent said it is about to change.',
   tasks:
     'Tasks: what each agent is working on and its plan, shared so agents do not duplicate work.',
   runs: 'Runs: merge checks, cross-agent reviews (another agent reads the changes) and replays (several agents get the same prompt in separate copies, compared side by side). Reviews and replays launch agents on this machine and may use paid API quota.',
+  split:
+    'Split: one goal divided into parts, each worked on by an agent in its own copy of the repository (a git worktree next to it) with the files it owns. Agents are warned, or blocked in strict mode, when they edit another part\u2019s files. The contract is the set of decisions the parts share. Merging combines the parts into one new branch and never touches your branches.',
   standup: 'Standup: a short written summary of what agents did in the chosen period.',
   configTrust:
     "Config trust: Mindly runs no command from this repository's .mindly/config.json until you trust that exact file. If the file changes, Mindly asks again. Without trust, merge checks combine the work but skip the commands.",
@@ -565,7 +594,7 @@ export function overviewStats(input: StatInput): Stat[] {
 }
 
 /** What a "Needs you" row is about. */
-export type NeedKind = 'conflict' | 'rule' | 'memory' | 'handoff';
+export type NeedKind = 'conflict' | 'rule' | 'memory' | 'handoff' | 'split';
 
 /** Kind label at the start of a "Needs you" row: "Conflict", "Rule", "Memory", "Handoff". */
 export function needKindWords(kind: NeedKind): string {
@@ -579,6 +608,8 @@ export function needActionWords(kind: NeedKind): string {
       return 'Resolve';
     case 'handoff':
       return 'Details';
+    case 'split':
+      return 'Open';
     default:
       return 'Review';
   }
@@ -711,6 +742,9 @@ export const EMPTY = {
   deliveriesSeen: 'No update has been seen yet.',
   handoffs: 'No handoffs.',
   runs: 'Nothing has run yet.',
+  split: 'No split in this project. Start one with mindly split "<goal>".',
+  splitContract: 'No shared contract.',
+  splitFiles: 'No files changed yet.',
   runWaiting: 'Waiting to start.',
   runRunning: 'Running.',
   runResult: 'No result yet.',
@@ -1119,6 +1153,16 @@ export function describeEvent(
         st === 'passed' ? 'good' : st === 'failed' || st === 'error' ? 'bad' : 'neutral',
       );
     }
+    case 'split.created': {
+      const n = list(p, 'parts').length;
+      return sys(`Split started with ${n > 0 ? count(n, 'part') : 'several parts'}`, 'accent');
+    }
+    case 'split.merged': {
+      const branch = str(p, 'branch');
+      return sys(`Split merged${branch ? ` into ${branch}` : ''}`, 'good');
+    }
+    case 'split.aborted':
+      return sys('Split abandoned; its worktrees were removed', 'warn');
     case 'turn.completed':
       return line(`finished a step${title ? `: ${title}` : ''}`);
     case 'save.caught':

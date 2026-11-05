@@ -241,6 +241,9 @@ For a client not in the list, add a stdio server to its MCP config. Most use thi
 - **A/B replay:** rerun a task with different agents from the same commit and compare.
 - **Time machine** (`mindly snapshot`): snapshot memory, tasks and code together; restore safely
   to a new branch.
+- **Split** (`mindly split "<goal>"`): divide one goal between agents working in parallel
+  worktrees, each briefed on its part and kept inside the files it owns; merge-check and merge
+  the parts into one branch.
 - **Morning standup** (`mindly standup`): what your agents did and what needs you.
 - **Phone pager:** optional notifications (desktop, ntfy, webhook) when an agent is blocked or
   rate-limited.
@@ -282,6 +285,8 @@ mindly standup [--since 24h]        # daily digest
 mindly conflicts                    # open conflicts; mindly conflict <id> resolve|dismiss|ack
 mindly handoff --summary "…" [--to codex]
 mindly snapshot create|list|diff|restore
+mindly split "<goal>" [--plan plan.json] [--strict]   # parallel worktrees, one per part
+mindly split status|check|merge|abort
 mindly review --session <id> --reviewer codex
 mindly replay --prompt "…" --agents claude-code,codex
 mindly trust                        # review and allow this repo's .mindly/config.json checks
