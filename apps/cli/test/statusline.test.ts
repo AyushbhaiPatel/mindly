@@ -72,7 +72,9 @@ describe('mindly statusline', () => {
     const sb = sandbox();
     await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm']);
     const db = new DatabaseSync(join(sb.mindlyHome, 'mindly.db'));
-    db.exec('DROP TABLE saves; PRAGMA user_version = 1;');
+    db.exec(
+      'DROP TABLE saves; DROP TABLE split_parts; DROP TABLE splits; ALTER TABLE handoffs DROP COLUMN worktree; PRAGMA user_version = 1;',
+    );
     db.close();
     const old = await cli(sb, ['statusline'], { cwd: sb.home, stdin: payload(sb.repo) });
     expect(old).toEqual({ code: 0, stdout: `${NEUTRAL_LINE}\n`, stderr: '' });
