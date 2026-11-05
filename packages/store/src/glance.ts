@@ -115,7 +115,8 @@ export function readGlance(
     `SELECT COUNT(*) AS n FROM conflicts WHERE project_id = ? AND status = 'open' AND severity != 'info'`,
     project.id,
   );
-  // One range count on the saves_project index (project_id, status, created_at).
+  // One range count on the saves_project index (project_id, status, created_at). The table always
+  // exists here: `openDatabaseReadOnly` refuses a database that is not on this schema version.
   const saves = count(
     db,
     `SELECT COUNT(*) AS n FROM saves WHERE project_id = ? AND status = 'confirmed' AND created_at >= ?`,

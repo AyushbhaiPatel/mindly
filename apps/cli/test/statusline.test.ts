@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { formatGlance, NEUTRAL_LINE } from '../src/index.js';
 import { cli, sandbox, tempDir, type Sandbox } from './helpers.js';
@@ -65,6 +66,19 @@ describe('mindly statusline', () => {
 
     const gone = await cli(sb, ['statusline'], { stdin: payload(join(sb.repo, 'missing')) });
     expect(gone).toEqual({ code: 0, stdout: `${NEUTRAL_LINE}\n`, stderr: '' });
+  });
+
+  it('shows the neutral line on a v1 database until the next command upgrades it', async () => {
+    const sb = sandbox();
+    await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm']);
+    const db = new DatabaseSync(join(sb.mindlyHome, 'mindly.db'));
+    db.exec('DROP TABLE saves; PRAGMA user_version = 1;');
+    db.close();
+    const old = await cli(sb, ['statusline'], { cwd: sb.home, stdin: payload(sb.repo) });
+    expect(old).toEqual({ code: 0, stdout: `${NEUTRAL_LINE}\n`, stderr: '' });
+    await cli(sb, ['status']);
+    const upgraded = await cli(sb, ['statusline'], { cwd: sb.home, stdin: payload(sb.repo) });
+    expect(upgraded.stdout).toBe('mindly · 1 rule · 0 updates · 0 conflicts\n');
   });
 });
 

@@ -173,6 +173,21 @@ describe('readGlance', () => {
     }
   });
 
+  it('refuses a database a writer has not migrated to v2 yet, without changing it', () => {
+    const { path, store } = fixture();
+    store.db.exec('DROP TABLE saves; PRAGMA user_version = 1;');
+    store.close();
+    const before = readFileSync(path);
+    let error: unknown;
+    try {
+      openDatabaseReadOnly(path).close();
+    } catch (err) {
+      error = err;
+    }
+    expect(isMindlyError(error, 'unavailable')).toBe(true);
+    expect(readFileSync(path).equals(before)).toBe(true);
+  });
+
   it('returns null outside known projects and never writes', () => {
     const { dir, path, store } = fixture();
     store.close();
