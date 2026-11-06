@@ -95,6 +95,38 @@ export {
 } from './snapshots.js';
 export type { CreatedSnapshot, SnapshotRef } from './snapshots.js';
 
+export {
+  CHECKPOINT_GIT_TIMEOUT_MS,
+  CHECKPOINT_REF_PREFIX,
+  STALE_LOCK_MS,
+  captureCheckpoint,
+  checkpointDiskUsage,
+  checkpointRefName,
+  deleteCheckpointRefs,
+  listCheckpointRefs,
+  mirrorRemotes,
+  tryLockCheckpoint,
+  worktreeId,
+} from './checkpoints.js';
+export type {
+  CheckpointCaptureInput,
+  CheckpointCaptureResult,
+  CheckpointLock,
+  CheckpointRefEntry,
+} from './checkpoints.js';
+
+export {
+  LOCKFILES,
+  MAX_STEP_DIFF_BYTES,
+  createBisectWorkspace,
+  isManifestPath,
+  lockfileIn,
+  revertStep,
+  stepChanges,
+  stepDiff,
+} from './bisect.js';
+export type { BisectWorkspace, RevertStepResult, StepPathChange } from './bisect.js';
+
 export { languageOf } from './analysis/language.js';
 export type { Language } from './analysis/language.js';
 export { MAX_ANALYSIS_BYTES, diffExportSurface, extractExports } from './analysis/exports.js';
