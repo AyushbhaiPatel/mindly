@@ -54,7 +54,6 @@ export async function createBisectWorkspace(
       timeoutMs: 60_000,
     }).catch(() => undefined);
     rmSync(tmp, { recursive: true, force: true });
-    await runGit(['worktree', 'prune'], { cwd: root, timeoutMs: 30_000 }).catch(() => undefined);
   };
 
   try {
@@ -78,13 +77,15 @@ export async function createBisectWorkspace(
       const id = await resolveCommit(root, next);
       if (!id) throw new MindlyError('not_found', 'checkpoint commit not found');
       if (id === ws.current) return;
-      // `--force` discards what the command under test wrote to tracked files; untracked files
-      // (node_modules, .venv) stay, so a setup step runs only when a manifest changed.
+      // `--force` discards what the command under test wrote to tracked files and `clean`
+      // removes what it created; ignored files (node_modules, .venv, build output) stay, so a
+      // setup step runs only when a manifest changed.
       await runGit(['checkout', '--quiet', '--force', '--detach', id], {
         cwd: path,
         config: overrides,
         timeoutMs,
       });
+      await runGit(['clean', '-fd', '--quiet'], { cwd: path, config: overrides, timeoutMs });
       ws.current = id;
     },
     async dispose() {

@@ -42,7 +42,7 @@ export function stepLines(sc: Screen, step: StepInfo, indent: number): void {
     indent,
   );
   if (step.kind === 'outside') {
-    sc.text('changed outside any agent: your edit, a formatter or a shell command', indent);
+    sc.text('not matched to an agent edit', indent);
   }
   if (step.gap) {
     sc.text('this step may hold more than one edit: a checkpoint before it was skipped', indent);
@@ -98,6 +98,9 @@ export function renderBisect(sc: Screen, r: BisectReport): void {
       if (r.output) {
         sc.text('failing output (tail):', 2);
         for (const line of r.output.split('\n').slice(-12)) sc.text(line, 4);
+      }
+      if (bad.kind === 'agent' && bad.gap) {
+        sc.note('No mistake memory was recorded: the step may hold edits other than this one.', 2);
       }
       const steps: Step[] = [
         { cmd: `mindly bisect show ${bad.seq} --patch`, why: 'see exactly what changed' },

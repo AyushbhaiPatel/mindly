@@ -25,7 +25,11 @@ import { git, makeRepo, tempDir, write } from './helpers.js';
  * another when several are written within the same second.
  */
 async function chainRepo(): Promise<{ root: string; steps: string[] }> {
-  const root = makeRepo({ 'README.md': '# demo\n', 'src/a.ts': 'export const a = 1;\n' });
+  const root = makeRepo({
+    '.gitignore': 'node_modules/\n',
+    'README.md': '# demo\n',
+    'src/a.ts': 'export const a = 1;\n',
+  });
   const indexFile = join(tempDir(), 'index');
   const steps: string[] = [];
   const take = async (paths: string[] | null): Promise<void> => {
@@ -89,8 +93,12 @@ describe('createBisectWorkspace', () => {
     mkdirSync(join(ws.path, 'node_modules', 'dep'), { recursive: true });
     writeFileSync(join(ws.path, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;\n');
     writeFileSync(join(ws.path, 'src', 'a.ts'), 'scribbled by a check\n');
+    mkdirSync(join(ws.path, 'dist'));
+    writeFileSync(join(ws.path, 'dist', 'out.js'), 'built by a check\n');
 
     await ws.checkout(step(steps, 1));
+    // What a check built is gone; what an install put in an ignored folder stays.
+    expect(existsSync(join(ws.path, 'dist'))).toBe(false);
     expect(ws.current).toBe(step(steps, 1));
     expect(git(ws.path, 'rev-parse', 'HEAD').trim()).toBe(step(steps, 1));
     expect(readFileSync(join(ws.path, 'src', 'a.ts'), 'utf8')).toBe('export const a = 22;\n');
@@ -120,6 +128,7 @@ describe('stepChanges and stepDiff', () => {
   it('reports added, modified and deleted paths of a step', async () => {
     const { root, steps } = await chainRepo();
     expect(await stepChanges(root, null, step(steps, 1))).toEqual([
+      { path: '.gitignore', status: 'A' },
       { path: 'README.md', status: 'A' },
       { path: 'src/a.ts', status: 'A' },
     ]);

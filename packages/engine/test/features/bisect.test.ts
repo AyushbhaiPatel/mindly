@@ -436,7 +436,8 @@ describe('BisectService', () => {
     expect(memory!.title).toMatch(/^claude-code step 1 broke `pnpm test/);
     expect(memory!.title).not.toContain('abcdef123456');
     expect(memory!.body).toContain('Edit src/auth.ts src/session.ts src/token.ts and 1 more');
-    expect(memory!.body).toContain('The prompt was: "make login faster".');
+    expect(memory!.body).not.toContain('make login faster');
+    expect(memory!.body).toContain('mindly bisect show 1');
     expect(memory!.body).toContain('mindly bisect revert 1');
     expect(memory!.body).not.toContain('abcdef123456');
     expect(memory!.tags).toEqual(expect.arrayContaining(['mistake', 'bisect']));

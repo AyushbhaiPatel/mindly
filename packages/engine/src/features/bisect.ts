@@ -337,7 +337,8 @@ export class BisectService {
     command: string;
   }): Memory | null {
     const { step } = input;
-    if (step.kind !== 'agent' || !step.agentKind) return null;
+    // A gap step may hold more than one edit, so nobody is blamed for it.
+    if (step.kind !== 'agent' || !step.agentKind || step.gap) return null;
     const command = sanitizeLine(redactText(input.command), 120);
     const paths = step.paths.slice(0, 20);
     const what = [step.tool ? sanitizeLine(step.tool, 40) : 'an edit', ...paths.slice(0, 3)]
@@ -345,11 +346,8 @@ export class BisectService {
       .join(' ');
     const body = [
       `${step.agentKind} step ${step.seq} (${what}${paths.length > 3 ? ` and ${paths.length - 3} more` : ''}) broke \`${command}\`.`,
-      step.prompt ? `The prompt was: "${step.prompt}".` : null,
-      `Found with mindly bisect; undo that edit alone with: mindly bisect revert ${step.seq}`,
-    ]
-      .filter((l): l is string => l !== null)
-      .join(' ');
+      `Found with mindly bisect. See the edit and its prompt with: mindly bisect show ${step.seq}; undo that edit alone with: mindly bisect revert ${step.seq}`,
+    ].join(' ');
     return this.memory.remember({
       projectId: input.projectId,
       projectRoot: input.projectRoot,

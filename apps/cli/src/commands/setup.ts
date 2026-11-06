@@ -444,8 +444,8 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
       total += Math.max(1, printRulesFileChanges(out, changes));
     }
   }
-  // Checkpoints (copies of the code after agent edits) go with the hooks that took them.
-  const checkpoints = await checkpointRows(out.io, projectRoot, 'count');
+  // Checkpoints (copies of the code after agent edits) go only when every agent's hooks go.
+  const checkpoints = explicit === null ? await checkpointRows(out.io, projectRoot, 'count') : 0;
   if (checkpoints > 0) {
     out.line(out.style.bold('Checkpoints'));
     out.line(

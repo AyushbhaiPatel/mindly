@@ -8,6 +8,7 @@ import {
   EXIT_OK,
   EXIT_USAGE,
   HintedError,
+  LITERAL_MARK,
   outFor,
   positiveInt,
   stripControl,
@@ -624,6 +625,22 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
 }
 
 /**
+ * Everything after `--` in `mindly bisect ... -- <command>` is the command to run, even when it
+ * starts with a subcommand name (`mindly bisect -- list`); the marker itself does not survive
+ * option parsing, so `LITERAL_MARK` is put in its place for `bisectRun` to strip.
+ */
+function markLiteralCommand(argv: readonly string[]): string[] {
+  const out = [...argv];
+  const dd = out.indexOf('--');
+  if (dd === -1) return out;
+  const before = out.slice(0, dd);
+  const subcommands = ['list', 'show', 'revert', 'help'];
+  if (!before.includes('bisect') || before.some((a) => subcommands.includes(a))) return out;
+  out.splice(dd + 1, 0, LITERAL_MARK);
+  return out;
+}
+
+/**
  * Runs the `mindly` command with `argv` (without the node and script paths) and returns the exit
  * code: 0 ok, 1 error, 2 usage. Never calls `process.exit`.
  */
@@ -633,7 +650,7 @@ export async function run(argv: readonly string[], io: CliIo = processIo()): Pro
     code = c;
   });
   try {
-    await program.parseAsync([...argv], { from: 'user' });
+    await program.parseAsync(markLiteralCommand(argv), { from: 'user' });
     return code;
   } catch (err) {
     if (err instanceof CommanderError) {

@@ -29,7 +29,14 @@ import { z } from 'zod';
 import { withProject, type ProjectScope } from '../context.js';
 import { confirm } from '../io.js';
 import { argvWords, count } from '../present/index.js';
-import { HintedError, parseDuration, stripControl, UsageError, type Out } from '../util.js';
+import {
+  HintedError,
+  LITERAL_MARK,
+  parseDuration,
+  stripControl,
+  UsageError,
+  type Out,
+} from '../util.js';
 import {
   renderBisect,
   renderStepList,
@@ -241,13 +248,14 @@ class ScratchRunner implements BisectRunner {
       await this.ws.checkout(step.commit);
       if (this.setup && (!this.setupDone || (await this.manifestChanged(previous, step.commit)))) {
         setupRan = true;
-        this.setupDone = true;
         const [s] = await runChecks(
           this.ws.path,
           [{ name: 'setup', argv: this.setup, timeoutSec: this.timeoutSec }],
           { signal: this.signal },
         );
         if (this.signal.aborted) throw new BisectAborted();
+        // A failed install is tried again at the next step rather than blaming that step's edit.
+        this.setupDone = s?.status === 'pass';
         if (!s || s.status !== 'pass') {
           return done({
             outcome: 'skip',
@@ -313,7 +321,9 @@ export async function bisectRun(
   deps: BisectDeps = {},
 ): Promise<number> {
   const o = parseOptions(RunOptions, raw);
-  const argv = command.map((a) => stripControl(a));
+  const argv = (command[0] === LITERAL_MARK ? command.slice(1) : command).map((a) =>
+    stripControl(a),
+  );
   if (argv.length === 0 || argv[0] === '') {
     throw new UsageError('give the command to run after --, e.g. mindly bisect -- pnpm test');
   }
@@ -337,16 +347,24 @@ export async function bisectRun(
       );
     }
 
-    const run = svc.startRun(pid, `Bisect ${argvWords(argv)}`, {
-      command: argv,
-      range: { good: good.seq, bad: bad.seq, worktree, since },
-      setup,
+    // The run record is exported and kept: nothing typed on the command line goes in unredacted.
+    const redacted = {
+      command: argv.map((a) => redactText(a)),
+      setup: setup?.map((a) => redactText(a)) ?? null,
+      worktree: redactText(worktree),
+    };
+    const run = svc.startRun(pid, redactText(`Bisect ${argvWords(argv)}`), {
+      command: redacted.command,
+      range: { good: good.seq, bad: bad.seq, worktree: redacted.worktree, since },
+      setup: redacted.setup,
       timeoutSec,
     });
     const ac = new AbortController();
-    const onSigint = (): void => ac.abort();
-    process.once('SIGINT', onSigint);
-    deps.signal?.addEventListener('abort', onSigint, { once: true });
+    const cancel = (): void => ac.abort();
+    // Any of these ends the search; the handlers stay on so a second Ctrl-C cannot skip cleanup.
+    const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+    for (const s of signals) process.on(s, cancel);
+    deps.signal?.addEventListener('abort', cancel, { once: true });
     if (deps.signal?.aborted) ac.abort();
     const started = Date.now();
     let result: BisectSearchResult | null = null;
@@ -372,8 +390,8 @@ export async function bisectRun(
         throw err;
       }
     } finally {
-      process.off('SIGINT', onSigint);
-      deps.signal?.removeEventListener('abort', onSigint);
+      for (const s of signals) process.off(s, cancel);
+      deps.signal?.removeEventListener('abort', cancel);
       if (ws) await ws.dispose();
     }
     const durationMs = Date.now() - started;
@@ -389,8 +407,8 @@ export async function bisectRun(
           : null;
     const report: BisectReport = {
       status,
-      command: argv,
-      worktree,
+      command: redacted.command,
+      worktree: redacted.worktree,
       range: { good: good.seq, bad: bad.seq, since },
       runs: checks.length,
       durationMs,
@@ -406,7 +424,7 @@ export async function bisectRun(
         projectId: pid,
         projectRoot: project.root,
         step: firstBad,
-        command: argvWords(argv),
+        command: argvWords(redacted.command),
       });
       report.mistakeId = mistake?.id ?? null;
     }
@@ -508,7 +526,7 @@ export async function bisectRevert(
         `See what that step changed with: mindly bisect show ${seq} --patch`,
       );
     }
-    if (!o.json || !o.yes) {
+    if (!o.json) {
       const diff = await stepDiff(worktree, step.parentCommit, step.commit, { patch: true });
       out.line(`Step ${seq} (${stepWhat(info)}) will be undone in ${worktree}:`);
       for (const line of stripControl(diff).trimEnd().split('\n'))
