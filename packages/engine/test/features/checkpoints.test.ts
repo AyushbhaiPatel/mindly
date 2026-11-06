@@ -2,12 +2,19 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { defaultUserConfig, EMPTY_HOOK_RESULT, type UserConfig } from '@mindly/core';
+import {
+  defaultUserConfig,
+  EMPTY_HOOK_RESULT,
+  MindlyError,
+  sha256,
+  type UserConfig,
+} from '@mindly/core';
 import {
   Mindly,
   PRUNE_INTERVAL_MS,
   type CheckpointCaptureInput,
   type CheckpointGitPort,
+  type CheckpointRefEntry,
 } from '../../src/index.js';
 import { event, FakeClock, fakeGit, shellTool, writeTool } from '../helpers.js';
 
@@ -20,9 +27,15 @@ const DAY_MS = 86_400_000;
 function fakeCheckpointGit(root: string) {
   const captures: CheckpointCaptureInput[] = [];
   const deleted: { worktree: string; refs: string[] }[] = [];
-  const state = { commits: 0, busy: false, failing: false, rescanChanges: [] as string[] };
+  const refs: CheckpointRefEntry[] = [];
+  const state = { commits: 0, busy: false, failing: false, rescanChanges: [] as string[], now: 0 };
+  const parseRef = (ref: string) => {
+    const [worktreeId, seq] = ref.slice('refs/mindly/steps/'.length).split('/');
+    return { worktreeId: worktreeId as string, seq: Number(seq) };
+  };
   const port: CheckpointGitPort = {
     worktreeRoot: async (cwd) => (cwd === root || cwd.startsWith(`${root}/`) ? root : null),
+    worktreeId: (worktree) => basename(worktree),
     refName: (worktree, seq) => `refs/mindly/steps/${basename(worktree)}/${seq}`,
     capture: async (input) => {
       captures.push(input);
@@ -31,25 +44,41 @@ function fakeCheckpointGit(root: string) {
       state.rescanChanges = [];
       const changed = input.parent === null || changedPaths.length > 0;
       if (!changed && !input.always) {
-        return { commit: null, tree: 'tree-same', changed: false, changedPaths: [], skipped: [] };
+        return {
+          commit: null,
+          tree: 'tree-same',
+          changed: false,
+          changedPaths: [],
+          skipped: [],
+          fresh: false,
+        };
+      }
+      if (refs.some((r) => r.ref === input.ref)) {
+        throw new MindlyError('conflict', 'checkpoint ref already exists');
       }
       state.commits += 1;
+      const commit = `commit-${state.commits}`;
+      refs.push({ ...parseRef(input.ref), ref: input.ref, commit, createdAt: state.now });
       return {
-        commit: `commit-${state.commits}`,
+        commit,
         tree: `tree-${state.commits}`,
         changed,
         changedPaths,
         skipped: [],
+        fresh: false,
       };
     },
-    deleteRefs: async (worktree, refs) => {
-      deleted.push({ worktree, refs: [...refs] });
-      return refs.length;
+    listRefs: async () => [...refs],
+    deleteRefs: async (repoDir, wanted) => {
+      const existing = refs.filter((r) => wanted.includes(r.ref));
+      deleted.push({ worktree: repoDir, refs: existing.map((r) => r.ref) });
+      for (const r of existing) refs.splice(refs.indexOf(r), 1);
+      return existing.length;
     },
     diskUsage: async () => 4096,
     tryLock: () => (state.busy ? null : { release: () => undefined }),
   };
-  return { port, captures, deleted, state };
+  return { port, captures, deleted, refs, state };
 }
 
 function make(configure?: (c: UserConfig) => void) {
@@ -121,7 +150,7 @@ describe('checkpoints through hooks', () => {
     const change = mindly.store.fileChanges.forPath(pid(), 'src/auth.ts')[0]!;
     expect(fake.captures.at(-1)).toMatchObject({
       paths: ['src/auth.ts'],
-      always: true,
+      always: false,
       parent: { commit: 'commit-1' },
       ref: `refs/mindly/steps/${basename(root)}/2`,
       message: 'mindly step 2',
@@ -206,6 +235,29 @@ describe('checkpoints through hooks', () => {
     expect(steps[3]!.paths).toEqual(['src/auth.ts']);
     expect(steps[1]!.sessionId).not.toBeNull();
     expect(steps[3]!.sessionId).toBe(steps[1]!.sessionId);
+  });
+
+  it('never reuses a step number: rows may go, refs and the high-water mark stay', async () => {
+    const { root, mindly, fake, pid, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const edit = (text: string) =>
+      mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', text) }),
+      );
+    await edit('a');
+    await edit('b');
+    expect(rows().map((c) => c.seq)).toEqual([1, 2, 3]);
+    // Rows lost without their refs (a reset database): numbering goes on from the mark.
+    mindly.store.checkpoints.delete(rows().map((c) => c.id));
+    await edit('c');
+    expect(rows().map((c) => c.seq)).toEqual([4]);
+    // The mark lost too (a reset home): the refs themselves give the next free number.
+    mindly.store.checkpoints.delete(rows().map((c) => c.id));
+    mindly.store.kv.delete(`checkpoints:seq:${pid()}:${sha256(root).slice(0, 16)}`);
+    await edit('d');
+    expect(rows().map((c) => c.seq)).toEqual([5]);
+    expect(fake.refs.map((r) => r.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(mindly.store.checkpoints.count(pid())).toBe(1);
   });
 
   it('skips a step when the lock is busy or git fails, and marks the next one as a gap', async () => {

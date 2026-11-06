@@ -388,6 +388,17 @@ export class FileChangeRepo {
     ).map((r) => toFileChange(r, []));
   }
 
+  /** Changes of a project recorded after `since` (exclusive), newest first. */
+  since(projectId: string, since: number, limit = 500): FileChange[] {
+    return (
+      this.db
+        .prepare(
+          'SELECT * FROM file_changes WHERE project_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT ?',
+        )
+        .all(projectId, since, Math.max(1, Math.min(5000, Math.trunc(limit)))) as Row[]
+    ).map((r) => toFileChange(r, []));
+  }
+
   /** Sessions other than `sessionId` that changed `path` since `since`. */
   otherEditors(projectId: string, sessionId: string, path: string, since: number): string[] {
     return (

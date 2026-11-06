@@ -10,9 +10,9 @@ All notable changes to `mindly-cli` are documented here. The project follows
 - `mindly bisect -- <command>` finds the agent edit that broke a command. Mindly now keeps a
   checkpoint of the code after every agent edit: a git commit of the whole working tree stored
   under a hidden ref (`refs/mindly/steps/<worktree>/<step>`) in your repository, taken through a
-  private index so your index, HEAD, branches, stash and files are never touched, with each
-  checkpoint's parent being the previous one so a step's diff is one `git diff`. Secret files on
-  the deny-list are never stored. After an edit tool only the touched paths are refreshed; a full
+  private index so your index, HEAD, branches, stash and files are never touched. Each checkpoint
+  is a parentless commit, so pruning one really frees it. Secret files on the deny-list are never
+  stored. After an edit tool only the touched paths are refreshed; a full
   rescan happens at session start, on each prompt and after a shell command that may have written
   files, and changes no agent edit explains become an `outside` step. Checkpoints never block or
   slow a hook: a busy lock or a git error skips the checkpoint and marks the next one as a gap.

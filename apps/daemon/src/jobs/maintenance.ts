@@ -63,7 +63,6 @@ export function housekeepingTick(ctx: JobContext): HousekeepingResult {
 
 /** Deletes checkpoints past `checkpoints.keepDays` or `checkpoints.maxPerWorktree` in every project. */
 export async function checkpointPruneTick(ctx: JobContext): Promise<void> {
-  if (!ctx.mindly.checkpoints.enabled) return;
   const r = await ctx.mindly.checkpoints.pruneAll();
   if (r.refsDeleted > 0 || r.rowsDeleted > 0) ctx.logger.info('checkpoint prune', { ...r });
 }

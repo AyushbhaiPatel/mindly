@@ -22,6 +22,7 @@ import {
   headCommit,
   hunkHashes,
   languageOf,
+  listCheckpointRefs,
   listFiles,
   materializeTree,
   mergeIntoNewBranch,
@@ -31,6 +32,7 @@ import {
   runGit,
   shadowMerge,
   tryLockCheckpoint,
+  worktreeId,
   assertValidBranchName,
   type ExportedSymbol,
   type ImportGraph,
@@ -47,10 +49,12 @@ export function createCheckpointGitPort(): CheckpointGitPort {
         return null;
       }
     },
+    worktreeId: (worktree) => worktreeId(worktree),
     refName: (worktree, seq) => checkpointRefName(worktree, seq),
     capture: (input) => captureCheckpoint(input),
-    deleteRefs: (worktree, refs) => deleteCheckpointRefs(worktree, refs),
-    diskUsage: (worktree) => checkpointDiskUsage(worktree),
+    listRefs: (repoDir) => listCheckpointRefs(repoDir),
+    deleteRefs: (repoDir, refs) => deleteCheckpointRefs(repoDir, refs),
+    diskUsage: (repoDir) => checkpointDiskUsage(repoDir),
     tryLock: (lockFile) => tryLockCheckpoint(lockFile),
   };
 }

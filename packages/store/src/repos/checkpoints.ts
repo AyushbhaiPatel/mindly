@@ -95,6 +95,26 @@ export class CheckpointRepo {
     return this.get(id);
   }
 
+  /** Re-attributes a step to the agent edit it turned out to hold. */
+  attribute(
+    id: string,
+    input: {
+      kind: CheckpointKind;
+      sessionId: string | null;
+      fileChangeId: string | null;
+      promptEventId: string | null;
+      tool: string | null;
+    },
+  ): Checkpoint {
+    this.db
+      .prepare(
+        `UPDATE checkpoints SET kind = ?, session_id = ?, file_change_id = ?, prompt_event_id = ?, tool = ?
+         WHERE id = ?`,
+      )
+      .run(input.kind, input.sessionId, input.fileChangeId, input.promptEventId, input.tool, id);
+    return this.get(id);
+  }
+
   get(id: string): Checkpoint {
     const r = this.db.prepare('SELECT * FROM checkpoints WHERE id = ?').get(id) as Row | undefined;
     if (!r) throw notFound('checkpoint', id);

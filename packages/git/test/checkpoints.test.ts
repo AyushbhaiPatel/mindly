@@ -88,7 +88,7 @@ describe('captureCheckpoint', () => {
     expect(step2).toMatch(/^[0-9a-f]{40}$/);
     expect(second.changed).toBe(true);
     expect(second.changedPaths).toEqual(['src/a.ts']);
-    expect(git(root, 'rev-parse', `${step2}^`).trim()).toBe(step1);
+    expect(git(root, 'rev-list', '--parents', '-n', '1', step2).trim()).toBe(step2);
     expect(blob(root, step2, 'src/a.ts')).toBe('export const a = 333;\n');
     expect(blob(root, step2, 'src/new.ts')).toBe('export const fresh = true;\n');
     expect(git(root, 'diff', '--name-only', step1, step2).trim()).toBe('src/a.ts');
@@ -149,7 +149,9 @@ describe('captureCheckpoint', () => {
     expect(forced.commit).toMatch(/^[0-9a-f]{40}$/);
     expect(forced.changed).toBe(false);
     expect(forced.tree).toBe(first.tree);
-    expect(git(root, 'rev-parse', `${forced.commit}^`).trim()).toBe(step1);
+    expect(git(root, 'rev-list', '--parents', '-n', '1', forced.commit as string).trim()).toBe(
+      forced.commit,
+    );
     expect((await listCheckpointRefs(root)).map((r) => r.seq)).toEqual([1, 2]);
   });
 
@@ -329,6 +331,41 @@ describe('checkpoint refs', () => {
     }
   });
 
+  it('drops a staged secret and a path denied after it was captured, on every capture', async () => {
+    const root = makeRepo({ 'a.txt': 'a\n', 'config/app.txt': 'plain\n' });
+    const indexFile = join(tempDir(), 'index');
+    write(root, '.env', 'SECRET=1\n');
+    git(root, 'add', '--force', '.env');
+    write(root, 'config/app.txt', 'token=abc\n');
+    const first = await captureCheckpoint({
+      worktree: root,
+      indexFile,
+      parent: null,
+      paths: null,
+      always: true,
+      ref: checkpointRefName(root, 1),
+      message: 'step 1',
+    });
+    expect(first.skipped).toEqual(['.env']);
+    expect(treePaths(root, first.commit as string)).toEqual(['a.txt', 'config/app.txt']);
+    expect(blob(root, first.commit as string, 'config/app.txt')).toBe('token=abc\n');
+
+    const second = await captureCheckpoint({
+      worktree: root,
+      indexFile,
+      parent: { commit: first.commit as string },
+      paths: ['a.txt'],
+      always: true,
+      ref: checkpointRefName(root, 2),
+      message: 'step 2',
+      extraDeny: ['config/*'],
+    });
+    expect(second.skipped).toEqual(['config/app.txt']);
+    expect(blob(root, second.commit as string, 'config/app.txt')).toBe('plain\n');
+    expect(treePaths(root, second.commit as string)).toEqual(['a.txt', 'config/app.txt']);
+    expect(git(root, 'ls-files', '--stage', '.env')).toContain('.env');
+  });
+
   it('lists oldest first, deletes only the named refs and measures disk usage', async () => {
     const root = makeRepo({ 'a.txt': 'a\n' });
     const indexFile = join(tempDir(), 'index');
@@ -348,13 +385,34 @@ describe('checkpoint refs', () => {
       commits.push(r.commit as string);
     }
     const listed = await listCheckpointRefs(root);
+    const id = worktreeId(root);
     expect(listed).toEqual([
-      { seq: 1, ref: checkpointRefName(root, 1), commit: commits[0] },
-      { seq: 2, ref: checkpointRefName(root, 2), commit: commits[1] },
-      { seq: 3, ref: checkpointRefName(root, 3), commit: commits[2] },
+      {
+        worktreeId: id,
+        seq: 1,
+        ref: checkpointRefName(root, 1),
+        commit: commits[0],
+        createdAt: expect.any(Number),
+      },
+      {
+        worktreeId: id,
+        seq: 2,
+        ref: checkpointRefName(root, 2),
+        commit: commits[1],
+        createdAt: expect.any(Number),
+      },
+      {
+        worktreeId: id,
+        seq: 3,
+        ref: checkpointRefName(root, 3),
+        commit: commits[2],
+        createdAt: expect.any(Number),
+      },
     ]);
+    expect(await listCheckpointRefs(root, id)).toEqual(listed);
+    expect(await listCheckpointRefs(root, 'nobody')).toEqual([]);
     mkdirSync(join(root, 'elsewhere'));
-    expect(await listCheckpointRefs(join(root, 'elsewhere'))).toEqual([]);
+    expect(await listCheckpointRefs(join(root, 'elsewhere'))).toEqual(listed);
 
     const usage = await checkpointDiskUsage(root);
     expect(usage === null || usage > 0).toBe(true);

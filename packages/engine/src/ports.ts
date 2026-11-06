@@ -79,19 +79,35 @@ export interface CheckpointCaptureResult {
   changedPaths: string[];
   /** Denied paths left out. */
   skipped: string[];
+  /** True when the private index did not exist, so the whole tree was scanned. */
+  fresh: boolean;
+}
+
+/** A checkpoint ref found in a repository. */
+export interface CheckpointRefEntry {
+  worktreeId: string;
+  seq: number;
+  ref: string;
+  commit: string;
+  /** When the checkpoint commit was made (ms since the epoch). */
+  createdAt: number;
 }
 
 /** Git operations behind checkpoints. Every method may throw a `MindlyError`. */
 export interface CheckpointGitPort {
   /** Canonical (`realpath.native`) top-level directory of the working tree containing `cwd`, or null. */
   worktreeRoot(cwd: string): Promise<string | null>;
+  /** Stable id of a working tree, as used in its ref names. */
+  worktreeId(worktree: string): string;
   /** Ref name of step `seq` of `worktree`. */
   refName(worktree: string, seq: number): string;
   capture(input: CheckpointCaptureInput): Promise<CheckpointCaptureResult>;
-  /** Deletes checkpoint refs of `worktree`; missing ones are ignored. Returns how many went. */
-  deleteRefs(worktree: string, refs: readonly string[]): Promise<number>;
+  /** Checkpoint refs of the repository containing `repoDir` (any existing directory of it). */
+  listRefs(repoDir: string): Promise<CheckpointRefEntry[]>;
+  /** Deletes checkpoint refs of the repository containing `repoDir`; missing ones are ignored. */
+  deleteRefs(repoDir: string, refs: readonly string[]): Promise<number>;
   /** Approximate bytes checkpoint objects take on disk, or null when unknown. */
-  diskUsage(worktree: string): Promise<number | null>;
+  diskUsage(repoDir: string): Promise<number | null>;
   /** Takes the per-worktree lock (a create-exclusive file) without waiting; null when busy. */
   tryLock(lockFile: string): { release(): void } | null;
 }

@@ -88,10 +88,8 @@ describe('checkpoint latency', () => {
       `checkpoint latency: median ${median.toFixed(1)}ms p95 ${p95.toFixed(1)}ms (${EDITS} edits, ${files.length} files; full rescan ${fullMedian.toFixed(1)}ms)`,
     );
 
-    expect(git(root, 'rev-list', '--first-parent', chain[chain.length - 1] as string).trim()).toBe(
-      [...chain].reverse().join('\n'),
-    );
     const last = chain[chain.length - 1] as string;
+    expect(git(root, 'rev-list', '--parents', '-n', '1', last).trim()).toBe(last);
     expect(git(root, 'rev-parse', checkpointRefName(root, EDITS + 1)).trim()).toBe(last);
     expect(git(root, 'rev-parse', 'HEAD^{tree}')).not.toBe(
       git(root, 'rev-parse', `${last}^{tree}`),

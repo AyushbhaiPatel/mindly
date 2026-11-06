@@ -82,6 +82,7 @@ export class Mindly {
     this.checkpoints = new CheckpointService(
       kernel,
       paths ? join(paths.home, 'checkpoints') : null,
+      paths?.daemonState ?? null,
     );
     this.hooks = new HookHandler(kernel, {
       projects: this.projects,

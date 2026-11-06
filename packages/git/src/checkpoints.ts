@@ -3,6 +3,8 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeSync,
@@ -18,7 +20,8 @@ import { findRepoRoot, headCommit } from './repo.js';
  * Checkpoints: a commit object holding the whole working tree as it was after one agent edit,
  * stored under a hidden ref. The user's index, HEAD, branches, stash and files are never touched:
  * every git call works on a private index file the caller keeps outside the repository. Git
- * deduplicates content, so unchanged files cost nothing.
+ * deduplicates content, so unchanged files cost nothing. Checkpoint commits have no parent: the
+ * previous step is kept by the caller, so deleting a ref really frees the step (after git gc).
  */
 
 /** Namespace holding checkpoint refs: `refs/mindly/steps/<worktree id>/<seq>`. */
@@ -49,14 +52,14 @@ export interface CheckpointCaptureInput {
   worktree: string;
   /** Private index file for this working tree, absolute and outside the repository. */
   indexFile: string;
-  /** The previous checkpoint of the working tree, the new commit's parent. */
+  /** The previous checkpoint of the working tree, whose tree the new one is compared with. */
   parent: { commit: string } | null;
   /**
    * Working-tree-relative paths an edit tool touched: only they are refreshed in the index. Null
    * rescans the whole tree (modified, deleted and untracked files).
    */
   paths: readonly string[] | null;
-  /** Create the commit even when the tree equals the parent's (agent steps always count). */
+  /** Create the commit even when the tree equals the parent's. */
   always: boolean;
   /** Ref to create for the new commit; must not exist yet. */
   ref: string;
@@ -78,6 +81,8 @@ export interface CheckpointCaptureResult {
   changedPaths: string[];
   /** Paths left out because they are on the deny-list. */
   skipped: string[];
+  /** True when the private index did not exist, so the whole tree was scanned. */
+  fresh: boolean;
 }
 
 const overridesCache = new Map<string, { at: number; value: Promise<string[]> }>();
@@ -107,35 +112,18 @@ function assertIndexFile(indexFile: string, root: string): void {
   }
 }
 
+type GitCommon = { cwd: string; env: Record<string, string>; config: string[]; timeoutMs: number };
+
 /**
- * Seeds a new private index from the real index (read only, keeps its stat cache) or from HEAD,
- * then restores HEAD content for every denied path the real index had staged with other content.
+ * Resets every denied path the index holds with content other than HEAD's back to HEAD (or
+ * removes it when HEAD has none), so a secret staged by the user, or a file denied since it was
+ * captured, never reaches a checkpoint tree. Returns the paths it touched.
  */
-async function seedIndex(
-  root: string,
-  indexFile: string,
-  common: { cwd: string; env: Record<string, string>; config: string[]; timeoutMs: number },
+async function dropDeniedEntries(
+  common: GitCommon,
   head: string | null,
   extraDeny: readonly string[],
 ): Promise<string[]> {
-  mkdirSync(dirname(indexFile), { recursive: true, mode: 0o700 });
-  const indexPath = (
-    await runGit(['rev-parse', '--git-path', 'index'], { cwd: root, timeoutMs: common.timeoutMs })
-  ).stdout.trim();
-  const realIndex = isAbsolute(indexPath) ? indexPath : resolve(root, indexPath);
-  let seeded = false;
-  if (existsSync(realIndex)) {
-    try {
-      copyIndex(realIndex, indexFile);
-      seeded = true;
-    } catch {
-      seeded = false;
-    }
-  }
-  if (!seeded) {
-    await runGit(head ? ['read-tree', head] : ['read-tree', '--empty'], common);
-    return [];
-  }
   const staged = head
     ? splitNul(
         (
@@ -162,12 +150,53 @@ async function seedIndex(
 }
 
 /**
- * Records the working tree containing `worktree` as a commit whose parent is the previous
- * checkpoint, using a private index file so the real index, HEAD, branches and files stay
- * untouched. With `paths`, only those entries are refreshed from disk (fast: an edit tool's own
- * files); without, the whole tree is rescanned. Denied paths (`.env`, keys, credentials) keep the
- * content HEAD has and are never stored. Every git call has a short timeout; any failure throws
- * and the caller skips the checkpoint.
+ * Seeds a new private index from the real index (read only, keeps its stat cache) or from HEAD.
+ * The seed is built in a temporary file and moved into place only once every denied path has
+ * been reset to HEAD, so an interrupted seeding leaves no index holding a staged secret.
+ */
+async function seedIndex(
+  root: string,
+  indexFile: string,
+  common: GitCommon,
+  head: string | null,
+  extraDeny: readonly string[],
+): Promise<string[]> {
+  mkdirSync(dirname(indexFile), { recursive: true, mode: 0o700 });
+  const seed = `${indexFile}.seed`;
+  rmSync(seed, { force: true });
+  const seeding = { ...common, env: { GIT_INDEX_FILE: seed } };
+  try {
+    const indexPath = (
+      await runGit(['rev-parse', '--git-path', 'index'], { cwd: root, timeoutMs: common.timeoutMs })
+    ).stdout.trim();
+    const realIndex = isAbsolute(indexPath) ? indexPath : resolve(root, indexPath);
+    let seeded = false;
+    if (existsSync(realIndex)) {
+      try {
+        copyIndex(realIndex, seed);
+        seeded = true;
+      } catch {
+        seeded = false;
+      }
+    }
+    let denied: string[] = [];
+    if (seeded) denied = await dropDeniedEntries(seeding, head, extraDeny);
+    else await runGit(head ? ['read-tree', head] : ['read-tree', '--empty'], seeding);
+    renameSync(seed, indexFile);
+    return denied;
+  } catch (err) {
+    rmSync(seed, { force: true });
+    throw err;
+  }
+}
+
+/**
+ * Records the working tree containing `worktree` as a parentless commit, using a private index
+ * file so the real index, HEAD, branches and files stay untouched. With `paths`, only those
+ * entries are refreshed from disk (fast: an edit tool's own files); without, the whole tree is
+ * rescanned. Denied paths (`.env`, keys, credentials) keep the content HEAD has and are never
+ * stored. Every git call has a short timeout; any failure throws and the caller skips the
+ * checkpoint.
  */
 export async function captureCheckpoint(
   input: CheckpointCaptureInput,
@@ -177,17 +206,29 @@ export async function captureCheckpoint(
   const timeoutMs = input.timeoutMs ?? CHECKPOINT_GIT_TIMEOUT_MS;
   const extraDeny = input.extraDeny ?? [];
   const env = { GIT_INDEX_FILE: input.indexFile };
-  const common = { cwd: root, env, config: await cachedOverrides(root), timeoutMs };
+  const common: GitCommon = { cwd: root, env, config: await cachedOverrides(root), timeoutMs };
   const skipped = new Set<string>();
 
+  // The caller holds the per-worktree lock, so a lock file left by a killed git process is stale.
+  rmSync(`${input.indexFile}.lock`, { force: true });
+  const head = await headCommit(root);
   const fresh = !existsSync(input.indexFile);
   if (fresh) {
-    const head = await headCommit(root);
     for (const p of await seedIndex(root, input.indexFile, common, head, extraDeny)) skipped.add(p);
   }
-  const full = input.paths === null || fresh;
-
-  let candidates: string[];
+  let candidates: string[] = [];
+  let full = input.paths === null || fresh;
+  if (!full) {
+    candidates = [...new Set((input.paths ?? []).map((p) => assertSafeRelativePath(p)))];
+    // A folder would be added whole, denied files inside it included: rescan instead.
+    full = candidates.some((p) => {
+      try {
+        return statSync(resolve(root, p)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+  }
   if (full) {
     const unstaged = splitNul(
       (await runGit(['diff-files', '--name-only', '-z', '--ignore-submodules=dirty'], common))
@@ -197,19 +238,11 @@ export async function captureCheckpoint(
       (await runGit(['ls-files', '-z', '--others', '--exclude-standard'], common)).stdout,
     );
     candidates = [...new Set([...unstaged, ...untracked])];
-  } else {
-    candidates = [...new Set((input.paths ?? []).map((p) => assertSafeRelativePath(p)))];
   }
   const refresh: string[] = [];
   for (const p of candidates) {
     if (isDeniedPath(p, extraDeny)) skipped.add(p);
     else refresh.push(p);
-  }
-
-  // A rescan that finds nothing new leaves the index, and so the tree, as the parent left it.
-  if (full && !fresh && input.parent && refresh.length === 0 && !input.always) {
-    const tree = (await runGit(['write-tree'], common)).stdout.trim();
-    return { commit: null, tree, changed: false, changedPaths: [], skipped: [...skipped].sort() };
   }
 
   const present = refresh.filter((p) => existsSync(resolve(root, p)));
@@ -231,6 +264,8 @@ export async function captureCheckpoint(
       input: `${missing.join('\0')}\0`,
     });
   }
+  // Whatever got in before (a staged secret, a path denied since): back to HEAD, every time.
+  for (const p of await dropDeniedEntries(common, head, extraDeny)) skipped.add(p);
   const tree = (await runGit(['write-tree'], common)).stdout.trim();
 
   let changed = true;
@@ -254,18 +289,11 @@ export async function captureCheckpoint(
       ).slice(0, MAX_CHANGED_PATHS);
     }
   }
+  const sortedSkipped = [...skipped].sort();
   if (!changed && !input.always) {
-    return { commit: null, tree, changed: false, changedPaths: [], skipped: [...skipped].sort() };
+    return { commit: null, tree, changed: false, changedPaths: [], skipped: sortedSkipped, fresh };
   }
-  const commit = await commitTree(
-    root,
-    tree,
-    input.parent ? [input.parent.commit] : [],
-    input.message,
-    {
-      timeoutMs,
-    },
-  );
+  const commit = await commitTree(root, tree, [], input.message, { timeoutMs });
   const created = await runGit(['update-ref', '--stdin', '-m', input.message], {
     cwd: root,
     input: `create ${input.ref} ${commit}\n`,
@@ -275,52 +303,67 @@ export async function captureCheckpoint(
   if (created.exitCode !== 0) {
     throw new MindlyError('conflict', 'checkpoint ref already exists or could not be created');
   }
-  return { commit, tree, changed, changedPaths, skipped: [...skipped].sort() };
+  return { commit, tree, changed, changedPaths, skipped: sortedSkipped, fresh };
 }
 
-/** A checkpoint ref of a working tree. */
+/** A checkpoint ref of the repository. */
 export interface CheckpointRefEntry {
+  worktreeId: string;
   seq: number;
   ref: string;
   commit: string;
-}
-
-/** Lists the checkpoint refs of `worktree`, oldest step first. */
-export async function listCheckpointRefs(worktree: string): Promise<CheckpointRefEntry[]> {
-  const root = await findRepoRoot(worktree);
-  const prefix = `${CHECKPOINT_REF_PREFIX}${worktreeId(worktree)}/`;
-  const res = await runGit(['for-each-ref', '--format=%(refname)%00%(objectname)', prefix], {
-    cwd: root,
-    timeoutMs: 10_000,
-  });
-  const out: CheckpointRefEntry[] = [];
-  for (const line of res.stdout.split('\n')) {
-    if (line === '') continue;
-    const [ref, commit] = line.split('\0');
-    if (!ref || !commit || !ref.startsWith(prefix)) continue;
-    const seq = Number(ref.slice(prefix.length));
-    if (!Number.isInteger(seq)) continue;
-    out.push({ seq, ref, commit });
-  }
-  return out.sort((a, b) => a.seq - b.seq);
+  /** When the checkpoint commit was made (ms since the epoch). */
+  createdAt: number;
 }
 
 /**
- * Deletes checkpoint refs of `worktree` (the commits stay until git garbage-collects them).
- * Refs that no longer exist are ignored. Returns how many were deleted.
+ * Lists the checkpoint refs of the repository containing `repoDir` (any existing directory of
+ * it, such as the project root), optionally only those of one working tree id, oldest step
+ * first per working tree.
+ */
+export async function listCheckpointRefs(
+  repoDir: string,
+  onlyWorktreeId?: string,
+): Promise<CheckpointRefEntry[]> {
+  const root = await findRepoRoot(repoDir);
+  const res = await runGit(
+    [
+      'for-each-ref',
+      '--format=%(refname)%00%(objectname)%00%(committerdate:unix)',
+      CHECKPOINT_REF_PREFIX,
+    ],
+    { cwd: root, timeoutMs: 10_000 },
+  );
+  const out: CheckpointRefEntry[] = [];
+  for (const line of res.stdout.split('\n')) {
+    if (line === '') continue;
+    const [ref, commit, date] = line.split('\0');
+    if (!ref || !commit || !ref.startsWith(CHECKPOINT_REF_PREFIX)) continue;
+    const [id, seqText] = ref.slice(CHECKPOINT_REF_PREFIX.length).split('/');
+    const seq = Number(seqText);
+    if (!id || !Number.isInteger(seq)) continue;
+    if (onlyWorktreeId !== undefined && id !== onlyWorktreeId) continue;
+    out.push({ worktreeId: id, seq, ref, commit, createdAt: Number(date ?? 0) * 1000 });
+  }
+  return out.sort((a, b) => a.worktreeId.localeCompare(b.worktreeId) || a.seq - b.seq);
+}
+
+/**
+ * Deletes checkpoint refs of the repository containing `repoDir` (the commits stay until git
+ * garbage-collects them). Refs that no longer exist are ignored. Returns how many were deleted.
  */
 export async function deleteCheckpointRefs(
-  worktree: string,
+  repoDir: string,
   refs: readonly string[],
 ): Promise<number> {
   const wanted = new Set(refs);
-  const existing = (await listCheckpointRefs(worktree)).filter((r) => wanted.has(r.ref));
+  const existing = (await listCheckpointRefs(repoDir)).filter((r) => wanted.has(r.ref));
   if (existing.length === 0) return 0;
-  const root = await findRepoRoot(worktree);
+  const root = await findRepoRoot(repoDir);
   await runGit(['update-ref', '--stdin', '-m', 'mindly checkpoint prune'], {
     cwd: root,
     input: existing.map((r) => `delete ${r.ref} ${r.commit}\n`).join(''),
-    timeoutMs: 30_000,
+    timeoutMs: 10_000,
   });
   return existing.length;
 }
@@ -329,8 +372,8 @@ export async function deleteCheckpointRefs(
  * Approximate bytes the checkpoint objects of the repository take on disk, beyond what branches,
  * tags and remotes already hold. Null when git cannot tell (older than 2.31).
  */
-export async function checkpointDiskUsage(worktree: string): Promise<number | null> {
-  const root = await findRepoRoot(worktree);
+export async function checkpointDiskUsage(repoDir: string): Promise<number | null> {
+  const root = await findRepoRoot(repoDir);
   try {
     const res = await runGit(
       [
@@ -353,8 +396,8 @@ export async function checkpointDiskUsage(worktree: string): Promise<number | nu
 }
 
 /** Names of remotes configured with `remote.<name>.mirror = true` (`git push --mirror` pushes hidden refs). */
-export async function mirrorRemotes(worktree: string): Promise<string[]> {
-  const root = await findRepoRoot(worktree);
+export async function mirrorRemotes(repoDir: string): Promise<string[]> {
+  const root = await findRepoRoot(repoDir);
   const res = await runGit(['config', '--get-regexp', '^remote\\..+\\.mirror$'], {
     cwd: root,
     okExitCodes: [1],

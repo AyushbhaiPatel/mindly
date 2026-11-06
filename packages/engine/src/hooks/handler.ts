@@ -385,8 +385,9 @@ export class HookHandler {
         failed: tool.failed,
       });
     }
-    // A shell command that may have written files: whatever changed is an `outside` step.
-    if (tool.shell && tool.command && shellMayWriteFiles(tool.command)) {
+    // A shell command that may have written files: whatever changed goes into a step no agent
+    // edit explains. A shell tool that reports its own edits (a patch) is handled as an edit.
+    if (tool.shell && tool.command && !tool.writes && shellMayWriteFiles(tool.command)) {
       await this.d.checkpoints.rescan(project, evt.cwd);
     }
     if (tool.shell && tool.failed && tool.command) {
