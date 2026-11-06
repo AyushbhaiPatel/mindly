@@ -6,9 +6,13 @@ import {
   addWorktree,
   branchExists,
   buildImportGraph,
+  captureCheckpoint,
   captureWorktreeCommit,
   changedFiles,
+  checkpointDiskUsage,
+  checkpointRefName,
   createSnapshotRef,
+  deleteCheckpointRefs,
   currentBranch,
   deleteBranch,
   diffExportSurface,
@@ -26,11 +30,30 @@ import {
   runChecks,
   runGit,
   shadowMerge,
+  tryLockCheckpoint,
   assertValidBranchName,
   type ExportedSymbol,
   type ImportGraph,
 } from '@mindly/git';
-import type { SplitGitPort } from '@mindly/engine';
+import type { CheckpointGitPort, SplitGitPort } from '@mindly/engine';
+
+/** `CheckpointGitPort` backed by `@mindly/git`. Errors propagate: the checkpoint service fails open. */
+export function createCheckpointGitPort(): CheckpointGitPort {
+  return {
+    worktreeRoot: async (cwd) => {
+      try {
+        return realpathSync.native(await findRepoRoot(cwd));
+      } catch {
+        return null;
+      }
+    },
+    refName: (worktree, seq) => checkpointRefName(worktree, seq),
+    capture: (input) => captureCheckpoint(input),
+    deleteRefs: (worktree, refs) => deleteCheckpointRefs(worktree, refs),
+    diskUsage: (worktree) => checkpointDiskUsage(worktree),
+    tryLock: (lockFile) => tryLockCheckpoint(lockFile),
+  };
+}
 
 /** `SplitGitPort` backed by `@mindly/git`. Errors propagate: split commands report them. */
 export function createSplitGitPort(): SplitGitPort {
@@ -217,6 +240,7 @@ export function createGitPort(): GitPort {
         return res.exitCode === 0;
       }, false),
     split: createSplitGitPort(),
+    checkpoints: createCheckpointGitPort(),
   };
 }
 

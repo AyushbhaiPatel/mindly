@@ -14,6 +14,7 @@ import {
 import { Store } from '@mindly/store';
 import { join } from 'node:path';
 import { ContextBuilder } from './context/builder.js';
+import { CheckpointService } from './features/checkpoints.js';
 import { TelepathyService } from './coordination/telepathy.js';
 import { IntentService, TaskService } from './coordination/work.js';
 import { HookHandler } from './hooks/handler.js';
@@ -58,6 +59,8 @@ export class Mindly {
   readonly tasks: TaskService;
   readonly intents: IntentService;
   readonly context: ContextBuilder;
+  /** Checkpoints of the code after every agent edit (`mindly bisect`). */
+  readonly checkpoints: CheckpointService;
   readonly hooks: HookHandler;
 
   constructor(
@@ -76,6 +79,10 @@ export class Mindly {
     this.tasks = new TaskService(kernel);
     this.intents = new IntentService(kernel, this.telepathy);
     this.context = new ContextBuilder(kernel, this.telepathy, this.mistakes);
+    this.checkpoints = new CheckpointService(
+      kernel,
+      paths ? join(paths.home, 'checkpoints') : null,
+    );
     this.hooks = new HookHandler(kernel, {
       projects: this.projects,
       context: this.context,
@@ -83,6 +90,7 @@ export class Mindly {
       telepathy: this.telepathy,
       rules: this.rules,
       mistakes: this.mistakes,
+      checkpoints: this.checkpoints,
       bus: this.bus,
     });
   }

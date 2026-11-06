@@ -48,6 +48,52 @@ export interface GitPort {
   isMerged?(repoRoot: string, branch: string, into: string): Promise<boolean>;
   /** Optional (splits): the operations `mindly split` needs; absent when git is unavailable. */
   split?: SplitGitPort;
+  /** Optional (bisect): checkpoints of the working tree after every agent edit. */
+  checkpoints?: CheckpointGitPort;
+}
+
+/** What one checkpoint capture needs. */
+export interface CheckpointCaptureInput {
+  /** The working tree (canonical path). */
+  worktree: string;
+  /** Private index file for this working tree, outside the repository. */
+  indexFile: string;
+  /** The previous checkpoint, the new commit's parent. */
+  parent: { commit: string } | null;
+  /** Paths an edit tool touched (only they are refreshed), or null for a full rescan. */
+  paths: readonly string[] | null;
+  /** Create the commit even when the tree is unchanged. */
+  always: boolean;
+  ref: string;
+  message: string;
+  extraDeny: readonly string[];
+  timeoutMs: number;
+}
+
+/** Result of one checkpoint capture. */
+export interface CheckpointCaptureResult {
+  /** The new commit, or null when nothing changed and `always` was false. */
+  commit: string | null;
+  tree: string;
+  changed: boolean;
+  changedPaths: string[];
+  /** Denied paths left out. */
+  skipped: string[];
+}
+
+/** Git operations behind checkpoints. Every method may throw a `MindlyError`. */
+export interface CheckpointGitPort {
+  /** Canonical (`realpath.native`) top-level directory of the working tree containing `cwd`, or null. */
+  worktreeRoot(cwd: string): Promise<string | null>;
+  /** Ref name of step `seq` of `worktree`. */
+  refName(worktree: string, seq: number): string;
+  capture(input: CheckpointCaptureInput): Promise<CheckpointCaptureResult>;
+  /** Deletes checkpoint refs of `worktree`; missing ones are ignored. Returns how many went. */
+  deleteRefs(worktree: string, refs: readonly string[]): Promise<number>;
+  /** Approximate bytes checkpoint objects take on disk, or null when unknown. */
+  diskUsage(worktree: string): Promise<number | null>;
+  /** Takes the per-worktree lock (a create-exclusive file) without waiting; null when busy. */
+  tryLock(lockFile: string): { release(): void } | null;
 }
 
 /** One side of a split merge check: a part's worktree. */
