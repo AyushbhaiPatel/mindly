@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/logo.png" alt="Mindly logo: a lavender pixel-art elephant" width="96" height="96">
+
 # Mindly
 
 **Shared project memory for your coding agents, so they stop repeating mistakes and stop breaking each other's work.**
