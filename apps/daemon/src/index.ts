@@ -38,6 +38,7 @@ export {
 } from './jobs/shadow-merge.js';
 export { runCommandContracts, runnableCommandContracts, contractsTick } from './jobs/contracts.js';
 export {
+  checkpointPruneTick,
   housekeepingTick,
   selfHealingTick,
   standupTick,

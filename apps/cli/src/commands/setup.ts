@@ -26,6 +26,7 @@ import {
   type AgentAdapter,
   type InstallStep,
 } from '@mindly/core';
+import type { Mindly } from '@mindly/engine';
 import { findRepoRoot } from '@mindly/git';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary } from '../diff.js';
@@ -377,6 +378,43 @@ function supportsProject(adapter: AgentAdapter): boolean {
   return !(adapter instanceof McpClientAdapter) || adapter.supportsProjectScope;
 }
 
+/**
+ * Counts or deletes the checkpoints (hidden `refs/mindly/steps/*` refs and their rows) of the
+ * project at `projectRoot`, or of every project without one. Best effort: 0 when Mindly cannot
+ * be opened.
+ */
+async function checkpointRows(
+  io: CliIo,
+  projectRoot: string | null,
+  action: 'count' | 'remove',
+): Promise<number> {
+  if (!existsSync(mindlyHome(io.env))) return 0;
+  let mindly: Mindly;
+  try {
+    mindly = openMindly({ env: io.env, disableNotify: true, disableLlm: true });
+  } catch {
+    return 0;
+  }
+  try {
+    const projects =
+      projectRoot === null
+        ? mindly.store.projects.list().slice(0, 500)
+        : [mindly.store.projects.findByRoot(realpathSync(projectRoot))].filter((p) => p !== null);
+    let rows = 0;
+    for (const p of projects) {
+      rows +=
+        action === 'count'
+          ? mindly.store.checkpoints.count(p.id)
+          : (await mindly.checkpoints.forget(p.id)).rowsDeleted;
+    }
+    return rows;
+  } catch {
+    return 0;
+  } finally {
+    mindly.close();
+  }
+}
+
 /** `mindly uninstall`: removes Mindly's hooks and MCP entries (data in `$MINDLY_HOME` is kept). */
 export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
   const env = out.io.env;
@@ -405,6 +443,15 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
       out.line(`  ${out.style.dim(root)}`);
       total += Math.max(1, printRulesFileChanges(out, changes));
     }
+  }
+  // Checkpoints (copies of the code after agent edits) go with the hooks that took them.
+  const checkpoints = await checkpointRows(out.io, projectRoot, 'count');
+  if (checkpoints > 0) {
+    out.line(out.style.bold('Checkpoints'));
+    out.line(
+      `  Delete ${checkpoints} saved copies of the code after agent edits (hidden refs in your repositories)`,
+    );
+    total += 1;
   }
   if (o.dryRun) {
     out.line();
@@ -435,6 +482,7 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
       }
     }
   }
+  const removed = checkpoints > 0 ? await checkpointRows(out.io, projectRoot, 'remove') : 0;
   const sc = out.screen();
   const names = plans.filter((p) => p.steps.length > 0).map((p) => p.adapter.displayName);
   sc.blank();
@@ -445,6 +493,11 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
   }
   if (rulesFile !== null) {
     sc.text(`${sc.mark('ok')} Removed Mindly's rules section from your agent instruction files.`);
+  }
+  if (removed > 0) {
+    sc.text(
+      `${sc.mark('ok')} Removed ${removed} checkpoints (copies of the code saved after agent edits) from your repositories.`,
+    );
   }
   sc.note(`Your Mindly data in ${mindlyHome(env)} is kept.`, 2);
   sc.next([{ cmd: 'mindly forget --project', why: "delete this project's Mindly data too" }]);
