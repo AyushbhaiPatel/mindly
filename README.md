@@ -123,6 +123,37 @@ You review the plan before anything is created. Then Mindly:
 `mindly split status` shows how each part is going. `mindly split merge` merges the parts into one
 new branch. It never pushes. `mindly split abort` removes only what the split created.
 
+### New: find the edit that broke it
+
+```bash
+mindly bisect -- pnpm test
+```
+
+Agents make dozens of edits between commits, often several agents in the same checkout, so when a
+test breaks `git bisect` cannot tell you which edit did it. Mindly can: it keeps a checkpoint of
+the code after every agent edit (a hidden git commit in your repository, so unchanged files cost
+nothing, and your branch, index and files are never touched). `mindly bisect` checks out those
+checkpoints one by one in a scratch folder, runs your command there (exit 0 is good, 125 is skip,
+anything else is bad, like `git bisect run`), and binary-searches to the first step that fails.
+It re-runs the two steps around the answer so a flaky test cannot get an agent blamed, and it
+tells you who made the edit, from which prompt, and which rules were in effect:
+
+```text
+Broke at step 87 of 140 · 6 runs · 41s
+  codex #dd7a9a10 · Edit src/auth.ts · 14:32
+  prompt: make login faster, skip the db lookup
+  rules in effect for src/auth.ts then: login must return user.role (it was told)
+  last good: step 86 (claude-code #7c34 · Edit src/ui/nav.tsx)
+-> mindly bisect show 87 --patch     see exactly what changed
+-> mindly bisect revert 87           undo only that edit in your checkout
+```
+
+`mindly bisect list` shows the steps of the last 24 hours, `mindly bisect show <step>` one step
+with its diff, and `mindly bisect revert <step>` undoes that one edit in your checkout after
+showing you the patch (never a commit, never a reset). A reliable result is remembered as a
+mistake in the project's memory so the agents are warned before they repeat it. Checkpoints are
+kept 14 days (`checkpoints.keepDays`) and can be turned off with `checkpoints.enabled`.
+
 ## Install
 
 You need **Node.js 22.13 or newer** and **git**, on macOS or Linux.
@@ -279,6 +310,8 @@ mindly saves [--since 7d]           # times Mindly prevented a problem, with pro
 mindly saves card --out saves.svg   # an image of your saves to share
 mindly split "<goal>"               # divide a goal between agents in separate worktrees
 mindly split status|check|merge|abort
+mindly bisect -- <command>          # the agent edit that broke a command, who made it and why
+mindly bisect list|show <step>|revert <step>
 mindly rules [--approve <id>]       # project rules, approved and proposed
 mindly rules import [--dry-run]     # import rules from CLAUDE.md, AGENTS.md, .cursorrules, …
 mindly rules sync [--dry-run|--off] # keep approved rules in AGENTS.md, CLAUDE.md, GEMINI.md
@@ -304,7 +337,8 @@ Most commands take `--json`. Run `mindly <command> --help` for all options.
   account, no server, no telemetry. Features that use a language model are off by default and use
   your own API key or a local model.
 - **Secrets are removed** before anything is saved, and secret files (`.env`, keys, credentials)
-  are never read.
+  are never read. Checkpoints for `mindly bisect` are git commits inside your own repository,
+  under hidden refs a normal `git push` never sends, and they leave secret files out.
 - **Agents can't make rules on their own.** They can only suggest; you approve. Everything Mindly
   gives an agent is labelled as reference information, so text in a malicious README or web page
   can't become an instruction for all your agents.
