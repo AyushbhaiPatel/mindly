@@ -10,6 +10,12 @@ coverage/
 .mindly-dev/
 .turbo/
 .claude/
+
+# Agent configs written by `mindly init --project` on a maintainer's machine
+.mcp.json
+.codex/
+.cursor/
+.gemini/
 release/
 
 # Private notes, roadmap and specs (never pushed)
