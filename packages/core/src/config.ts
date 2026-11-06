@@ -114,6 +114,14 @@ export const UserConfigSchema = z.object({
       denyPaths: z.array(z.string().max(512)).max(200).default([]),
     })
     .prefault({}),
+  checkpoints: z
+    .object({
+      /** Save a copy of the code after every agent edit (what `mindly bisect` searches). */
+      enabled: z.boolean().default(true),
+      keepDays: z.number().int().min(1).max(3650).default(14),
+      maxPerWorktree: z.number().int().min(10).max(100_000).default(5000),
+    })
+    .prefault({}),
 });
 export type UserConfig = z.infer<typeof UserConfigSchema>;
 

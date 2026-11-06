@@ -91,7 +91,7 @@ export type ContractKind = (typeof CONTRACT_KINDS)[number];
 export const CONTRACT_STATES = ['unknown', 'passing', 'failing', 'error'] as const;
 export type ContractState = (typeof CONTRACT_STATES)[number];
 
-export const RUN_KINDS = ['shadow_merge', 'replay', 'review', 'contract_sweep'] as const;
+export const RUN_KINDS = ['shadow_merge', 'replay', 'review', 'contract_sweep', 'bisect'] as const;
 export type RunKind = (typeof RUN_KINDS)[number];
 
 export const RUN_STATUSES = [
@@ -479,6 +479,47 @@ export interface Snapshot {
   /** Hidden ref under refs/mindly/snapshots/ capturing tracked + untracked work. */
   gitRef: string | null;
   commit: string | null;
+  createdAt: number;
+}
+
+/**
+ * Kinds of checkpoint (`mindly bisect`): `agent` holds exactly what one agent edit changed,
+ * `outside` holds changes no agent edit explains (the user, a formatter, a shell command) found
+ * by a full rescan, and `baseline` is the first checkpoint of a working tree.
+ */
+export const CHECKPOINT_KINDS = ['agent', 'outside', 'baseline'] as const;
+export type CheckpointKind = (typeof CHECKPOINT_KINDS)[number];
+
+/** Most paths one checkpoint lists (the tree itself holds every file). */
+export const CHECKPOINT_MAX_PATHS = 50;
+
+/**
+ * A copy of a working tree as it was after one agent edit (or after changes made outside any
+ * agent), stored as a git commit under `refs/mindly/steps/<worktree id>/<seq>`. Each checkpoint's
+ * parent is the previous checkpoint of the same working tree, so one step's diff is
+ * `git diff <parent> <commit>`.
+ */
+export interface Checkpoint {
+  id: string;
+  projectId: string;
+  /** Absolute, symlink-resolved path of the working tree. */
+  worktree: string;
+  /** Step number, increasing per working tree; what `mindly bisect` shows and takes. */
+  seq: number;
+  commit: string;
+  parentCommit: string | null;
+  kind: CheckpointKind;
+  /** The agent session that made the edit; null for `outside` and `baseline`. */
+  sessionId: string | null;
+  /** The `file_changes` row of the edit, when one was recorded. */
+  fileChangeId: string | null;
+  /** The `prompt.submitted` event of the turn that made the edit. */
+  promptEventId: string | null;
+  tool: string | null;
+  /** Project-relative paths the step changed (at most {@link CHECKPOINT_MAX_PATHS}). */
+  paths: string[];
+  /** True when at least one checkpoint before this one was skipped, so it may hold several edits. */
+  gap: boolean;
   createdAt: number;
 }
 
