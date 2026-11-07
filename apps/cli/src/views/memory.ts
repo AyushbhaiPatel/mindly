@@ -1,5 +1,5 @@
 import {
-  shortId,
+  codename,
   type Contract,
   type Memory,
   type MemoryEvidence,
@@ -20,7 +20,7 @@ import {
   type Step,
 } from '../present/index.js';
 import { clean, cleanBlock } from '../util.js';
-import { memoryFlags, memoryRow } from './common.js';
+import { memoryColumns, memoryFlags, memoryTableRow } from './common.js';
 
 /** Renders `mindly rules`. */
 export function renderRules(sc: Screen, approved: Memory[], proposed: Memory[]): void {
@@ -43,18 +43,24 @@ export function renderRules(sc: Screen, approved: Memory[], proposed: Memory[]):
   sc.summary(`Rules ${sc.sym.dot} ${parts.join(` ${sc.sym.dot} `)}`);
   if (approved.length) {
     sc.section('Every agent follows');
-    sc.rows(approved.map((m) => memoryRow(m, { showKind: false })));
+    sc.table(
+      memoryColumns({ kind: false }),
+      approved.map((m) => memoryTableRow(sc, m, { kind: false })),
+    );
   }
   if (proposed.length) {
     sc.section('Waiting for you');
-    sc.rows(proposed.map((m) => memoryRow(m, { showKind: false })));
+    sc.table(
+      memoryColumns({ kind: false }),
+      proposed.map((m) => memoryTableRow(sc, m, { kind: false })),
+    );
     const first = proposed[0] as Memory;
     sc.next([
       {
-        cmd: `mindly rules --approve ${shortId(first.id)}`,
+        cmd: `mindly rules --approve ${codename(first.id)}`,
         why: 'make the rule apply to every agent',
       },
-      { cmd: `mindly memory reject ${shortId(first.id)}`, why: 'drop the suggestion' },
+      { cmd: `mindly memory reject ${codename(first.id)}`, why: 'drop the suggestion' },
     ]);
   }
 }
@@ -92,17 +98,20 @@ export function renderMemoryList(
     waiting.length ? `${head} ${sc.sym.dot} ${waiting.length} waiting for you` : `${head}`,
   );
   sc.blank();
-  sc.rows(memories.map((m) => memoryRow(m)));
+  sc.table(
+    memoryColumns(),
+    memories.map((m) => memoryTableRow(sc, m)),
+  );
   const steps: Step[] = [];
   const first = waiting[0];
   if (first) {
     steps.push({
-      cmd: `mindly memory approve ${shortId(first.id)}`,
+      cmd: `mindly memory approve ${codename(first.id)}`,
       why: 'share it with every agent',
     });
   }
   steps.push({
-    cmd: `mindly memory show ${shortId((first ?? (memories[0] as Memory)).id)}`,
+    cmd: `mindly memory show ${codename((first ?? (memories[0] as Memory)).id)}`,
     why: 'see the details and history',
   });
   sc.next(steps);
@@ -173,11 +182,11 @@ export function renderMemoryShow(sc: Screen, d: MemoryDetail): void {
     steps.push({
       cmd:
         m.kind === 'rule'
-          ? `mindly rules --approve ${shortId(m.id)}`
-          : `mindly memory approve ${shortId(m.id)}`,
+          ? `mindly rules --approve ${codename(m.id)}`
+          : `mindly memory approve ${codename(m.id)}`,
       why: m.trust === 'stale' ? 'confirm it is still true' : 'share it with every agent',
     });
-    steps.push({ cmd: `mindly memory reject ${shortId(m.id)}`, why: 'drop it' });
+    steps.push({ cmd: `mindly memory reject ${codename(m.id)}`, why: 'drop it' });
   }
   sc.next(steps);
 }
