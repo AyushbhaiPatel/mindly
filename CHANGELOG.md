@@ -12,10 +12,10 @@ All notable changes to `mindly-cli` are documented here. The project follows
   id) instead of one long sentence per item. On a narrow terminal the least important columns are
   left out rather than squeezed. `--json` output is unchanged.
 - Records have readable names instead of hex ids. Where the terminal used to show `[9f02a0c3]`,
-  it shows `quiet-otter`: a name derived from the id, the same every time. Every command that
-  takes an id accepts the name as well as the short or full id (`mindly conflict quiet-otter
-resolve`). Agent sessions get a Session column with their name; sentences say just "Claude
-  Code".
+  it shows a name like `quiet-otter-17`: an adjective, a noun and a number that spell the last 6
+  hex digits of the id, the same every time. Every command that takes an id accepts the name as
+  well as the short or full id (`mindly conflict quiet-otter-17 resolve`). Agent sessions get a
+  Session column with their name; sentences say just "Claude Code".
 
 ## 0.4.1 — 2026-11-07
 

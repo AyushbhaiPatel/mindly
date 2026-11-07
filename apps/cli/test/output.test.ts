@@ -103,22 +103,22 @@ describe('human output on a real project', () => {
     // Agents are a table: name, status, branch, what the agent is doing.
     expect(r.stdout).toMatch(/Agent[\s|]+Session[\s|]+Status[\s|]+Branch[\s|]+Doing/);
     expect(r.stdout).toMatch(
-      /\* Codex[\s|]+[a-z]+-[a-z]+[\s|]+working[\s|]+main[\s|]+editing src\/dash\.ts/,
+      /\* Codex[\s|]+[a-z]+-[a-z]+-\d+[\s|]+working[\s|]+main[\s|]+editing src\/dash\.ts/,
     );
     expect(r.stdout).toMatch(
-      /\* Claude Code[\s|]+[a-z]+-[a-z]+[\s|]+working[\s|]+main[\s|]+edited src\/auth\.ts/,
+      /\* Claude Code[\s|]+[a-z]+-[a-z]+-\d+[\s|]+working[\s|]+main[\s|]+edited src\/auth\.ts/,
     );
     expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code changed/);
     const flat = r.stdout.replace(/[\s|]+/g, ' ');
     expect(flat).toContain('changed the exports of src/auth.ts;');
     expect(flat).toContain("Codex's");
     expect(flat).toContain('src/dash.ts uses them');
-    expect(flat).toMatch(/Conflict Claude Code changed .* [a-z]+-[a-z]+ /);
+    expect(flat).toMatch(/Conflict Claude Code changed .* [a-z]+-[a-z]+-\d+ /);
     expect(flat).toContain('- Rule "Don\'t use default exports" - suggested by you');
     expect(flat).toContain('- Handoff Waiting for Cursor:');
     expect(flat).toContain('Finish the dashboard login form');
     expect(r.stdout).toMatch(
-      /^-> mindly conflict [a-z]+-[a-z]+ resolve\s+mark the conflict resolved$/m,
+      /^-> mindly conflict [a-z]+-[a-z]+-\d+ resolve\s+mark the conflict resolved$/m,
     );
     expect(r.stdout).not.toMatch(UUID_RE);
     expect(r.stdout).not.toMatch(JARGON_RE);
@@ -147,7 +147,7 @@ describe('human output on a real project', () => {
     expect(xray).toMatch(/Claude Code is working in this project too/);
   });
 
-  it('accepts short ids, unique prefixes and full ids; lists candidates when ambiguous', async () => {
+  it('accepts names, short ids, unique prefixes and full ids; lists candidates when ambiguous', async () => {
     const rules = json<{ proposed: { id: string; title: string }[] }>(
       (await cli(sb, ['rules', '--json'])).stdout,
     );
@@ -166,7 +166,7 @@ describe('human output on a real project', () => {
     expect(ambiguous.code).toBe(1);
     expect(ambiguous.stderr).toMatch(/matches \d+ memories:/);
     expect(ambiguous.stderr).toMatch(
-      new RegExp(`${shortId(rule.id)}  [a-z]+-[a-z]+  Don't use default exports`),
+      new RegExp(`${shortId(rule.id)}  [a-z]+-[a-z]+-\\d+  Don't use default exports`),
     );
     expect(ambiguous.stderr).toContain('-> Use one of the ids above');
 
@@ -181,13 +181,13 @@ describe('human output on a real project', () => {
     expect(bad.code).toBe(2);
     expect(bad.stderr).toContain('-> See the options with: mindly memory show --help');
 
-    const approve = await cli(sb, ['rules', '--approve', shortId(rule.id)]);
+    const approve = await cli(sb, ['rules', '--approve', codename(rule.id)]);
     expect(approve.code).toBe(0);
     expect(approve.stdout).toContain('Approved rule "Don\'t use default exports".');
 
     const conflict = json<{ id: string }[]>((await cli(sb, ['conflicts', '--json'])).stdout)[0];
     if (!conflict) throw new Error('expected a conflict');
-    const ack = await cli(sb, ['conflict', shortId(conflict.id), 'ack']);
+    const ack = await cli(sb, ['conflict', codename(conflict.id), 'ack']);
     expect(ack.stdout).toContain(`Conflict ${codename(conflict.id)} marked seen:`);
 
     const sessions = json<{ sessions: { id: string; agentKind: string }[] }>(
@@ -201,7 +201,7 @@ describe('human output on a real project', () => {
 
     const snap = json<{ id: string }[]>((await cli(sb, ['snapshot', 'list', '--json'])).stdout)[0];
     if (!snap) throw new Error('expected a snapshot');
-    expect((await cli(sb, ['snapshot', 'diff', shortId(snap.id)])).code).toBe(0);
+    expect((await cli(sb, ['snapshot', 'diff', codename(snap.id)])).code).toBe(0);
   });
 
   it('keeps --json output exactly as before (full ids, raw enums, ms timestamps)', async () => {

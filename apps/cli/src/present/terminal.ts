@@ -212,7 +212,7 @@ export interface Screen {
   readonly now: number;
   /** The coloured marker character. */
   mark(marker: Marker): string;
-  /** The record's readable name, dimmed: `quiet-otter`. */
+  /** The record's readable name, dimmed: `quiet-otter-17`. */
   ref(id: string): string;
   /** The first line of a screen: the answer. */
   summary(text: string): void;

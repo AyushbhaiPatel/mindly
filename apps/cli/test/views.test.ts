@@ -166,26 +166,26 @@ describe('status screen', () => {
       Mindly · my-app · 2 agents working · 2 things need you
 
       Agents
-        ┌───────────────┬───────────────┬─────────┬────────┬───────────────────────────┬────────┐
-        │ Agent         │ Session       │ Status  │ Branch │ Doing                     │ Active │
-        ├───────────────┼───────────────┼─────────┼────────┼───────────────────────────┼────────┤
-        │ ● Claude Code │ lively-beaver │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
-        ├───────────────┼───────────────┼─────────┼────────┼───────────────────────────┼────────┤
-        │ ● Codex       │ plum-oriole   │ working │ main   │ editing src/dash.ts       │ 1m ago │
-        └───────────────┴───────────────┴─────────┴────────┴───────────────────────────┴────────┘
+        ┌───────────────┬────────────────┬─────────┬────────┬───────────────────────────┬────────┐
+        │ Agent         │ Session        │ Status  │ Branch │ Doing                     │ Active │
+        ├───────────────┼────────────────┼─────────┼────────┼───────────────────────────┼────────┤
+        │ ● Claude Code │ deep-island-51 │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
+        ├───────────────┼────────────────┼─────────┼────────┼───────────────────────────┼────────┤
+        │ ● Codex       │ icy-spider-16  │ working │ main   │ editing src/dash.ts       │ 1m ago │
+        └───────────────┴────────────────┴─────────┴────────┴───────────────────────────┴────────┘
 
       Needs you
-        ┌────────────┬─────────────────────────────────────────────────────────────────────┬─────────────┐
-        │ Type       │ What                                                                │ Name        │
-        ├────────────┼─────────────────────────────────────────────────────────────────────┼─────────────┤
-        │ ! Conflict │ Claude Code changed the exports of src/auth.ts; Codex's src/dash.ts │ early-panda │
-        │            │ uses them                                                           │             │
-        ├────────────┼─────────────────────────────────────────────────────────────────────┼─────────────┤
-        │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code      │ happy-jay   │
-        └────────────┴─────────────────────────────────────────────────────────────────────┴─────────────┘
+        ┌────────────┬────────────────────────────────────────────────────────────────┬──────────────────┐
+        │ Type       │ What                                                           │ Name             │
+        ├────────────┼────────────────────────────────────────────────────────────────┼──────────────────┤
+        │ ! Conflict │ Claude Code changed the exports of src/auth.ts; Codex's        │ brave-shrimp-195 │
+        │            │ src/dash.ts uses them                                          │                  │
+        ├────────────┼────────────────────────────────────────────────────────────────┼──────────────────┤
+        │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code │ stormy-star-183  │
+        └────────────┴────────────────────────────────────────────────────────────────┴──────────────────┘
 
-      → mindly conflict early-panda resolve   mark the conflict resolved
-      → mindly rules --approve happy-jay      make the rule apply to every agent
+      → mindly conflict brave-shrimp-195 resolve   mark the conflict resolved
+      → mindly rules --approve stormy-star-183     make the rule apply to every agent
       "
     `);
   });
@@ -216,32 +216,32 @@ describe('status screen', () => {
       Mindly - my-app - 1 agent idle - 5 things need you
 
       Agents
-        +-----------+-------------+---------------------+--------+--------------------+--------+
-        | Agent     | Session     | Status              | Branch | Doing              | Active |
-        +-----------+-------------+---------------------+--------+--------------------+--------+
-        | [!] Codex | plum-oriole | hit its usage limit | main   | last active 1m ago | 1m ago |
-        +-----------+-------------+---------------------+--------+--------------------+--------+
+        +-----------+---------------+---------------------+--------+--------------------+--------+
+        | Agent     | Session       | Status              | Branch | Doing              | Active |
+        +-----------+---------------+---------------------+--------+--------------------+--------+
+        | [!] Codex | icy-spider-16 | hit its usage limit | main   | last active 1m ago | 1m ago |
+        +-----------+---------------+---------------------+--------+--------------------+--------+
 
       Needs you
-        +-----------------+---------------------------------------------------------------+--------------+
-        | Type            | What                                                          | Name         |
-        +-----------------+---------------------------------------------------------------+--------------+
-        | [!] Config      | This project's .mindly/config.json is not trusted yet, so its |              |
-        |                 | checks do not run                                             |              |
-        +-----------------+---------------------------------------------------------------+--------------+
-        | [!] Conflict    | Claude Code changed the exports of src/auth.ts; Codex's       | early-panda  |
-        |                 | src/dash.ts uses them                                         |              |
-        +-----------------+---------------------------------------------------------------+--------------+
-        | - Rule          | "Don't use default exports" - suggested by you, in Claude     | happy-jay    |
-        |                 | Code                                                          |              |
-        +-----------------+---------------------------------------------------------------+--------------+
-        | - Known pitfall | "Command fails: npm test" - suggested by Codex                | bright-moose |
-        +-----------------+---------------------------------------------------------------+--------------+
-        | - Handoff       | Waiting for Cursor: "Finish the dashboard login form"         | grand-beaver |
-        +-----------------+---------------------------------------------------------------+--------------+
+        +-----------------+----------------------------------------------------------+-------------------+
+        | Type            | What                                                     | Name              |
+        +-----------------+----------------------------------------------------------+-------------------+
+        | [!] Config      | This project's .mindly/config.json is not trusted yet,   |                   |
+        |                 | so its checks do not run                                 |                   |
+        +-----------------+----------------------------------------------------------+-------------------+
+        | [!] Conflict    | Claude Code changed the exports of src/auth.ts; Codex's  | brave-shrimp-195  |
+        |                 | src/dash.ts uses them                                    |                   |
+        +-----------------+----------------------------------------------------------+-------------------+
+        | - Rule          | "Don't use default exports" - suggested by you, in       | stormy-star-183   |
+        |                 | Claude Code                                              |                   |
+        +-----------------+----------------------------------------------------------+-------------------+
+        | - Known pitfall | "Command fails: npm test" - suggested by Codex           | lucky-warbler-224 |
+        +-----------------+----------------------------------------------------------+-------------------+
+        | - Handoff       | Waiting for Cursor: "Finish the dashboard login form"    | still-wasp-91     |
+        +-----------------+----------------------------------------------------------+-------------------+
 
-      -> mindly trust                          review the project config and its commands
-      -> mindly conflict early-panda resolve   mark the conflict resolved
+      -> mindly trust                               review the project config and its commands
+      -> mindly conflict brave-shrimp-195 resolve   mark the conflict resolved
       "
     `);
   });
@@ -265,21 +265,22 @@ describe('memory screens', () => {
       Rules · 1 rule every agent follows · 1 waiting for you
 
       Every agent follows
-        ┌───────────────────────┬────────────────────────────┬──────┬─────────┬───────────┐
-        │ Status                │ Rule                       │ From │ Updated │ Name      │
-        ├───────────────────────┼────────────────────────────┼──────┼─────────┼───────────┤
-        │ ✓ approved · enforced │ Always use pnpm, never npm │ you  │  1h ago │ blue-wasp │
-        └───────────────────────┴────────────────────────────┴──────┴─────────┴───────────┘
+        ┌───────────────────────┬────────────────────────────┬──────┬─────────┬─────────────────┐
+        │ Status                │ Rule                       │ From │ Updated │ Name            │
+        ├───────────────────────┼────────────────────────────┼──────┼─────────┼─────────────────┤
+        │ ✓ approved · enforced │ Always use pnpm, never npm │ you  │  1h ago │ large-iguana-85 │
+        └───────────────────────┴────────────────────────────┴──────┴─────────┴─────────────────┘
 
       Waiting for you
-        ┌───────────────────┬───────────────────────────┬─────────────────────┬─────────┬───────────┐
-        │ Status            │ Rule                      │ From                │ Updated │ Name      │
-        ├───────────────────┼───────────────────────────┼─────────────────────┼─────────┼───────────┤
-        │ ! waiting for you │ Don't use default exports │ you, in Claude Code │  1h ago │ happy-jay │
-        └───────────────────┴───────────────────────────┴─────────────────────┴─────────┴───────────┘
+        ┌───────────────────┬──────────────────────────┬─────────────────────┬─────────┬─────────────────┐
+        │ Status            │ Rule                     │ From                │ Updated │ Name            │
+        ├───────────────────┼──────────────────────────┼─────────────────────┼─────────┼─────────────────┤
+        │ ! waiting for you │ Don't use default        │ you, in Claude Code │  1h ago │ stormy-star-183 │
+        │                   │ exports                  │                     │         │                 │
+        └───────────────────┴──────────────────────────┴─────────────────────┴─────────┴─────────────────┘
 
-      → mindly rules --approve happy-jay   make the rule apply to every agent
-      → mindly memory reject happy-jay     drop the suggestion
+      → mindly rules --approve stormy-star-183   make the rule apply to every agent
+      → mindly memory reject stormy-star-183     drop the suggestion
       "
     `);
     expect(render((sc) => renderRules(sc, [], []))).toMatchInlineSnapshot(`
@@ -298,18 +299,18 @@ describe('memory screens', () => {
         "
         3 memories - 2 waiting for you
 
-          +--------------------------+---------------+----------------------------+--------------+
-          | Status                   | Kind          | Title                      | Name         |
-          +--------------------------+---------------+----------------------------+--------------+
-          | [ok] approved - enforced | rule          | Always use pnpm, never npm | blue-wasp    |
-          +--------------------------+---------------+----------------------------+--------------+
-          | [!] waiting for you      | rule          | Don't use default exports  | happy-jay    |
-          +--------------------------+---------------+----------------------------+--------------+
-          | [!] waiting for you      | known pitfall | Command fails: npm test    | bright-moose |
-          +--------------------------+---------------+----------------------------+--------------+
+          +--------------------------+---------------+----------------------------+-------------------+
+          | Status                   | Kind          | Title                      | Name              |
+          +--------------------------+---------------+----------------------------+-------------------+
+          | [ok] approved - enforced | rule          | Always use pnpm, never npm | large-iguana-85   |
+          +--------------------------+---------------+----------------------------+-------------------+
+          | [!] waiting for you      | rule          | Don't use default exports  | stormy-star-183   |
+          +--------------------------+---------------+----------------------------+-------------------+
+          | [!] waiting for you      | known pitfall | Command fails: npm test    | lucky-warbler-224 |
+          +--------------------------+---------------+----------------------------+-------------------+
 
-        -> mindly memory approve happy-jay   share it with every agent
-        -> mindly memory show happy-jay      see the details and history
+        -> mindly memory approve stormy-star-183   share it with every agent
+        -> mindly memory show stormy-star-183      see the details and history
         "
       `);
   });
@@ -322,17 +323,17 @@ describe('insight screens', () => {
         "
         1 open conflict
 
-          ┌──────────────┬─────────────────────────────────────────────────┬────────┬────────┬─────────────┐
-          │ Severity     │ What                                            │ Status │   When │ Name        │
-          ├──────────────┼─────────────────────────────────────────────────┼────────┼────────┼─────────────┤
-          │ ! check this │ Claude Code changed the exports of src/auth.ts; │ open   │ 2m ago │ early-panda │
-          │              │ Codex's src/dash.ts uses them                   │        │        │             │
-          │              │ Changed signature: login. 1 file imports it:    │        │        │             │
-          │              │ src/dash.ts.                                    │        │        │             │
-          └──────────────┴─────────────────────────────────────────────────┴────────┴────────┴─────────────┘
+          ┌──────────────┬────────────────────────────────────────────┬────────┬────────┬──────────────────┐
+          │ Severity     │ What                                       │ Status │   When │ Name             │
+          ├──────────────┼────────────────────────────────────────────┼────────┼────────┼──────────────────┤
+          │ ! check this │ Claude Code changed the exports of         │ open   │ 2m ago │ brave-shrimp-195 │
+          │              │ src/auth.ts; Codex's src/dash.ts uses them │        │        │                  │
+          │              │ Changed signature: login. 1 file imports   │        │        │                  │
+          │              │ it: src/dash.ts.                           │        │        │                  │
+          └──────────────┴────────────────────────────────────────────┴────────┴────────┴──────────────────┘
 
-        → mindly conflict early-panda resolve   mark it resolved once fixed
-        → mindly conflict early-panda dismiss   if it is not a real problem
+        → mindly conflict brave-shrimp-195 resolve   mark it resolved once fixed
+        → mindly conflict brave-shrimp-195 dismiss   if it is not a real problem
         "
       `);
     expect(render((sc) => renderConflicts(sc, [], sessionOf, false))).toMatchInlineSnapshot(`
@@ -381,7 +382,7 @@ describe('insight screens', () => {
         Asked to: "Add a password parameter to login"
 
       Related memories
-        [ok] Rule: Always use pnpm, never npm (approved by you)  blue-wasp
+        [ok] Rule: Always use pnpm, never npm (approved by you)  large-iguana-85
       "
     `);
   });
@@ -432,7 +433,7 @@ describe('insight screens', () => {
       Left out (no room left in the context): 1 item
         ! Decision "Auth uses sessions, not JWT"
 
-      → mindly xray --session plum-oriole --query "<words>"
+      → mindly xray --session icy-spider-16 --query "<words>"
           find out why a memory did or did not reach it
       "
     `);
@@ -468,10 +469,10 @@ describe('insight screens', () => {
       "
       Would memories about "exports" reach Codex - f57f6d10?
 
-        [!] Rule "Don't use default exports": not sent: waiting for your approval  happy-jay
-        [ok] Rule "Always use pnpm, never npm": would be sent                      blue-wasp
+        [!] Rule "Don't use default exports": not sent: waiting for your approval  stormy-star-183
+        [ok] Rule "Always use pnpm, never npm": would be sent                      large-iguana-85
 
-      -> mindly memory approve happy-jay   let it reach agents
+      -> mindly memory approve stormy-star-183   let it reach agents
       "
     `);
   });
@@ -525,7 +526,7 @@ describe('insight screens', () => {
         [!] 1 conflict opened, 0 resolved, 1 still open
 
       Needs you
-        - Suggested rule: "Don't use default exports"  happy-jay
+        - Suggested rule: "Don't use default exports"  stormy-star-183
 
       -> mindly rules    review the suggested rules
       -> mindly status   see everything that needs you
@@ -540,12 +541,12 @@ describe('continuity screens', () => {
       "
       1 handoff - 1 waiting to be picked up
 
-        +------------------------+---------------------------------+-------+--------+--------------+
-        | Status                 | Work                            | From  |   When | Name         |
-        +------------------------+---------------------------------+-------+--------+--------------+
-        | [!] waiting for Cursor | Finish the dashboard login form | Codex | 5m ago | grand-beaver |
-        |                        | Next: Wire the submit button    |       |        |              |
-        +------------------------+---------------------------------+-------+--------+--------------+
+        +------------------------+---------------------------------+-------+--------+---------------+
+        | Status                 | Work                            | From  |   When | Name          |
+        +------------------------+---------------------------------+-------+--------+---------------+
+        | [!] waiting for Cursor | Finish the dashboard login form | Codex | 5m ago | still-wasp-91 |
+        |                        | Next: Wire the submit button    |       |        |               |
+        +------------------------+---------------------------------+-------+--------+---------------+
 
       -> Start Cursor in this project: it picks the handoff up at the start of its session.
       "
@@ -562,10 +563,10 @@ describe('continuity screens', () => {
       "
       1 snapshot
 
-        - "before refactor" - 1h ago - code at commit 645b014e  lively-tapir
+        - "before refactor" - 1h ago - code at commit 645b014e  fiery-jackal-0
 
-      -> mindly snapshot diff lively-tapir      see what changed since
-      -> mindly snapshot restore lively-tapir   go back to it (nothing is deleted)
+      -> mindly snapshot diff fiery-jackal-0      see what changed since
+      -> mindly snapshot restore fiery-jackal-0   go back to it (nothing is deleted)
       "
     `);
   });

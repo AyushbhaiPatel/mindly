@@ -14,9 +14,11 @@ the docs understands what they see, knows what matters, and knows what to do nex
 4. **Always end with what to do next** when there is something to do: one or two exact commands
    (CLI) or buttons (dashboard).
 5. **Hide what is empty.** No `Tasks (0)` sections. Empty states are one friendly line.
-6. **Names, not ids.** Every record is shown by its readable name (`quiet-otter`), derived from
-   its id and the same every time. Every command that takes an id accepts the name, the
-   8-character short id or the full id; an ambiguous name is reported with the candidates.
+6. **Names, not ids.** Every record is shown by its readable name (`quiet-otter-17`): an
+   adjective, a noun and a number from 0 to 255 that spell the last 6 hex digits of its id, the
+   same every time. Every command that takes an id accepts the name, the 8-character short id or
+   the full id. Two records share a name only when their ids end in the same 6 digits; an
+   ambiguous name is reported with the full ids of the candidates.
 7. **Relative times.** "2m ago", "yesterday 14:05"; absolute local time only where precision matters
    (provenance), never UTC.
 8. **Machine output stays exact.** `--json` output is unchanged by any of this: full ids, raw enums,
@@ -77,26 +79,26 @@ the docs understands what they see, knows what matters, and knows what to do nex
 Mindly · my-app · 2 agents working · 2 things need you
 
 Agents
-  ┌───────────────┬──────────┬─────────┬────────┬───────────────────────────┬────────┐
-  │ Agent         │ Session  │ Status  │ Branch │ Doing                     │ Active │
-  ├───────────────┼──────────┼─────────┼────────┼───────────────────────────┼────────┤
-  │ ● Claude Code │ gold-owl │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
-  ├───────────────┼──────────┼─────────┼────────┼───────────────────────────┼────────┤
-  │ ● Codex       │ neat-elk │ working │ main   │ editing src/dash.ts       │ 1m ago │
-  └───────────────┴──────────┴─────────┴────────┴───────────────────────────┴────────┘
+  ┌───────────────┬────────────────┬─────────┬────────┬───────────────────────────┬────────┐
+  │ Agent         │ Session        │ Status  │ Branch │ Doing                     │ Active │
+  ├───────────────┼────────────────┼─────────┼────────┼───────────────────────────┼────────┤
+  │ ● Claude Code │ deep-island-51 │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
+  ├───────────────┼────────────────┼─────────┼────────┼───────────────────────────┼────────┤
+  │ ● Codex       │ icy-spider-16  │ working │ main   │ editing src/dash.ts       │ 1m ago │
+  └───────────────┴────────────────┴─────────┴────────┴───────────────────────────┴────────┘
 
 Needs you
-  ┌────────────┬────────────────────────────────────────────────────────────────┬────────────┐
-  │ Type       │ What                                                           │ Name        │
-  ├────────────┼────────────────────────────────────────────────────────────────┼────────────┤
-  │ ! Conflict │ Claude Code changed the exports of src/auth.ts; Codex's        │ brisk-heron │
-  │            │ src/dash.ts uses them                                          │             │
-  ├────────────┼────────────────────────────────────────────────────────────────┼────────────┤
-  │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code │ calm-finch  │
-  └────────────┴────────────────────────────────────────────────────────────────┴────────────┘
+  ┌────────────┬────────────────────────────────────────────────────────────────┬──────────────────┐
+  │ Type       │ What                                                           │ Name             │
+  ├────────────┼────────────────────────────────────────────────────────────────┼──────────────────┤
+  │ ! Conflict │ Claude Code changed the exports of src/auth.ts; Codex's        │ brave-shrimp-195 │
+  │            │ src/dash.ts uses them                                          │                  │
+  ├────────────┼────────────────────────────────────────────────────────────────┼──────────────────┤
+  │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code │ stormy-star-183  │
+  └────────────┴────────────────────────────────────────────────────────────────┴──────────────────┘
 
-→ mindly conflict brisk-heron resolve   mark the conflict resolved
-→ mindly rules --approve calm-finch     make the rule apply to every agent
+→ mindly conflict brave-shrimp-195 resolve   mark the conflict resolved
+→ mindly rules --approve stormy-star-183     make the rule apply to every agent
 ```
 
 ## Mission Control

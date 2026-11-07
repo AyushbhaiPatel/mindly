@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { defaultUserConfig, ProjectConfigSchema } from '../src/config.js';
-import { isUuid, uuidv7 } from '../src/ids.js';
+import { codename, isUuid, parseCodename, uuidv7 } from '../src/ids.js';
 import { sanitizeForContext, truncate } from '../src/text.js';
 
 describe('uuidv7', () => {
@@ -10,6 +10,39 @@ describe('uuidv7', () => {
     expect(ids.every((id) => id[14] === '7')).toBe(true);
     expect([...ids].sort()).toEqual(ids);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe('codename', () => {
+  it('spells the last 6 hex digits of an id and parses back to them', () => {
+    const id = '01a1a6ed-ddf5-7ae7-8e36-9ff94409d433';
+    const name = codename(id);
+    expect(name).toMatch(/^[a-z]+-[a-z]+-\d{1,3}$/);
+    expect(parseCodename(name)).toBe('09d433');
+    expect(parseCodename(` ${name.toUpperCase()} `)).toBe('09d433');
+    // A session tag (the short id) has the same name as the full id.
+    expect(codename('4409d433')).toBe(name);
+  });
+
+  it('gives different names to ids that only differ before their last 6 digits', () => {
+    // These two ids shared the name ruby-fox when names were a 2-word hash.
+    const a = '01a1a6ed-0000-7000-8000-000010036224';
+    const b = '01a1a6ed-0000-7000-8000-0000100bd77e';
+    expect(codename(a)).not.toBe(codename(b));
+    expect(parseCodename(codename(b))).toBe('0bd77e');
+  });
+
+  it('does not take hex or near-names for a name', () => {
+    for (const input of [
+      'dead-beef',
+      'deadbeef',
+      'quiet-otter',
+      'quiet-otter-017',
+      'quiet-otter-256',
+    ]) {
+      expect(parseCodename(input)).toBeNull();
+    }
+    expect(parseCodename('quiet-otter-17')).not.toBeNull();
   });
 });
 

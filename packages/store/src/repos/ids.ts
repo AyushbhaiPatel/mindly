@@ -1,4 +1,4 @@
-import { codename, isCodename } from '@mindly/core';
+import { parseCodename } from '@mindly/core';
 import { type Db, type Row, str } from '../db.js';
 
 /** Kinds of record that people refer to by id on the command line or in the dashboard. */
@@ -61,38 +61,23 @@ export function normaliseIdRef(input: string): string | null {
 }
 
 /**
- * Resolves the ids people type: a full id, the 8-character short id shown in human output (the
- * last 8 hex digits), or any unique prefix of the full id. Lookups are always scoped to one
- * project and use bound parameters only.
+ * Resolves the ids people type: a readable name (`codename()` in core: the last 6 hex digits of
+ * the id as words), a full id, the 8-character short id (the last 8 hex digits), or any unique
+ * prefix of the full id. Lookups are always scoped to one project and use bound parameters only.
  */
 export class IdRepo {
   constructor(private readonly db: Db) {}
 
   /**
-   * Finds the records of `kind` in `projectId` that `input` refers to. Precedence: an exact full
-   * id, then short-id (suffix) matches, then prefix matches. Returns at most `max` candidates of
-   * the winning match type (`type: 'none'` and no matches when nothing fits or the input is not
-   * id-shaped).
+   * Finds the records of `kind` in `projectId` that `input` refers to. A readable name matches
+   * the records whose id ends in the 6 hex digits it spells. Otherwise, in order of precedence: an
+   * exact full id, then short-id (suffix) matches, then prefix matches. Returns at most `max`
+   * candidates of the winning match type, most recent first (`type: 'none'` and no matches when
+   * nothing fits or the input is not id-shaped).
    */
   lookup(kind: IdKind, projectId: string, input: string, max = 10): IdLookup {
     const { table, title } = SPECS[kind];
     const n = Math.max(1, Math.min(Math.trunc(max), 50));
-    if (isCodename(input)) {
-      // A readable name (`quiet-otter`): derived from the id, so compare against every record.
-      const name = input.trim().toLowerCase();
-      const rows = this.db
-        .prepare(
-          `SELECT id, ${title} AS title FROM ${table} WHERE project_id = ? ORDER BY id DESC LIMIT 20000`,
-        )
-        .all(projectId) as Row[];
-      const matches = rows
-        .map((r) => ({ id: str(r, 'id'), title: str(r, 'title') }))
-        .filter((m) => codename(m.id) === name)
-        .slice(0, n);
-      return matches.length > 0 ? { type: 'name', matches } : { type: 'none', matches: [] };
-    }
-    const compact = normaliseIdRef(input);
-    if (compact === null) return { type: 'none', matches: [] };
     const select = (where: string, ...params: string[]): IdMatch[] =>
       (
         this.db
@@ -102,6 +87,15 @@ export class IdRepo {
           )
           .all(projectId, ...params, n) as Row[]
       ).map((r) => ({ id: str(r, 'id'), title: str(r, 'title') }));
+
+    // A readable name (`quiet-otter-17`) spells out the last 6 hex digits of the id.
+    const suffix = parseCodename(input);
+    if (suffix !== null) {
+      const named = select("substr(replace(id, '-', ''), -6) = ?", suffix);
+      return named.length > 0 ? { type: 'name', matches: named } : { type: 'none', matches: [] };
+    }
+    const compact = normaliseIdRef(input);
+    if (compact === null) return { type: 'none', matches: [] };
 
     // The input is hex and dashes only (checked above), so it cannot contain LIKE wildcards.
     const exact = select("replace(id, '-', '') = ?", compact);

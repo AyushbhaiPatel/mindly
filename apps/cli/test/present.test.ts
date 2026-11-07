@@ -154,8 +154,8 @@ describe('screen', () => {
       { cmd: 'mindly longer', why: 'second' },
     ]);
     expect(lines).toEqual([
-      '  ! Short              brave-robin'.trimEnd(),
-      '  \u2713 A bit longer text  sharp-tapir'.trimEnd(),
+      '  ! Short              hardy-quartz-185',
+      '  \u2713 A bit longer text  rocky-weasel-170',
       '',
       '\u2192 mindly a        first',
       '\u2192 mindly longer   second',

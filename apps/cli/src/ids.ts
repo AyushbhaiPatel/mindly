@@ -1,4 +1,4 @@
-import { codename, isCodename, sanitizeLine, shortId } from '@mindly/core';
+import { codename, parseCodename, sanitizeLine, shortId } from '@mindly/core';
 import { normaliseIdRef, type IdKind, type Store } from '@mindly/store';
 import { HintedError, UsageError } from './util.js';
 
@@ -17,16 +17,17 @@ const KINDS: Record<IdKind, { one: string; many: string; list: string }> = {
 
 /**
  * Resolves an id typed by the user to the full id of a record of `kind` in `projectId`. Accepts
- * the full id, the 8-character short id shown in human output, or any unique prefix of the full
- * id. Throws a usage error for input that is not id-shaped, `not_found` when nothing matches, and
- * `invalid_input` listing the candidates (with their titles) when the reference is ambiguous.
+ * the readable name shown in human output (`quiet-otter-17`), the full id, the 8-character short
+ * id, or any unique prefix of the full id. Throws a usage error for input that is not id-shaped,
+ * `not_found` when nothing matches, and `invalid_input` listing the candidates (with their
+ * titles) when the reference is ambiguous.
  */
 export function resolveId(store: Store, kind: IdKind, projectId: string, input: string): string {
   const k = KINDS[kind];
   const typed = sanitizeLine(input, 40);
-  if (!isCodename(input) && normaliseIdRef(input) === null) {
+  if (parseCodename(input) === null && normaliseIdRef(input) === null) {
     throw new UsageError(
-      `"${typed}" is not a ${k.one} name or id. Use the name shown in the table, e.g. quiet-otter (see ${k.list})`,
+      `"${typed}" is not a ${k.one} name or id. Use the name shown in the table, e.g. quiet-otter-17 (see ${k.list})`,
     );
   }
   const found = store.ids.lookup(kind, projectId, input, 10);
@@ -39,8 +40,8 @@ export function resolveId(store: Store, kind: IdKind, projectId: string, input: 
     );
   }
   if (found.matches.length === 1) return first.id;
-  // Two records can share a short id; then only the full id tells them apart.
-  // Two records can share a name or a short id; then the id tells them apart.
+  // Two records can share a name (the last 6 hex digits of their ids) or a short id; then only
+  // the full id tells them apart.
   const shorts = found.matches.map((m) => shortId(m.id));
   const clash = found.type === 'name' || new Set(shorts).size !== shorts.length;
   const lines = found.matches.map(
