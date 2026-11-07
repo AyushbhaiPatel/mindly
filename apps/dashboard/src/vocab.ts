@@ -1293,6 +1293,8 @@ export interface HomeSummary {
   limited: number;
   decisions: number;
   conflicts: number;
+  /** Blocked parts of the active split plus its failed merge check. */
+  splitProblems: number;
   savesWeek: number | undefined;
 }
 
@@ -1307,7 +1309,8 @@ export function homeSentence(s: HomeSummary): string {
   else parts.push('No agent working right now');
   if (s.limited > 0) parts.push(`${s.limited} at a usage limit`);
   if (s.conflicts > 0) parts.push(`${count(s.conflicts, 'conflict')} open`);
-  else parts.push('nothing broken');
+  if (s.splitProblems > 0) parts.push(`${count(s.splitProblems, 'problem')} in the split`);
+  if (s.conflicts === 0 && s.splitProblems === 0) parts.push('nothing broken');
   if (s.decisions > 0) {
     parts.push(`${count(s.decisions, 'decision')} ${s.decisions === 1 ? 'waits' : 'wait'} for you`);
   }

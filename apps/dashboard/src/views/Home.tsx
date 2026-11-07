@@ -151,6 +151,7 @@ function Pulse({
     limited: by('rate_limited'),
     decisions,
     conflicts,
+    splitProblems: ov.needsYou.blockedParts + ov.needsYou.failedMergeChecks,
     savesWeek: saves,
   });
   const figures: { n: number; label: string; tone: 'good' | 'warn' | 'bad' | 'neutral' }[] = [

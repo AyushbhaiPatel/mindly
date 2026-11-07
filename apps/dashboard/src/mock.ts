@@ -1252,6 +1252,23 @@ export function createMockClient(): MindlyClient {
       const pc = byProject(conflicts, id).filter(
         (c) => c.status === 'open' || c.status === 'acknowledged',
       );
+      // The active split and what of it needs the user, worked out the way the daemon does.
+      const activeSplit = byProject(splits, id).find((x) => x.status === 'active');
+      const blockedParts = activeSplit
+        ? splitParts
+            .filter(
+              (p) =>
+                p.splitId === activeSplit.id &&
+                tasks.find((t) => t.id === p.taskId)?.status === 'blocked',
+            )
+            .map((p) => ({ key: p.key, title: p.title }))
+        : [];
+      const splitCheck = activeSplit
+        ? (byProject(runs, id).find(
+            (r) => r.kind === 'shadow_merge' && r.input['splitId'] === activeSplit.id,
+          ) ?? null)
+        : null;
+      const splitCheckPaths = splitCheck?.result?.['conflictedPaths'];
       const ov: Overview = {
         project,
         sessions: byProject(sessions, id).filter((s) => LIVE_STATUSES.has(s.status)),
@@ -1276,18 +1293,26 @@ export function createMockClient(): MindlyClient {
           pendingHandoffs: byProject(handoffs, id).filter(
             (h) => h.status === 'pending' && !h.packet.split,
           ).length,
-          blockedParts: 0,
-          failedMergeChecks: 0,
+          blockedParts: blockedParts.length,
+          failedMergeChecks:
+            splitCheck && (splitCheck.status === 'failed' || splitCheck.status === 'error') ? 1 : 0,
         },
-        split:
-          id === P1
-            ? {
-                id: SPLIT_ID,
-                goal: splits[0]!.goal,
-                blockedParts: [],
-                mergeCheck: { runId: runs[0]!.id, status: runs[0]!.status, conflictedPaths: [] },
-              }
-            : null,
+        split: activeSplit
+          ? {
+              id: activeSplit.id,
+              goal: activeSplit.goal,
+              blockedParts,
+              mergeCheck: splitCheck
+                ? {
+                    runId: splitCheck.id,
+                    status: splitCheck.status,
+                    conflictedPaths: Array.isArray(splitCheckPaths)
+                      ? (splitCheckPaths as string[]).slice(0, 20)
+                      : [],
+                  }
+                : null,
+            }
+          : null,
         lastSeq: seq,
       };
       return delay(ov);
