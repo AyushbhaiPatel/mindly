@@ -149,6 +149,43 @@ describe('screen', () => {
     return { sc, lines };
   }
 
+  it('keeps table borders straight in ASCII mode and with wide characters', () => {
+    const ascii = capture({ LANG: 'C', COLUMNS: '60' });
+    ascii.sc.table(
+      [
+        { header: 'What', fill: true },
+        { header: 'Next', max: 12 },
+      ],
+      [['Use pnpm\u2026 never npm', 'a \u2192 b \u2192 c \u2192 d']],
+    );
+    expect(ascii.lines).toEqual([
+      '  +-----------------------+--------------+',
+      '  | What                  | Next         |',
+      '  +-----------------------+--------------+',
+      '  | Use pnpm... never npm | a -> b ->... |',
+      '  +-----------------------+--------------+',
+    ]);
+    const cjk = capture({ LANG: 'en_US.UTF-8' });
+    cjk.sc.table([{ header: 'Rule' }, { header: 'Name' }], [['使用 pnpm 而不是 npm', 'x']]);
+    expect(cjk.lines).toEqual([
+      '  ┌──────────────────────┬──────┐',
+      '  │ Rule                 │ Name │',
+      '  ├──────────────────────┼──────┤',
+      '  │ 使用 pnpm 而不是 npm │ x    │',
+      '  └──────────────────────┴──────┘',
+    ]);
+    expect(visibleLength('使用 pnpm 🚀 e\u0301')).toBe(14);
+  });
+
+  it('wraps a long path in the fill column in full', () => {
+    const { sc, lines } = capture({ LANG: 'C', COLUMNS: '40' });
+    const path = 'packages/billing/src/services/invoice-generator-v2.ts';
+    sc.table([{ header: 'Doing', fill: true }], [[`editing ${path}`]]);
+    const text = lines.filter((l) => l.startsWith('  | ')).map((l) => l.slice(4, -2).trim());
+    expect(text.slice(1).join('')).toBe(`editing${path}`);
+    expect(lines.every((l) => l.length <= 40)).toBe(true);
+  });
+
   it('aligns ids and next steps', () => {
     const { sc, lines } = capture({ LANG: 'en_US.UTF-8' });
     sc.rows([

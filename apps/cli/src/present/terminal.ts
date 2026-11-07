@@ -132,9 +132,86 @@ export function widthFor(out: TextOut, env: NodeJS.ProcessEnv): number {
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\u001b\[[0-9;]*m/g;
 
-/** Printed width of `text` (colour codes do not count). */
+/*
+ * Code points a terminal shows two columns wide: East Asian Wide and Fullwidth (Hangul Jamo, CJK,
+ * Hiragana, Katakana, Hangul syllables, fullwidth forms) and emoji. Sorted pairs of first, last.
+ */
+const WIDE: readonly (readonly [number, number])[] = [
+  [0x1100, 0x115f],
+  [0x2e80, 0x303e],
+  [0x3041, 0x33ff],
+  [0x3400, 0x4dbf],
+  [0x4e00, 0x9fff],
+  [0xa000, 0xa4cf],
+  [0xac00, 0xd7a3],
+  [0xf900, 0xfaff],
+  [0xfe30, 0xfe4f],
+  [0xff00, 0xff60],
+  [0xffe0, 0xffe6],
+  [0x1f300, 0x1faff],
+  [0x20000, 0x2fffd],
+  [0x30000, 0x3fffd],
+];
+/** Combining marks take no column. */
+const MARK_RE = /^[\p{Mn}\p{Me}]$/u;
+/** Zero-width spaces and joiners, word joiner, variation selectors: no column either. */
+const ZERO_WIDTH: readonly (readonly [number, number])[] = [
+  [0x200b, 0x200f],
+  [0x2060, 0x2060],
+  [0xfe00, 0xfe0f],
+  [0xe0100, 0xe01ef],
+];
+const within = (cp: number, ranges: readonly (readonly [number, number])[]): boolean =>
+  ranges.some(([lo, hi]) => cp >= lo && cp <= hi);
+
+/** Columns one code point takes in a terminal: 0, 1 or 2. */
+function charWidth(ch: string): number {
+  const cp = ch.codePointAt(0) ?? 0;
+  if (within(cp, ZERO_WIDTH) || MARK_RE.test(ch)) return 0;
+  return within(cp, WIDE) ? 2 : 1;
+}
+
+/**
+ * Printed width of `text` in terminal columns: colour codes do not count, wide characters (CJK,
+ * emoji) count 2, combining marks and joiners 0.
+ */
 export function visibleLength(text: string): number {
-  return text.replace(ANSI_RE, '').length;
+  let n = 0;
+  for (const ch of text.replace(ANSI_RE, '')) n += charWidth(ch);
+  return n;
+}
+
+/**
+ * Cuts `text` (colour codes removed) into pieces at most `width` columns wide, at code-point
+ * boundaries. The last piece may be shorter.
+ */
+function cutByWidth(text: string, width: number): string[] {
+  const pieces: string[] = [];
+  let current = '';
+  let used = 0;
+  for (const ch of text.replace(ANSI_RE, '')) {
+    const w = charWidth(ch);
+    if (used + w > width && current !== '') {
+      pieces.push(current);
+      current = '';
+      used = 0;
+    }
+    current += ch;
+    used += w;
+  }
+  if (current !== '' || pieces.length === 0) pieces.push(current);
+  return pieces;
+}
+
+/**
+ * Like {@link wrap} without a prefix, but a word wider than `width` (a long path or URL) is broken
+ * into pieces of `width` columns, so a table cell shows all of it instead of cutting it off.
+ */
+function wrapCell(text: string, width: number): string[] {
+  const words = text
+    .split(/ +/)
+    .flatMap((w) => (visibleLength(w) > width ? cutByWidth(w, Math.max(1, width)) : [w]));
+  return wrap(words.join(' '), width);
 }
 
 /**
@@ -228,7 +305,9 @@ export interface Screen {
   pairs(pairs: readonly (readonly [string, string])[], indent?: number): void;
   /**
    * An aligned table with a dimmed header row. Cells may carry colour codes. The fill column
-   * wraps; on a narrow terminal the least important columns are left out rather than squeezed.
+   * wraps (breaking words too long for it); on a narrow terminal the least important columns are
+   * left out rather than squeezed, and if it still does not fit, long cells are cut with an
+   * ellipsis and the fill column gets narrower than its `min`.
    */
   table(columns: readonly Column[], rows: readonly (TableRow | readonly string[])[]): void;
   /** A blank line, then the next steps with aligned commands. */
@@ -330,15 +409,22 @@ export function screenFor(
       const indent = 2;
       const padCells = 1; // spaces inside a cell, each side
       const box = sym.box;
-      const normalised: TableRow[] = rows.map((r) =>
-        Array.isArray(r) ? { cells: r as readonly string[] } : (r as TableRow),
-      );
-      // Natural width of each column: its widest cell or header, capped at `max`.
-      const natural = columns.map((c, i) =>
+      // In ASCII mode convert first, so cells are measured as they are printed (… is 3 wide).
+      const plain = sym === ASCII ? toAscii : (t: string): string => t;
+      const heads = columns.map((c) => plain(c.header));
+      const normalised: TableRow[] = rows.map((r) => {
+        const row = Array.isArray(r) ? { cells: r as readonly string[] } : (r as TableRow);
+        return {
+          cells: row.cells.map(plain),
+          ...(row.note !== undefined ? { note: plain(row.note) } : {}),
+        };
+      });
+      // Width of each column: its widest cell or header, capped at `max`.
+      const widths = columns.map((c, i) =>
         Math.min(
           c.max ?? Infinity,
           Math.max(
-            visibleLength(c.header),
+            visibleLength(heads[i] ?? ''),
             ...normalised.map((r) => visibleLength(r.cells[i] ?? '')),
           ),
         ),
@@ -351,11 +437,11 @@ export function screenFor(
       // Total printed width: indent, one border per gap plus the outer two, padding in each cell.
       const widthOf = (idx: readonly number[], fillWidth: number): number =>
         indent +
-        idx.reduce((n, i) => n + (i === fillAt ? fillWidth : (natural[i] ?? 0)) + 2 * padCells, 0) +
+        idx.reduce((n, i) => n + (i === fillAt ? fillWidth : (widths[i] ?? 0)) + 2 * padCells, 0) +
         idx.length +
         1;
       // Shrink the fill column to its minimum, then drop columns until the table fits.
-      const fillMin = fillAt >= 0 ? Math.min(natural[fillAt] ?? 0, columns[fillAt]?.min ?? 24) : 0;
+      let fillMin = fillAt >= 0 ? Math.min(widths[fillAt] ?? 0, columns[fillAt]?.min ?? 24) : 0;
       for (;;) {
         if (widthOf(shown, fillMin) <= width) break;
         const droppable = shown
@@ -365,18 +451,37 @@ export function screenFor(
         if (drop === undefined) break;
         shown = shown.filter((i) => i !== drop);
       }
+      // Still too wide: cut the widest other columns, one column at a time, down to `limit`.
+      const narrow = (limit: number): void => {
+        while (widthOf(shown, fillMin) > width) {
+          const widest = shown
+            .filter((i) => i !== fillAt && (widths[i] ?? 0) > limit)
+            .sort((a, b) => (widths[b] ?? 0) - (widths[a] ?? 0))[0];
+          if (widest === undefined) return;
+          widths[widest] = (widths[widest] ?? 0) - 1;
+        }
+      };
+      // Long labels go first (a readable name is at most 21 wide and stays whole), then the fill
+      // column wraps narrower than its minimum (nothing is lost), then every column gets cut.
+      narrow(24);
+      if (shown.includes(fillAt)) {
+        const over = widthOf(shown, fillMin) - width;
+        if (over > 0) fillMin = Math.max(Math.min(fillMin, 16), fillMin - over);
+      }
+      narrow(8);
       const fillWidth =
         fillAt >= 0 && shown.includes(fillAt)
-          ? Math.max(fillMin, Math.min(natural[fillAt] ?? 0, width - widthOf(shown, 0)))
+          ? Math.max(fillMin, Math.min(widths[fillAt] ?? 0, width - widthOf(shown, 0)))
           : 0;
-      const colWidth = (i: number): number => (i === fillAt ? fillWidth : (natural[i] ?? 0));
+      const colWidth = (i: number): number => (i === fillAt ? fillWidth : (widths[i] ?? 0));
       const fit = (text: string, i: number): string => {
         const w = colWidth(i);
         const len = visibleLength(text);
         if (len > w) {
           // Truncate a non-fill cell (the fill column wraps instead).
-          const cut = Math.max(0, w - sym.ellipsis.length);
-          return `${text.replace(ANSI_RE, '').slice(0, cut)}${sym.ellipsis}`;
+          const room = Math.max(0, w - visibleLength(sym.ellipsis));
+          const kept = room > 0 ? (cutByWidth(text, room)[0] ?? '') : '';
+          return `${kept}${' '.repeat(Math.max(0, room - visibleLength(kept)))}${sym.ellipsis}`;
         }
         const fillBy = ' '.repeat(w - len);
         return columns[i]?.right ? `${fillBy}${text}` : `${text}${fillBy}`;
@@ -391,17 +496,17 @@ export function screenFor(
           `${lead}${l}${shown.map((i) => box.h.repeat(colWidth(i) + 2 * padCells)).join(j)}${r}`,
         );
       write(rule(box.tl, box.tj, box.tr));
-      write(line(shown.map((i) => style.dim(fit(columns[i]?.header ?? '', i)))));
+      write(line(shown.map((i) => style.dim(fit(heads[i] ?? '', i)))));
       write(rule(box.lj, box.x, box.rj));
       const fillPos = shown.indexOf(fillAt);
       normalised.forEach((r, rowIndex) => {
         if (rowIndex > 0) write(rule(box.lj, box.x, box.rj));
         const cells = shown.map((i) => r.cells[i] ?? '');
         // The fill column wraps; a note continues under it, dimmed, inside the same row.
-        const fillLines = fillPos >= 0 ? wrap(cells[fillPos] ?? '', fillWidth) : [];
+        const fillLines = fillPos >= 0 ? wrapCell(cells[fillPos] ?? '', fillWidth) : [];
         const noteLines =
           fillPos >= 0 && r.note !== undefined && r.note !== ''
-            ? wrap(r.note, fillWidth).map((l) => style.dim(l))
+            ? wrapCell(r.note, fillWidth).map((l) => style.dim(l))
             : [];
         const body = [...fillLines, ...noteLines];
         const lineCount = Math.max(1, body.length);

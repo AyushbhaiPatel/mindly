@@ -246,6 +246,18 @@ describe('status screen', () => {
     `);
   });
 
+  it('fits an agent with a long label into 80 columns', () => {
+    const labelled = { ...claude, label: 'refactor the billing service' };
+    const agents = [{ ...statusData().agents[0]!, session: labelled }];
+    const out = render((sc) => renderStatus(sc, statusData({ agents })), {
+      ...UTF8,
+      COLUMNS: '80',
+    });
+    const widths = out.split('\n').map((l) => [...l].length);
+    expect(Math.max(...widths)).toBeLessThanOrEqual(80);
+    expect(out).toContain('● Claude Code "refactor the bil…');
+  });
+
   it('says "All quiet." when nothing is happening', () => {
     expect(
       render((sc) => renderStatus(sc, statusData({ agents: [], conflicts: [], proposed: [] }))),

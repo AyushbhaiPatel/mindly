@@ -71,7 +71,10 @@ the docs understands what they see, knows what matters, and knows what to do nex
   bordered tables (box-drawing characters, `+-|` in ASCII): a dimmed header row, one row per
   item, columns aligned, the id last. One column takes
   the remaining width and wraps; on a narrow terminal the least important columns are left out
-  rather than squeezed, and a column that is empty for every row is not shown.
+  rather than squeezed, and a column that is empty for every row is not shown. If the table still
+  does not fit, long labels are cut with an ellipsis, then the wrapping column gets narrower; a
+  word too long for the wrapping column (a path, a URL) is broken across lines, never cut. Widths
+  are counted in terminal columns: CJK characters and emoji take two.
 
 ## Shape of a screen (CLI)
 

@@ -119,7 +119,7 @@ export function renderStatus(sc: Screen, d: StatusData): void {
     sc.section('Agents');
     sc.table(
       [
-        { header: 'Agent' },
+        { header: 'Agent', max: 32 },
         { header: 'Session', drop: 4 },
         { header: 'Status' },
         { header: 'Branch', max: 24, drop: 2 },
