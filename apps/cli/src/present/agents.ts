@@ -25,12 +25,13 @@ const KIND_IN_TEXT_RE = new RegExp(
 );
 
 /**
- * Rewrites engine-made labels inside stored text (conflict titles, update titles) into the
- * human form: `claude-code #4409d433` -> `Claude Code - 4409d433`, `a codex session` ->
- * `a Codex session`. The input must already be sanitised.
+ * Rewrites engine-made labels inside stored text (conflict titles, update titles) into plain
+ * words: `claude-code #4409d433` -> `Claude Code`, `a codex session` -> `a Codex session`. The
+ * session tag is dropped from running text; tables show it in a column of their own. The input
+ * must already be sanitised.
  */
 export function humanizeText(text: string): string {
   return text
-    .replace(SESSION_TAG_RE, (_m, kind: string, tag: string) => `${agentName(kind)} \u00B7 ${tag}`)
+    .replace(SESSION_TAG_RE, (_m, kind: string) => agentName(kind))
     .replace(KIND_IN_TEXT_RE, (kind: string) => agentName(kind));
 }

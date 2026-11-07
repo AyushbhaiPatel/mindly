@@ -166,19 +166,21 @@ describe('status screen', () => {
       Mindly · my-app · 2 agents working · 2 things need you
 
       Agents
-        ┌──────────────────────────┬─────────┬────────┬───────────────────────────┬────────┐
-        │ Agent                    │ Status  │ Branch │ Doing                     │ Active │
-        ├──────────────────────────┼─────────┼────────┼───────────────────────────┼────────┤
-        │ ● Claude Code · 4409d433 │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
-        │ ● Codex · f57f6d10       │ working │ main   │ editing src/dash.ts       │ 1m ago │
-        └──────────────────────────┴─────────┴────────┴───────────────────────────┴────────┘
+        ┌───────────────┬──────────┬─────────┬────────┬───────────────────────────┬────────┐
+        │ Agent         │ Session  │ Status  │ Branch │ Doing                     │ Active │
+        ├───────────────┼──────────┼─────────┼────────┼───────────────────────────┼────────┤
+        │ ● Claude Code │ 4409d433 │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
+        ├───────────────┼──────────┼─────────┼────────┼───────────────────────────┼────────┤
+        │ ● Codex       │ f57f6d10 │ working │ main   │ editing src/dash.ts       │ 1m ago │
+        └───────────────┴──────────┴─────────┴────────┴───────────────────────────┴────────┘
 
       Needs you
         ┌────────────┬──────────────────────────────────────────────────────────────────────┬────────────┐
         │ Type       │ What                                                                 │ Id         │
         ├────────────┼──────────────────────────────────────────────────────────────────────┼────────────┤
-        │ ! Conflict │ Claude Code · 4409d433 changed the exports of src/auth.ts; Codex's   │ [9f02a0c3] │
-        │            │ src/dash.ts uses them                                                │            │
+        │ ! Conflict │ Claude Code changed the exports of src/auth.ts; Codex's src/dash.ts  │ [9f02a0c3] │
+        │            │ uses them                                                            │            │
+        ├────────────┼──────────────────────────────────────────────────────────────────────┼────────────┤
         │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code       │ [7bc7e9b7] │
         └────────────┴──────────────────────────────────────────────────────────────────────┴────────────┘
 
@@ -214,11 +216,11 @@ describe('status screen', () => {
       Mindly - my-app - 1 agent idle - 5 things need you
 
       Agents
-        +----------------------+---------------------+--------+--------------------+--------+
-        | Agent                | Status              | Branch | Doing              | Active |
-        +----------------------+---------------------+--------+--------------------+--------+
-        | [!] Codex - f57f6d10 | hit its usage limit | main   | last active 1m ago | 1m ago |
-        +----------------------+---------------------+--------+--------------------+--------+
+        +-----------+----------+---------------------+--------+--------------------+--------+
+        | Agent     | Session  | Status              | Branch | Doing              | Active |
+        +-----------+----------+---------------------+--------+--------------------+--------+
+        | [!] Codex | f57f6d10 | hit its usage limit | main   | last active 1m ago | 1m ago |
+        +-----------+----------+---------------------+--------+--------------------+--------+
 
       Needs you
         +-----------------+-----------------------------------------------------------------+------------+
@@ -226,10 +228,14 @@ describe('status screen', () => {
         +-----------------+-----------------------------------------------------------------+------------+
         | [!] Config      | This project's .mindly/config.json is not trusted yet, so its   |            |
         |                 | checks do not run                                               |            |
-        | [!] Conflict    | Claude Code - 4409d433 changed the exports of src/auth.ts;      | [9f02a0c3] |
-        |                 | Codex's src/dash.ts uses them                                   |            |
+        +-----------------+-----------------------------------------------------------------+------------+
+        | [!] Conflict    | Claude Code changed the exports of src/auth.ts; Codex's         | [9f02a0c3] |
+        |                 | src/dash.ts uses them                                           |            |
+        +-----------------+-----------------------------------------------------------------+------------+
         | - Rule          | "Don't use default exports" - suggested by you, in Claude Code  | [7bc7e9b7] |
+        +-----------------+-----------------------------------------------------------------+------------+
         | - Known pitfall | "Command fails: npm test" - suggested by Codex                  | [bf1da9e0] |
+        +-----------------+-----------------------------------------------------------------+------------+
         | - Handoff       | Waiting for Cursor: "Finish the dashboard login form"           | [2bc5385b] |
         +-----------------+-----------------------------------------------------------------+------------+
 
@@ -295,7 +301,9 @@ describe('memory screens', () => {
           | Status                   | Kind          | Title                      | Id         |
           +--------------------------+---------------+----------------------------+------------+
           | [ok] approved - enforced | rule          | Always use pnpm, never npm | [a9884755] |
+          +--------------------------+---------------+----------------------------+------------+
           | [!] waiting for you      | rule          | Don't use default exports  | [7bc7e9b7] |
+          +--------------------------+---------------+----------------------------+------------+
           | [!] waiting for you      | known pitfall | Command fails: npm test    | [bf1da9e0] |
           +--------------------------+---------------+----------------------------+------------+
 
@@ -316,8 +324,8 @@ describe('insight screens', () => {
           ┌──────────────┬──────────────────────────────────────────────────┬────────┬────────┬────────────┐
           │ Severity     │ What                                             │ Status │   When │ Id         │
           ├──────────────┼──────────────────────────────────────────────────┼────────┼────────┼────────────┤
-          │ ! check this │ Claude Code · 4409d433 changed the exports of    │ open   │ 2m ago │ [9f02a0c3] │
-          │              │ src/auth.ts; Codex's src/dash.ts uses them       │        │        │            │
+          │ ! check this │ Claude Code changed the exports of src/auth.ts;  │ open   │ 2m ago │ [9f02a0c3] │
+          │              │ Codex's src/dash.ts uses them                    │        │        │            │
           │              │ Changed signature: login. 1 file imports it:     │        │        │            │
           │              │ src/dash.ts.                                     │        │        │            │
           └──────────────┴──────────────────────────────────────────────────┴────────┴────────┴────────────┘
@@ -414,16 +422,16 @@ describe('insight screens', () => {
     };
     expect(render((sc) => renderXray(sc, codex, r), UTF8)).toMatchInlineSnapshot(`
       "
-      Context sent to Codex \u00B7 f57f6d10
+      Context sent to Codex · f57f6d10
 
       At session start (3m ago), Codex received 3 items:
-        \u2713 Claude Code \u00B7 4409d433 is working in this project too
-        \u2713 Rule "Always use pnpm, never npm"
-        \u2713 Conflict: Claude Code \u00B7 4409d433 changed the exports of src/auth.ts
+        ✓ Claude Code is working in this project too
+        ✓ Rule "Always use pnpm, never npm"
+        ✓ Conflict: Claude Code changed the exports of src/auth.ts
       Left out (no room left in the context): 1 item
         ! Decision "Auth uses sessions, not JWT"
 
-      \u2192 mindly xray --session f57f6d10 --query "<words>"   find out why a memory did or did not reach it
+      → mindly xray --session f57f6d10 --query "<words>"   find out why a memory did or did not reach it
       "
     `);
     expect(
@@ -530,13 +538,12 @@ describe('continuity screens', () => {
       "
       1 handoff - 1 waiting to be picked up
 
-        +------------------------+------------------------------+------------------+--------+------------+
-        | Status                 | Work                         | From             |   When | Id         |
-        +------------------------+------------------------------+------------------+--------+------------+
-        | [!] waiting for Cursor | Finish the dashboard login   | Codex - f57f6d10 | 5m ago | [2bc5385b] |
-        |                        | form                         |                  |        |            |
-        |                        | Next: Wire the submit button |                  |        |            |
-        +------------------------+------------------------------+------------------+--------+------------+
+        +------------------------+---------------------------------+-------+--------+------------+
+        | Status                 | Work                            | From  |   When | Id         |
+        +------------------------+---------------------------------+-------+--------+------------+
+        | [!] waiting for Cursor | Finish the dashboard login form | Codex | 5m ago | [2bc5385b] |
+        |                        | Next: Wire the submit button    |       |        |            |
+        +------------------------+---------------------------------+-------+--------+------------+
 
       -> Start Cursor in this project: it picks the handoff up at the start of its session.
       "

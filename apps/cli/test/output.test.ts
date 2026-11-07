@@ -101,18 +101,19 @@ describe('human output on a real project', () => {
       /^Mindly - mindly-cli-repo-\w+ - 2 agents working - 4 things need you$/,
     );
     // Agents are a table: name, status, branch, what the agent is doing.
-    expect(r.stdout).toMatch(/Agent[\s|]+Status[\s|]+Branch[\s|]+Doing/);
+    expect(r.stdout).toMatch(/Agent[\s|]+Session[\s|]+Status[\s|]+Branch[\s|]+Doing/);
     expect(r.stdout).toMatch(
-      /\* Codex - [0-9a-f]{8}[\s|]+working[\s|]+main[\s|]+editing src\/dash\.ts/,
+      /\* Codex[\s|]+[0-9a-f]{8}[\s|]+working[\s|]+main[\s|]+editing src\/dash\.ts/,
     );
     expect(r.stdout).toMatch(
-      /\* Claude Code - [0-9a-f]{8}[\s|]+working[\s|]+main[\s|]+edited src\/auth\.ts/,
+      /\* Claude Code[\s|]+[0-9a-f]{8}[\s|]+working[\s|]+main[\s|]+edited src\/auth\.ts/,
     );
-    expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code - /);
+    expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code changed/);
     const flat = r.stdout.replace(/[\s|]+/g, ' ');
     expect(flat).toContain('changed the exports of src/auth.ts;');
-    expect(flat).toContain("Codex's src/dash.ts uses them");
-    expect(flat).toMatch(/Conflict Claude Code - [0-9a-f]{8} changed[^[]*\[[0-9a-f]{8}\]/);
+    expect(flat).toContain("Codex's");
+    expect(flat).toContain('src/dash.ts uses them');
+    expect(flat).toMatch(/Conflict Claude Code changed[^[]*\[[0-9a-f]{8}\]/);
     expect(r.stdout).toMatch(
       /- Rule[\s|]+"Don't use default exports" - suggested by you, in Claude Code/,
     );
@@ -146,7 +147,7 @@ describe('human output on a real project', () => {
     }
     const xray = (await cli(sb, ['xray'])).stdout;
     expect(xray).toMatch(/At session start \(just now\), Codex received 1 item:/);
-    expect(xray).toMatch(/Claude Code - [0-9a-f]{8} is working in this project too/);
+    expect(xray).toMatch(/Claude Code is working in this project too/);
   });
 
   it('accepts short ids, unique prefixes and full ids; lists candidates when ambiguous', async () => {

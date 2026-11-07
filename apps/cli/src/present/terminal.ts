@@ -392,7 +392,8 @@ export function screenFor(
       write(line(shown.map((i) => style.dim(fit(columns[i]?.header ?? '', i)))));
       write(rule(box.lj, box.x, box.rj));
       const fillPos = shown.indexOf(fillAt);
-      for (const r of normalised) {
+      normalised.forEach((r, rowIndex) => {
+        if (rowIndex > 0) write(rule(box.lj, box.x, box.rj));
         const cells = shown.map((i) => r.cells[i] ?? '');
         // The fill column wraps; a note continues under it, dimmed, inside the same row.
         const fillLines = fillPos >= 0 ? wrap(cells[fillPos] ?? '', fillWidth) : [];
@@ -412,9 +413,10 @@ export function screenFor(
             ),
           );
         }
-        if (fillPos < 0 && r.note)
+        if (fillPos < 0 && r.note) {
           for (const l of wrap(r.note, width, `${lead} `)) write(style.dim(l));
-      }
+        }
+      });
       write(rule(box.bl, box.bj, box.br));
     },
     next: (steps) => {

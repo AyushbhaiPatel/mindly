@@ -45,9 +45,9 @@ export function renderHandoffs(sc: Screen, list: Handoff[], sessionOf: SessionLo
         .join('; ');
       return {
         cells: [
-          `${sc.mark(marker)} ${handoffStatusWord(h.status, h.toAgentKind, claimer ? sessionName(claimer) : null)}`,
+          `${sc.mark(marker)} ${handoffStatusWord(h.status, h.toAgentKind, claimer ? agentName(claimer.agentKind) : null)}`,
           clean(h.summary, 120),
-          from ? sessionName(from) : 'an agent',
+          from ? agentName(from.agentKind) : 'an agent',
           handoffReasonWord(h.reason),
           relativeTime(h.createdAt, sc.now),
           sc.ref(h.id),

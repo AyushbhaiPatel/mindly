@@ -15,7 +15,6 @@ import {
   handoffStatusWord,
   memoryKindWord,
   relativeTime,
-  sessionName,
   sessionStatusWord,
   taskStatusWord,
   type Marker,
@@ -121,6 +120,7 @@ export function renderStatus(sc: Screen, d: StatusData): void {
     sc.table(
       [
         { header: 'Agent' },
+        { header: 'Session', drop: 4 },
         { header: 'Status' },
         { header: 'Branch', max: 24, drop: 2 },
         { header: 'Doing', fill: true, min: 24 },
@@ -128,7 +128,8 @@ export function renderStatus(sc: Screen, d: StatusData): void {
         { header: 'Active', right: true, drop: 3 },
       ],
       d.agents.map((a) => [
-        `${sc.mark(agentMarker(a.session))} ${sessionName(a.session)}`,
+        `${sc.mark(agentMarker(a.session))} ${agentName(a.session.agentKind)}${a.session.label ? ` "${clean(a.session.label, 40)}"` : ''}`,
+        shortId(a.session.id),
         sessionStatusWord(a.session.status),
         a.session.branch ? clean(a.session.branch, 60) : '',
         doing(a, sc.now),
