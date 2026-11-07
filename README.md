@@ -154,6 +154,51 @@ showing you the patch (never a commit, never a reset). A reliable result is reme
 mistake in the project's memory so the agents are warned before they repeat it. Checkpoints are
 kept 14 days (`checkpoints.keepDays`) and can be turned off with `checkpoints.enabled`.
 
+### Which agent is better at what, in your repo
+
+```bash
+mindly track
+```
+
+If you use several agents on the same code, you probably pick one by gut feeling. Mindly already
+knows what each agent edited and what went wrong afterwards, so it can show you, folder by folder,
+how often each agent's edits broke something in this repository:
+
+```text
+Track record · last 30 days · 2 agents · 1,284 edits
+
+src/api
+  codex        212 edits   broke 1 (0.5%) · kept 91% of 1,940 lines
+  claude-code  188 edits   broke 7 (3.7%) · kept 84% of 2,210 lines
+  -> codex breaks less here (clear difference)
+
+src/ui
+  claude-code  301 edits   broke 2 (0.7%) · kept 88% of 3,105 lines
+  cursor        44 edits   broke 1 (2.3%) · kept 79% of 512 lines
+  -> no clear difference yet
+
+Usage limits: claude-code 3 of 41 sessions · codex 0 of 22
+```
+
+"Broke" adds up the edits that `mindly bisect` found broke a check, the recorded decisions an
+edit broke, and failed merge checks. "Kept" is how many of the lines an agent wrote at least a week
+ago are still in the code (later rewrites count as not kept). The numbers are meant to be honest:
+
+- **Counts are always shown.** Every rate comes with what it counts ("broke 2 of 41 edits"), and
+  there is no overall score or "best agent".
+- **No rate without enough data.** An agent needs at least 20 edits and 3 sessions in a folder
+  before any rate is shown there; until then it says "not enough data yet".
+- **No clear difference means none.** Agents are compared only when their 95% confidence
+  intervals do not overlap; otherwise Mindly says "no clear difference yet".
+- **Only what is pinned to one agent counts.** A problem involving several sessions, or a change
+  made outside any agent, counts for nobody.
+
+`mindly track --area src/api --explain` shows one folder with the exact definition of each
+number; `--since 90d`, `--agent codex` and `--json` work too. When you `mindly split` a goal and
+one agent clearly breaks less in a folder a part owns, the plan review says so next to that part
+(it never changes the plan for you). The track record stays on your machine and is never part of
+a saves card.
+
 ## Install
 
 You need **Node.js 22.13 or newer** and **git**, on macOS or Linux.
@@ -312,6 +357,7 @@ mindly split "<goal>"               # divide a goal between agents in separate w
 mindly split status|check|merge|abort
 mindly bisect -- <command>          # the agent edit that broke a command, who made it and why
 mindly bisect list|show <step>|revert <step>
+mindly track [--area src/api]       # which agent breaks less where in this repo, as counts
 mindly rules [--approve <id>]       # project rules, approved and proposed
 mindly rules import [--dry-run]     # import rules from CLAUDE.md, AGENTS.md, .cursorrules, …
 mindly rules sync [--dry-run|--off] # keep approved rules in AGENTS.md, CLAUDE.md, GEMINI.md

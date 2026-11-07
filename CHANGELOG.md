@@ -38,11 +38,34 @@ All notable changes to `mindly-cli` are documented here. The project follows
   `remote.<name>.mirror` set (a `git push --mirror` would push the hidden refs).
 - Database schema v4: a `checkpoints` table, and the `runs` table rebuilt so it accepts the
   `bisect` run kind. Applied automatically; upgrades from v1, v2 and v3 keep every row.
+- `mindly track [--since 30d] [--area <folder>] [--agent <kind>] [--min-edits 20] [--explain]
+[--json]`: a track record of each agent in this repository, per folder (the first
+  `track.areaDepth` folders of a path, default 2; root files are `(root)`). For each agent it
+  shows edits and sessions, how many edits broke a check (reliable `mindly bisect` results whose
+  first bad step is one of its edits), broke a recorded decision (contract conflicts naming only
+  its session) or failed a merge check (shadow-merge and split merge-check conflicts naming only
+  its session), writes blocked by an enforced rule (confirmed saves), the share of its lines
+  still in the code after 7 days, and how many of its sessions hit a usage limit. There is no
+  score: every rate shows its counts and a 95% Wilson interval, rates appear only with at least
+  `track.minEdits` (20) edits and `track.minSessions` (3) sessions in a folder, and agents are
+  called clearly different only when their intervals do not overlap. Outcomes involving several
+  sessions, outside steps or gap steps count for nobody.
+- `mindly split` adds the track record (counts only, inside the planner's data block) to the
+  planning prompt, and the plan review shows a suggested agent next to a part when one agent
+  clearly breaks less in a folder it owns. The plan's own choice is never changed.
+- `GET /api/projects/:projectId/track?since&area&agent&minEdits` on the daemon (read-only, same
+  shape as `mindly track --json`), and a daemon job that checks the lines of up to 500 edits per
+  run once they are 7 days old. `mindly track` checks up to 200 more itself (at most 3 seconds)
+  and says how many are still waiting.
+- `mindly bisect` stores the blamed step (kind, session, paths) with its run result, so the track
+  record still counts it after the checkpoint is pruned.
+- Database schema v5: a `line_survival` table (one row per agent edit: line hashes added and still
+  present; no file content). Applied automatically; upgrades from v1 to v4 keep every row.
 
 ### Changed
 
-- Once a Mindly with schema v4 has upgraded your database, an older Mindly (0.3.0 or earlier)
-  cannot open it any more. Upgrade every Mindly install on the machine together.
+- Once a Mindly with schema v4 or v5 has upgraded your database, an older Mindly (0.3.0 or
+  earlier) cannot open it any more. Upgrade every Mindly install on the machine together.
 
 ## 0.3.0 — 2026-11-05
 
