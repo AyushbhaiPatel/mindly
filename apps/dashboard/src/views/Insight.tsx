@@ -16,7 +16,6 @@ import {
   Panel,
   Paths,
   Segmented,
-  Tabs,
   TextLink,
   Time,
   TrustMark,
@@ -46,36 +45,6 @@ import type {
   SnapshotDiff,
 } from '../types';
 import { AgentName } from './Overview';
-
-type Sub = 'xray' | 'provenance' | 'standup' | 'snapshots';
-
-export function InsightView() {
-  const [sub, setSub] = useState<Sub>('xray');
-  return (
-    <div className="view">
-      <div className="subnav">
-        <Tabs
-          idPrefix="insight"
-          label="Insight sections"
-          value={sub}
-          onChange={setSub}
-          tabs={[
-            { key: 'xray', label: 'Context X-Ray' },
-            { key: 'provenance', label: 'Provenance' },
-            { key: 'standup', label: 'Standup' },
-            { key: 'snapshots', label: 'Snapshots' },
-          ]}
-        />
-      </div>
-      <div id="insight-panel" role="tabpanel" aria-labelledby={`insight-tab-${sub}`}>
-        {sub === 'xray' && <XRay />}
-        {sub === 'provenance' && <Provenance />}
-        {sub === 'standup' && <Standup />}
-        {sub === 'snapshots' && <Snapshots />}
-      </div>
-    </div>
-  );
-}
 
 export function XRay() {
   const { client, project, sessions } = useApp();
