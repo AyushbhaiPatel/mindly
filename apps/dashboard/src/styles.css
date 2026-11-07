@@ -2902,6 +2902,12 @@ dialog::backdrop {
   min-width: 5.5rem;
 }
 
+.decision-links {
+  display: grid;
+  justify-items: end;
+  gap: 0.25rem;
+}
+
 @media (max-width: 600px) {
   .headline-text {
     font-size: 1.2rem;
@@ -2915,6 +2921,10 @@ dialog::backdrop {
     grid-column: 2;
     justify-content: flex-start;
     margin-top: 0.5rem;
+  }
+
+  .decision-links {
+    justify-items: start;
   }
 
   .guide-word {

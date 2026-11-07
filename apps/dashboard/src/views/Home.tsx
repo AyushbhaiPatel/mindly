@@ -14,7 +14,16 @@ import {
   useNow,
 } from '../components/ui';
 import { useAction, useApp, useResource } from '../state';
-import type { Handoff, Intent, Memory, MindlyEvent, Overview, Session, Task } from '../types';
+import type {
+  Handoff,
+  Intent,
+  Memory,
+  MemoryKind,
+  MindlyEvent,
+  Overview,
+  Session,
+  Task,
+} from '../types';
 import {
   INTRO,
   agentDoingWords,
@@ -22,6 +31,7 @@ import {
   count,
   homeSentence,
   humanizeAgentText,
+  memoryKindPlural,
   needGroupWhy,
   needGroupWords,
   productName,
@@ -45,7 +55,8 @@ export function HomeView() {
   const waiting = useResource(
     () =>
       Promise.all([
-        client.memories(project.id, { trust: 'proposed', status: 'active', limit: 50 }),
+        // Only for samples and which kinds are waiting; the counts come from `ov.needsYou`.
+        client.memories(project.id, { trust: 'proposed', status: 'active', limit: 200 }),
         client.handoffs(project.id),
       ]),
     [project.id],
@@ -56,15 +67,15 @@ export function HomeView() {
     <Loaded res={res}>
       {(ov) => {
         const memories = waiting.data?.[0] ?? [];
-        const handoffs = (waiting.data?.[1] ?? []).filter((h) => h.status === 'pending');
-        const quiet = ov.sessions.length === 0 && events.length === 0;
+        // Same rule as the overview's `needsYou.pendingHandoffs`: split parts are handled on the
+        // split page, not here.
+        const handoffs = (waiting.data?.[1] ?? []).filter(
+          (h) => h.status === 'pending' && !h.packet.split,
+        );
+        const quiet = isFirstRun(ov) && events.length === 0;
         return (
           <div className="home view">
-            <Pulse
-              ov={ov}
-              decisions={decisionCount(ov, memories, handoffs)}
-              saves={saves.data?.summary.total}
-            />
+            <Pulse ov={ov} decisions={decisionCount(ov)} saves={saves.data?.summary.total} />
             {quiet && <GettingStarted />}
             <AgentsNow
               sessions={ov.sessions}
@@ -87,16 +98,36 @@ export function HomeView() {
   );
 }
 
-function decisionCount(ov: Overview, memories: Memory[], handoffs: Handoff[]): number {
+/** What waits for the user, as the server counts it (not capped by the samples Home fetches). */
+function decisionCount(ov: Overview): number {
+  const n = ov.needsYou;
   return (
-    ov.conflicts.filter((c) => c.status === 'open' && c.severity !== 'info').length +
-    memories.length +
-    handoffs.length +
-    (ov.split?.blockedParts.length ?? 0) +
-    (ov.split?.mergeCheck &&
-    (ov.split.mergeCheck.status === 'failed' || ov.split.mergeCheck.status === 'error')
-      ? 1
-      : 0)
+    n.openConflicts +
+    n.proposedRules +
+    n.proposedMemories +
+    n.pendingHandoffs +
+    n.blockedParts +
+    n.failedMergeChecks
+  );
+}
+
+/**
+ * True when nothing was ever recorded for this project, judged from the overview alone: the event
+ * list loads separately and is empty while it loads or when it fails, and `ov.sessions` only holds
+ * the last 30 minutes. `lastSeq` is the highest event number across all projects, so 0 means
+ * nothing happened anywhere; otherwise the project's own memories, tasks, conflicts, runs, split
+ * and updates show whether it has a history.
+ */
+function isFirstRun(ov: Overview): boolean {
+  if (ov.lastSeq === 0) return true;
+  return (
+    ov.sessions.length === 0 &&
+    ov.tasks.length === 0 &&
+    ov.conflicts.length === 0 &&
+    Object.values(ov.memoryCounts).every((n) => n === 0) &&
+    ov.lastShadowMerge === null &&
+    ov.split === null &&
+    ov.pendingDeliveries === 0
   );
 }
 
@@ -321,7 +352,7 @@ function Decisions({
   const conflicts = ov.conflicts.filter((c) => c.status === 'open' && c.severity !== 'info');
   const rules = memories.filter((m) => m.kind === 'rule');
   const others = memories.filter((m) => m.kind !== 'rule');
-  const total = decisionCount(ov, memories, handoffs);
+  const total = decisionCount(ov);
 
   const rows: ReactNode[] = [];
 
@@ -360,14 +391,16 @@ function Decisions({
     );
   }
 
-  const group = (kind: 'rule' | 'memory', items: Memory[]) => {
-    if (items.length === 0) return;
+  const group = (kind: 'rule' | 'memory', pending: number, items: Memory[]) => {
+    if (pending === 0) return;
     const shown = items.slice(0, 3);
+    // The Memory page filters by one kind; suggested memories of several kinds get one link each.
+    const kinds: MemoryKind[] = kind === 'rule' ? ['rule'] : [...new Set(items.map((m) => m.kind))];
     rows.push(
       <li key={`g:${kind}`} className="decision">
         <Dot tone="warn" />
         <div className="decision-body">
-          <p className="decision-text">{needGroupWords(kind, items.length)}</p>
+          <p className="decision-text">{needGroupWords(kind, pending)}</p>
           <p className="decision-why">{needGroupWhy(kind)}</p>
           <ul className="decision-samples">
             {shown.map((m) => (
@@ -382,30 +415,44 @@ function Decisions({
                 <span className="muted"> from {sourceWords(m.source, sessions)}</span>
               </li>
             ))}
-            {items.length > shown.length && (
-              <li className="muted">and {items.length - shown.length} more</li>
+            {shown.length > 0 && pending > shown.length && (
+              <li className="muted">and {pending - shown.length} more</li>
             )}
           </ul>
         </div>
         <span className="decision-action">
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() =>
-              navigate(
-                'memory',
-                kind === 'rule' ? { trust: 'proposed', kind: 'rule' } : { trust: 'proposed' },
-              )
-            }
-          >
-            Review {items.length === 1 ? 'it' : 'all'}
-          </button>
+          {kinds.length > 1 ? (
+            <span className="decision-links">
+              {kinds.map((k) => (
+                <TextLink
+                  key={k}
+                  go
+                  onClick={() => navigate('memory', { trust: 'proposed', kind: k })}
+                >
+                  Review {memoryKindPlural(k)}
+                </TextLink>
+              ))}
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() =>
+                navigate(
+                  'memory',
+                  kinds[0] ? { trust: 'proposed', kind: kinds[0] } : { trust: 'proposed' },
+                )
+              }
+            >
+              Review {pending === 1 ? 'it' : 'all'}
+            </button>
+          )}
         </span>
       </li>,
     );
   };
-  group('rule', rules);
-  group('memory', others);
+  group('rule', ov.needsYou.proposedRules, rules);
+  group('memory', ov.needsYou.proposedMemories, others);
 
   if (ov.split) {
     for (const p of ov.split.blockedParts) {

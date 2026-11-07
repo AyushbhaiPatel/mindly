@@ -1273,7 +1273,9 @@ export function createMockClient(): MindlyClient {
           openConflicts: pc.filter((c) => c.status === 'open' && c.severity !== 'info').length,
           criticalConflicts: pc.filter((c) => c.severity === 'critical' && c.status === 'open')
             .length,
-          pendingHandoffs: byProject(handoffs, id).filter((h) => h.status === 'pending').length,
+          pendingHandoffs: byProject(handoffs, id).filter(
+            (h) => h.status === 'pending' && !h.packet.split,
+          ).length,
           blockedParts: 0,
           failedMergeChecks: 0,
         },
