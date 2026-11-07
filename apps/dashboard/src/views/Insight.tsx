@@ -16,7 +16,6 @@ import {
   Panel,
   Paths,
   Segmented,
-  Tabs,
   TextLink,
   Time,
   TrustMark,
@@ -47,37 +46,7 @@ import type {
 } from '../types';
 import { AgentName } from './Overview';
 
-type Sub = 'xray' | 'provenance' | 'standup' | 'snapshots';
-
-export function InsightView() {
-  const [sub, setSub] = useState<Sub>('xray');
-  return (
-    <div className="view">
-      <div className="subnav">
-        <Tabs
-          idPrefix="insight"
-          label="Insight sections"
-          value={sub}
-          onChange={setSub}
-          tabs={[
-            { key: 'xray', label: 'Context X-Ray' },
-            { key: 'provenance', label: 'Provenance' },
-            { key: 'standup', label: 'Standup' },
-            { key: 'snapshots', label: 'Snapshots' },
-          ]}
-        />
-      </div>
-      <div id="insight-panel" role="tabpanel" aria-labelledby={`insight-tab-${sub}`}>
-        {sub === 'xray' && <XRay />}
-        {sub === 'provenance' && <Provenance />}
-        {sub === 'standup' && <Standup />}
-        {sub === 'snapshots' && <Snapshots />}
-      </div>
-    </div>
-  );
-}
-
-function XRay() {
+export function XRay() {
   const { client, project, sessions } = useApp();
   const sres = useResource(() => client.sessions(project.id, 50), [project.id], ['sessions']);
   const [sessionId, setSessionId] = useState<string>('');
@@ -227,7 +196,7 @@ function ItemTable({
   );
 }
 
-function Provenance() {
+export function Provenance() {
   const { client, project, sessions } = useApp();
   const [file, setFile] = useState('');
   const [line, setLine] = useState('1');
@@ -364,7 +333,7 @@ function Provenance() {
 
 const DAY = 86_400_000;
 
-function Standup() {
+export function Standup() {
   const { client, project } = useApp();
   const [range, setRange] = useState<'1' | '3' | '7'>('1');
   const [since] = useState(() => Date.now());
@@ -402,7 +371,7 @@ function Standup() {
   );
 }
 
-function Snapshots() {
+export function Snapshots() {
   const { client, project } = useApp();
   const res = useResource(() => client.snapshots(project.id), [project.id], ['snapshots']);
   const { busy, run } = useAction();

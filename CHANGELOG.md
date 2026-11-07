@@ -3,6 +3,19 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## Unreleased
+
+### Changed
+
+- Mission Control is reorganised around what a first-time user needs to know. Five pages instead
+  of seven: Home, Memory, Agents, History and Settings. Home opens with one sentence on how the
+  project is doing, then the agents at work as cards, the decisions only you can make (suggested
+  rules grouped with a count instead of one row each), where Mindly helped, and recent activity.
+  Every page and section starts with one plain sentence saying what it shows, and a "Guide"
+  button explains the pages and the words Mindly uses. Older links (`#/overview`,
+  `#/coordination`, `#/runs`, `#/insight`, `#/split`) still open the right page.
+- The dashboard's tab icon is the Mindly logo.
+
 ## 0.4.1 — 2026-11-07
 
 ### Fixed

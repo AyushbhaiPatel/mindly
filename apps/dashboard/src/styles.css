@@ -169,6 +169,8 @@ html {
   -webkit-text-size-adjust: 100%;
   /* Never scroll the page sideways (hidden tooltips near the edge must not widen it). */
   overflow-x: clip;
+  /* Scrolling to a section (e.g. ?focus=handoffs) stops below the sticky top bar. */
+  scroll-padding-top: 5.5rem;
 }
 
 body {
@@ -2219,6 +2221,10 @@ dialog::backdrop {
 /* ------------------------------------------------------------------ responsive */
 
 @media (max-width: 1180px) {
+  html {
+    scroll-padding-top: 7rem;
+  }
+
   .topbar {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
@@ -2552,5 +2558,390 @@ dialog::backdrop {
   .tlink,
   .icon-btn {
     color: LinkText;
+  }
+}
+
+/* ------------------------------------------------------------------ plain-language layer */
+
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.logo-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  flex: none;
+}
+
+.page-head .page-role {
+  margin: 0 0 0.6rem;
+  font-size: 0.8125rem;
+}
+
+.page-intro {
+  max-width: 44rem;
+  margin-top: 0.7rem;
+  font-size: 1.0625rem;
+  line-height: 1.55;
+  color: var(--slate-2);
+}
+
+.panel-head-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  row-gap: 0.15rem;
+}
+
+.panel-head-intro .panel-actions {
+  margin-left: 0;
+}
+
+.panel-intro {
+  grid-column: 1 / -1;
+  max-width: 44rem;
+  margin: 0 0 0.35rem;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  color: var(--slate-3);
+}
+
+.guide-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  margin-right: 0.35rem;
+  border: 1px solid var(--hair-strong);
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.guide {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  color: var(--slate-2);
+}
+
+.guide h3 {
+  margin-top: 0.4rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--slate-3);
+}
+
+.guide-list {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.guide-list dt {
+  font-weight: 600;
+  color: var(--slate);
+}
+
+.guide-list dd {
+  margin-top: 0.1rem;
+}
+
+/* the one sentence and three figures on Home */
+
+.headline {
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+  padding-bottom: 1.9rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.headline-text {
+  font-family: var(--serif);
+  font-size: 1.45rem;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--slate);
+}
+
+.figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 1rem 2rem;
+}
+
+.figure {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.figure dd {
+  font-family: var(--serif);
+  font-size: 2.1rem;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--slate);
+  font-variant-numeric: tabular-nums lining-nums;
+  /* the number reads first; the label (dt) comes first in the markup */
+  order: -1;
+}
+
+.figure dt {
+  font-size: 0.875rem;
+  line-height: 1.3;
+  color: var(--slate-3);
+}
+
+.figure-good dd {
+  color: var(--good);
+}
+
+.figure-warn dd {
+  color: var(--warn);
+}
+
+.figure-bad dd {
+  color: var(--bad);
+}
+
+/* first run */
+
+.start-steps {
+  display: grid;
+  gap: 0.9rem;
+  margin: 0.25rem 0 0;
+  padding-left: 1.6rem;
+  counter-reset: step;
+}
+
+.start-steps li {
+  display: grid;
+  gap: 0.15rem;
+  padding-left: 0.35rem;
+  line-height: 1.5;
+}
+
+.start-steps li::marker {
+  font-family: var(--serif);
+  font-size: 1.1rem;
+  color: var(--slate-3);
+}
+
+.start-steps strong {
+  font-weight: 600;
+  color: var(--slate);
+}
+
+.start-steps span {
+  color: var(--slate-2);
+}
+
+/* agent cards */
+
+.agent-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: 0.85rem;
+  list-style: none;
+}
+
+.agent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.95rem 1.05rem 0.85rem;
+  border: 1px solid var(--hair);
+  border-radius: 14px;
+  background: var(--field-bg);
+}
+
+.agent-card.is-active {
+  border-color: color-mix(in srgb, var(--c-green) 45%, transparent);
+}
+
+.agent-card.is-rate_limited {
+  border-color: color-mix(in srgb, var(--dot-bad) 45%, transparent);
+}
+
+.agent-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.agent-card-head strong {
+  font-weight: 600;
+  color: var(--slate);
+}
+
+.agent-state {
+  font-size: 0.8125rem;
+  color: var(--slate-3);
+}
+
+.state-active {
+  color: var(--good);
+}
+
+.state-rate_limited {
+  color: var(--bad);
+}
+
+.agent-doing {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9375rem;
+  color: var(--slate);
+}
+
+.agent-task {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.875rem;
+  color: var(--slate-2);
+}
+
+.agent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem;
+  margin-top: 0.1rem;
+  font-size: 0.8125rem;
+  color: var(--slate-3);
+}
+
+.agent-meta .mono {
+  padding: 0;
+  background: none;
+  color: var(--slate-3);
+}
+
+/* decisions */
+
+.decisions {
+  list-style: none;
+  border-top: 1px solid var(--rule);
+}
+
+.decision {
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 0.9rem;
+  padding: 0.95rem 0;
+  border-bottom: 1px solid var(--hair);
+}
+
+.decision > .dot {
+  margin-top: 0.55rem;
+}
+
+.decision:last-child {
+  border-bottom: 0;
+}
+
+.decision-body {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.decision-text {
+  font-size: 1rem;
+  line-height: 1.45;
+  color: var(--slate);
+}
+
+.decision-why {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--slate-3);
+}
+
+.decision-samples {
+  display: grid;
+  gap: 0.15rem;
+  margin-top: 0.4rem;
+  list-style: none;
+  font-size: 0.875rem;
+  color: var(--slate-2);
+}
+
+.decision-samples li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sample-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--slate);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--hair-strong);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.sample-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.decision-action {
+  display: inline-flex;
+  justify-content: flex-end;
+  align-self: center;
+  min-width: 5.5rem;
+}
+
+.decision-links {
+  display: grid;
+  justify-items: end;
+  gap: 0.25rem;
+}
+
+@media (max-width: 600px) {
+  .headline-text {
+    font-size: 1.2rem;
+  }
+
+  .decision {
+    grid-template-columns: 6px minmax(0, 1fr);
+  }
+
+  .decision-action {
+    grid-column: 2;
+    justify-content: flex-start;
+    margin-top: 0.5rem;
+  }
+
+  .decision-links {
+    justify-items: start;
+  }
+
+  /* hidden from view but kept as the button's accessible name */
+  .guide-word {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 }
