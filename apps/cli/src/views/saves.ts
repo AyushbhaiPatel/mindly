@@ -1,4 +1,4 @@
-import { shortId, type Save, type SaveStatus } from '@mindly/core';
+import { codename, type Save, type SaveStatus } from '@mindly/core';
 import type { SavesSummary } from '@mindly/engine';
 import {
   count,
@@ -66,7 +66,7 @@ const SAVE_COLUMNS: Column[] = [
   { header: 'What', fill: true, min: 36 },
   { header: 'Where', max: 36, drop: 1 },
   { header: 'Status', drop: 2 },
-  { header: 'Id' },
+  { header: 'Name' },
 ];
 
 const MAX_ROWS = 20;
@@ -106,7 +106,7 @@ export function renderSaves(sc: Screen, d: SavesData): void {
   const first = confirmed[0] ?? pending[0];
   if (first) {
     steps.push({
-      cmd: `mindly saves reject ${shortId(first.id)}`,
+      cmd: `mindly saves reject ${codename(first.id)}`,
       why: 'not a save? remove it from every total',
     });
   }

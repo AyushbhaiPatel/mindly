@@ -1,4 +1,4 @@
-import { shortId } from '@mindly/core';
+import { codename } from '@mindly/core';
 import { styleFor, type Style, type TextOut } from '../io.js';
 
 /** Status markers of docs/output-style.md. */
@@ -212,7 +212,7 @@ export interface Screen {
   readonly now: number;
   /** The coloured marker character. */
   mark(marker: Marker): string;
-  /** A dimmed short id in brackets: `[9f02a0c3]`. */
+  /** The record's readable name, dimmed: `quiet-otter`. */
   ref(id: string): string;
   /** The first line of a screen: the answer. */
   summary(text: string): void;
@@ -258,7 +258,7 @@ export function screenFor(
     idle: style.dim,
   };
   const mark = (m: Marker): string => colour[m](sym[m]);
-  const ref = (id: string): string => style.dim(`[${shortId(id)}]`);
+  const ref = (id: string): string => style.dim(codename(id));
   const para = (text: string, indent: number, dim: boolean): void => {
     const pad = ' '.repeat(indent);
     for (const l of text.split('\n')) {
@@ -284,7 +284,9 @@ export function screenFor(
     note: (text, indent = 0) => para(text, indent, true),
     rows: (rows) => {
       const lead = (r: Row): string => `  ${sym[r.marker]} `;
-      const idWidth = 11; // "  [12345678]"
+      // Width of the name column: two spaces and the longest name among the rows.
+      const idWidth =
+        2 + Math.max(0, ...rows.map((r) => (r.id === undefined ? 0 : visibleLength(ref(r.id)))));
       // Align ids on the longest text that still fits on one line with its id.
       let col = 0;
       for (const r of rows) {

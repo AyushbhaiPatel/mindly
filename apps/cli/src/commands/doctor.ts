@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { describeError, homePaths, mindlyHome, shortId, type HomePaths } from '@mindly/core';
+import { describeError, homePaths, mindlyHome, codename, type HomePaths } from '@mindly/core';
 import { checkSafePattern, type Mindly, type ProjectContext } from '@mindly/engine';
 import { gitVersion, mirrorRemotes, versionAtLeast } from '@mindly/git';
 import { MIGRATIONS, schemaVersion, Store } from '@mindly/store';
@@ -314,7 +314,7 @@ function rejectedPatternItems(mindly: Mindly, project: ProjectContext): DoctorIt
     );
   if (rejected.length === 0) return [];
   const list = rejected
-    .map((c) => `memory ${shortId(c.memoryId)}: ${clean(c.spec.pattern ?? '', 80)}`)
+    .map((c) => `memory ${codename(c.memoryId)}: ${clean(c.spec.pattern ?? '', 80)}`)
     .join('; ');
   const n = rejected.length;
   const summary = `${n} contract${n === 1 ? '' : 's'} cannot run: pattern rejected as too expensive to evaluate safely (${list})`;

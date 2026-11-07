@@ -1,5 +1,5 @@
 import {
-  shortId,
+  codename,
   type Contract,
   type Memory,
   type MemoryEvidence,
@@ -57,10 +57,10 @@ export function renderRules(sc: Screen, approved: Memory[], proposed: Memory[]):
     const first = proposed[0] as Memory;
     sc.next([
       {
-        cmd: `mindly rules --approve ${shortId(first.id)}`,
+        cmd: `mindly rules --approve ${codename(first.id)}`,
         why: 'make the rule apply to every agent',
       },
-      { cmd: `mindly memory reject ${shortId(first.id)}`, why: 'drop the suggestion' },
+      { cmd: `mindly memory reject ${codename(first.id)}`, why: 'drop the suggestion' },
     ]);
   }
 }
@@ -106,12 +106,12 @@ export function renderMemoryList(
   const first = waiting[0];
   if (first) {
     steps.push({
-      cmd: `mindly memory approve ${shortId(first.id)}`,
+      cmd: `mindly memory approve ${codename(first.id)}`,
       why: 'share it with every agent',
     });
   }
   steps.push({
-    cmd: `mindly memory show ${shortId((first ?? (memories[0] as Memory)).id)}`,
+    cmd: `mindly memory show ${codename((first ?? (memories[0] as Memory)).id)}`,
     why: 'see the details and history',
   });
   sc.next(steps);
@@ -182,11 +182,11 @@ export function renderMemoryShow(sc: Screen, d: MemoryDetail): void {
     steps.push({
       cmd:
         m.kind === 'rule'
-          ? `mindly rules --approve ${shortId(m.id)}`
-          : `mindly memory approve ${shortId(m.id)}`,
+          ? `mindly rules --approve ${codename(m.id)}`
+          : `mindly memory approve ${codename(m.id)}`,
       why: m.trust === 'stale' ? 'confirm it is still true' : 'share it with every agent',
     });
-    steps.push({ cmd: `mindly memory reject ${shortId(m.id)}`, why: 'drop it' });
+    steps.push({ cmd: `mindly memory reject ${codename(m.id)}`, why: 'drop it' });
   }
   sc.next(steps);
 }

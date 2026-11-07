@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
-import { shortId } from '@mindly/core';
+import { codename } from '@mindly/core';
 import { renderSavesCard, savesOf, startOfLocalWeek } from '@mindly/engine';
 import { withProject } from '../context.js';
 import { resolveId } from '../ids.js';
@@ -51,18 +51,18 @@ export async function savesReject(out: Out, id: string): Promise<number> {
     const sc = out.screen();
     if (before.status === 'rejected') {
       sc.text(
-        `Save ${shortId(sid)} was already removed from every total: ${clean(after.title, 120)}`,
+        `Save ${codename(sid)} was already removed from every total: ${clean(after.title, 120)}`,
       );
       return 0;
     }
     if (after.status !== 'rejected') {
       sc.text(
-        `Save ${shortId(sid)} is not in any total (${saveStatusWord(after.status)}): ${clean(after.title, 120)}`,
+        `Save ${codename(sid)} is not in any total (${saveStatusWord(after.status)}): ${clean(after.title, 120)}`,
       );
       return 0;
     }
     sc.text(
-      `${sc.mark('ok')} Save ${shortId(sid)} removed from every total: ${clean(after.title, 120)}`,
+      `${sc.mark('ok')} Save ${codename(sid)} removed from every total: ${clean(after.title, 120)}`,
     );
     return 0;
   });

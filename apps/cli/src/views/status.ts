@@ -1,6 +1,6 @@
 import {
   conflictNeedsUser,
-  shortId,
+  codename,
   type Conflict,
   type Handoff,
   type Intent,
@@ -129,7 +129,7 @@ export function renderStatus(sc: Screen, d: StatusData): void {
       ],
       d.agents.map((a) => [
         `${sc.mark(agentMarker(a.session))} ${agentName(a.session.agentKind)}${a.session.label ? ` "${clean(a.session.label, 40)}"` : ''}`,
-        shortId(a.session.id),
+        codename(a.session.id),
         sessionStatusWord(a.session.status),
         a.session.branch ? clean(a.session.branch, 60) : '',
         doing(a, sc.now),
@@ -176,7 +176,7 @@ export function renderStatus(sc: Screen, d: StatusData): void {
   if (needs.length) {
     sc.section('Needs you');
     sc.table(
-      [{ header: 'Type' }, { header: 'What', fill: true, min: 30 }, { header: 'Id' }],
+      [{ header: 'Type' }, { header: 'What', fill: true, min: 30 }, { header: 'Name' }],
       needs.slice(0, MAX_ITEMS),
     );
     if (needs.length > MAX_ITEMS) {
@@ -229,18 +229,18 @@ export function statusSteps(d: StatusData): Step[] {
   )[0];
   if (urgent)
     add({
-      cmd: `mindly conflict ${shortId(urgent.id)} resolve`,
+      cmd: `mindly conflict ${codename(urgent.id)} resolve`,
       why: 'mark the conflict resolved',
     });
   const rule = d.proposed.find((m) => m.kind === 'rule');
   if (rule)
     add({
-      cmd: `mindly rules --approve ${shortId(rule.id)}`,
+      cmd: `mindly rules --approve ${codename(rule.id)}`,
       why: 'make the rule apply to every agent',
     });
   const mem = d.proposed.find((m) => m.kind !== 'rule');
   if (mem)
-    add({ cmd: `mindly memory approve ${shortId(mem.id)}`, why: 'share it with every agent' });
+    add({ cmd: `mindly memory approve ${codename(mem.id)}`, why: 'share it with every agent' });
   if (d.handoffs.length)
     add({ cmd: 'mindly handoffs', why: 'see what is waiting to be picked up' });
   return steps;

@@ -1,4 +1,4 @@
-import { shortId, type Conflict, type ContextItem, type Session } from '@mindly/core';
+import { codename, type Conflict, type ContextItem, type Session } from '@mindly/core';
 import type {
   ProvenanceResult,
   SavesSummary,
@@ -69,7 +69,7 @@ export function renderConflicts(
       { header: 'What', fill: true, min: 30 },
       { header: 'Status', drop: 2 },
       { header: 'When', right: true, drop: 1 },
-      { header: 'Id' },
+      { header: 'Name' },
     ],
     list.map((c): TableRow => ({
       cells: [
@@ -85,8 +85,8 @@ export function renderConflicts(
   const first = open[0];
   if (first) {
     sc.next([
-      { cmd: `mindly conflict ${shortId(first.id)} resolve`, why: 'mark it resolved once fixed' },
-      { cmd: `mindly conflict ${shortId(first.id)} dismiss`, why: 'if it is not a real problem' },
+      { cmd: `mindly conflict ${codename(first.id)} resolve`, why: 'mark it resolved once fixed' },
+      { cmd: `mindly conflict ${codename(first.id)} dismiss`, why: 'if it is not a real problem' },
     ]);
   }
 }
@@ -192,7 +192,7 @@ export function renderXray(sc: Screen, session: Session, r: XRaySession): void {
   }
   sc.next([
     {
-      cmd: `mindly xray --session ${shortId(session.id)} --query "<words>"`,
+      cmd: `mindly xray --session ${codename(session.id)} --query "<words>"`,
       why: 'find out why a memory did or did not reach it',
     },
   ]);
@@ -242,7 +242,7 @@ export function renderXrayQuery(sc: Screen, session: Session, r: XRayMissing): v
   const waiting = r.items.find((it) => it.reason === 'trust_filter' && it.trust === 'proposed');
   if (waiting) {
     sc.next([
-      { cmd: `mindly memory approve ${shortId(waiting.memoryId)}`, why: 'let it reach agents' },
+      { cmd: `mindly memory approve ${codename(waiting.memoryId)}`, why: 'let it reach agents' },
     ]);
   }
 }

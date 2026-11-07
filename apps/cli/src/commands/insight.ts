@@ -1,4 +1,4 @@
-import { CONFLICT_STATUSES, shortId, type ConflictStatus } from '@mindly/core';
+import { CONFLICT_STATUSES, codename, type ConflictStatus } from '@mindly/core';
 import { LIVE_WINDOW_MS, provenanceOf, savesOf, standupService, xrayOf } from '@mindly/engine';
 import { startOfLocalDay } from '@mindly/store';
 import { z } from 'zod';
@@ -216,8 +216,8 @@ export async function conflictAction(out: Out, id: string, action: string): Prom
     const word = conflictStatusWord(c.status);
     sc.text(
       before.status === c.status
-        ? `Conflict ${shortId(c.id)} was already ${word}: ${what}`
-        : `${sc.mark('ok')} Conflict ${shortId(c.id)} marked ${word}: ${what}`,
+        ? `Conflict ${codename(c.id)} was already ${word}: ${what}`
+        : `${sc.mark('ok')} Conflict ${codename(c.id)} marked ${word}: ${what}`,
     );
     return 0;
   });

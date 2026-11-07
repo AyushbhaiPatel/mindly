@@ -1,3 +1,4 @@
+import { codename, isCodename } from '@mindly/core';
 import { type Db, type Row, str } from '../db.js';
 
 /** Kinds of record that people refer to by id on the command line or in the dashboard. */
@@ -37,7 +38,7 @@ export interface IdMatch {
 }
 
 /** How an id reference matched. */
-export type IdMatchType = 'exact' | 'short' | 'prefix' | 'none';
+export type IdMatchType = 'exact' | 'short' | 'prefix' | 'name' | 'none';
 
 /** Result of {@link IdRepo.lookup}: the candidates of the best match type, most recent first. */
 export interface IdLookup {
@@ -74,10 +75,24 @@ export class IdRepo {
    * id-shaped).
    */
   lookup(kind: IdKind, projectId: string, input: string, max = 10): IdLookup {
-    const compact = normaliseIdRef(input);
-    if (compact === null) return { type: 'none', matches: [] };
     const { table, title } = SPECS[kind];
     const n = Math.max(1, Math.min(Math.trunc(max), 50));
+    if (isCodename(input)) {
+      // A readable name (`quiet-otter`): derived from the id, so compare against every record.
+      const name = input.trim().toLowerCase();
+      const rows = this.db
+        .prepare(
+          `SELECT id, ${title} AS title FROM ${table} WHERE project_id = ? ORDER BY id DESC LIMIT 20000`,
+        )
+        .all(projectId) as Row[];
+      const matches = rows
+        .map((r) => ({ id: str(r, 'id'), title: str(r, 'title') }))
+        .filter((m) => codename(m.id) === name)
+        .slice(0, n);
+      return matches.length > 0 ? { type: 'name', matches } : { type: 'none', matches: [] };
+    }
+    const compact = normaliseIdRef(input);
+    if (compact === null) return { type: 'none', matches: [] };
     const select = (where: string, ...params: string[]): IdMatch[] =>
       (
         this.db

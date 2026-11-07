@@ -14,9 +14,9 @@ the docs understands what they see, knows what matters, and knows what to do nex
 4. **Always end with what to do next** when there is something to do: one or two exact commands
    (CLI) or buttons (dashboard).
 5. **Hide what is empty.** No `Tasks (0)` sections. Empty states are one friendly line.
-6. **Short ids only.** Show the 8-character short id (`shortId()` in core), never a full UUID. Every
-   command that takes an id accepts the short id (and a full id). Ambiguous short ids are reported
-   with the candidates.
+6. **Names, not ids.** Every record is shown by its readable name (`quiet-otter`), derived from
+   its id and the same every time. Every command that takes an id accepts the name, the
+   8-character short id or the full id; an ambiguous name is reported with the candidates.
 7. **Relative times.** "2m ago", "yesterday 14:05"; absolute local time only where precision matters
    (provenance), never UTC.
 8. **Machine output stays exact.** `--json` output is unchanged by any of this: full ids, raw enums,
@@ -27,7 +27,7 @@ the docs understands what they see, knows what matters, and knows what to do nex
 | Internal concept                                           | Say                                                                              | Example                                                                                  |
 | ---------------------------------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | agent kind `claude-code`                                   | the product name                                                                 | Claude Code, Codex, Cursor, Gemini CLI                                                   |
-| session                                                    | the agent; its 8-character tag only in a Session column, never inside a sentence | Claude Code (Session 4409d433)                                                           |
+| session                                                    | the agent; its 8-character tag only in a Session column, never inside a sentence | Claude Code (Session gold-owl)                                                           |
 | session status active / idle / rate_limited / ended        | working / idle / hit its usage limit / finished                                  |                                                                                          |
 | intent                                                     | "is editing" / "plans to edit"                                                   | Codex is editing `src/dash.ts`                                                           |
 | delivery                                                   | update for an agent                                                              | 1 update waiting for Codex                                                               |
@@ -80,23 +80,23 @@ Agents
   ┌───────────────┬──────────┬─────────┬────────┬───────────────────────────┬────────┐
   │ Agent         │ Session  │ Status  │ Branch │ Doing                     │ Active │
   ├───────────────┼──────────┼─────────┼────────┼───────────────────────────┼────────┤
-  │ ● Claude Code │ 4409d433 │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
+  │ ● Claude Code │ gold-owl │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
   ├───────────────┼──────────┼─────────┼────────┼───────────────────────────┼────────┤
-  │ ● Codex       │ f57f6d10 │ working │ main   │ editing src/dash.ts       │ 1m ago │
+  │ ● Codex       │ neat-elk │ working │ main   │ editing src/dash.ts       │ 1m ago │
   └───────────────┴──────────┴─────────┴────────┴───────────────────────────┴────────┘
 
 Needs you
   ┌────────────┬────────────────────────────────────────────────────────────────┬────────────┐
-  │ Type       │ What                                                           │ Id         │
+  │ Type       │ What                                                           │ Name        │
   ├────────────┼────────────────────────────────────────────────────────────────┼────────────┤
-  │ ! Conflict │ Claude Code changed the exports of src/auth.ts; Codex's        │ [9f02a0c3] │
-  │            │ src/dash.ts uses them                                          │            │
+  │ ! Conflict │ Claude Code changed the exports of src/auth.ts; Codex's        │ brisk-heron │
+  │            │ src/dash.ts uses them                                          │             │
   ├────────────┼────────────────────────────────────────────────────────────────┼────────────┤
-  │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code │ [7bc7e9b7] │
+  │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code │ calm-finch  │
   └────────────┴────────────────────────────────────────────────────────────────┴────────────┘
 
-→ mindly conflict 9f02a0c3 resolve   mark the conflict resolved
-→ mindly rules --approve 7bc7e9b7    make the rule apply to every agent
+→ mindly conflict brisk-heron resolve   mark the conflict resolved
+→ mindly rules --approve calm-finch     make the rule apply to every agent
 ```
 
 ## Mission Control

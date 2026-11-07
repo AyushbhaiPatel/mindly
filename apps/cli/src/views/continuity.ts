@@ -1,4 +1,4 @@
-import { shortId, type Handoff, type Snapshot } from '@mindly/core';
+import { codename, type Handoff, type Snapshot } from '@mindly/core';
 import {
   agentName,
   count,
@@ -32,7 +32,7 @@ export function renderHandoffs(sc: Screen, list: Handoff[], sessionOf: SessionLo
       { header: 'From', max: 26, drop: 1 },
       { header: 'Why', max: 30, drop: 3 },
       { header: 'When', right: true, drop: 2 },
-      { header: 'Id' },
+      { header: 'Name' },
     ],
     list.map((h): TableRow => {
       const from = sessionOf(h.fromSessionId);
@@ -87,9 +87,9 @@ export function renderSnapshots(sc: Screen, list: Snapshot[]): void {
   );
   const first = list[0] as Snapshot;
   sc.next([
-    { cmd: `mindly snapshot diff ${shortId(first.id)}`, why: 'see what changed since' },
+    { cmd: `mindly snapshot diff ${codename(first.id)}`, why: 'see what changed since' },
     {
-      cmd: `mindly snapshot restore ${shortId(first.id)}`,
+      cmd: `mindly snapshot restore ${codename(first.id)}`,
       why: 'go back to it (nothing is deleted)',
     },
   ]);
@@ -140,7 +140,7 @@ export function renderSnapshotDiff(sc: Screen, d: SnapshotDiffView): void {
   if (total > 0) {
     sc.next([
       {
-        cmd: `mindly snapshot restore ${shortId(d.snapshot.id)}`,
+        cmd: `mindly snapshot restore ${codename(d.snapshot.id)}`,
         why: 'go back to it (newer memories are archived, not deleted)',
       },
     ]);
