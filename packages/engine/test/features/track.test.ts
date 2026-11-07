@@ -725,12 +725,12 @@ describe('line survival', () => {
     expect(report(w, { minEdits: 1 }).areas[0]!.agents[0]!.kept.count).toBe(5);
   });
 
-  it('measures whole added lines only, the same for every tool', async () => {
+  it('measures the lines an edit added or changed, as whole lines, for every tool', async () => {
     const w = await world();
     await w.session('claude-code', 'cc');
     await w.session('codex', 'cx');
     w.write('src/a.ts', body(['const x = foo(1);', LINES[1]!]));
-    // Edit: `foo(1)` to `foo(2)` inside a line: a fragment, no whole line added.
+    // Edit: `foo(1)` to `foo(2)` inside a line: that whole line is what the edit changed.
     await w.replace(
       'claude-code',
       'cc',
@@ -748,15 +748,61 @@ describe('line survival', () => {
       `${LINES[1]!}\n${LINES[2]!}`,
       LINES[1]!,
     );
+    // A change inside a line that is later rewritten: not kept.
+    w.write('src/c.ts', body(['const y = bar(1);']));
+    await w.replace(
+      'claude-code',
+      'cc',
+      'src/c.ts',
+      body(['const y = bar(2);']),
+      'bar(2)',
+      'bar(1)',
+    );
+    w.write('src/c.ts', body(['const y = bar(3);']));
+    // A fragment found twice cannot be located: only whole added lines would count (none here).
+    w.write('src/d.ts', body(['const z = baz(1);', 'const w = baz(2);']));
+    await w.replace(
+      'claude-code',
+      'cc',
+      'src/d.ts',
+      body(['const z = baz(2);', 'const w = baz(2);']),
+      'baz(2)',
+      'baz(1)',
+    );
     // A patch adding whole lines.
     await w.edit('codex', 'cx', 'src/b.ts', body(LINES));
     w.clock.advance(SURVIVAL_AGE_MS + DAY);
     await trackOf(w.mindly).computeSurvival({ projectId: w.pid, max: 100 });
     expect(survivalRows(w)).toEqual([
-      { path: 'src/a.ts', total: 0, kept: 0 },
+      { path: 'src/a.ts', total: 1, kept: 1 },
       { path: 'src/a.ts', total: 1, kept: 1 },
       { path: 'src/b.ts', total: 3, kept: 3 },
+      { path: 'src/c.ts', total: 1, kept: 0 },
+      { path: 'src/d.ts', total: 0, kept: 0 },
     ]);
+  });
+
+  it('shows kept lines for an agent that only edits inside lines', async () => {
+    const w = await world();
+    for (let i = 0; i < 25; i++) {
+      const id = `cc${i % 3}`;
+      await w.session('claude-code', id);
+      w.write(`src/api/f${i}.ts`, body([`export const v${i} = compute(1);`]));
+      await w.replace(
+        'claude-code',
+        id,
+        `src/api/f${i}.ts`,
+        body([`export const v${i} = compute(2);`]),
+        'compute(2)',
+        'compute(1)',
+      );
+    }
+    w.clock.advance(SURVIVAL_AGE_MS + DAY);
+    await trackOf(w.mindly).computeSurvival({ projectId: w.pid, max: 100 });
+    const cc = report(w, { area: 'src/api' }).areas[0]!.agents[0]!;
+    expect(cc).toMatchObject({ agent: 'claude-code', edits: 25, sessions: 3, enoughData: true });
+    expect(cc.keptFrom).toEqual({ edits: 25, sessions: 3 });
+    expect(cc.kept).toMatchObject({ count: 25, of: 25, rate: 1 });
   });
 
   it('reads the branch the session worked on, and skips what it cannot tell', async () => {

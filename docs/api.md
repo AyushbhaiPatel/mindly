@@ -282,7 +282,7 @@ interface TrackReport {
       contracts: TrackRate; // contract breaks right after its edit in the project's own checkout
       mergeChecks: TrackRate; // merge conflicts (shadow merge, split merge check) naming only its session
       ruleAttempts: TrackRate; // confirmed rule_enforced saves; a count only (rate and interval always null)
-      kept: TrackRate; // tracked (whole, added) lines still present, of those added at least 7 days ago
+      kept: TrackRate; // tracked lines (added or changed) still present, of those from edits at least 7 days old
       keptFrom: { edits: number; sessions: number }; // checked edits behind `kept`; its own minimum
     }[];
     // pairs on breakages whose intervals do not overlap, among agents with enough data, when the

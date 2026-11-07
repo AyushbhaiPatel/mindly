@@ -1,5 +1,6 @@
 import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sha256 } from '@mindly/core';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { USER, contractsOf } from '@mindly/engine';
 import { openMindly } from '@mindly/runtime';
@@ -434,6 +435,31 @@ describe('mindly track output safety', () => {
     const r = await cli(sb, ['track']);
     expect(r.stdout).toContain('-> mindly track --explain');
     expect(r.stdout).not.toContain('--area x/');
+  });
+
+  it('records the whole line a Claude Code Edit changed inside it', async () => {
+    const sb = sandbox();
+    await hook(sb, 'claude-code', 'cc', 'SessionStart', { source: 'startup' });
+    write(sb.repo, 'src/v.js', 'const v = foo(2);\nconst w = 1;\n');
+    await hook(sb, 'claude-code', 'cc', 'PostToolUse', {
+      tool_name: 'Edit',
+      tool_input: {
+        file_path: join(sb.repo, 'src/v.js'),
+        old_string: 'foo(1)',
+        new_string: 'foo(2)',
+      },
+      tool_response: { filePath: join(sb.repo, 'src/v.js') },
+      tool_use_id: 'toolu_2',
+    });
+    const store = Store.open(join(sb.mindlyHome, 'mindly.db'));
+    try {
+      const rows = store.db.prepare('SELECT hash FROM file_change_lines').all() as {
+        hash: string;
+      }[];
+      expect(rows.map((r) => r.hash)).toEqual([sha256('const v = foo(2);')]);
+    } finally {
+      store.close();
+    }
   });
 
   it('says so when there is nothing yet', async () => {

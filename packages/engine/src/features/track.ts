@@ -56,7 +56,7 @@ export const TRACK_EXPLAIN = {
     'Broke: the three above added up, out of the edits in the area. Agents are compared on this only, and only when the higher count comes from at least 2 sessions. Outcomes involving several sessions count for nobody; dismissed conflicts do not count.',
   ruleAttempts:
     'Tried to break a rule: confirmed saves where an enforced rule blocked a write of this agent. A count of attempts, not damage, and not a rate: blocked writes are not edits.',
-  kept: 'Kept: of the whole lines this agent added at least 7 days ago (tracked lines), how many are still in the file on the branch it worked on. Later rewrites by anyone count as not kept; deny-listed files and files over 512 KB are skipped.',
+  kept: 'Kept: of the lines this agent added or changed at least 7 days ago (tracked lines, whole lines of the file), how many are still in the file on the branch it worked on. Later rewrites by anyone count as not kept; deny-listed files and files over 512 KB are skipped.',
   usageLimits:
     'Usage limits: sessions of this agent seen in the window that hit a usage limit or handed work off because of one. Per agent, not per area.',
 } as const;

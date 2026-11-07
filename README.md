@@ -194,8 +194,8 @@ Usage limits: claude-code 3 of 41 sessions · codex 0 of 22 · cursor 0 of 6
 ```
 
 "Broke" adds up the edits that `mindly bisect` found broke a check, the recorded decisions an
-edit broke, and merge conflicts caused by one agent alone. "Kept" is how many of the whole lines
-an agent wrote at least a week ago are still in the code on the branch it worked on (later
+edit broke, and merge conflicts caused by one agent alone. "Kept" is how many of the lines an
+agent added or changed at least a week ago are still in the code on the branch it worked on (later
 rewrites count as not kept). The numbers are meant to be honest:
 
 - **Counts are always shown.** Every rate comes with what it is out of (`188 edits`,

@@ -75,7 +75,7 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   beyond `checkpoints.maxPerWorktree` (5,000), by `mindly forget --project` and by
   `mindly uninstall`; `checkpoints.enabled = false` turns them off.
 - The track record (`mindly track`) checks, once per agent edit and only after it is 7 days old,
-  how many of the whole lines the edit added are still in the file. At edit time it stores only
+  how many of the lines the edit added or changed are still in the file. At edit time it stores only
   hashes of those lines. To check, it reads the current file in the agent's checkout (or the
   project root when that checkout is gone), or, when another branch is checked out there, the
   file at the tip of the branch the agent worked on (`git cat-file`, never a checkout); it hashes

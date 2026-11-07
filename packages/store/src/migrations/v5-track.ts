@@ -1,9 +1,9 @@
 /**
  * v5: line survival (`mindly track`).
  *
- * - `file_change_lines`: the whole lines an agent edit added (hashes only), recorded at edit
- *   time. Survival is measured over these, so partial-line fragments and unchanged context
- *   lines inside an edit never count.
+ * - `file_change_lines`: the lines an agent edit added or changed, as whole lines of the file
+ *   (hashes only), recorded at edit time. Survival is measured over these, so a change inside a
+ *   line counts as that line, and unchanged context lines inside an edit never count.
  * - `line_survival`: one row per agent edit, computed once the edit is old enough: how many of
  *   those line hashes were still in the file when checked. Skipped files (deny-listed, too large,
  *   no branch to read) get a row with both counts 0 so they are never read again and never

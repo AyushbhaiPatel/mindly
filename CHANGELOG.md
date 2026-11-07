@@ -46,7 +46,7 @@ All notable changes to `mindly-cli` are documented here. The project follows
   that edit), a recorded decision (each time a contract started failing right after its edit in
   the project's own checkout) or a merge (shadow-merge and split merge conflicts naming only its
   session). It also counts writes blocked by an enforced rule (confirmed saves, as a count), the
-  share of the whole lines it added that are still in the code after 7 days on the branch it
+  share of the lines it added or changed that are still in the code after 7 days on the branch it
   worked on, and how many of its sessions hit a usage limit. There is no score: every rate shows
   its counts and a 95% Wilson interval, rates appear only with at least `track.minEdits` (20)
   edits and `track.minSessions` (3) sessions in a folder, and agents are called clearly different
@@ -60,10 +60,11 @@ All notable changes to `mindly-cli` are documented here. The project follows
   shape as `mindly track --json`), and a daemon job that checks the lines of up to 500 edits per
   run (at most 20 seconds) once they are 7 days old. `mindly track` checks up to 200 more itself
   (at most 3 seconds) and says how many are still waiting.
-- Agent edits now record which whole lines they added, and `conflict.opened` events record the
+- Agent edits now record which lines of the file they added or changed (a change inside a line
+  counts as that line), and `conflict.opened` events record the
   sessions and paths of that opening. `mindly bisect` stores the blamed step (kind, session,
   paths, time) with its run, so the track record still counts it after the checkpoint is pruned.
-- Database schema v5: `file_change_lines` (hashes of the whole lines each agent edit added),
+- Database schema v5: `file_change_lines` (hashes of the lines each agent edit added or changed),
   `line_survival` (per edit: tracked lines and how many are still present; no file content) and
   an index on `file_changes (created_at, id)`. Applied automatically; upgrades from v1 to v4 keep
   every row.
