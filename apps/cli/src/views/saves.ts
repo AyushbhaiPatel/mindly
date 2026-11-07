@@ -63,8 +63,8 @@ function row(sc: Screen, s: Save, marker: Row['marker']): TableRow {
 
 const SAVE_COLUMNS: Column[] = [
   { header: 'When' },
-  { header: 'What', fill: true, min: 30 },
-  { header: 'Where', max: 44, drop: 1 },
+  { header: 'What', fill: true, min: 36 },
+  { header: 'Where', max: 36, drop: 1 },
   { header: 'Status', drop: 2 },
   { header: '' },
 ];
