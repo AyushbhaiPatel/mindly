@@ -431,7 +431,8 @@ function Shell({
 
   const changeProject = (id: string) => {
     setProjectId(id);
-    writeRoute(route.page, { p: id });
+    const sub = route.params.get('sub');
+    writeRoute(route.page, sub ? { p: id, sub } : { p: id });
   };
 
   const liveLabel: Record<LiveStatus, string> = {
