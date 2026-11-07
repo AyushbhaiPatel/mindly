@@ -131,6 +131,10 @@ export function widthFor(out: TextOut, env: NodeJS.ProcessEnv): number {
 
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\u001b\[[0-9;]*m/g;
+// eslint-disable-next-line no-control-regex
+const SGR_RE = /\u001b\[([0-9;]*)m/g;
+/** Codes that end a style: normal intensity, default colours, no italic/underline/inverse. */
+const SGR_CLOSE = new Set(['22', '23', '24', '27', '39', '49']);
 
 /*
  * Code points a terminal shows two columns wide: East Asian Wide and Fullwidth (Hangul Jamo, the
@@ -256,7 +260,18 @@ function wrapCell(text: string, width: number): string[] {
   const words = text
     .split(/ +/)
     .flatMap((w) => (visibleLength(w) > width ? cutByWidth(w, Math.max(1, width)) : [w]));
-  return wrap(words.join(' '), width);
+  // Colour that spans a line break is closed at the end of the line and reopened on the next,
+  // so it never runs into the borders. Codes come from io.ts styles, which nest properly.
+  let open: string[] = [];
+  return wrap(words.join(' '), width).map((line) => {
+    const start = open.join('');
+    for (const [code, params] of line.matchAll(SGR_RE)) {
+      if (params === '' || params === '0') open = [];
+      else if (SGR_CLOSE.has(params ?? '')) open.pop();
+      else open.push(code);
+    }
+    return `${start}${line}${open.length > 0 ? '\u001b[0m' : ''}`;
+  });
 }
 
 /**
