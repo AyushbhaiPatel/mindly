@@ -110,7 +110,8 @@ describe('human output on a real project', () => {
     );
     expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code - /);
     const flat = r.stdout.replace(/[\s|]+/g, ' ');
-    expect(flat).toContain("changed the exports of src/auth.ts; Codex's");
+    expect(flat).toContain('changed the exports of src/auth.ts;');
+    expect(flat).toContain("Codex's src/dash.ts uses them");
     expect(flat).toMatch(/Conflict Claude Code - [0-9a-f]{8} changed[^[]*\[[0-9a-f]{8}\]/);
     expect(r.stdout).toMatch(
       /- Rule[\s|]+"Don't use default exports" - suggested by you, in Claude Code/,
