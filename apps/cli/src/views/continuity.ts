@@ -5,6 +5,7 @@ import {
   handoffReasonWord,
   handoffStatusWord,
   relativeTime,
+  sessionName,
   type Screen,
   type TableRow,
 } from '../present/index.js';
@@ -29,7 +30,6 @@ export function renderHandoffs(sc: Screen, list: Handoff[], sessionOf: SessionLo
     [
       { header: 'Status' },
       { header: 'Work', fill: true, min: 24 },
-      { header: 'From', max: 26, drop: 1 },
       { header: 'Why', max: 30, drop: 3 },
       { header: 'When', right: true, drop: 2 },
       { header: 'Name', keep: true },
@@ -42,16 +42,18 @@ export function renderHandoffs(sc: Screen, list: Handoff[], sessionOf: SessionLo
         .slice(0, 3)
         .map((x) => clean(x, 100))
         .join('; ');
+      // The source goes in the note, which is never dropped: two sessions of one agent differ
+      // only by name.
+      const source = `From ${from ? sessionName(from) : 'an agent'}`;
       return {
         cells: [
-          `${sc.mark(marker)} ${handoffStatusWord(h.status, h.toAgentKind, claimer ? agentName(claimer.agentKind) : null)}`,
+          `${sc.mark(marker)} ${handoffStatusWord(h.status, h.toAgentKind, claimer ? sessionName(claimer) : null)}`,
           clean(h.summary, 120),
-          from ? agentName(from.agentKind) : 'an agent',
           handoffReasonWord(h.reason),
           relativeTime(h.createdAt, sc.now),
           sc.ref(h.id),
         ],
-        ...(next ? { note: `Next: ${next}` } : {}),
+        note: next ? `${source}. Next: ${next}` : source,
       };
     }),
   );

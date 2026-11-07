@@ -555,12 +555,13 @@ describe('continuity screens', () => {
       "
       1 handoff - 1 waiting to be picked up
 
-        +------------------------+---------------------------------+-------+--------+---------------+
-        | Status                 | Work                            | From  |   When | Name          |
-        +------------------------+---------------------------------+-------+--------+---------------+
-        | [!] waiting for Cursor | Finish the dashboard login form | Codex | 5m ago | still-wasp-91 |
-        |                        | Next: Wire the submit button    |       |        |               |
-        +------------------------+---------------------------------+-------+--------+---------------+
+        +------------------------+---------------------------------+--------+---------------+
+        | Status                 | Work                            |   When | Name          |
+        +------------------------+---------------------------------+--------+---------------+
+        | [!] waiting for Cursor | Finish the dashboard login form | 5m ago | still-wasp-91 |
+        |                        | From Codex - icy-spider-16.     |        |               |
+        |                        | Next: Wire the submit button    |        |               |
+        +------------------------+---------------------------------+--------+---------------+
 
       -> Start Cursor in this project: it picks the handoff up at the start of its session.
       "
