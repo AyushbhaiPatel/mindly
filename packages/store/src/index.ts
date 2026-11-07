@@ -14,6 +14,7 @@ import {
   SnapshotRepo,
 } from './repos/misc.js';
 import { SplitRepo } from './repos/splits.js';
+import { TrackRepo } from './repos/track.js';
 import { ConflictRepo, DeliveryRepo, FileChangeRepo, IntentRepo, TaskRepo } from './repos/work.js';
 
 export * from './db.js';
@@ -26,6 +27,7 @@ export * from './repos/memories.js';
 export * from './repos/misc.js';
 export * from './repos/saves.js';
 export * from './repos/splits.js';
+export * from './repos/track.js';
 export * from './repos/work.js';
 
 /**
@@ -51,6 +53,8 @@ export class Store {
   readonly saves: SaveRepo;
   readonly splits: SplitRepo;
   readonly checkpoints: CheckpointRepo;
+  /** Read models of `mindly track` and the line survival table. */
+  readonly track: TrackRepo;
   /** Resolves full, short and prefix ids typed by people (CLI, dashboard search). */
   readonly ids: IdRepo;
 
@@ -76,6 +80,7 @@ export class Store {
     this.saves = new SaveRepo(db, clock);
     this.splits = new SplitRepo(db, clock);
     this.checkpoints = new CheckpointRepo(db, clock);
+    this.track = new TrackRepo(db, clock);
     this.ids = new IdRepo(db);
   }
 

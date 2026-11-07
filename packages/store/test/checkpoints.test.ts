@@ -82,14 +82,17 @@ function expectUpgraded(path: string, ids: { projectId: string; runId: string })
 
 describe('checkpoints schema (v4)', () => {
   it('is the fourth migration', () => {
-    expect(MIGRATIONS).toHaveLength(4);
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(4);
     expect(MIGRATIONS[3]).toContain('CREATE TABLE checkpoints');
     expect(MIGRATIONS[2]).not.toContain('checkpoints');
   });
 
   it('upgrades a v3 database, keeping its runs and accepting bisect runs', () => {
     const path = tempDb('syn-checkpoints-v3-');
-    const ids = downgrade(path, `DROP TABLE checkpoints; ${RUNS_V1} PRAGMA user_version = 3;`);
+    const ids = downgrade(
+      path,
+      `DROP TABLE line_survival; DROP TABLE checkpoints; ${RUNS_V1} PRAGMA user_version = 3;`,
+    );
     expectUpgraded(path, ids);
   });
 
@@ -97,7 +100,7 @@ describe('checkpoints schema (v4)', () => {
     const path = tempDb('syn-checkpoints-v1-');
     const ids = downgrade(
       path,
-      `DROP TABLE checkpoints; DROP TABLE saves; DROP TABLE split_parts; DROP TABLE splits;
+      `DROP TABLE line_survival; DROP TABLE checkpoints; DROP TABLE saves; DROP TABLE split_parts; DROP TABLE splits;
        ALTER TABLE handoffs DROP COLUMN worktree; ${RUNS_V1} PRAGMA user_version = 1;`,
     );
     expectUpgraded(path, ids);

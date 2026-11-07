@@ -33,7 +33,7 @@ describe('saves schema (v2)', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'syn-saves-')), 'mindly.db');
     const v1 = Store.open(path);
     v1.db.exec(
-      'DROP TABLE checkpoints; DROP TABLE saves; DROP TABLE split_parts; DROP TABLE splits; ALTER TABLE handoffs DROP COLUMN worktree; PRAGMA user_version = 1;',
+      'DROP TABLE line_survival; DROP TABLE checkpoints; DROP TABLE saves; DROP TABLE split_parts; DROP TABLE splits; ALTER TABLE handoffs DROP COLUMN worktree; PRAGMA user_version = 1;',
     );
     v1.close();
     const store = Store.open(path);
