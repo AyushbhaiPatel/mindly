@@ -10,7 +10,18 @@ import {
   type SplitPlan,
 } from '@mindly/core';
 import { HOOK_AGENT_KINDS } from '@mindly/adapters';
-import { parsePlan, splitOf, validatePlan, type SplitMergeResult } from '@mindly/engine';
+import {
+  parsePlan,
+  splitOf,
+  suggestAgents,
+  TRACK_DEFAULT_WINDOW_MS,
+  trackOf,
+  trackPromptLines,
+  validatePlan,
+  type SplitMergeResult,
+  type TrackReport,
+  type TrackSuggestion,
+} from '@mindly/engine';
 import { z } from 'zod';
 import { withProject, type ProjectScope } from '../context.js';
 import { confirm, type CliIo } from '../io.js';
@@ -119,6 +130,7 @@ async function planWithAgent(
   o: { goal: string; planner?: 'claude-code' | 'codex'; parts?: number; agents: string[] | null },
   connected: ReadonlySet<string>,
   files: readonly string[],
+  track: TrackReport | null,
 ): Promise<{ plan: SplitPlan; plannedBy: string }> {
   const { detectAgent, runPlanner } = await import('@mindly/runners');
   const planner = o.planner ?? PLANNERS.find((k) => detectAgent(k, out.io.env) !== null) ?? null;
@@ -163,6 +175,7 @@ async function planWithAgent(
       decisions,
       agents,
       ...(o.parts !== undefined ? { parts: o.parts } : {}),
+      ...(track ? { trackRecord: trackPromptLines(track, agents) } : {}),
       timeoutSec: PLAN_TIMEOUT_SEC,
     },
     { env: out.io.env },
@@ -192,6 +205,18 @@ async function planWithAgent(
   }
 }
 
+/** The project's track record of the last 30 days, or null when it cannot be read. */
+function trackRecordFor(scope: ProjectScope): TrackReport | null {
+  try {
+    return trackOf(scope.mindly).report(scope.project.project.id, {
+      windowMs: TRACK_DEFAULT_WINDOW_MS,
+      since: '30d',
+    });
+  } catch {
+    return null;
+  }
+}
+
 function sym(out: Out): string {
   return out.screen().sym.ellipsis;
 }
@@ -213,6 +238,7 @@ export async function split(out: Out, goalWords: string[], raw: unknown): Promis
     const svc = splitOf(scope.mindly);
     const connected = await connectedHookAgents(out.io, scope.project.root);
     const files = await svc.projectFiles(scope.project.project.id);
+    const track = trackRecordFor(scope);
     let plan: SplitPlan;
     let plannedBy: string;
     if (o.plan) {
@@ -231,14 +257,19 @@ export async function split(out: Out, goalWords: string[], raw: unknown): Promis
         },
         connected,
         files,
+        track,
       ));
     }
+    // Only shown next to the plan: the plan's own agent choice is never changed.
+    const suggest = (): Map<string, TrackSuggestion> =>
+      track ? suggestAgents(track, plan.parts, [...connected]) : new Map();
     validatePlan(plan, files, connected);
 
     if (o.dryRun) {
-      if (o.json) out.json({ plan, plannedBy, created: false });
-      else {
-        renderPlan(out.screen(), plan, plannedBy);
+      if (o.json) {
+        out.json({ plan, plannedBy, created: false, suggestions: Object.fromEntries(suggest()) });
+      } else {
+        renderPlan(out.screen(), plan, plannedBy, suggest());
         out.screen().next([
           {
             cmd: 'mindly split --plan plan.json --yes',
@@ -250,7 +281,7 @@ export async function split(out: Out, goalWords: string[], raw: unknown): Promis
     }
     if (!o.yes) {
       if (!out.io.prompt) {
-        if (!o.json) renderPlan(out.screen(), plan, plannedBy);
+        if (!o.json) renderPlan(out.screen(), plan, plannedBy, suggest());
         out.warn(
           'Not created: no terminal to review the plan on. Re-run with --yes to create it, or --dry-run to only show it.',
         );
@@ -258,7 +289,7 @@ export async function split(out: Out, goalWords: string[], raw: unknown): Promis
       }
       // Review loop: Enter creates, "e" edits the JSON in $EDITOR, "n" stops.
       for (;;) {
-        renderPlan(out.screen(), plan, plannedBy);
+        renderPlan(out.screen(), plan, plannedBy, suggest());
         out.line();
         const answer = (
           await out.io.prompt(

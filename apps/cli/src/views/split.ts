@@ -1,5 +1,6 @@
 import type { Run, SplitPlan } from '@mindly/core';
 import type {
+  TrackSuggestion,
   SplitAbortResult,
   SplitMergeCheckResult,
   SplitMergeResult,
@@ -45,8 +46,25 @@ function partMarker(state: SplitPartState): Marker {
   }
 }
 
-/** The plan as a table: part, agent, owns, depends on; then the contract. */
-export function renderPlan(sc: Screen, plan: SplitPlan, plannedBy: string): void {
+/**
+ * `suggested: codex (broke 1 of 212 edits in src/api vs 7 of 188)`: the agent the track record
+ * favours for a part. The other agent is named unless it is the part's own.
+ */
+export function suggestionLine(s: TrackSuggestion, partAgent: string): string {
+  const vs = s.versus.agent === partAgent ? '' : `${clean(s.versus.agent, 40)} `;
+  return `suggested: ${clean(s.agent, 40)} (broke ${s.count} of ${s.of} edits in ${clean(s.area, 120)} vs ${vs}${s.versus.count} of ${s.versus.of})`;
+}
+
+/**
+ * The plan as a table: part, agent, owns, depends on; then the contract. `suggestions` (by part
+ * key) come from the track record and are shown only; the plan is not changed.
+ */
+export function renderPlan(
+  sc: Screen,
+  plan: SplitPlan,
+  plannedBy: string,
+  suggestions: ReadonlyMap<string, TrackSuggestion> = new Map(),
+): void {
   const by =
     plannedBy === 'plan-file'
       ? 'from your plan file'
@@ -59,7 +77,12 @@ export function renderPlan(sc: Screen, plan: SplitPlan, plannedBy: string): void
       return {
         marker: 'item',
         text: `${i + 1} ${clean(p.title, 60)} ${sc.sym.dot} ${agentName(p.agent)} ${sc.sym.dot} owns ${p.owns.map((g) => clean(g, 100)).join(', ')} ${sc.sym.dot} ${deps}`,
-        details: [clean(p.brief, 240)],
+        details: [
+          clean(p.brief, 240),
+          ...(suggestions.has(p.key)
+            ? [suggestionLine(suggestions.get(p.key) as TrackSuggestion, p.agent)]
+            : []),
+        ],
       };
     }),
   );
