@@ -3,6 +3,14 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## 0.4.1 — 2026-11-07
+
+### Fixed
+
+- The README on npm now shows the logo and the demo, and its links to the docs, licence,
+  changelog and contributing guide work. npm resolved the README's relative paths against
+  `apps/cli`; the release build now rewrites them to absolute GitHub URLs.
+
 ## 0.4.0 — 2026-11-07
 
 ### Added
