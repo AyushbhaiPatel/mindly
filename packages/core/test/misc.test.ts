@@ -32,6 +32,22 @@ describe('codename', () => {
     expect(parseCodename(codename(b))).toBe('0bd77e');
   });
 
+  it('has 256 distinct words per position, none of which looks like hex', () => {
+    const byte = (i: number): string => i.toString(16).padStart(2, '0');
+    const words = (at: number): string[] =>
+      Array.from({ length: 256 }, (_, i) => {
+        const hex = at === 0 ? `${byte(i)}0000` : `00${byte(i)}00`;
+        expect(parseCodename(codename(hex))).toBe(hex);
+        return codename(hex).split('-')[at] as string;
+      });
+    const all = [...words(0), ...words(1)];
+    expect(new Set(all).size).toBe(512);
+    for (const w of all) {
+      expect(w).toMatch(/^[a-z]{3,8}$/);
+      expect(w).not.toMatch(/^[a-f]+$/);
+    }
+  });
+
   it('does not take hex or near-names for a name', () => {
     for (const input of [
       'dead-beef',
