@@ -328,10 +328,17 @@ export class FileChangeRepo {
     private readonly clock: Clock,
   ) {}
 
-  record(input: Omit<FileChange, 'id' | 'createdAt'>): FileChange {
+  /**
+   * Records an agent edit. `lineHashes` are the hashes of the whole lines the edit added (what
+   * `mindly track` measures survival over); `hunkHashes` also hold fragments, for provenance.
+   */
+  record(
+    input: Omit<FileChange, 'id' | 'createdAt'> & { lineHashes?: readonly string[] },
+  ): FileChange {
     const now = this.clock.now();
     const id = uuidv7(now);
     const hashes = [...new Set(input.hunkHashes)].slice(0, 5000);
+    const lines = [...new Set(input.lineHashes ?? [])].slice(0, 5000);
     transaction(this.db, () => {
       this.db
         .prepare(
@@ -353,8 +360,25 @@ export class FileChangeRepo {
         'INSERT OR IGNORE INTO file_change_hunks (change_id, hash) VALUES (?, ?)',
       );
       for (const h of hashes) stmt.run(id, h);
+      if (lines.length > 0) {
+        const line = this.db.prepare(
+          'INSERT OR IGNORE INTO file_change_lines (change_id, hash) VALUES (?, ?)',
+        );
+        for (const h of lines) line.run(id, h);
+      }
     });
-    return { ...input, id, hunkHashes: hashes, createdAt: now };
+    return {
+      id,
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      path: input.path,
+      tool: input.tool,
+      hunkHashes: hashes,
+      addedLines: input.addedLines,
+      removedLines: input.removedLines,
+      promptEventId: input.promptEventId,
+      createdAt: now,
+    };
   }
 
   /** Most recent changes whose added lines include `hash`, restricted to one file. */

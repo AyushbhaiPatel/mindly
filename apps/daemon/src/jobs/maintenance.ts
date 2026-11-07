@@ -1,5 +1,5 @@
 import { describeError } from '@mindly/core';
-import { needsYouCount, savesOf, selfHealingOf, standupService } from '@mindly/engine';
+import { needsYouCount, savesOf, selfHealingOf, standupService, trackOf } from '@mindly/engine';
 import type { JobContext } from './context.js';
 
 const DAY_MS = 86_400_000;
@@ -65,6 +65,23 @@ export function housekeepingTick(ctx: JobContext): HousekeepingResult {
 export async function checkpointPruneTick(ctx: JobContext): Promise<void> {
   const r = await ctx.mindly.checkpoints.pruneAll();
   if (r.refsDeleted > 0 || r.rowsDeleted > 0) ctx.logger.info('checkpoint prune', { ...r });
+}
+
+/** Edits whose line survival one tick computes, across all projects. */
+export const SURVIVAL_PER_TICK = 500;
+
+/** Wall-clock time one survival tick may spend reading files. */
+export const SURVIVAL_TICK_BUDGET_MS = 20_000;
+
+/** Computes line survival (`mindly track`) for up to 500 edits that turned 7 days old. */
+export async function trackSurvivalTick(ctx: JobContext): Promise<number> {
+  const r = await trackOf(ctx.mindly).computeSurvival({
+    projectId: null,
+    max: SURVIVAL_PER_TICK,
+    budgetMs: SURVIVAL_TICK_BUDGET_MS,
+  });
+  if (r.checked > 0) ctx.logger.info('track survival', { checked: r.checked });
+  return r.checked;
 }
 
 /**

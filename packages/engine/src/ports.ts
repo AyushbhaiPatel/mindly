@@ -10,6 +10,13 @@ export interface ExportSurfaceDiff {
   changed: string[];
 }
 
+/** What a path holds at a git ref (see `GitPort.fileStateAtRef`). */
+export type FileAtRefState =
+  | { state: 'file'; content: string }
+  | { state: 'absent' }
+  | { state: 'no_ref' }
+  | { state: 'too_large' };
+
 export interface GitPort {
   /** Canonical (realpath) top-level directory of the repository containing `cwd`, or null. */
   findRepoRoot(cwd: string): Promise<string | null>;
@@ -25,6 +32,16 @@ export interface GitPort {
   changedFiles(cwd: string): Promise<string[]>;
   /** File content at a ref, or null when missing. */
   fileAtRef(cwd: string, ref: string, path: string): Promise<string | null>;
+  /**
+   * What `path` holds at `ref`: a file no larger than `maxBytes`, nothing, a larger file, or no
+   * such ref. Null on any other failure.
+   */
+  fileStateAtRef?(
+    cwd: string,
+    ref: string,
+    path: string,
+    maxBytes: number,
+  ): Promise<FileAtRefState | null>;
   /** Hashes of normalised non-trivial lines (code provenance). */
   hunkHashes(text: string): string[];
   /** Exported symbols with a coarse signature fingerprint, keyed by name. */

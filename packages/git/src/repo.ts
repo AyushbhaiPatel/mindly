@@ -307,3 +307,36 @@ export async function fileAtRef(cwd: string, ref: string, path: string): Promise
   });
   return res.stdout;
 }
+
+/** What a path holds at a ref: a file (with its content), nothing, or more than `maxBytes`. */
+export type FileAtRefState =
+  | { state: 'file'; content: string }
+  | { state: 'absent' }
+  | { state: 'no_ref' }
+  | { state: 'too_large' };
+
+/**
+ * Like `fileAtRef`, but tells a missing ref, a missing path and a file over `maxBytes` apart
+ * (the content of a large file is never read).
+ */
+export async function fileStateAtRef(
+  cwd: string,
+  ref: string,
+  path: string,
+  maxBytes: number,
+): Promise<FileAtRefState> {
+  assertValidRevision(ref);
+  const rel = assertSafeRelativePath(path);
+  const dir = absoluteDir(cwd);
+  const commit = await resolveCommit(dir, ref);
+  if (!commit) return { state: 'no_ref' };
+  const spec = `${commit}:${rel}`;
+  const type = await runGit(['cat-file', '-t', spec], { cwd: dir, okExitCodes: [1, 128] });
+  if (type.exitCode !== 0 || type.stdout.trim() !== 'blob') return { state: 'absent' };
+  const size = Number((await runGit(['cat-file', '-s', spec], { cwd: dir })).stdout.trim());
+  if (!Number.isFinite(size) || size > Math.min(maxBytes, MAX_BLOB_BYTES)) {
+    return { state: 'too_large' };
+  }
+  const res = await runGit(['cat-file', 'blob', spec], { cwd: dir, maxBuffer: size + 1024 });
+  return { state: 'file', content: res.stdout };
+}

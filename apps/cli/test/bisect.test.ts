@@ -265,6 +265,13 @@ describe('mindly bisect', () => {
         range: { good: 1, bad: EDITS + 1 },
       });
       expect(run.result).toMatchObject({ status: 'found', firstBad: BREAK + 1, lastGood: BREAK });
+      // The blamed step is kept with the result (mindly track reads it after pruning).
+      expect(run.result).toMatchObject({
+        blame: { kind: 'agent', gap: false, paths: ['src/calc.js'] },
+      });
+      const blame = (run.result as { blame: { sessionId: string; at: number } }).blame;
+      expect(store.sessions.get(blame.sessionId).agentKind).toBe('codex');
+      expect(blame.at).toBeLessThanOrEqual(run.createdAt);
     } finally {
       store.close();
     }

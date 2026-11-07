@@ -335,6 +335,21 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
       act((o: object) => async (out) => (await import('./commands/insight.js')).standup(out, o)),
     );
 
+  program
+    .command('track')
+    .description('Which agent does better in which part of this repository, as counts')
+    .option('--since <duration>', 'how far back to look, e.g. 7d or 90d (default 30d)')
+    .option('--area <folder>', 'one folder at any depth, e.g. src/api, or (root)')
+    .option('--agent <kind>', 'one agent, e.g. claude-code')
+    .option(
+      '--min-edits <n>',
+      'edits an agent needs in an area before rates are shown (default 20)',
+      positiveInt(100_000),
+    )
+    .option('--explain', 'what each number counts')
+    .option('--json', 'machine-readable output')
+    .action(act((o: object) => async (out) => (await import('./commands/track.js')).track(out, o)));
+
   const saves = program
     .command('saves')
     .description('Times Mindly demonstrably helped, with evidence')

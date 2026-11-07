@@ -68,6 +68,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 | GET    | `/api/projects/:projectId/saves?since&status`                                    | `SavesResult` (below)                                                                                             |
 | POST   | `/api/saves/:id/reject`                                                          | "not a save": removes it from every total → `Save`; 404 if unknown                                                |
 | GET    | `/api/projects/:projectId/saves/card.svg?since&details`                          | the share card as `image/svg+xml` (below)                                                                         |
+| GET    | `/api/projects/:projectId/track?since&area&agent&minEdits`                       | `TrackReport` (below); read-only                                                                                  |
 | GET    | `/api/projects/:projectId/snapshots`                                             | `Snapshot[]`                                                                                                      |
 | POST   | `/api/projects/:projectId/snapshots`                                             | `{ label }` → `Snapshot`                                                                                          |
 | GET    | `/api/snapshots/:id/diff`                                                        | snapshot diff                                                                                                     |
@@ -242,12 +243,76 @@ also blocks later ones. This under-counts rather than inflates.
 SVG: counts by kind and agent names only. `details=1` adds the project name and each save's sentence
 and files; without it the card contains no project name, path or code.
 
+### Track record
+
+`GET …/track` is the track record of `mindly track`: per folder (area) and agent, counts of edits
+and of outcomes stored evidence ties to exactly one session of that agent. It only reads; line
+survival is computed by the daemon's background job. `since` is a duration as in the CLI (`90m`,
+`24h`, `30d`, `12w`; default `30d`, at most 3650 days), `area` a folder prefix at any depth (or
+`(root)`), `agent` an agent kind, `minEdits` overrides `track.minEdits`. Unknown projects give 404,
+malformed values 400.
+
+```ts
+interface TrackRate {
+  count: number;
+  of: number; // denominator: edits in the area (tracked lines for `kept`)
+  rate: number | null; // null below the minimum data, and when count > of
+  interval: { low: number; high: number } | null; // 95% Wilson score interval; null when rate is
+}
+
+interface TrackReport {
+  window: { since: string; from: number; to: number };
+  areaDepth: number; // track.areaDepth (1-4)
+  filter: { area: string | null; agent: string | null };
+  minimum: { edits: number; sessions: number };
+  totals: { agents: number; edits: number; areas: number }; // areas: all, before the 200 cap
+  areas: {
+    area: string; // `src/api`, or `(root)`; most edits first, at most 200
+    edits: number;
+    agents: {
+      agent: string;
+      edits: number;
+      sessions: number; // sessions with at least one edit in the area
+      linesAdded: number;
+      linesRemoved: number;
+      enoughData: boolean; // at least minimum.edits and minimum.sessions
+      breakages: TrackRate; // bisect + contracts + mergeChecks
+      breakageSessions: number; // distinct sessions behind the breakages
+      bisect: TrackRate; // reliable bisect results whose first bad step is one edit of this agent (once per step)
+      contracts: TrackRate; // contract breaks right after its edit in the project's own checkout
+      mergeChecks: TrackRate; // merge conflicts (shadow merge, split merge check) naming only its session
+      ruleAttempts: TrackRate; // confirmed rule_enforced saves; a count only (rate and interval always null)
+      kept: TrackRate; // tracked lines (added or changed) still present, of those from edits at least 7 days old
+      keptFrom: { edits: number; sessions: number }; // checked edits behind `kept`; its own minimum
+    }[];
+    // pairs on breakages whose intervals do not overlap, among agents with enough data, when the
+    // higher count comes from at least 2 sessions; empty: no clear difference
+    clearDifference: {
+      measure: 'breakages';
+      better: { agent: string; count: number; of: number };
+      worse: { agent: string; count: number; of: number };
+    }[];
+  }[];
+  usageLimits: { agent: string; limited: number; sessions: number }[]; // per agent, not per area
+  survival: { pending: number; checkedNow: number }; // edits in the window still waiting for their check
+  truncated: boolean; // a query hit its row limit: the record is partial
+}
+```
+
+Outcomes are counted in the window by when they happened: a bisect blame at the time of the
+blamed edit, a conflict at each time it opened, with the sessions recorded then. Dismissed
+conflicts do not count. Outcomes naming several sessions, `outside` steps and gap steps count for
+nobody, and failing checks are not counted (a merge check cannot tell whose change made one fail).
+
 ## CLI `--json`
 
 `mindly saves [--since 7d] [--all] --json` prints the same object as `GET …/saves`:
 `{ since, summary: { total, byKind, byAgent }, saves: Save[] }`. Without `--all` it lists confirmed
 and caught saves; with it every status. `mindly saves card` writes SVG (stdout, or `--out card.svg`),
 not JSON. The `--json` output of existing commands (`status`, `standup`, …) does not include saves.
+
+`mindly track [--since 30d] [--area <folder>] [--agent <kind>] [--min-edits 20] --json` prints a
+`TrackReport` (above), after checking the lines of up to 200 edits that turned 7 days old.
 
 Review requests need a runner agent (`claude-code`, `codex`) different from the session's agent;
 replay takes 1-4 distinct runner agents. Replay checks only come from a trusted project config.

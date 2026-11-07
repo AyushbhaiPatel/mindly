@@ -805,6 +805,8 @@ export class SplitService {
         kind: conflict.kind,
         severity: conflict.severity,
         title: conflict.title,
+        sessionIds: report.sessionIds,
+        paths: report.paths.slice(0, 200),
       },
     });
   }

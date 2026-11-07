@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import {
   isDeniedPath,
   resolveInsideRoot,
+  type Clock,
   type ResolvedProjectPath,
   type Session,
 } from '@mindly/core';
@@ -17,9 +18,22 @@ export interface ProjectScope {
   project: ProjectContext;
 }
 
+/** Test hooks of a command: a fixed clock. */
+export interface ScopeOptions {
+  clock?: Clock;
+}
+
 /** Opens Mindly for a CLI command (no pager notifications), closing it when `fn` settles. */
-export async function withMindly<T>(io: CliIo, fn: (mindly: Mindly) => Promise<T> | T): Promise<T> {
-  const mindly = openMindly({ env: io.env, disableNotify: true });
+export async function withMindly<T>(
+  io: CliIo,
+  fn: (mindly: Mindly) => Promise<T> | T,
+  options: ScopeOptions = {},
+): Promise<T> {
+  const mindly = openMindly({
+    env: io.env,
+    disableNotify: true,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   try {
     return await fn(mindly);
   } finally {
@@ -31,11 +45,16 @@ export async function withMindly<T>(io: CliIo, fn: (mindly: Mindly) => Promise<T
 export async function withProject<T>(
   io: CliIo,
   fn: (scope: ProjectScope) => Promise<T> | T,
+  options: ScopeOptions = {},
 ): Promise<T> {
-  return withMindly(io, async (mindly) => {
-    const project = await mindly.projects.resolve(io.cwd);
-    return fn({ mindly, project });
-  });
+  return withMindly(
+    io,
+    async (mindly) => {
+      const project = await mindly.projects.resolve(io.cwd);
+      return fn({ mindly, project });
+    },
+    options,
+  );
 }
 
 /**

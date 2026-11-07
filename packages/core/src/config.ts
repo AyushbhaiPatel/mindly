@@ -122,6 +122,16 @@ export const UserConfigSchema = z.object({
       maxPerWorktree: z.number().int().min(10).max(100_000).default(5000),
     })
     .prefault({}),
+  track: z
+    .object({
+      /** Folder segments that make an area of `mindly track` (`src/api` at 2). */
+      areaDepth: z.number().int().min(1).max(4).default(2),
+      /** Edits an agent needs in an area before any rate is shown there. */
+      minEdits: z.number().int().min(1).max(100_000).default(20),
+      /** Sessions with edits an agent needs in an area before any rate is shown there. */
+      minSessions: z.number().int().min(1).max(10_000).default(3),
+    })
+    .prefault({}),
 });
 export type UserConfig = z.infer<typeof UserConfigSchema>;
 

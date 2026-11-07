@@ -434,6 +434,19 @@ export async function bisectRun(
       status,
       checks,
       firstBad: firstBad?.seq ?? null,
+      // The blamed step as it was when found, so `mindly track` can still attribute the run
+      // after the checkpoint itself is pruned.
+      blame:
+        status === 'found' && result?.firstBad
+          ? {
+              checkpointId: result.firstBad.id,
+              kind: result.firstBad.kind,
+              gap: result.firstBad.gap,
+              sessionId: result.firstBad.sessionId,
+              paths: result.firstBad.paths,
+              at: result.firstBad.createdAt,
+            }
+          : null,
       lastGood: lastGood?.seq ?? null,
       flaky: report.flaky,
       skipped: report.skipped,

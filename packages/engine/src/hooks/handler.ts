@@ -413,13 +413,15 @@ export class HookHandler {
     for (const edit of tool.edits.slice(0, 50)) {
       const [resolved] = await this.projectPaths(project, evt.cwd, [edit.path]);
       if (!resolved) continue;
-      const hashes = this.provenanceHashes(resolved.abs, edit.addedText);
+      const content = readBounded(resolved.abs, MAX_PROVENANCE_FILE_BYTES);
+      const hashes = this.provenanceHashes(content, edit.addedText);
       const recorded = this.k.store.fileChanges.record({
         projectId: project.project.id,
         sessionId: session.id,
         path: resolved.rel,
         tool: sanitizeLine(tool.name, 40),
         hunkHashes: hashes,
+        lineHashes: this.addedLineHashes(content, edit.addedText, edit.removedText),
         addedLines: countLines(edit.addedText),
         removedLines: countLines(edit.removedText),
         promptEventId: promptEvent?.id ?? null,
@@ -501,7 +503,7 @@ export class HookHandler {
    * so besides the added text itself, every line of the file as written that contains an added
    * fragment is hashed too; `mindly why` hashes whole lines and would otherwise miss them.
    */
-  private provenanceHashes(abs: string, addedText: string): string[] {
+  private provenanceHashes(content: string | null, addedText: string): string[] {
     const hashes = new Set(this.k.ports.git.hunkHashes(addedText));
     const fragments = addedText
       .split(/\r?\n/)
@@ -509,7 +511,6 @@ export class HookHandler {
       .filter((l) => l.length >= 4)
       .slice(0, 200);
     if (fragments.length === 0) return [...hashes];
-    const content = readBounded(abs, MAX_PROVENANCE_FILE_BYTES);
     if (content === null) return [...hashes];
     for (const line of content.split(/\r?\n/)) {
       if (line.length > 2000) continue;
@@ -518,6 +519,81 @@ export class HookHandler {
       }
     }
     return [...hashes].slice(0, 5000);
+  }
+
+  /**
+   * Hashes of the lines an edit added or changed (what `mindly track` measures survival over),
+   * always as whole lines of the file as written, so every tool is measured the same way.
+   *
+   * When the added text occurs exactly once in the file (an Edit-style replacement, a whole-file
+   * write), the edit is located there: the file lines it spans are compared with the same lines
+   * with the edit undone (added text replaced by the removed text), and every line that differs
+   * counts. A change inside a line (`foo(1)` to `foo(2)`) records that whole line; unchanged
+   * context inside the replacement does not count. Otherwise (several hunks, the text found more
+   * than once) only added lines that are whole lines of the file count, minus removed ones.
+   */
+  private addedLineHashes(
+    content: string | null,
+    addedText: string,
+    removedText: string,
+  ): string[] {
+    if (content === null || addedText === '') return [];
+    const located = this.changedLines(content, addedText, removedText);
+    if (located !== null) return located;
+    const git = this.k.ports.git;
+    const norm = (l: string): string => l.trim().replace(/\s+/g, ' ');
+    // Only lines of the file equal to an added line are hashed (cheap on large files).
+    const added = new Set(addedText.split(/\r?\n/).map(norm));
+    const lines = new Set<string>();
+    for (const line of content.split(/\r?\n/)) {
+      if (line.length <= 2000 && added.has(norm(line))) {
+        for (const h of git.hunkHashes(line)) lines.add(h);
+      }
+    }
+    const removed = new Map<string, number>();
+    for (const h of git.hunkHashes(removedText)) removed.set(h, (removed.get(h) ?? 0) + 1);
+    const out = new Set<string>();
+    for (const h of git.hunkHashes(addedText)) {
+      const n = removed.get(h) ?? 0;
+      if (n > 0) {
+        removed.set(h, n - 1);
+        continue;
+      }
+      if (lines.has(h)) out.add(h);
+    }
+    return [...out].slice(0, 5000);
+  }
+
+  /**
+   * The lines an edit changed, found by locating its added text in the file (it must occur
+   * exactly once) and undoing it there. Null when it cannot be located.
+   */
+  private changedLines(content: string, addedText: string, removedText: string): string[] | null {
+    const at = content.indexOf(addedText);
+    if (at === -1 || content.indexOf(addedText, at + 1) !== -1) return null;
+    // Widen to whole lines: what precedes the edit on its first line, what follows on its last.
+    const start = content.lastIndexOf('\n', at - 1) + 1;
+    const nl = content.indexOf('\n', at + addedText.length);
+    const end = nl === -1 ? content.length : nl;
+    const before = content.slice(start, at);
+    const after = content.slice(at + addedText.length, end);
+    const norm = (l: string): string => l.trim().replace(/\s+/g, ' ');
+    const undone = new Map<string, number>();
+    for (const l of `${before}${removedText}${after}`.split(/\r?\n/)) {
+      undone.set(norm(l), (undone.get(norm(l)) ?? 0) + 1);
+    }
+    const git = this.k.ports.git;
+    const out = new Set<string>();
+    for (const line of `${before}${addedText}${after}`.split(/\r?\n/)) {
+      const n = undone.get(norm(line)) ?? 0;
+      if (n > 0) {
+        undone.set(norm(line), n - 1);
+        continue;
+      }
+      if (line.length <= 2000) for (const h of git.hunkHashes(line)) out.add(h);
+      if (out.size >= 5000) break;
+    }
+    return [...out];
   }
 
   private async stop(

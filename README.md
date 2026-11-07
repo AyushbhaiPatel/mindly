@@ -167,6 +167,52 @@ writes into another part's files are flagged (or blocked with `--strict`). In th
 Mindly keeps checking that all the parts still merge and pass your checks. `mindly split merge`
 combines them into one new branch, in dependency order, and never pushes.
 
+### Which agent is better at what, in your repo
+
+```bash
+mindly track
+```
+
+If you use several agents on the same code, you probably pick one by gut feeling. Mindly already
+knows what each agent edited and what went wrong afterwards, so it can show you, folder by folder,
+how often each agent's edits broke something in this repository:
+
+```text
+Track record · last 30 days · 3 agents · 745 edits
+
+src/api
+  codex        212 edits   broke 1 (0.5%) · kept 1,765 of 1,940 tracked lines (91%)
+  claude-code  188 edits   broke 10 (5.3%) · kept 1,856 of 2,210 tracked lines (84%)
+  -> codex breaks less often per edit here (clear difference)
+
+src/ui
+  claude-code  301 edits   broke 2 (0.7%) · kept 2,732 of 3,105 tracked lines (88%)
+  cursor        44 edits   broke 1 (2.3%) · kept 404 of 512 tracked lines (79%)
+  -> no clear difference yet
+
+Usage limits: claude-code 3 of 41 sessions · codex 0 of 22 · cursor 0 of 6
+```
+
+"Broke" adds up the edits that `mindly bisect` found broke a check, the recorded decisions an
+edit broke, and merge conflicts caused by one agent alone. "Kept" is how many of the lines an
+agent added or changed at least a week ago are still in the code on the branch it worked on (later
+rewrites count as not kept). The numbers are meant to be honest:
+
+- **Counts are always shown.** Every rate comes with what it is out of (`188 edits`,
+  `broke 10 (5.3%)`), and there is no overall score or "best agent".
+- **No rate without enough data.** An agent needs at least 20 edits and 3 sessions in a folder
+  before any rate is shown there; until then it says "not enough data yet".
+- **No clear difference means none.** Agents are compared only when their 95% confidence
+  intervals do not overlap (and the breakages come from more than one session); otherwise
+  Mindly says "no clear difference yet".
+- **Only what is pinned to one agent counts.** A problem involving several sessions, or a change
+  made outside any agent, counts for nobody.
+
+`mindly track --area src/api --explain` shows one folder with the exact definition of each
+number. When you `mindly split` a goal and another agent clearly breaks less in the folder a part
+mainly owns, the plan review says so next to that part (it never changes the plan for you). The
+track record stays on your machine and is never part of a saves card.
+
 ### Keeps work going when an agent hits its limit
 
 When Claude Code hits its usage limit mid-task, the next agent you open starts with the goal, the
@@ -279,6 +325,7 @@ mindly bisect list|show <step> [--patch]|revert <step>
 mindly why <file>:<line>             # who wrote a line, and from which prompt
 mindly xray [--session <id>]         # the context an agent was given
 mindly saves [--since 7d]            # problems Mindly prevented, with proof
+mindly track [--area src/api] [--explain]   # which agent breaks less where, as counts
 mindly snapshot create|list|diff|restore
 mindly review --session <id> --reviewer codex
 mindly replay --prompt "…" --agents claude-code,codex
@@ -310,6 +357,8 @@ mindly config set checkpoints.keepDays 30
 | `rules.autoCapture`                     | `true`        | Turn corrections like "from now on use pnpm" into proposed rules  |
 | `checkpoints.enabled`                   | `true`        | Keep a checkpoint after every agent edit, for `mindly bisect`     |
 | `checkpoints.keepDays`                  | `14`          | How long checkpoints are kept                                     |
+| `track.areaDepth`                       | `2`           | Folder depth of an area in `mindly track` (1-4)                   |
+| `track.minEdits` / `minSessions`        | `20` / `3`    | Data an agent needs in a folder before rates are shown            |
 | `shadowMerge.enabled` / `intervalSec`   | `true` / `90` | Background merge checks between agents in separate worktrees      |
 | `failover.enabled`                      | `true`        | Brief the next agent when one hits its usage limit                |
 | `retention.promptsDays` / `eventsDays`  | `30` / `180`  | How long prompt text and event history are kept                   |

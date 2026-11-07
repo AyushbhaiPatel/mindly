@@ -11,6 +11,8 @@ import {
   runCommandContracts,
   Scheduler,
   shadowMergeTick,
+  SURVIVAL_PER_TICK,
+  trackSurvivalTick,
   type Daemon,
 } from '../src/index.js';
 import {
@@ -103,9 +105,11 @@ describe('shadow merge job', () => {
     // Same conflict again: same row, not a second one.
     await merge(s);
     expect(s.d.mindly.store.conflicts.list(s.project.id)).toHaveLength(1);
-    expect(
-      s.d.mindly.store.events.query(s.project.id, { types: ['conflict.opened'] }),
-    ).toHaveLength(1);
+    const opened = s.d.mindly.store.events.query(s.project.id, { types: ['conflict.opened'] });
+    expect(opened).toHaveLength(1);
+    // The event keeps who and what at this opening (the row is overwritten by later reports).
+    expect((opened[0]!.payload['sessionIds'] as string[]).sort()).toEqual([s.a.id, s.b.id].sort());
+    expect(opened[0]!.payload['paths']).toEqual(['a.txt']);
     // B gives up its change: the conflict is resolved.
     git(s.wt, 'checkout', '--', 'a.txt');
     const clean = await merge(s);
@@ -243,6 +247,42 @@ describe('maintenance and failover', () => {
     expect(r.sessionsEnded).toBe(1);
     const [e] = store.events.query(s.projectId, { types: ['prompt.submitted'] });
     expect(e?.payload).toEqual({ summary: 'old' });
+  });
+
+  it('computes line survival for edits at least 7 days old, a bounded number per tick', async () => {
+    t = await testDaemon();
+    const d = t.daemon;
+    const root = repo();
+    const s = seedSession(d, root);
+    const store = d.mindly.store;
+    const record = (path: string) =>
+      store.fileChanges.record({
+        projectId: s.projectId,
+        sessionId: s.id,
+        path,
+        tool: 'Edit',
+        hunkHashes: d.mindly.kernel.ports.git.hunkHashes('line 1\nline 2\nline 3'),
+        lineHashes: d.mindly.kernel.ports.git.hunkHashes('line 1\nline 2\nline 3'),
+        addedLines: 3,
+        removedLines: 0,
+        promptEventId: null,
+      });
+    // The session worked on main, which is checked out.
+    store.db.prepare("UPDATE sessions SET branch = 'main' WHERE id = ?").run(s.id);
+    const old = record('a.txt');
+    const fresh = record('b.txt');
+    store.db
+      .prepare('UPDATE file_changes SET created_at = ? WHERE id = ?')
+      .run(Date.now() - 8 * 86_400_000, old.id);
+    expect(SURVIVAL_PER_TICK).toBe(500);
+    expect(await trackSurvivalTick(d.jobs)).toBe(1);
+    const rows = store.db
+      .prepare('SELECT change_id, total_hashes, kept_hashes FROM line_survival')
+      .all();
+    expect(rows).toEqual([{ change_id: old.id, total_hashes: 3, kept_hashes: 3 }]);
+    expect(await trackSurvivalTick(d.jobs)).toBe(0);
+    expect(store.track.countPendingSurvival(s.projectId, Date.now())).toBe(1);
+    expect(fresh.id).not.toBe(old.id);
   });
 
   it('auto-launches a pending rate-limit handoff at most once, only when enabled', async () => {

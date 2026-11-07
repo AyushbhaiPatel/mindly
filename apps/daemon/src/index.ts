@@ -42,6 +42,8 @@ export {
   housekeepingTick,
   selfHealingTick,
   standupTick,
+  SURVIVAL_PER_TICK,
+  trackSurvivalTick,
   type HousekeepingResult,
 } from './jobs/maintenance.js';
 export { executeReplay, executeReview, failoverTick, queueRun, resumePrompt } from './jobs/runs.js';
