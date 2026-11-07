@@ -163,19 +163,21 @@ describe('status screen', () => {
   it('matches the shape in docs/output-style.md', () => {
     expect(render((sc) => renderStatus(sc, statusData()), UTF8)).toMatchInlineSnapshot(`
       "
-      Mindly \u00B7 my-app \u00B7 2 agents working \u00B7 2 things need you
+      Mindly · my-app · 2 agents working · 2 things need you
 
       Agents
-        \u25CF Claude Code \u00B7 4409d433   working \u00B7 main \u00B7 edited src/auth.ts 1m ago
-        \u25CF Codex \u00B7 f57f6d10         working \u00B7 main \u00B7 editing src/dash.ts
+        Agent                     Status   Branch  Doing                      Active
+        ● Claude Code · 4409d433  working  main    edited src/auth.ts 1m ago  1m ago
+        ● Codex · f57f6d10        working  main    editing src/dash.ts        1m ago
 
       Needs you
-        ! Conflict: Claude Code \u00B7 4409d433 changed the exports of src/auth.ts; Codex's
-          src/dash.ts uses them  [9f02a0c3]
-        \u2022 Suggested rule from Claude Code: "Don't use default exports"  [7bc7e9b7]
+        Type        What
+        ! Conflict  Claude Code · 4409d433 changed the exports of src/auth.ts; Codex's          [9f02a0c3]
+                    src/dash.ts uses them
+        • Rule      "Don't use default exports" · suggested by you, in Claude Code              [7bc7e9b7]
 
-      \u2192 mindly conflict 9f02a0c3 resolve   mark the conflict resolved
-      \u2192 mindly rules --approve 7bc7e9b7    make the rule apply to every agent
+      → mindly conflict 9f02a0c3 resolve   mark the conflict resolved
+      → mindly rules --approve 7bc7e9b7    make the rule apply to every agent
       "
     `);
   });
@@ -206,15 +208,18 @@ describe('status screen', () => {
       Mindly - my-app - 1 agent idle - 5 things need you
 
       Agents
-        [!] Codex - f57f6d10   hit its usage limit - main - last active 1m ago
+        Agent                 Status               Branch  Doing               Active
+        [!] Codex - f57f6d10  hit its usage limit  main    last active 1m ago  1m ago
 
       Needs you
-        [!] This project's .mindly/config.json is not trusted yet, so its checks do not run
-        [!] Conflict: Claude Code - 4409d433 changed the exports of src/auth.ts; Codex's
-            src/dash.ts uses them  [9f02a0c3]
-        - Suggested rule from Claude Code: "Don't use default exports"   [7bc7e9b7]
-        - Suggested known pitfall from Codex: "Command fails: npm test"  [bf1da9e0]
-        - Handoff waiting for Cursor: "Finish the dashboard login form"  [2bc5385b]
+        Type             What
+        [!] Config       This project's .mindly/config.json is not trusted yet, so its checks
+                         do not run
+        [!] Conflict     Claude Code - 4409d433 changed the exports of src/auth.ts; Codex's     [9f02a0c3]
+                         src/dash.ts uses them
+        - Rule           "Don't use default exports" - suggested by you, in Claude Code         [7bc7e9b7]
+        - Known pitfall  "Command fails: npm test" - suggested by Codex                         [bf1da9e0]
+        - Handoff        Waiting for Cursor: "Finish the dashboard login form"                  [2bc5385b]
 
       -> mindly trust                       review the project config and its commands
       -> mindly conflict 9f02a0c3 resolve   mark the conflict resolved
@@ -238,16 +243,18 @@ describe('memory screens', () => {
   it('rules', () => {
     expect(render((sc) => renderRules(sc, [pnpmRule], [exportsRule]), UTF8)).toMatchInlineSnapshot(`
       "
-      Rules \u00B7 1 rule every agent follows \u00B7 1 waiting for you
+      Rules · 1 rule every agent follows · 1 waiting for you
 
       Every agent follows
-        \u2713 Always use pnpm, never npm (approved by you; enforced: blocks edits that break it)  [a9884755]
+        Status                 Rule                        From  Updated
+        ✓ approved · enforced  Always use pnpm, never npm  you    1h ago  [a9884755]
 
       Waiting for you
-        ! Don't use default exports (you said it in Claude Code, waiting for you)  [7bc7e9b7]
+        Status             Rule                       From                 Updated
+        ! waiting for you  Don't use default exports  you, in Claude Code   1h ago  [7bc7e9b7]
 
-      \u2192 mindly rules --approve 7bc7e9b7   make the rule apply to every agent
-      \u2192 mindly memory reject 7bc7e9b7     drop the suggestion
+      → mindly rules --approve 7bc7e9b7   make the rule apply to every agent
+      → mindly memory reject 7bc7e9b7     drop the suggestion
       "
     `);
     expect(render((sc) => renderRules(sc, [], []))).toMatchInlineSnapshot(`
@@ -266,10 +273,12 @@ describe('memory screens', () => {
         "
         3 memories - 2 waiting for you
 
-          [ok] Rule: Always use pnpm, never npm (approved by you; enforced: blocks edits that
-               break it)  [a9884755]
-          [!] Rule: Don't use default exports (you said it in Claude Code, waiting for you)  [7bc7e9b7]
-          [!] Known pitfall: Command fails: npm test (suggested by Codex, waiting for you)   [bf1da9e0]
+          Status                    Kind           Title                     From
+          [ok] approved - enforced  rule           Always use pnpm, never    you                  [a9884755]
+                                                   npm
+          [!] waiting for you       rule           Don't use default         you, in Claude Code  [7bc7e9b7]
+                                                   exports
+          [!] waiting for you       known pitfall  Command fails: npm test   Codex                [bf1da9e0]
 
         -> mindly memory approve 7bc7e9b7   share it with every agent
         -> mindly memory show 7bc7e9b7      see the details and history
@@ -285,13 +294,13 @@ describe('insight screens', () => {
         "
         1 open conflict
 
-          ! Claude Code \u00B7 4409d433 changed the exports of src/auth.ts; Codex's src/dash.ts uses
-            them  [9f02a0c3]
-            check this \u00B7 open \u00B7 2m ago
-            Changed signature: login. 1 file imports it: src/dash.ts.
+          Severity      What                                                      Status    When
+          ! check this  Claude Code · 4409d433 changed the exports of             open    2m ago  [9f02a0c3]
+                        src/auth.ts; Codex's src/dash.ts uses them
+                        Changed signature: login. 1 file imports it: src/dash.ts.
 
-        \u2192 mindly conflict 9f02a0c3 resolve   mark it resolved once fixed
-        \u2192 mindly conflict 9f02a0c3 dismiss   if it is not a real problem
+        → mindly conflict 9f02a0c3 resolve   mark it resolved once fixed
+        → mindly conflict 9f02a0c3 dismiss   if it is not a real problem
         "
       `);
     expect(render((sc) => renderConflicts(sc, [], sessionOf, false))).toMatchInlineSnapshot(`
@@ -498,9 +507,9 @@ describe('continuity screens', () => {
       "
       1 handoff - 1 waiting to be picked up
 
-        [!] Finish the dashboard login form  [2bc5385b]
-            waiting for Cursor - from Codex - f57f6d10 - handed over by you - 5m ago
-            Next: Wire the submit button
+        Status                  Work                             From                When
+        [!] waiting for Cursor  Finish the dashboard login form  Codex - f57f6d10  5m ago  [2bc5385b]
+                                Next: Wire the submit button
 
       -> Start Cursor in this project: it picks the handoff up at the start of its session.
       "
@@ -620,7 +629,7 @@ describe('human output never shows internals', () => {
     ].join('\n');
     expect(all).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/);
     expect(all).not.toMatch(
-      /\b(proposed|approved\b(?! by you)|verified|session_start|intent_overlap|impact|rate_limited|acknowledged|tokens?|claude-code #|manual|pending)\b/,
+      /\b(proposed|verified|session_start|intent_overlap|impact|rate_limited|acknowledged|tokens?|claude-code #|manual|pending)\b/,
     );
   });
 });

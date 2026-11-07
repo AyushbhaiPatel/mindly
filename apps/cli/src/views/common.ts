@@ -1,14 +1,18 @@
-import type { Conflict, Memory, Session } from '@mindly/core';
+import { isRepoFileSource, type Conflict, type Memory, type Session } from '@mindly/core';
 import type { Store } from '@mindly/store';
 import {
   agentName,
   capitalise,
   humanizeText,
   memoryKindWord,
+  relativeTime,
   sourceWord,
   trustWord,
+  type Column,
   type Marker,
   type Row,
+  type Screen,
+  type TableRow,
 } from '../present/index.js';
 import { clean } from '../util.js';
 
@@ -68,6 +72,60 @@ export function suggestionText(m: Memory): string {
   const kind = memoryKindWord(m.kind);
   const from = who === 'you' ? (m.source.agentKind ? agentName(m.source.agentKind) : 'you') : who;
   return `Suggested ${kind} from ${from}: "${clean(m.title, 120)}"`;
+}
+
+/** Trust in two or three words for a table cell: approved / waiting for you / may be outdated. */
+export function trustShort(m: Memory): string {
+  switch (m.trust) {
+    case 'approved':
+      return 'approved';
+    case 'verified':
+      return 'confirmed in code';
+    case 'proposed':
+      return 'waiting for you';
+    case 'stale':
+      return 'may be outdated';
+    case 'rejected':
+      return 'rejected';
+  }
+}
+
+/** Who a memory came from, short: you / Claude Code / AGENTS.md / the code. */
+export function fromShort(m: Memory): string {
+  if (isRepoFileSource(m.source)) return 'a repository file';
+  const who = sourceWord(m.source);
+  if (who === 'you' && m.trust === 'proposed' && m.source.agentKind) {
+    return `you, in ${agentName(m.source.agentKind)}`;
+  }
+  return who;
+}
+
+/** Columns of a memory table; `kind` adds the Kind column. */
+export function memoryColumns(opts: { kind?: boolean } = {}): Column[] {
+  return [
+    { header: 'Status' },
+    ...(opts.kind === false ? [] : [{ header: 'Kind', drop: 1 }]),
+    { header: opts.kind === false ? 'Rule' : 'Title', fill: true, min: 24 },
+    { header: 'From', max: 22, drop: 2 },
+    { header: 'Updated', right: true, drop: 3 },
+    { header: '' },
+  ];
+}
+
+/** A memory as table cells matching {@link memoryColumns}. */
+export function memoryTableRow(sc: Screen, m: Memory, opts: { kind?: boolean } = {}): TableRow {
+  const flags = memoryFlags(m).map((f) => f.split(':')[0] as string);
+  const status = [trustShort(m), ...flags].join(` ${sc.sym.dot} `);
+  return {
+    cells: [
+      `${sc.mark(memoryMarker(m))} ${status}`,
+      ...(opts.kind === false ? [] : [memoryKindWord(m.kind)]),
+      clean(m.title, 160),
+      fromShort(m),
+      relativeTime(m.updatedAt, sc.now),
+      sc.ref(m.id),
+    ],
+  };
 }
 
 /** A memory as a list row: `rule: Use pnpm   approved by you   [5aa7b7d3]`. */

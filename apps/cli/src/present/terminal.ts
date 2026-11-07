@@ -136,6 +136,33 @@ export interface Step {
   why: string;
 }
 
+/** One column of a {@link Screen.table}. */
+export interface Column {
+  header: string;
+  /**
+   * The column that takes the remaining width and wraps its text. At most one per table; the
+   * others are as wide as their widest cell (up to `max`).
+   */
+  fill?: boolean;
+  /** Widest a non-fill column may be; longer cells end with an ellipsis. */
+  max?: number;
+  /** Narrowest the fill column may get before other columns are dropped. */
+  min?: number;
+  /** Right-aligned (numbers, times). */
+  right?: boolean;
+  /**
+   * Dropped first on a narrow terminal (higher goes first). The first column and the fill
+   * column are never dropped.
+   */
+  drop?: number;
+}
+
+/** One row of a table: its cells, and an optional dimmed note under the row. */
+export interface TableRow {
+  cells: readonly string[];
+  note?: string;
+}
+
 /** Writes human output in the style of docs/output-style.md. */
 export interface Screen {
   readonly style: Style;
@@ -159,6 +186,11 @@ export interface Screen {
   rows(rows: readonly Row[]): void;
   /** Two aligned columns (`left` must already be short): wraps the right column. */
   pairs(pairs: readonly (readonly [string, string])[], indent?: number): void;
+  /**
+   * An aligned table with a dimmed header row. Cells may carry colour codes. The fill column
+   * wraps; on a narrow terminal the least important columns are left out rather than squeezed.
+   */
+  table(columns: readonly Column[], rows: readonly (TableRow | readonly string[])[]): void;
   /** A blank line, then the next steps with aligned commands. */
   next(steps: readonly Step[]): void;
   /** A blank line. */
@@ -249,6 +281,85 @@ export function screenFor(
           for (const w of wrap(r, width, `${pad}    `)) write(w);
         } else {
           for (const w of wrap(r, width, head, ' '.repeat(visibleLength(head)))) write(w);
+        }
+      }
+    },
+    table: (columns, rows) => {
+      const indent = 2;
+      const gap = 2;
+      const normalised: TableRow[] = rows.map((r) =>
+        Array.isArray(r) ? { cells: r as readonly string[] } : (r as TableRow),
+      );
+      // Natural width of each column: its widest cell or header, capped at `max`.
+      const natural = columns.map((c, i) =>
+        Math.min(
+          c.max ?? Infinity,
+          Math.max(
+            visibleLength(c.header),
+            ...normalised.map((r) => visibleLength(r.cells[i] ?? '')),
+          ),
+        ),
+      );
+      const fillAt = columns.findIndex((c) => c.fill === true);
+      // A column nobody has anything in is left out (its header would only add noise).
+      let shown = columns
+        .map((_, i) => i)
+        .filter((i) => i === fillAt || normalised.some((r) => (r.cells[i] ?? '') !== ''));
+      const widthOf = (idx: readonly number[], fillWidth: number): number =>
+        indent +
+        idx.reduce((n, i) => n + (i === fillAt ? fillWidth : (natural[i] ?? 0)), 0) +
+        gap * Math.max(0, idx.length - 1);
+      // Shrink the fill column to its minimum, then drop columns until the table fits.
+      const fillMin = fillAt >= 0 ? Math.min(natural[fillAt] ?? 0, columns[fillAt]?.min ?? 24) : 0;
+      for (;;) {
+        if (widthOf(shown, fillMin) <= width) break;
+        const droppable = shown
+          .filter((i) => i !== 0 && i !== fillAt && (columns[i]?.drop ?? 0) > 0)
+          .sort((a, b) => (columns[b]?.drop ?? 0) - (columns[a]?.drop ?? 0));
+        const drop = droppable[0];
+        if (drop === undefined) break;
+        shown = shown.filter((i) => i !== drop);
+      }
+      const fillWidth =
+        fillAt >= 0 && shown.includes(fillAt)
+          ? Math.max(fillMin, Math.min(natural[fillAt] ?? 0, width - widthOf(shown, 0)))
+          : 0;
+      const colWidth = (i: number): number => (i === fillAt ? fillWidth : (natural[i] ?? 0));
+      const pad = (text: string, i: number): string => {
+        const w = colWidth(i);
+        const len = visibleLength(text);
+        if (len > w) {
+          // Truncate a non-fill cell (the fill column wraps instead).
+          const cut = Math.max(0, w - sym.ellipsis.length);
+          return `${text.replace(ANSI_RE, '').slice(0, cut)}${sym.ellipsis}`;
+        }
+        const fillBy = ' '.repeat(w - len);
+        return columns[i]?.right ? `${fillBy}${text}` : `${text}${fillBy}`;
+      };
+      const lead = ' '.repeat(indent);
+      const sep = ' '.repeat(gap);
+      write(
+        style.dim(
+          `${lead}${shown.map((i) => pad(columns[i]?.header ?? '', i)).join(sep)}`.trimEnd(),
+        ),
+      );
+      for (const r of normalised) {
+        const cells = shown.map((i) => r.cells[i] ?? '');
+        const fillPos = shown.indexOf(fillAt);
+        const fillLines = fillPos >= 0 ? wrap(cells[fillPos] ?? '', fillWidth) : [];
+        const lineCount = Math.max(1, fillLines.length);
+        for (let n = 0; n < lineCount; n++) {
+          const parts = shown.map((i, k) => {
+            if (k === fillPos) return pad(fillLines[n] ?? '', i);
+            return n === 0 ? pad(cells[k] ?? '', i) : ' '.repeat(colWidth(i));
+          });
+          write(`${lead}${parts.join(sep)}`.trimEnd());
+        }
+        if (r.note !== undefined && r.note !== '') {
+          const noteIndent = ' '.repeat(
+            indent + (fillPos > 0 ? widthOf(shown.slice(0, fillPos), 0) - indent + gap : 0),
+          );
+          for (const l of wrap(r.note, width, noteIndent)) write(style.dim(l));
         }
       }
     },

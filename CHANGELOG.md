@@ -3,6 +3,15 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## Unreleased
+
+### Changed
+
+- The terminal shows lists as tables. `mindly status`, `rules`, `memory list`, `conflicts`,
+  `saves` and `handoffs` print a dimmed header row and aligned columns (status, what, who, when,
+  id) instead of one long sentence per item. On a narrow terminal the least important columns are
+  left out rather than squeezed. `--json` output is unchanged.
+
 ## 0.4.1 — 2026-11-07
 
 ### Fixed

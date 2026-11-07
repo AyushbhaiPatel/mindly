@@ -23,6 +23,7 @@ import {
   trustWord,
   type Marker,
   type Row,
+  type TableRow,
   type Screen,
   type Step,
 } from '../present/index.js';
@@ -62,22 +63,24 @@ export function renderConflicts(
       : `${count(open.length, 'open conflict')}`,
   );
   sc.blank();
-  sc.rows(
-    list.map((c) => {
-      const facts = [
-        severityWord(c.severity),
+  sc.table(
+    [
+      { header: 'Severity' },
+      { header: 'What', fill: true, min: 30 },
+      { header: 'Status', drop: 2 },
+      { header: 'When', right: true, drop: 1 },
+      { header: '' },
+    ],
+    list.map((c): TableRow => ({
+      cells: [
+        `${sc.mark(c.status === 'resolved' || c.status === 'dismissed' ? 'ok' : conflictMarker(c))} ${severityWord(c.severity)}`,
+        conflictText(c, sessionOf),
         conflictStatusWord(c.status),
         relativeTime(c.createdAt, sc.now),
-      ];
-      const details = [facts.join(` ${sc.sym.dot} `)];
-      if (c.detail) details.push(plainDetail(c.detail));
-      return {
-        marker: c.status === 'resolved' || c.status === 'dismissed' ? 'ok' : conflictMarker(c),
-        text: conflictText(c, sessionOf),
-        id: c.id,
-        details,
-      } satisfies Row;
-    }),
+        sc.ref(c.id),
+      ],
+      ...(c.detail ? { note: plainDetail(c.detail) } : {}),
+    })),
   );
   const first = open[0];
   if (first) {

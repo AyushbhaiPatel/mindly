@@ -6,8 +6,8 @@ import {
   handoffStatusWord,
   relativeTime,
   sessionName,
-  type Row,
   type Screen,
+  type TableRow,
 } from '../present/index.js';
 import { clean } from '../util.js';
 import type { SessionLookup } from './common.js';
@@ -26,30 +26,33 @@ export function renderHandoffs(sc: Screen, list: Handoff[], sessionOf: SessionLo
     `${count(list.length, 'handoff')}${waiting.length ? ` ${sc.sym.dot} ${waiting.length} waiting to be picked up` : ''}`,
   );
   sc.blank();
-  sc.rows(
-    list.map((h): Row => {
+  sc.table(
+    [
+      { header: 'Status' },
+      { header: 'Work', fill: true, min: 24 },
+      { header: 'From', max: 26, drop: 1 },
+      { header: 'Why', max: 30, drop: 3 },
+      { header: 'When', right: true, drop: 2 },
+      { header: '' },
+    ],
+    list.map((h): TableRow => {
       const from = sessionOf(h.fromSessionId);
       const claimer = h.claimedBySessionId ? sessionOf(h.claimedBySessionId) : null;
-      const facts = [
-        handoffStatusWord(h.status, h.toAgentKind, claimer ? sessionName(claimer) : null),
-        `from ${from ? sessionName(from) : 'an agent'}`,
-        handoffReasonWord(h.reason),
-        relativeTime(h.createdAt, sc.now),
-      ];
-      const details = [facts.join(` ${sc.sym.dot} `)];
-      if (h.packet.nextSteps.length) {
-        details.push(
-          `Next: ${h.packet.nextSteps
-            .slice(0, 3)
-            .map((x) => clean(x, 100))
-            .join('; ')}`,
-        );
-      }
+      const marker = h.status === 'pending' ? 'warn' : h.status === 'cancelled' ? 'item' : 'ok';
+      const next = h.packet.nextSteps
+        .slice(0, 3)
+        .map((x) => clean(x, 100))
+        .join('; ');
       return {
-        marker: h.status === 'pending' ? 'warn' : h.status === 'cancelled' ? 'item' : 'ok',
-        text: clean(h.summary, 120),
-        id: h.id,
-        details,
+        cells: [
+          `${sc.mark(marker)} ${handoffStatusWord(h.status, h.toAgentKind, claimer ? sessionName(claimer) : null)}`,
+          clean(h.summary, 120),
+          from ? sessionName(from) : 'an agent',
+          handoffReasonWord(h.reason),
+          relativeTime(h.createdAt, sc.now),
+          sc.ref(h.id),
+        ],
+        ...(next ? { note: `Next: ${next}` } : {}),
       };
     }),
   );

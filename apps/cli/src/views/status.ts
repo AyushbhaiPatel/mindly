@@ -10,19 +10,20 @@ import {
 } from '@mindly/core';
 import {
   agentName,
+  capitalise,
   count,
   handoffStatusWord,
+  memoryKindWord,
   relativeTime,
   sessionName,
   sessionStatusWord,
   taskStatusWord,
   type Marker,
-  type Row,
   type Screen,
   type Step,
 } from '../present/index.js';
 import { clean } from '../util.js';
-import { conflictMarker, conflictText, suggestionText, type SessionLookup } from './common.js';
+import { conflictMarker, conflictText, fromShort, type SessionLookup } from './common.js';
 
 /** What one live agent is doing. */
 export interface AgentActivity {
@@ -67,17 +68,13 @@ function files(list: readonly string[], max = 2): string {
   return `${shown.join(', ')}${list.length > max ? ` +${list.length - max} more` : ''}`;
 }
 
-function activity(a: AgentActivity, now: number): string {
-  const s = a.session;
-  const parts = [sessionStatusWord(s.status)];
-  if (s.branch) parts.push(clean(s.branch, 60));
-  if (a.editing.length) parts.push(`editing ${files(a.editing)}`);
-  else if (a.plans[0] !== undefined) parts.push(`plans to ${clean(a.plans[0], 80).toLowerCase()}`);
-  else if (a.lastEdit) {
-    parts.push(`edited ${clean(a.lastEdit.path, 100)} ${relativeTime(a.lastEdit.at, now)}`);
-  } else parts.push(`last active ${relativeTime(s.lastSeenAt, now)}`);
-  if (a.task) parts.push(`task: ${clean(a.task.title, 80)}`);
-  return parts.join(' \u00B7 ');
+/** What the agent is doing right now, as one short phrase. */
+function doing(a: AgentActivity, now: number): string {
+  if (a.editing.length) return `editing ${files(a.editing)}`;
+  if (a.plans[0] !== undefined) return `plans to ${clean(a.plans[0], 80).toLowerCase()}`;
+  if (a.lastEdit)
+    return `edited ${clean(a.lastEdit.path, 100)} ${relativeTime(a.lastEdit.at, now)}`;
+  return `last active ${relativeTime(a.session.lastSeenAt, now)}`;
 }
 
 function agentMarker(s: Session): Marker {
@@ -121,49 +118,66 @@ export function renderStatus(sc: Screen, d: StatusData): void {
 
   if (d.agents.length) {
     sc.section('Agents');
-    sc.pairs(
-      d.agents.map(
-        (a) =>
-          [
-            `${sc.mark(agentMarker(a.session))} ${sessionName(a.session)}`,
-            activity(a, sc.now),
-          ] as const,
-      ),
+    sc.table(
+      [
+        { header: 'Agent' },
+        { header: 'Status' },
+        { header: 'Branch', max: 24, drop: 2 },
+        { header: 'Doing', fill: true, min: 24 },
+        { header: 'Task', max: 36, drop: 1 },
+        { header: 'Active', right: true, drop: 3 },
+      ],
+      d.agents.map((a) => [
+        `${sc.mark(agentMarker(a.session))} ${sessionName(a.session)}`,
+        sessionStatusWord(a.session.status),
+        a.session.branch ? clean(a.session.branch, 60) : '',
+        doing(a, sc.now),
+        a.task ? clean(a.task.title, 80) : '',
+        relativeTime(a.session.lastSeenAt, sc.now),
+      ]),
     );
   }
 
-  const needs: Row[] = [];
+  const needs: string[][] = [];
   if (d.config === 'invalid') {
-    needs.push({ marker: 'fail', text: "This project's .mindly/config.json is invalid" });
+    needs.push([`${sc.mark('fail')} Config`, "This project's .mindly/config.json is invalid", '']);
   } else if (d.config === 'untrusted') {
-    needs.push({
-      marker: 'warn',
-      text: "This project's .mindly/config.json is not trusted yet, so its checks do not run",
-    });
+    needs.push([
+      `${sc.mark('warn')} Config`,
+      "This project's .mindly/config.json is not trusted yet, so its checks do not run",
+      '',
+    ]);
   }
   const conflicts = d.conflicts
     .filter(conflictNeedsUser)
     .sort((a, b) => (b.severity === 'critical' ? 1 : 0) - (a.severity === 'critical' ? 1 : 0));
   for (const c of conflicts) {
-    needs.push({
-      marker: conflictMarker(c),
-      text: `Conflict: ${conflictText(c, d.sessionOf)}`,
-      id: c.id,
-    });
+    needs.push([
+      `${sc.mark(conflictMarker(c))} Conflict`,
+      conflictText(c, d.sessionOf),
+      sc.ref(c.id),
+    ]);
   }
   for (const m of d.proposed) {
-    needs.push({ marker: 'item', text: suggestionText(m), id: m.id });
+    needs.push([
+      `${sc.mark('item')} ${capitalise(memoryKindWord(m.kind))}`,
+      `"${clean(m.title, 120)}" ${sc.sym.dot} suggested by ${fromShort(m)}`,
+      sc.ref(m.id),
+    ]);
   }
   for (const h of d.handoffs) {
-    needs.push({
-      marker: 'item',
-      text: `Handoff ${handoffStatusWord(h.status, h.toAgentKind)}: "${clean(h.summary, 100)}"`,
-      id: h.id,
-    });
+    needs.push([
+      `${sc.mark('item')} Handoff`,
+      `${capitalise(handoffStatusWord(h.status, h.toAgentKind))}: "${clean(h.summary, 100)}"`,
+      sc.ref(h.id),
+    ]);
   }
   if (needs.length) {
     sc.section('Needs you');
-    sc.rows(needs.slice(0, MAX_ITEMS));
+    sc.table(
+      [{ header: 'Type' }, { header: 'What', fill: true, min: 30 }, { header: '' }],
+      needs.slice(0, MAX_ITEMS),
+    );
     if (needs.length > MAX_ITEMS) {
       sc.note(`  ${sc.sym.ellipsis} and ${needs.length - MAX_ITEMS} more`);
     }

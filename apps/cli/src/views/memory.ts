@@ -20,7 +20,7 @@ import {
   type Step,
 } from '../present/index.js';
 import { clean, cleanBlock } from '../util.js';
-import { memoryFlags, memoryRow } from './common.js';
+import { memoryColumns, memoryFlags, memoryTableRow } from './common.js';
 
 /** Renders `mindly rules`. */
 export function renderRules(sc: Screen, approved: Memory[], proposed: Memory[]): void {
@@ -43,11 +43,17 @@ export function renderRules(sc: Screen, approved: Memory[], proposed: Memory[]):
   sc.summary(`Rules ${sc.sym.dot} ${parts.join(` ${sc.sym.dot} `)}`);
   if (approved.length) {
     sc.section('Every agent follows');
-    sc.rows(approved.map((m) => memoryRow(m, { showKind: false })));
+    sc.table(
+      memoryColumns({ kind: false }),
+      approved.map((m) => memoryTableRow(sc, m, { kind: false })),
+    );
   }
   if (proposed.length) {
     sc.section('Waiting for you');
-    sc.rows(proposed.map((m) => memoryRow(m, { showKind: false })));
+    sc.table(
+      memoryColumns({ kind: false }),
+      proposed.map((m) => memoryTableRow(sc, m, { kind: false })),
+    );
     const first = proposed[0] as Memory;
     sc.next([
       {
@@ -92,7 +98,10 @@ export function renderMemoryList(
     waiting.length ? `${head} ${sc.sym.dot} ${waiting.length} waiting for you` : `${head}`,
   );
   sc.blank();
-  sc.rows(memories.map((m) => memoryRow(m)));
+  sc.table(
+    memoryColumns(),
+    memories.map((m) => memoryTableRow(sc, m)),
+  );
   const steps: Step[] = [];
   const first = waiting[0];
   if (first) {

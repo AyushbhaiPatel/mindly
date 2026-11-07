@@ -290,7 +290,8 @@ describe('rule import', () => {
       expect(rules.proposed.sort()).toEqual([injected, 'Run the linter before every commit']);
       // Shown as coming from the file, never as the user's own rules.
       const listed = (await cli(sb, ['rules'])).stdout.replace(/\s+/g, ' ');
-      expect(listed).toContain('imported from a repository file, waiting for you');
+      expect(listed).toContain('waiting for you');
+      expect(listed).toContain('a repository file');
       expect(listed).not.toContain('approved by you');
     }
   });
