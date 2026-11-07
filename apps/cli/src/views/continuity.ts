@@ -32,7 +32,7 @@ export function renderHandoffs(sc: Screen, list: Handoff[], sessionOf: SessionLo
       { header: 'From', max: 26, drop: 1 },
       { header: 'Why', max: 30, drop: 3 },
       { header: 'When', right: true, drop: 2 },
-      { header: 'Name' },
+      { header: 'Name', keep: true },
     ],
     list.map((h): TableRow => {
       const from = sessionOf(h.fromSessionId);

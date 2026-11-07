@@ -108,7 +108,7 @@ export function memoryColumns(opts: { kind?: boolean } = {}): Column[] {
     { header: opts.kind === false ? 'Rule' : 'Title', fill: true, min: 24 },
     { header: 'From', max: 22, drop: 2 },
     { header: 'Updated', right: true, drop: 3 },
-    { header: 'Name' },
+    { header: 'Name', keep: true },
   ];
 }
 

@@ -72,8 +72,9 @@ the docs understands what they see, knows what matters, and knows what to do nex
   item, columns aligned, the id last. One column takes
   the remaining width and wraps; on a narrow terminal the least important columns are left out
   rather than squeezed, and a column that is empty for every row is not shown. If the table still
-  does not fit, long labels are cut with an ellipsis, then the wrapping column gets narrower; a
-  word too long for the wrapping column (a path, a URL) is broken across lines, never cut. Widths
+  does not fit, long labels are cut with an ellipsis and the wrapping column gets narrower; a
+  record's name is never cut, since it is what people type. A word too long for the wrapping
+  column (a path, a URL) is broken across lines, never cut. Widths
   are counted in terminal columns: CJK characters and emoji take two.
 
 ## Shape of a screen (CLI)

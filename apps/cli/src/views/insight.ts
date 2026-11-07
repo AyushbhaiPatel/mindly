@@ -69,7 +69,7 @@ export function renderConflicts(
       { header: 'What', fill: true, min: 30 },
       { header: 'Status', drop: 2 },
       { header: 'When', right: true, drop: 1 },
-      { header: 'Name' },
+      { header: 'Name', keep: true },
     ],
     list.map((c): TableRow => ({
       cells: [

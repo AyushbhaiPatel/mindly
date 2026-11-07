@@ -272,6 +272,11 @@ export interface Column {
    * column are never dropped.
    */
   drop?: number;
+  /**
+   * Never cut or dropped, whatever the width: the column of record names, which are what people
+   * type to refer to a record.
+   */
+  keep?: boolean;
 }
 
 /** One row of a table: its cells, and an optional dimmed note under the row. */
@@ -307,7 +312,7 @@ export interface Screen {
    * An aligned table with a dimmed header row. Cells may carry colour codes. The fill column
    * wraps (breaking words too long for it); on a narrow terminal the least important columns are
    * left out rather than squeezed, and if it still does not fit, long cells are cut with an
-   * ellipsis and the fill column gets narrower than its `min`.
+   * ellipsis and the fill column gets narrower than its `min`. `keep` columns are never cut.
    */
   table(columns: readonly Column[], rows: readonly (TableRow | readonly string[])[]): void;
   /** A blank line, then the next steps with aligned commands. */
@@ -357,7 +362,7 @@ export function screenFor(
     },
     section: (title) => {
       write('');
-      write(style.bold(title));
+      for (const l of wrap(title, width)) write(style.bold(l));
     },
     text: (text, indent = 0) => para(text, indent, false),
     note: (text, indent = 0) => para(text, indent, true),
@@ -445,30 +450,38 @@ export function screenFor(
       for (;;) {
         if (widthOf(shown, fillMin) <= width) break;
         const droppable = shown
-          .filter((i) => i !== 0 && i !== fillAt && (columns[i]?.drop ?? 0) > 0)
+          .filter(
+            (i) =>
+              i !== 0 && i !== fillAt && columns[i]?.keep !== true && (columns[i]?.drop ?? 0) > 0,
+          )
           .sort((a, b) => (columns[b]?.drop ?? 0) - (columns[a]?.drop ?? 0));
         const drop = droppable[0];
         if (drop === undefined) break;
         shown = shown.filter((i) => i !== drop);
       }
-      // Still too wide: cut the widest other columns, one column at a time, down to `limit`.
+      // Still too wide: cut the widest columns that may be cut (never a `keep` column), one
+      // column at a time, down to `limit`; or let the fill column wrap narrower, down to `limit`.
       const narrow = (limit: number): void => {
         while (widthOf(shown, fillMin) > width) {
           const widest = shown
-            .filter((i) => i !== fillAt && (widths[i] ?? 0) > limit)
+            .filter((i) => i !== fillAt && columns[i]?.keep !== true && (widths[i] ?? 0) > limit)
             .sort((a, b) => (widths[b] ?? 0) - (widths[a] ?? 0))[0];
           if (widest === undefined) return;
           widths[widest] = (widths[widest] ?? 0) - 1;
         }
       };
-      // Long labels go first (a readable name is at most 21 wide and stays whole), then the fill
-      // column wraps narrower than its minimum (nothing is lost), then every column gets cut.
+      const narrowFill = (limit: number): void => {
+        const over = shown.includes(fillAt) ? widthOf(shown, fillMin) - width : 0;
+        if (over > 0) fillMin = Math.max(Math.min(fillMin, limit), fillMin - over);
+      };
+      // Long labels go first, then the fill column wraps narrower (nothing is lost), then labels
+      // are cut further, and so on until the table fits next to its whole names.
       narrow(24);
-      if (shown.includes(fillAt)) {
-        const over = widthOf(shown, fillMin) - width;
-        if (over > 0) fillMin = Math.max(Math.min(fillMin, 16), fillMin - over);
-      }
+      narrowFill(16);
       narrow(8);
+      narrowFill(8);
+      narrow(4);
+      narrowFill(1);
       const fillWidth =
         fillAt >= 0 && shown.includes(fillAt)
           ? Math.max(fillMin, Math.min(widths[fillAt] ?? 0, width - widthOf(shown, 0)))
@@ -478,10 +491,12 @@ export function screenFor(
         const w = colWidth(i);
         const len = visibleLength(text);
         if (len > w) {
-          // Truncate a non-fill cell (the fill column wraps instead).
-          const room = Math.max(0, w - visibleLength(sym.ellipsis));
+          // Truncate a non-fill cell (the fill column wraps instead), with an ellipsis when the
+          // column has room for one.
+          const mark = w > visibleLength(sym.ellipsis) ? sym.ellipsis : '';
+          const room = w - visibleLength(mark);
           const kept = room > 0 ? (cutByWidth(text, room)[0] ?? '') : '';
-          return `${kept}${' '.repeat(Math.max(0, room - visibleLength(kept)))}${sym.ellipsis}`;
+          return `${kept}${' '.repeat(Math.max(0, room - visibleLength(kept)))}${mark}`;
         }
         const fillBy = ' '.repeat(w - len);
         return columns[i]?.right ? `${fillBy}${text}` : `${text}${fillBy}`;

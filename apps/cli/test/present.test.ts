@@ -177,6 +177,27 @@ describe('screen', () => {
     expect(visibleLength('使用 pnpm 🚀 e\u0301')).toBe(14);
   });
 
+  it('keeps record names whole and fits a narrow terminal', () => {
+    for (const LANG of ['C', 'en_US.UTF-8']) {
+      const { sc, lines } = capture({ LANG, COLUMNS: '40' });
+      sc.table(
+        [
+          { header: 'Status' },
+          { header: 'Title', fill: true, min: 24 },
+          { header: 'From', drop: 1 },
+          { header: 'Name', keep: true },
+        ],
+        [
+          ['[!] waiting for you', "Don't use default exports", 'you', 'tranquil-woolly-255'],
+          ['[ok] approved', 'Use pnpm', 'Claude Code', 'calm-otter-7'],
+        ],
+      );
+      expect(lines.every((l) => visibleLength(l) <= 40)).toBe(true);
+      expect(lines.join('\n')).toContain(' tranquil-woolly-255 ');
+      expect(lines.join('\n')).toContain(' calm-otter-7 ');
+    }
+  });
+
   it('wraps a long path in the fill column in full', () => {
     const { sc, lines } = capture({ LANG: 'C', COLUMNS: '40' });
     const path = 'packages/billing/src/services/invoice-generator-v2.ts';
