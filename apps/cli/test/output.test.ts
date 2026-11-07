@@ -101,19 +101,23 @@ describe('human output on a real project', () => {
       /^Mindly - mindly-cli-repo-\w+ - 2 agents working - 4 things need you$/,
     );
     // Agents are a table: name, status, branch, what the agent is doing.
-    expect(r.stdout).toMatch(/Agent\s+Status\s+Branch\s+Doing/);
-    expect(r.stdout).toMatch(/\* Codex - [0-9a-f]{8}\s+working\s+main\s+editing src\/dash\.ts/);
+    expect(r.stdout).toMatch(/Agent[\s|]+Status[\s|]+Branch[\s|]+Doing/);
     expect(r.stdout).toMatch(
-      /\* Claude Code - [0-9a-f]{8}\s+working\s+main\s+edited src\/auth\.ts/,
+      /\* Codex - [0-9a-f]{8}[\s|]+working[\s|]+main[\s|]+editing src\/dash\.ts/,
     );
-    expect(r.stdout).toMatch(/\[!\] Conflict\s+Claude Code - /);
-    const flat = r.stdout.replace(/\s+/g, ' ');
+    expect(r.stdout).toMatch(
+      /\* Claude Code - [0-9a-f]{8}[\s|]+working[\s|]+main[\s|]+edited src\/auth\.ts/,
+    );
+    expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code - /);
+    const flat = r.stdout.replace(/[\s|]+/g, ' ');
     expect(flat).toContain("changed the exports of src/auth.ts; Codex's");
     expect(flat).toMatch(/Conflict Claude Code - [0-9a-f]{8} changed[^[]*\[[0-9a-f]{8}\]/);
     expect(r.stdout).toMatch(
-      /- Rule\s+"Don't use default exports" - suggested by you, in Claude Code/,
+      /- Rule[\s|]+"Don't use default exports" - suggested by you, in Claude Code/,
     );
-    expect(r.stdout).toMatch(/- Handoff\s+Waiting for Cursor: "Finish the dashboard login form"/);
+    expect(r.stdout).toMatch(
+      /- Handoff[\s|]+Waiting for Cursor: "Finish the dashboard login form"/,
+    );
     expect(r.stdout).toMatch(
       /^-> mindly conflict [0-9a-f]{8} resolve\s+mark the conflict resolved$/m,
     );
