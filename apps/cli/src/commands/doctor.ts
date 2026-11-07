@@ -2,14 +2,14 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describeError, homePaths, mindlyHome, shortId, type HomePaths } from '@mindly/core';
 import { checkSafePattern, type Mindly, type ProjectContext } from '@mindly/engine';
-import { gitVersion, versionAtLeast } from '@mindly/git';
+import { gitVersion, mirrorRemotes, versionAtLeast } from '@mindly/git';
 import { MIGRATIONS, schemaVersion, Store } from '@mindly/store';
 import { withProject } from '../context.js';
 import { clean, type Out } from '../util.js';
 import { runningDaemon } from './daemon.js';
 import { inspectClaudeCodeStatusLine, McpClientAdapter } from '@mindly/adapters';
 import { adapterOf, adaptersFor, installCommand, SUPPORTED_AGENTS, userHome } from './setup.js';
-import type { Step } from '../present/index.js';
+import { count, type Step } from '../present/index.js';
 import { renderDoctor, type DoctorItem } from '../views/doctor.js';
 
 /** Result of one doctor check (the `--json` shape; keep it stable). */
@@ -227,6 +227,80 @@ function projectItem(project: ProjectContext): DoctorItem {
         `This project's (${name}) .mindly/config.json is not trusted, so its checks do not run`,
         { cmd: 'mindly trust', why: 'review its commands and trust it' },
       );
+}
+
+function bytesWords(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+/** Whether checkpoints (what `mindly bisect` searches) are on, how many exist and what they take. */
+async function checkpointItems(
+  mindly: Mindly,
+  project: ProjectContext,
+  cwd: string,
+): Promise<DoctorItem[]> {
+  const cfg = mindly.config.checkpoints;
+  if (!cfg.enabled) {
+    return [
+      item(
+        { name: 'checkpoints', status: 'info', detail: 'off (checkpoints.enabled is false)' },
+        'Optional',
+        'Checkpoints are off, so mindly bisect has nothing to search',
+        {
+          cmd: 'mindly config set checkpoints.enabled true',
+          why: 'save the code after every agent edit',
+        },
+      ),
+    ];
+  }
+  const worktree = await mindly.checkpoints.worktreeOf(cwd);
+  if (!worktree) {
+    return [
+      item(
+        { name: 'checkpoints', status: 'info', detail: 'not a git repository' },
+        'Optional',
+        'This folder is not a git repository, so Mindly keeps no checkpoints here (mindly bisect needs them)',
+      ),
+    ];
+  }
+  const stats = await mindly.checkpoints.stats(project.project.id);
+  const disk = stats.diskBytes === null ? '' : `, about ${bytesWords(stats.diskBytes)} on disk`;
+  const items = [
+    item(
+      {
+        name: 'checkpoints',
+        status: 'ok',
+        detail: `on: ${stats.count} stored${disk}, kept ${cfg.keepDays} days`,
+      },
+      'Optional',
+      `Checkpoints are on: ${count(stats.count, 'step')} saved for mindly bisect${disk}, kept ${cfg.keepDays} days (at most ${cfg.maxPerWorktree} per checkout)`,
+    ),
+  ];
+  let mirrors: string[] = [];
+  try {
+    mirrors = await mirrorRemotes(worktree);
+  } catch {
+    // Not knowing is not a problem to report.
+  }
+  for (const remote of mirrors) {
+    const name = clean(remote, 80);
+    items.push(
+      item(
+        {
+          name: 'checkpoints-mirror',
+          status: 'warn',
+          detail: `remote ${name} is a mirror: git push --mirror also pushes hidden checkpoint refs`,
+        },
+        'Setup',
+        `Remote ${name} has remote.${name}.mirror set, so git push --mirror would also push Mindly's hidden checkpoint refs (copies of this code after each agent edit) to it`,
+        `Push branches explicitly instead, or unset it with: git config --unset remote.${name}.mirror`,
+      ),
+    );
+  }
+  return items;
 }
 
 /** Pattern contracts whose pattern no longer passes the safety check, so they cannot run. */
@@ -493,9 +567,10 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
   if (paths && existsSync(paths.home)) {
     try {
       items.push(
-        ...(await withProject(out.io, ({ mindly, project }): DoctorItem[] => [
+        ...(await withProject(out.io, async ({ mindly, project }): Promise<DoctorItem[]> => [
           projectItem(project),
           ...rejectedPatternItems(mindly, project),
+          ...(await checkpointItems(mindly, project, out.io.cwd)),
         ])),
       );
     } catch (err) {

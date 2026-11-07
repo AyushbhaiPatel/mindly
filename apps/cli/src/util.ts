@@ -2,6 +2,13 @@ import { MindlyError, sanitizeForContext, sanitizeLine } from '@mindly/core';
 import { styleFor, type CliIo, type Style } from './io.js';
 import { screenFor, type Screen } from './present/terminal.js';
 
+/**
+ * Stands in for the `--` marker of `mindly bisect -- <command>`, which the option parser drops:
+ * put right after it, it keeps a command named like a subcommand (`mindly bisect -- list`) from
+ * being taken for that subcommand.
+ */
+export const LITERAL_MARK = '\0literal';
+
 /** Exit codes of the `mindly` command. */
 export const EXIT_OK = 0;
 export const EXIT_ERROR = 1;

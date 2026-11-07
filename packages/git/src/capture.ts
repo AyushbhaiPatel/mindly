@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { MindlyError, isDeniedPath } from '@mindly/core';
@@ -34,6 +34,7 @@ export async function commitTree(
   tree: string,
   parents: readonly string[],
   message: string,
+  options: { timeoutMs?: number } = {},
 ): Promise<string> {
   for (const id of [tree, ...parents]) {
     if (!/^[0-9a-f]{40,64}$/.test(id)) throw new MindlyError('invalid_input', 'invalid object id');
@@ -45,8 +46,21 @@ export async function commitTree(
     cwd,
     env: syntheticIdentityEnv(),
     input: message.replace(/\0/g, '').slice(0, 2000) || 'mindly',
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
   return res.stdout.trim();
+}
+
+/**
+ * Copies the real index to a private file, keeping its timestamps. Git decides whether an entry
+ * may be trusted from its stat cache by comparing the entry's mtime with the index file's mtime
+ * (the "racily clean" check); a copy with a fresh mtime would make git keep a stale blob for a
+ * file rewritten with the same size within the same second as the last `git add`.
+ */
+export function copyIndex(realIndex: string, target: string): void {
+  const st = statSync(realIndex);
+  copyFileSync(realIndex, target);
+  utimesSync(target, st.atime, st.mtime);
 }
 
 /** Options for `captureWorktreeCommit`. */
@@ -104,7 +118,7 @@ export async function captureWorktreeCommit(
     let seeded = false;
     if (existsSync(realIndex)) {
       try {
-        copyFileSync(realIndex, tmpIndex);
+        copyIndex(realIndex, tmpIndex);
         seeded = true;
       } catch {
         seeded = false;

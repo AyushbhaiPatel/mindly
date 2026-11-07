@@ -63,6 +63,17 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - Model API keys are read from environment variables at call time and never written to disk by
   Mindly.
 - Pager payloads contain titles and counts only, never code or prompt text.
+- Checkpoints (`mindly bisect`) store the working tree after each agent edit as git commits
+  inside the repository itself, under `refs/mindly/steps/<worktree id>/<step>`. They hold code,
+  not prompts; the prompt is linked by event id and goes through the usual redaction and
+  retention. Paths on the deny-list (and the project's `ignore` globs) keep their HEAD content
+  in every checkpoint tree, so a modified or untracked `.env` is never stored. The private index
+  files Mindly uses to take them live under `$MINDLY_HOME/checkpoints/`, never in the
+  repository. Hidden refs are not sent by a normal `git push`, `git push --all` or
+  `git push --tags`; `git push --mirror` does send them, so `mindly doctor` warns when a remote
+  has `remote.<name>.mirror` set. Checkpoints are deleted after `checkpoints.keepDays` (14) or
+  beyond `checkpoints.maxPerWorktree` (5,000), by `mindly forget --project` and by
+  `mindly uninstall`; `checkpoints.enabled = false` turns them off.
 
 ### T4. Local network and browser attacks on the daemon
 
@@ -93,6 +104,11 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - Headless agent runs (replay, review, failover) are opt-in per invocation or by explicit config,
   run in isolated temporary worktrees, and use the agent's own permission system in its most
   restrictive mode that can complete the task (review runs are read-only).
+
+- `mindly bisect` runs only the command the user typed after `--` (and the `--setup` command
+  they gave), as an argument list without a shell, in a scratch worktree in a temp directory with
+  a minimal environment and a time limit; nothing from the repository, memory or agent output
+  chooses what runs. Agents cannot start a bisect: there is no MCP tool or daemon endpoint for it.
 
 ### T7. Denial of service against agents
 
@@ -176,7 +192,8 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 ## Data retention and deletion
 
 - `mindly export` writes everything for a project as JSON.
-- `mindly forget --project` hard-deletes a project's rows and vacuums the database.
+- `mindly forget --project` hard-deletes a project's rows, deletes its checkpoint refs from the
+  repositories and vacuums the database.
 - `mindly forget --memory <id>` hard-deletes one memory and its history.
 - Raw prompts are kept for 30 days by default (`retention.promptsDays`), then reduced to their
   redacted summary.

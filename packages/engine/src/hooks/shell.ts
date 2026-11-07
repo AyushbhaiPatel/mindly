@@ -50,7 +50,7 @@ export function mentionsPath(command: string, path: string): boolean {
 }
 
 /** Whether every part of the command is a known read-only program without output redirection. */
-function isReadOnly(command: string): boolean {
+export function isReadOnlyCommand(command: string): boolean {
   // `2>&1`, `>&2` only move streams; any other `>` writes a file.
   const streams = command.replace(/\d*>&\d+/g, ' ');
   if (streams.includes('>')) return false;
@@ -81,5 +81,13 @@ function isReadOnly(command: string): boolean {
  * that depends on the file not being written is dropped rather than counted.
  */
 export function shellMayWrite(command: string, path: string): boolean {
-  return mentionsPath(command, path) && !isReadOnly(command);
+  return mentionsPath(command, path) && !isReadOnlyCommand(command);
+}
+
+/**
+ * Whether a shell command may have written any file: it is not made only of read-only programs.
+ * Cautious like `shellMayWrite`: when in doubt it says yes, so a checkpoint rescan follows.
+ */
+export function shellMayWriteFiles(command: string): boolean {
+  return !isReadOnlyCommand(command);
 }

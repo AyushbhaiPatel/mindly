@@ -16,7 +16,12 @@ import { AuthState, loadOrCreateToken } from './auth.js';
 import type { Listener } from './http/security.js';
 import type { JobContext } from './jobs/context.js';
 import { contractsTick } from './jobs/contracts.js';
-import { housekeepingTick, selfHealingTick, standupTick } from './jobs/maintenance.js';
+import {
+  checkpointPruneTick,
+  housekeepingTick,
+  selfHealingTick,
+  standupTick,
+} from './jobs/maintenance.js';
 import { failoverTick } from './jobs/runs.js';
 import { Scheduler } from './jobs/scheduler.js';
 import { shadowMergeTick } from './jobs/shadow-merge.js';
@@ -279,6 +284,12 @@ export function registerJobs(jobs: JobContext): void {
     run: () => {
       housekeepingTick(jobs);
     },
+  });
+  scheduler.every({
+    name: 'checkpoint-prune',
+    intervalMs: 60 * MINUTE,
+    initialDelayMs: 3 * MINUTE,
+    run: () => checkpointPruneTick(jobs),
   });
   if (config.standup.time) {
     scheduler.every({ name: 'standup', intervalMs: MINUTE, run: () => standupTick(jobs) });

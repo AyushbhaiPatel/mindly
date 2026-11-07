@@ -50,8 +50,9 @@ function splitInput(store: Store, projectId: string, slug = 'billing'): SplitCre
 describe('migration v3 (split)', () => {
   it('adds the split tables and the handoff worktree column', () => {
     const { store } = setup();
-    expect(MIGRATIONS).toHaveLength(3);
-    expect(schemaVersion(store.db)).toBe(3);
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(3);
+    expect(MIGRATIONS[2]).toContain('CREATE TABLE splits');
+    expect(schemaVersion(store.db)).toBe(MIGRATIONS.length);
     const tables = (
       store.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
         name: string;

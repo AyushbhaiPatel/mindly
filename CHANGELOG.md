@@ -3,6 +3,47 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## Unreleased
+
+### Added
+
+- `mindly bisect -- <command>` finds the agent edit that broke a command. Mindly now keeps a
+  checkpoint of the code after every agent edit: a git commit of the whole working tree stored
+  under a hidden ref (`refs/mindly/steps/<worktree>/<step>`) in your repository, taken through a
+  private index so your index, HEAD, branches, stash and files are never touched. Each checkpoint
+  is a parentless commit, so pruning one really frees it. Secret files on the deny-list are never
+  stored. After an edit tool only the touched paths are refreshed; a full
+  rescan happens at session start, on each prompt and after a shell command that may have written
+  files, and changes no agent edit explains become an `outside` step. Checkpoints never block or
+  slow a hook: a busy lock or a git error skips the checkpoint and marks the next one as a gap.
+  `mindly bisect` checks the steps out one by one in a scratch worktree in a temp folder (never in
+  your checkout), runs the command without a shell with a minimal environment and a time limit,
+  reads exit codes like `git bisect run` (0 good, 125 skip, else bad), binary-searches, re-runs
+  the two steps around the answer and calls the result unreliable when they disagree. The result
+  names the step, the agent and session, the prompt, the rules in effect for those files then,
+  the last good step and the failing output; `--setup "<command>"` installs dependencies first
+  and again only when a step changes a lockfile or manifest; `--since`, `--good` and `--bad`
+  pick the range; `--json` has a stable shape. A reliable result made by an agent is recorded as a
+  mistake memory from you, scoped to the step's paths, and every bisect is stored as a run of the
+  new kind `bisect`.
+- `mindly bisect list`, `mindly bisect show <step> [--patch]` and `mindly bisect revert <step>`,
+  which applies the reverse of that one step to your checkout with `git apply -R --3way` after
+  showing the patch and asking (it refuses when the lines changed since, never commits and never
+  touches other files).
+- `checkpoints.enabled` (default true), `checkpoints.keepDays` (14) and
+  `checkpoints.maxPerWorktree` (5,000) in the user config. The daemon prunes old checkpoints
+  hourly; without the daemon a hook prunes at most once a day. `mindly forget --project` and
+  `mindly uninstall` delete the hidden refs and rows, and `mindly doctor` reports whether
+  checkpoints are on, how many exist, their approximate disk use, and warns when a remote has
+  `remote.<name>.mirror` set (a `git push --mirror` would push the hidden refs).
+- Database schema v4: a `checkpoints` table, and the `runs` table rebuilt so it accepts the
+  `bisect` run kind. Applied automatically; upgrades from v1, v2 and v3 keep every row.
+
+### Changed
+
+- Once a Mindly with schema v4 has upgraded your database, an older Mindly (0.3.0 or earlier)
+  cannot open it any more. Upgrade every Mindly install on the machine together.
+
 ## 0.3.0 — 2026-11-05
 
 ### Added

@@ -48,6 +48,68 @@ export interface GitPort {
   isMerged?(repoRoot: string, branch: string, into: string): Promise<boolean>;
   /** Optional (splits): the operations `mindly split` needs; absent when git is unavailable. */
   split?: SplitGitPort;
+  /** Optional (bisect): checkpoints of the working tree after every agent edit. */
+  checkpoints?: CheckpointGitPort;
+}
+
+/** What one checkpoint capture needs. */
+export interface CheckpointCaptureInput {
+  /** The working tree (canonical path). */
+  worktree: string;
+  /** Private index file for this working tree, outside the repository. */
+  indexFile: string;
+  /** The previous checkpoint, the new commit's parent. */
+  parent: { commit: string } | null;
+  /** Paths an edit tool touched (only they are refreshed), or null for a full rescan. */
+  paths: readonly string[] | null;
+  /** Create the commit even when the tree is unchanged. */
+  always: boolean;
+  ref: string;
+  message: string;
+  extraDeny: readonly string[];
+  timeoutMs: number;
+}
+
+/** Result of one checkpoint capture. */
+export interface CheckpointCaptureResult {
+  /** The new commit, or null when nothing changed and `always` was false. */
+  commit: string | null;
+  tree: string;
+  changed: boolean;
+  changedPaths: string[];
+  /** Denied paths left out. */
+  skipped: string[];
+  /** True when the private index did not exist, so the whole tree was scanned. */
+  fresh: boolean;
+}
+
+/** A checkpoint ref found in a repository. */
+export interface CheckpointRefEntry {
+  worktreeId: string;
+  seq: number;
+  ref: string;
+  commit: string;
+  /** When the checkpoint commit was made (ms since the epoch). */
+  createdAt: number;
+}
+
+/** Git operations behind checkpoints. Every method may throw a `MindlyError`. */
+export interface CheckpointGitPort {
+  /** Canonical (`realpath.native`) top-level directory of the working tree containing `cwd`, or null. */
+  worktreeRoot(cwd: string): Promise<string | null>;
+  /** Stable id of a working tree, as used in its ref names. */
+  worktreeId(worktree: string): string;
+  /** Ref name of step `seq` of `worktree`. */
+  refName(worktree: string, seq: number): string;
+  capture(input: CheckpointCaptureInput): Promise<CheckpointCaptureResult>;
+  /** Checkpoint refs of the repository containing `repoDir` (any existing directory of it). */
+  listRefs(repoDir: string): Promise<CheckpointRefEntry[]>;
+  /** Deletes checkpoint refs of the repository containing `repoDir`; missing ones are ignored. */
+  deleteRefs(repoDir: string, refs: readonly string[]): Promise<number>;
+  /** Approximate bytes checkpoint objects take on disk, or null when unknown. */
+  diskUsage(repoDir: string): Promise<number | null>;
+  /** Takes the per-worktree lock (a create-exclusive file) without waiting; null when busy. */
+  tryLock(lockFile: string): { release(): void } | null;
 }
 
 /** One side of a split merge check: a part's worktree. */

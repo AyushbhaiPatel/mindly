@@ -18,8 +18,9 @@ import { memoryLine, renderSections } from '../context/render.js';
 import type { IntentService } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { LIVE_WINDOW_MS, type ChangedFile, type EngineBus, type Kernel } from '../kernel.js';
+import type { CheckpointService } from '../features/checkpoints.js';
 import { commandKey, type MistakeService } from '../memory/mistakes.js';
-import { normalizeCommandLine, shellMayWrite } from './shell.js';
+import { normalizeCommandLine, shellMayWrite, shellMayWriteFiles } from './shell.js';
 import type { RuleService } from '../memory/rules.js';
 import type { ProjectContext, ProjectService } from '../projects.js';
 
@@ -47,6 +48,7 @@ export interface HookDeps {
   telepathy: TelepathyService;
   rules: RuleService;
   mistakes: MistakeService;
+  checkpoints: CheckpointService;
   bus: EngineBus;
 }
 
@@ -174,6 +176,9 @@ export class HookHandler {
       type: 'session.started',
       payload: { agent: session.agentKind, source: evt.startSource, branch: session.branch },
     });
+    // A full rescan: whatever changed since the last checkpoint happened outside any agent.
+    await this.d.checkpoints.rescan(project, evt.cwd);
+    await this.d.checkpoints.pruneIfDue(project.project.id);
     await this.d.bus.emit('session.started', {
       projectId: project.project.id,
       projectRoot: project.root,
@@ -203,6 +208,7 @@ export class HookHandler {
       },
     });
     if (session.status !== 'active') this.k.store.sessions.setStatus(session.id, 'active');
+    await this.d.checkpoints.rescan(project, evt.cwd);
     const rules = await this.d.rules.captureFromPrompt({
       projectId: project.project.id,
       projectRoot: project.root,
@@ -379,6 +385,11 @@ export class HookHandler {
         failed: tool.failed,
       });
     }
+    // A shell command that may have written files: whatever changed goes into a step no agent
+    // edit explains. A shell tool that reports its own edits (a patch) is handled as an edit.
+    if (tool.shell && tool.command && !tool.writes && shellMayWriteFiles(tool.command)) {
+      await this.d.checkpoints.rescan(project, evt.cwd);
+    }
     if (tool.shell && tool.failed && tool.command) {
       this.d.mistakes.recordFailedCommand({
         projectId: project.project.id,
@@ -398,11 +409,12 @@ export class HookHandler {
       limit: 1,
     })[0];
     const changed: ChangedFile[] = [];
+    let firstChangeId: string | null = null;
     for (const edit of tool.edits.slice(0, 50)) {
       const [resolved] = await this.projectPaths(project, evt.cwd, [edit.path]);
       if (!resolved) continue;
       const hashes = this.provenanceHashes(resolved.abs, edit.addedText);
-      this.k.store.fileChanges.record({
+      const recorded = this.k.store.fileChanges.record({
         projectId: project.project.id,
         sessionId: session.id,
         path: resolved.rel,
@@ -412,6 +424,7 @@ export class HookHandler {
         removedLines: countLines(edit.removedText),
         promptEventId: promptEvent?.id ?? null,
       });
+      firstChangeId ??= recorded.id;
       changed.push({
         path: resolved.rel,
         abs: resolved.abs,
@@ -426,6 +439,13 @@ export class HookHandler {
       sessionId: session.id,
       type: 'file.changed',
       payload: { paths: changed.map((c) => c.path), tool: tool.name },
+    });
+    // The checkpoint of this edit: the tree after it, holding only the paths the tool touched.
+    await this.d.checkpoints.afterEdit(project, session, evt.cwd, {
+      paths: changed.map((c) => c.path),
+      tool: tool.name,
+      fileChangeId: firstChangeId,
+      promptEventId: promptEvent?.id ?? null,
     });
     for (const c of changed) this.d.intents.checkRecentEditors(session, c.path);
     await this.d.bus.emit('files.changed', {

@@ -2,7 +2,13 @@ import { loadUserConfig, ensureHome, mindlyHome, type UserConfig } from '@mindly
 import { installDefaultModules, Mindly, type MindlyOptions } from '@mindly/engine';
 import { createGitPort, createLlmPort, createNotifierPort } from './ports.js';
 
-export { createGitPort, createLlmPort, createNotifierPort, createSplitGitPort } from './ports.js';
+export {
+  createCheckpointGitPort,
+  createGitPort,
+  createLlmPort,
+  createNotifierPort,
+  createSplitGitPort,
+} from './ports.js';
 
 export interface RuntimeOptions extends Omit<MindlyOptions, 'ports' | 'config'> {
   /** Skip optional model access even if configured (hooks on a tight budget). */

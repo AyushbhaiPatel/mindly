@@ -398,6 +398,8 @@ export function runKindWords(kind: RunKind | string | null | undefined): string 
       return 'review';
     case 'contract_sweep':
       return 'checks run';
+    case 'bisect':
+      return 'bisect';
     default:
       return 'run';
   }

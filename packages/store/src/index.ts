@@ -1,5 +1,6 @@
 import { systemClock, type Clock } from '@mindly/core';
 import { openDatabase, transaction, type Db, type OpenOptions } from './db.js';
+import { CheckpointRepo } from './repos/checkpoints.js';
 import { EventRepo, ProjectRepo, SessionRepo } from './repos/core.js';
 import { IdRepo } from './repos/ids.js';
 import { MemoryRepo } from './repos/memories.js';
@@ -18,6 +19,7 @@ import { ConflictRepo, DeliveryRepo, FileChangeRepo, IntentRepo, TaskRepo } from
 export * from './db.js';
 export * from './glance.js';
 export { MIGRATIONS } from './migrations.js';
+export * from './repos/checkpoints.js';
 export * from './repos/core.js';
 export * from './repos/ids.js';
 export * from './repos/memories.js';
@@ -48,6 +50,7 @@ export class Store {
   readonly kv: KvRepo;
   readonly saves: SaveRepo;
   readonly splits: SplitRepo;
+  readonly checkpoints: CheckpointRepo;
   /** Resolves full, short and prefix ids typed by people (CLI, dashboard search). */
   readonly ids: IdRepo;
 
@@ -72,6 +75,7 @@ export class Store {
     this.kv = new KvRepo(db, clock);
     this.saves = new SaveRepo(db, clock);
     this.splits = new SplitRepo(db, clock);
+    this.checkpoints = new CheckpointRepo(db, clock);
     this.ids = new IdRepo(db);
   }
 

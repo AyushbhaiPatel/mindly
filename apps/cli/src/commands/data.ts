@@ -196,7 +196,7 @@ export async function forget(
     const counts = mindly.store.memories.count(pid);
     const memories = Object.values(counts).reduce((a, b) => a + b, 0);
     out.line(
-      `This permanently deletes everything Mindly stored for ${clean(project.project.name, 80)} (${clean(project.root, 300)}): ${plural(memories, 'memory', 'memories')}, sessions, events, tasks, snapshots and runs.`,
+      `This permanently deletes everything Mindly stored for ${clean(project.project.name, 80)} (${clean(project.root, 300)}): ${plural(memories, 'memory', 'memories')}, sessions, events, tasks, snapshots, checkpoints and runs.`,
     );
     out.line(
       out.style.dim(
@@ -207,6 +207,8 @@ export async function forget(
       out.line('Nothing was deleted.');
       return 1;
     }
+    // Checkpoint refs live in the repositories: delete them before their rows go.
+    await mindly.checkpoints.forget(pid);
     mindly.store.projects.delete(pid);
     mindly.store.vacuum();
     out.line(`Forgotten: Mindly no longer has any data for ${clean(project.project.name, 80)}.`);

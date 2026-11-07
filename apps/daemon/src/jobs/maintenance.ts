@@ -61,6 +61,12 @@ export function housekeepingTick(ctx: JobContext): HousekeepingResult {
   return result;
 }
 
+/** Deletes checkpoints past `checkpoints.keepDays` or `checkpoints.maxPerWorktree` in every project. */
+export async function checkpointPruneTick(ctx: JobContext): Promise<void> {
+  const r = await ctx.mindly.checkpoints.pruneAll();
+  if (r.refsDeleted > 0 || r.rowsDeleted > 0) ctx.logger.info('checkpoint prune', { ...r });
+}
+
 /**
  * Sends the scheduled standup (when `config.standup.time` is set) for each project that is due,
  * then marks it delivered. Projects with nothing to report are marked without a notification.

@@ -1,4 +1,5 @@
 import type { Mindly, MindlyModule } from '../mindly.js';
+import { BisectService } from './bisect.js';
 import { contractsModule, ContractService } from './contracts.js';
 import { impactModule, ImpactService } from './impact.js';
 import { provenanceModule, ProvenanceService } from './provenance.js';
@@ -9,6 +10,8 @@ import { splitModule } from './split.js';
 import { xrayModule, XRayService } from './xray.js';
 import { continuityModules } from './continuity.js';
 
+export * from './bisect.js';
+export * from './checkpoints.js';
 export * from './contracts.js';
 export * from './impact.js';
 export * from './provenance.js';
@@ -83,4 +86,9 @@ export function savesOf(mindly: Mindly): SavesService {
 /** The Context X-Ray service of `mindly`. */
 export function xrayOf(mindly: Mindly): XRayService {
   return serviceOf(mindly, 'xray', () => new XRayService(mindly.kernel));
+}
+
+/** The bisect service of `mindly` (explains steps, records runs and lessons). */
+export function bisectOf(mindly: Mindly): BisectService {
+  return serviceOf(mindly, 'bisect', () => new BisectService(mindly.kernel, mindly.memory));
 }

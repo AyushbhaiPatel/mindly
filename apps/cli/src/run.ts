@@ -8,6 +8,7 @@ import {
   EXIT_OK,
   EXIT_USAGE,
   HintedError,
+  LITERAL_MARK,
   outFor,
   positiveInt,
   stripControl,
@@ -546,6 +547,64 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .option('--json', 'machine-readable output')
     .action(act((o: object) => async (out) => (await import('./commands/runs.js')).replay(out, o)));
 
+  // ---- bisect --------------------------------------------------------------------------------
+  const bisectCmd = program
+    .command('bisect')
+    .description('Find the agent edit that broke a command (binary search over checkpoints)')
+    .argument('[command...]', 'the command to run at each step, after --, e.g. -- pnpm test')
+    .option('--since <duration>', 'oldest step to consider, e.g. 24h or 7d (default 24h)')
+    .option('--good <step>', 'a step known to pass (see mindly bisect list)', positiveInt(1e9))
+    .option('--bad <step>', 'a step known to fail (default: the newest)', positiveInt(1e9))
+    .option('--worktree <path>', 'checkout to search (default: the current folder)')
+    .option('--setup <cmd>', 'install command, run first and again when a lockfile changes')
+    .option('--timeout <seconds>', 'time limit per run (default 300)', positiveInt(3600))
+    .option('-y, --yes', 'do not ask')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (command: string[], o: object) => async (out) =>
+          (await import('./commands/bisect.js')).bisectRun(out, command, o),
+      ),
+    );
+  bisectCmd
+    .command('list')
+    .description('Checkpoints of this checkout, newest first')
+    .option('--since <duration>', 'how far back to look (default 24h)')
+    .option('--worktree <path>', 'checkout to list (default: the current folder)')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/bisect.js')).bisectList(out, cmd.optsWithGlobals()),
+      ),
+    );
+  bisectCmd
+    .command('show')
+    .description('One step: who made it, from which prompt, and what changed')
+    .argument('<step>', 'step number, as mindly bisect list shows it')
+    .option('--patch', 'show the full patch instead of the file summary')
+    .option('--worktree <path>', 'checkout of the step (default: the current folder)')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (step: string, _o: object, cmd: Command) => async (out) =>
+          (await import('./commands/bisect.js')).bisectShow(out, step, cmd.optsWithGlobals()),
+      ),
+    );
+  bisectCmd
+    .command('revert')
+    .description("Undo one step's edit in your checkout (asks first; never commits)")
+    .argument('<step>', 'step number, as mindly bisect list shows it')
+    .option('-y, --yes', 'do not ask')
+    .option('--worktree <path>', 'checkout of the step (default: the current folder)')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (step: string, _o: object, cmd: Command) => async (out) =>
+          (await import('./commands/bisect.js')).bisectRevert(out, step, cmd.optsWithGlobals()),
+      ),
+    );
+
   program
     .command('export')
     .description("Export this project's data as JSON")
@@ -566,6 +625,22 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
 }
 
 /**
+ * Everything after `--` in `mindly bisect ... -- <command>` is the command to run, even when it
+ * starts with a subcommand name (`mindly bisect -- list`); the marker itself does not survive
+ * option parsing, so `LITERAL_MARK` is put in its place for `bisectRun` to strip.
+ */
+function markLiteralCommand(argv: readonly string[]): string[] {
+  const out = [...argv];
+  const dd = out.indexOf('--');
+  if (dd === -1) return out;
+  const before = out.slice(0, dd);
+  const subcommands = ['list', 'show', 'revert', 'help'];
+  if (!before.includes('bisect') || before.some((a) => subcommands.includes(a))) return out;
+  out.splice(dd + 1, 0, LITERAL_MARK);
+  return out;
+}
+
+/**
  * Runs the `mindly` command with `argv` (without the node and script paths) and returns the exit
  * code: 0 ok, 1 error, 2 usage. Never calls `process.exit`.
  */
@@ -575,7 +650,7 @@ export async function run(argv: readonly string[], io: CliIo = processIo()): Pro
     code = c;
   });
   try {
-    await program.parseAsync([...argv], { from: 'user' });
+    await program.parseAsync(markLiteralCommand(argv), { from: 'user' });
     return code;
   } catch (err) {
     if (err instanceof CommanderError) {
