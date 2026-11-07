@@ -485,8 +485,10 @@ function Shell({
         </nav>
         <div className="topbar-status">
           {client.mock && <span className="mock-tag">sample data</span>}
-          <TextLink onClick={() => setGuide(true)} label="What am I looking at?">
-            <span className="guide-btn">?</span>
+          <TextLink onClick={() => setGuide(true)} title="What am I looking at?">
+            <span className="guide-btn" aria-hidden="true">
+              ?
+            </span>
             <span className="guide-word">Guide</span>
           </TextLink>
           <span className={cx('live-pill', `live-${liveStatus}`)} role="status" aria-live="polite">

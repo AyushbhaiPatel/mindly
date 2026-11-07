@@ -173,8 +173,8 @@ function Pulse({
       <dl className="figures">
         {figures.map((f) => (
           <div key={f.label} className={cx('figure', `figure-${f.tone}`)}>
-            <dd>{f.n}</dd>
             <dt>{f.label}</dt>
+            <dd>{f.n}</dd>
           </div>
         ))}
       </dl>

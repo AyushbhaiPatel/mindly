@@ -2685,6 +2685,8 @@ dialog::backdrop {
   letter-spacing: -0.02em;
   color: var(--slate);
   font-variant-numeric: tabular-nums lining-nums;
+  /* the number reads first; the label (dt) comes first in the markup */
+  order: -1;
 }
 
 .figure dt {
@@ -2927,7 +2929,13 @@ dialog::backdrop {
     justify-items: start;
   }
 
+  /* hidden from view but kept as the button's accessible name */
   .guide-word {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 }

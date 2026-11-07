@@ -191,6 +191,7 @@ export function TextLink({
   disabled,
   type = 'button',
   label,
+  title,
   expanded,
   controls,
 }: {
@@ -201,6 +202,7 @@ export function TextLink({
   disabled?: boolean;
   type?: 'button' | 'submit';
   label?: string;
+  title?: string;
   expanded?: boolean;
   controls?: string;
 }) {
@@ -211,6 +213,7 @@ export function TextLink({
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
+      title={title}
       aria-expanded={expanded}
       aria-controls={controls}
     >
