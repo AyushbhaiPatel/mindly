@@ -1177,3 +1177,173 @@ export function describeEvent(
       return line('did something Mindly does not describe yet');
   }
 }
+
+/* ------------------------------------------------------------------------------------------ */
+/* Plain-language introductions: always visible, one sentence, under a title                 */
+/* ------------------------------------------------------------------------------------------ */
+
+/** The five pages, in the order of the navigation. */
+export type Page = 'home' | 'memory' | 'agents' | 'history' | 'settings';
+
+export const PAGES: readonly { key: Page; label: string; intro: string }[] = [
+  {
+    key: 'home',
+    label: 'Home',
+    intro:
+      'What your agents are doing in this project right now, what needs your decision, and where Mindly helped.',
+  },
+  {
+    key: 'memory',
+    label: 'Memory',
+    intro:
+      'What every agent is told about this project: rules, decisions, facts and known pitfalls. Agents can only suggest; you approve.',
+  },
+  {
+    key: 'agents',
+    label: 'Agents',
+    intro:
+      'Who is working on what, which files each agent is editing, what Mindly told whom, and work passed from one agent to another.',
+  },
+  {
+    key: 'history',
+    label: 'History',
+    intro:
+      'Merge checks, bisects and reviews that ran, exactly what each agent was told, and who wrote which line.',
+  },
+  {
+    key: 'settings',
+    label: 'Settings',
+    intro: 'This project, the commands Mindly may run here, and where your data lives.',
+  },
+];
+
+/** One-line introductions under section titles. Facts about what the section shows, in plain words. */
+export const INTRO = {
+  agentsNow:
+    'Every agent that worked in this folder in the last 30 minutes, and what it is doing. An agent shows up here on its own when it starts.',
+  decisions:
+    'Things only you can decide. Nothing here changes how agents work until you act on it.',
+  helped:
+    'Times Mindly stopped a problem. One counts only when what happened next proves the problem was avoided.',
+  activity: 'What agents and Mindly did, newest first.',
+  conflicts:
+    'Two agents whose work collides, or a change that breaks something another agent relies on.',
+  mergeCheck:
+    "Mindly merges every agent's work in a scratch copy and runs your checks, without touching your branches.",
+} as const;
+
+/** The sub-pages of Agents and History. */
+export const SUBPAGES = {
+  agents: [
+    { key: 'team', label: 'Working together' },
+    { key: 'split', label: 'Split' },
+  ],
+  history: [
+    { key: 'runs', label: 'Runs' },
+    { key: 'xray', label: 'What agents were told' },
+    { key: 'provenance', label: 'Who wrote this line' },
+    { key: 'standup', label: 'Standup' },
+    { key: 'snapshots', label: 'Snapshots' },
+  ],
+} as const;
+
+/** The short guide behind "What am I looking at?". */
+export const GUIDE: readonly { term: string; text: string }[] = [
+  {
+    term: 'Agent',
+    text: 'A coding assistant connected to Mindly: Claude Code, Codex, Cursor or Gemini CLI. Each session of one is listed on its own.',
+  },
+  {
+    term: 'Rule',
+    text: 'Something every agent must follow in this project ("use pnpm, never npm"). Agents can suggest rules from what you tell them; only you approve them.',
+  },
+  {
+    term: 'Decision',
+    text: 'A choice the project made, written down so agents stop re-deciding it. A decision can carry a check that runs after every edit.',
+  },
+  {
+    term: 'Conflict',
+    text: 'Two agents editing the same code, or a change that breaks something another agent relies on. You decide which change wins, then mark it resolved.',
+  },
+  {
+    term: 'Save',
+    text: 'A time Mindly stopped a problem: an agent warned before building on changed code, a write blocked by your rule, a merge conflict found early. Counted only with proof.',
+  },
+  {
+    term: 'Merge check',
+    text: "Mindly merges every agent's work in a scratch copy and runs your checks there, so you learn about conflicts before anything is merged.",
+  },
+  {
+    term: 'Bisect',
+    text: 'Finds the exact agent edit that broke a command, who made it and from which prompt. Run it with mindly bisect -- <command>.',
+  },
+  {
+    term: 'Split',
+    text: 'One goal divided between agents, each in its own copy of the repository with the files it owns, merged back into one branch.',
+  },
+  {
+    term: 'Handoff',
+    text: 'Unfinished work packaged up when an agent stops, for example at its usage limit. The next agent picks it up with the goal, plan and files.',
+  },
+];
+
+export interface HomeSummary {
+  working: number;
+  idle: number;
+  limited: number;
+  decisions: number;
+  conflicts: number;
+  savesWeek: number | undefined;
+}
+
+/**
+ * The one sentence at the top of Home: "2 agents working · 1 conflict open · 3 decisions wait
+ * for you · Mindly helped 4 times this week."
+ */
+export function homeSentence(s: HomeSummary): string {
+  const parts: string[] = [];
+  if (s.working > 0) parts.push(`${count(s.working, 'agent')} working`);
+  else if (s.idle > 0) parts.push(`${count(s.idle, 'agent')} idle, none working`);
+  else parts.push('No agent working right now');
+  if (s.limited > 0) parts.push(`${s.limited} at a usage limit`);
+  if (s.conflicts > 0) parts.push(`${count(s.conflicts, 'conflict')} open`);
+  else parts.push('nothing broken');
+  if (s.decisions > 0) {
+    parts.push(`${count(s.decisions, 'decision')} ${s.decisions === 1 ? 'waits' : 'wait'} for you`);
+  }
+  if (s.savesWeek !== undefined && s.savesWeek > 0) {
+    parts.push(`Mindly helped ${s.savesWeek === 1 ? 'once' : `${s.savesWeek} times`} this week`);
+  }
+  return `${parts.join(' · ')}.`;
+}
+
+/** What a group of "Needs you" items is, with its count: "3 suggested rules". */
+export function needGroupWords(kind: 'rule' | 'memory', n: number): string {
+  if (kind === 'rule') return count(n, 'suggested rule');
+  return count(n, 'suggested memory', 'suggested memories');
+}
+
+/** Why a group needs the user, in one line. */
+export function needGroupWhy(kind: 'rule' | 'memory'): string {
+  if (kind === 'rule') {
+    return 'Picked up from what you told an agent. Agents see them as hints until you approve them.';
+  }
+  return 'Facts and pitfalls an agent noticed. Agents treat them as unverified until you approve them.';
+}
+
+/** What an agent is doing, as one short phrase for its card. */
+export function agentDoingWords(input: {
+  status: Session['status'];
+  editing: readonly string[];
+  lastEdit: { path: string; at: number } | null;
+  lastSeenAt: number;
+  now: number;
+}): string {
+  if (input.status === 'rate_limited') return 'hit its usage limit';
+  if (input.editing.length > 0) return `editing ${filesPhrase(input.editing)}`;
+  if (input.lastEdit) {
+    return `edited ${input.lastEdit.path} ${relTime(input.lastEdit.at, input.now)}`;
+  }
+  if (input.status === 'ended') return `finished ${relTime(input.lastSeenAt, input.now)}`;
+  return `last active ${relTime(input.lastSeenAt, input.now)}`;
+}

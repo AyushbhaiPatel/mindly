@@ -77,7 +77,7 @@ export function InsightView() {
   );
 }
 
-function XRay() {
+export function XRay() {
   const { client, project, sessions } = useApp();
   const sres = useResource(() => client.sessions(project.id, 50), [project.id], ['sessions']);
   const [sessionId, setSessionId] = useState<string>('');
@@ -227,7 +227,7 @@ function ItemTable({
   );
 }
 
-function Provenance() {
+export function Provenance() {
   const { client, project, sessions } = useApp();
   const [file, setFile] = useState('');
   const [line, setLine] = useState('1');
@@ -364,7 +364,7 @@ function Provenance() {
 
 const DAY = 86_400_000;
 
-function Standup() {
+export function Standup() {
   const { client, project } = useApp();
   const [range, setRange] = useState<'1' | '3' | '7'>('1');
   const [since] = useState(() => Date.now());
@@ -402,7 +402,7 @@ function Standup() {
   );
 }
 
-function Snapshots() {
+export function Snapshots() {
   const { client, project } = useApp();
   const res = useResource(() => client.snapshots(project.id), [project.id], ['snapshots']);
   const { busy, run } = useAction();

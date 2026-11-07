@@ -3,13 +3,18 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
-## 0.4.1 — 2026-11-07
+## Unreleased
 
-### Fixed
+### Changed
 
-- The README on npm now shows the logo and the demo, and its links to the docs, licence,
-  changelog and contributing guide work. npm resolved the README's relative paths against
-  `apps/cli`; the release build now rewrites them to absolute GitHub URLs.
+- Mission Control is reorganised around what a first-time user needs to know. Five pages instead
+  of seven: Home, Memory, Agents, History and Settings. Home opens with one sentence on how the
+  project is doing, then the agents at work as cards, the decisions only you can make (suggested
+  rules grouped with a count instead of one row each), where Mindly helped, and recent activity.
+  Every page and section starts with one plain sentence saying what it shows, and a "Guide"
+  button explains the pages and the words Mindly uses. Older links (`#/overview`,
+  `#/coordination`, `#/runs`, `#/insight`, `#/split`) still open the right page.
+- The dashboard's tab icon is the Mindly logo.
 
 ## 0.4.0 — 2026-11-07
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, createHttpClient, describeError, takeLoginCode, type MindlyClient } from './api';
-import { Tabs, cx, type TabDef } from './components/ui';
+import { Drawer, Tabs, TextLink, cx } from './components/ui';
 import {
   createLiveFeed,
   topicsFor,
@@ -12,46 +12,64 @@ import {
 import { AppContext, type AppState, type Toast } from './state';
 import { applyTheme, loadString, loadTheme, nextTheme, saveString, type ThemePref } from './theme';
 import type { Project, Session, MindlyEvent } from './types';
-import { CoordinationView } from './views/Coordination';
-import { InsightView } from './views/Insight';
+import { AgentsView, type AgentsSub } from './views/Agents';
+import { HistoryView, type HistorySub } from './views/History';
+import { HomeView } from './views/Home';
 import { MemoryView } from './views/Memory';
-import { OverviewView } from './views/Overview';
-import { RunsView } from './views/Runs';
 import { SettingsView } from './views/Settings';
-import { SplitView } from './views/Split';
+import { GUIDE, PAGES, SUBPAGES, type Page } from './vocab';
 
-type TabKey = 'overview' | 'memory' | 'coordination' | 'split' | 'runs' | 'insight' | 'settings';
-const TABS: TabDef<TabKey>[] = [
-  { key: 'overview', label: 'Mission Control' },
-  { key: 'memory', label: 'Memory' },
-  { key: 'coordination', label: 'Coordination' },
-  { key: 'split', label: 'Split' },
-  { key: 'runs', label: 'Runs' },
-  { key: 'insight', label: 'Insight' },
-  { key: 'settings', label: 'Trust & settings' },
-];
-const TAB_KEYS = new Set<string>(TABS.map((t) => t.key));
+const PAGE_KEYS = new Set<string>(PAGES.map((p) => p.key));
 
 const MOCK = import.meta.env.VITE_MINDLY_MOCK === '1';
 const PROJECT_KEY = 'mindly.project';
 const MAX_EVENTS = 400;
 
 interface Route {
-  tab: TabKey;
+  page: Page;
   params: URLSearchParams;
+}
+
+/**
+ * Older links and the views' own `navigate()` calls still use the previous page names; each maps
+ * to a page and, where the page has sections, the section to open.
+ */
+const ALIASES: Record<string, { page: Page; sub?: string }> = {
+  overview: { page: 'home' },
+  coordination: { page: 'agents', sub: 'team' },
+  split: { page: 'agents', sub: 'split' },
+  runs: { page: 'history', sub: 'runs' },
+  insight: { page: 'history', sub: 'xray' },
+};
+
+function canonical(
+  path: string,
+  params: Record<string, string>,
+): { page: Page; params: Record<string, string> } {
+  if (PAGE_KEYS.has(path)) return { page: path as Page, params };
+  const alias = ALIASES[path];
+  if (!alias) return { page: 'home', params };
+  return { page: alias.page, params: alias.sub ? { sub: alias.sub, ...params } : params };
 }
 
 function readRoute(): Route {
   const raw = location.hash.replace(/^#\/?/, '');
   const [path = '', query = ''] = raw.split('?');
-  const tab = TAB_KEYS.has(path) ? (path as TabKey) : 'overview';
-  return { tab, params: new URLSearchParams(query) };
+  const params = new URLSearchParams(query);
+  const c = canonical(path, Object.fromEntries(params));
+  return { page: c.page, params: new URLSearchParams(c.params) };
 }
 
 function writeRoute(tab: string, params: Record<string, string> = {}) {
-  const q = new URLSearchParams(params).toString();
-  const next = `#/${tab}${q ? `?${q}` : ''}`;
+  const c = canonical(tab, params);
+  const q = new URLSearchParams(c.params).toString();
+  const next = `#/${c.page}${q ? `?${q}` : ''}`;
   if (location.hash !== next) location.hash = next;
+}
+
+function subOf<K extends string>(params: URLSearchParams, keys: readonly { key: K }[]): K {
+  const v = params.get('sub');
+  return (keys.find((k) => k.key === v)?.key ?? keys[0]!.key) as K;
 }
 
 type Boot =
@@ -107,7 +125,7 @@ export function App() {
       <div className="splash" role="status">
         <Sky />
         <Logo />
-        <p>Connecting to the Mindly daemon…</p>
+        <p>Connecting to Mindly on this machine…</p>
       </div>
     );
   }
@@ -117,14 +135,13 @@ export function App() {
         <Sky />
         <Logo />
         <h1>
-          Sign in from your <em>terminal</em>
+          Open it from your <em>terminal</em>
         </h1>
         {boot.reason && <p className="splash-warn">{boot.reason}</p>}
-        <p>Mission Control opens with a one-time link. In the project you want to watch, run:</p>
+        <p>This page opens with a one-time link. In the project you want to watch, run:</p>
         <pre className="splash-cmd">mindly dashboard</pre>
         <p className="muted">
-          The link signs this browser in for 12 hours. Nothing is sent anywhere except this
-          machine’s Mindly daemon.
+          The link signs this browser in for 12 hours. Nothing leaves this machine.
         </p>
       </main>
     );
@@ -135,12 +152,12 @@ export function App() {
         <Sky />
         <Logo />
         <h1>
-          Can’t reach the <em>daemon</em>
+          Can’t reach <em>Mindly</em>
         </h1>
         <p>{boot.message}</p>
         <p className="muted">
-          Start it with <code className="mono">mindly daemon</code> or reopen with{' '}
-          <code className="mono">mindly dashboard</code>.
+          Start the background service with <code className="mono">mindly daemon start</code>, or
+          reopen with <code className="mono">mindly dashboard</code>.
         </p>
         <button type="button" className="btn-primary" onClick={() => void start()}>
           Try again
@@ -158,7 +175,7 @@ export function App() {
         </h1>
         <p>
           Run <code className="mono">mindly init</code> inside a git repository, then start an agent
-          there. It will show up here.
+          there. The project shows up here on its own.
         </p>
       </main>
     );
@@ -166,9 +183,14 @@ export function App() {
   return <Shell client={boot.client} liveFactory={boot.live} projects={boot.projects} />;
 }
 
-/** The product mark: a lowercase wordmark in Newsreader, like the portfolio's name mark. */
+/** The product mark: the pixel elephant and the lowercase wordmark. */
 function Logo() {
-  return <span className="logo">mindly</span>;
+  return (
+    <span className="logo">
+      <img src="/favicon.svg" alt="" width="22" height="22" className="logo-mark" />
+      mindly
+    </span>
+  );
 }
 
 /**
@@ -187,24 +209,19 @@ function Sky() {
 }
 
 /** Page titles in Newsreader; the last word is set in italic, like the portfolio's name. */
-const TITLES: Record<TabKey, readonly [lead: string, accent: string]> = {
-  overview: ['Mission', 'Control'],
-  memory: ['', 'Memory'],
-  coordination: ['', 'Coordination'],
-  split: ['', 'Split'],
-  runs: ['', 'Runs'],
-  insight: ['', 'Insight'],
-  settings: ['Trust &', 'settings'],
+const TITLES: Record<Page, readonly [lead: string, accent: string]> = {
+  home: ['', 'Home'],
+  memory: ['Project', 'memory'],
+  agents: ['Your', 'agents'],
+  history: ['', 'History'],
+  settings: ['', 'Settings'],
 };
 
-function PageHead({ tab, project }: { tab: TabKey; project: Project }) {
-  const [lead, accent] = TITLES[tab];
+function PageHead({ page, project }: { page: Page; project: Project }) {
+  const [lead, accent] = TITLES[page];
+  const intro = PAGES.find((p) => p.key === page)?.intro;
   return (
     <header className="page-head">
-      <h1 className="page-title">
-        {lead ? `${lead} ` : ''}
-        <em>{accent}</em>
-      </h1>
       <p className="page-role">
         <span className="page-project">{project.name}</span>
         <span aria-hidden="true" className="page-sep">
@@ -214,7 +231,50 @@ function PageHead({ tab, project }: { tab: TabKey; project: Project }) {
           {project.root}
         </code>
       </p>
+      <h1 className="page-title">
+        {lead ? `${lead} ` : ''}
+        <em>{accent}</em>
+      </h1>
+      {intro && <p className="page-intro">{intro}</p>}
     </header>
+  );
+}
+
+/** "What am I looking at?": the pages and the handful of words Mindly uses, in one drawer. */
+function GuideDrawer({ open, onClose }: { open: boolean; onClose(): void }) {
+  return (
+    <Drawer open={open} onClose={onClose} title="What am I looking at?">
+      <div className="guide">
+        <p>
+          Mindly sits between your coding agents and this repository. It remembers what the project
+          decided, tells each agent what the others are doing, and steps in before an edit breaks
+          something. This page shows all of that; it never changes your code on its own.
+        </p>
+        <h3>The pages</h3>
+        <dl className="guide-list">
+          {PAGES.map((p) => (
+            <div key={p.key}>
+              <dt>{p.label}</dt>
+              <dd>{p.intro}</dd>
+            </div>
+          ))}
+        </dl>
+        <h3>The words</h3>
+        <dl className="guide-list">
+          {GUIDE.map((g) => (
+            <div key={g.term}>
+              <dt>{g.term}</dt>
+              <dd>{g.text}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="muted">
+          The same things are one command away in the terminal:{' '}
+          <code className="mono">mindly status</code>, <code className="mono">mindly rules</code>,{' '}
+          <code className="mono">mindly saves</code>.
+        </p>
+      </div>
+    </Drawer>
   );
 }
 
@@ -256,6 +316,7 @@ function Shell({
   const [sessionList, setSessionList] = useState<Session[]>([]);
   const [versions, setVersions] = useState<Record<Topic, number>>(EMPTY_VERSIONS);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [guide, setGuide] = useState(false);
   const liveRef = useRef<LiveFeed | null>(null);
   const pendingTopics = useRef(new Set<Topic>());
   const flushTimer = useRef<number | undefined>(undefined);
@@ -370,7 +431,7 @@ function Shell({
 
   const changeProject = (id: string) => {
     setProjectId(id);
-    writeRoute(route.tab, { p: id });
+    writeRoute(route.page, { p: id });
   };
 
   const liveLabel: Record<LiveStatus, string> = {
@@ -407,17 +468,21 @@ function Shell({
             </select>
           </label>
         </div>
-        <nav aria-label="Views" className="topbar-tabs">
+        <nav aria-label="Pages" className="topbar-tabs">
           <Tabs
-            tabs={TABS}
-            value={route.tab}
+            tabs={PAGES.map((p) => ({ key: p.key, label: p.label }))}
+            value={route.page}
             onChange={(k) => writeRoute(k, { p: projectId })}
-            label="Views"
+            label="Pages"
             idPrefix="view"
           />
         </nav>
         <div className="topbar-status">
-          {client.mock && <span className="mock-tag">mock data</span>}
+          {client.mock && <span className="mock-tag">sample data</span>}
+          <TextLink onClick={() => setGuide(true)} label="What am I looking at?">
+            <span className="guide-btn">?</span>
+            <span className="guide-word">Guide</span>
+          </TextLink>
           <span className={cx('live-pill', `live-${liveStatus}`)} role="status" aria-live="polite">
             <span className="live-dot" aria-hidden="true" />
             {liveLabel[liveStatus]}
@@ -442,18 +507,21 @@ function Shell({
         id="view-panel"
         className="main"
         role="tabpanel"
-        aria-labelledby={`view-tab-${route.tab}`}
+        aria-labelledby={`view-tab-${route.page}`}
         tabIndex={-1}
       >
-        <PageHead key={`${route.tab}:${projectId}`} tab={route.tab} project={project} />
-        {route.tab === 'overview' && <OverviewView key={projectId} />}
-        {route.tab === 'memory' && <MemoryView key={projectId} />}
-        {route.tab === 'coordination' && <CoordinationView key={projectId} />}
-        {route.tab === 'split' && <SplitView key={projectId} />}
-        {route.tab === 'runs' && <RunsView key={projectId} />}
-        {route.tab === 'insight' && <InsightView key={projectId} />}
-        {route.tab === 'settings' && <SettingsView key={projectId} />}
+        <PageHead key={`${route.page}:${projectId}`} page={route.page} project={project} />
+        {route.page === 'home' && <HomeView key={projectId} />}
+        {route.page === 'memory' && <MemoryView key={projectId} />}
+        {route.page === 'agents' && (
+          <AgentsView key={projectId} sub={subOf<AgentsSub>(route.params, SUBPAGES.agents)} />
+        )}
+        {route.page === 'history' && (
+          <HistoryView key={projectId} sub={subOf<HistorySub>(route.params, SUBPAGES.history)} />
+        )}
+        {route.page === 'settings' && <SettingsView key={projectId} />}
       </main>
+      <GuideDrawer open={guide} onClose={() => setGuide(false)} />
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={cx('toast', `toast-${t.tone}`)} role="status">

@@ -154,20 +154,7 @@ const dependencies = Object.fromEntries([...imported].sort().map((d) => [d, thir
 // --- Dashboard, docs, licences -------------------------------------------------------------------
 
 cpSync(dashboardDist, join(out, 'dashboard'), { recursive: true });
-// npm resolves relative README links against `repository.directory` (apps/cli), which breaks
-// every image and doc link. Point them at the repository root on GitHub instead.
-const GH = 'AyushbhaiPatel/mindly';
-const isRelative = (u) => !/^([a-z][a-z0-9+.-]*:|#|\/\/)/i.test(u);
-const absolute = (u) => {
-  const path = u.replace(/^\.\//, '');
-  return /\.(png|jpe?g|gif|svg|webp)$/i.test(path)
-    ? `https://raw.githubusercontent.com/${GH}/main/${path}`
-    : `https://github.com/${GH}/blob/main/${path}`;
-};
-const readme = readFileSync(join(repo, 'README.md'), 'utf8')
-  .replace(/(\bsrc=")([^"]+)"/g, (m, pre, u) => (isRelative(u) ? `${pre}${absolute(u)}"` : m))
-  .replace(/\]\(([^)\s]+)\)/g, (m, u) => (isRelative(u) ? `](${absolute(u)})` : m));
-writeFileSync(join(out, 'README.md'), readme);
+cpSync(join(repo, 'README.md'), join(out, 'README.md'));
 cpSync(join(repo, 'LICENSE'), join(out, 'LICENSE'));
 
 // The dashboard bundle (built by Vite) contains third-party code: its runtime dependencies and

@@ -27,7 +27,7 @@ import {
   progressWords,
   taskStatusWords,
 } from '../vocab';
-import { AgentName } from './Overview';
+import { AgentName, ConflictsPanel, MergeCheckPanel } from './Overview';
 
 const STATUS_ORDER: Record<TaskStatus, number> = {
   in_progress: 0,
@@ -38,16 +38,23 @@ const STATUS_ORDER: Record<TaskStatus, number> = {
 };
 
 export function CoordinationView() {
-  const { params } = useApp();
+  const { params, client, project } = useApp();
   useEffect(() => {
     if (params.get('focus') === 'handoffs') document.getElementById('handoffs')?.scrollIntoView();
   }, [params]);
+  const ov = useResource(
+    () => client.overview(project.id),
+    [project.id],
+    ['overview', 'conflicts', 'runs', 'sessions'],
+  );
   return (
     <div className="view">
       <TasksPanel />
       <IntentsPanel />
+      {ov.data && <ConflictsPanel ov={ov.data} onChange={ov.reload} />}
       <DeliveriesPanel />
       <HandoffsPanel />
+      {ov.data && <MergeCheckPanel ov={ov.data} onQueued={ov.reload} />}
     </div>
   );
 }

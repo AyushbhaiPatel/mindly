@@ -22,7 +22,17 @@ import {
  * line for saves still waiting for evidence, "Not a save" in each row's menu, and the Share
  * button that opens the weekly card.
  */
-export function SavesPanel({ res, onChange }: { res: SavesResult | undefined; onChange(): void }) {
+export function SavesPanel({
+  res,
+  onChange,
+  title = 'Saves',
+  intro,
+}: {
+  res: SavesResult | undefined;
+  onChange(): void;
+  title?: string;
+  intro?: string;
+}) {
   const { client, sessions } = useApp();
   const { busy, run } = useAction();
   const [sharing, setSharing] = useState(false);
@@ -43,8 +53,9 @@ export function SavesPanel({ res, onChange }: { res: SavesResult | undefined; on
   ];
   return (
     <Panel
-      title="Saves"
+      title={title}
       help="saves"
+      intro={intro}
       meta={res ? `${res.summary.total} this week` : undefined}
       actions={
         <button

@@ -91,7 +91,9 @@ never include pending, expired or rejected saves. Pending ones may appear in det
 as not counted yet. The share card shows counts and agent names only unless the user asks for
 details.
 
-Same vocabulary, same order of importance: summary bar, "Needs you", agents, activity. Every
+Same vocabulary, same order of importance: one summary sentence, the agents at work, "Needs your
+decision", where Mindly helped, activity. Every page and every section starts with one visible
+sentence that says what it shows; the "?" tooltip is only used where no such sentence fits. Every
 badge has text, every number has a label, every empty panel has a one-line explanation of what will
 appear there and when. Tooltips explain terms the first time they appear (e.g. "Intent: what an
 agent is about to edit").

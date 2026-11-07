@@ -131,7 +131,7 @@ export function Status({ value, label }: { value: string; label?: string }) {
 /* One shared ticker keeps every relative time fresh without one timer per element. */
 const tickers = new Set<() => void>();
 let tickTimer: number | undefined;
-function useNow(): number {
+export function useNow(): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const fn = () => setNow(Date.now());
@@ -503,6 +503,7 @@ export function Facts({ items }: { items: [label: string, value: ReactNode][] })
 export function Panel({
   title,
   help,
+  intro,
   meta,
   actions,
   children,
@@ -511,6 +512,8 @@ export function Panel({
 }: {
   title: ReactNode;
   help?: Term;
+  /** One plain sentence, always visible under the title, saying what the section shows. */
+  intro?: string | undefined;
   meta?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
@@ -518,12 +521,16 @@ export function Panel({
   id?: string;
 }) {
   const hid = useId();
+  // A section explains itself in one visible sentence: the one given, else the term's own
+  // explanation without its "Term:" lead. The "?" tooltip is kept only when nothing is shown.
+  const derived = help ? TERMS[help].replace(/^[^:]{1,24}:\s*/, '') : undefined;
+  const shown = intro ?? (derived ? derived[0]!.toUpperCase() + derived.slice(1) : undefined);
   return (
     <section className={cx('panel', className)} aria-labelledby={hid} id={id}>
-      <header className="panel-head">
+      <header className={cx('panel-head', shown && 'panel-head-intro')}>
         <div className="panel-title">
           <h2 id={hid}>{title}</h2>
-          {help && <Help term={help} />}
+          {help && !shown && <Help term={help} />}
         </div>
         {(meta !== undefined || actions) && (
           <div className="panel-actions">
@@ -531,6 +538,7 @@ export function Panel({
             {actions}
           </div>
         )}
+        {shown && <p className="panel-intro">{shown}</p>}
       </header>
       <div className="panel-body">{children}</div>
     </section>
