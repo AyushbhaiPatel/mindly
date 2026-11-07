@@ -3,7 +3,7 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
-## Unreleased
+## 0.4.0 — 2026-11-07
 
 ### Added
 
