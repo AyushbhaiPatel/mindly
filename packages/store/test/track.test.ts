@@ -3,9 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { MIGRATIONS, Store, schemaVersion } from '../src/index.js';
+import { MIGRATION_V5_TRACK } from '../src/migrations/v5-track.js';
 import { setup } from './helpers.js';
 
 const DAY = 86_400_000;
+const DOWNGRADE =
+  'DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines;';
 
 function change(
   store: Store,
@@ -13,6 +16,7 @@ function change(
   sessionId: string,
   path: string,
   hashes: string[],
+  lineHashes: string[] = hashes,
 ) {
   return store.fileChanges.record({
     projectId,
@@ -20,6 +24,7 @@ function change(
     path,
     tool: 'Edit',
     hunkHashes: hashes,
+    lineHashes,
     addedLines: hashes.length,
     removedLines: 1,
     promptEventId: null,
@@ -34,13 +39,21 @@ function tables(store: Store): string[] {
   ).map((t) => t.name);
 }
 
+function indexSql(store: Store, name: string): string | undefined {
+  return (
+    store.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
+      .get(name) as { sql: string } | undefined
+  )?.sql;
+}
+
 describe('line survival schema (v5)', () => {
-  it('is the fifth migration, with an index on the project', () => {
+  it('is the fifth migration: added lines, survival and an index for the scan', () => {
     const { store } = setup();
-    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(5);
-    expect(MIGRATIONS[4]).toContain('CREATE TABLE line_survival');
+    expect(MIGRATIONS).toHaveLength(5);
+    expect(MIGRATIONS[4]).toBe(MIGRATION_V5_TRACK);
     expect(MIGRATIONS[3]).not.toContain('line_survival');
-    expect(schemaVersion(store.db)).toBe(MIGRATIONS.length);
+    expect(schemaVersion(store.db)).toBe(5);
     const cols = (
       store.db.prepare('PRAGMA table_info(line_survival)').all() as { name: string; pk: number }[]
     ).map((c) => [c.name, c.pk]);
@@ -51,12 +64,9 @@ describe('line survival schema (v5)', () => {
       ['total_hashes', 0],
       ['kept_hashes', 0],
     ]);
-    const index = store.db
-      .prepare(
-        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'line_survival_project'",
-      )
-      .get() as { sql: string } | undefined;
-    expect(index?.sql).toContain('(project_id)');
+    expect(indexSql(store, 'line_survival_project')).toContain('(project_id)');
+    expect(indexSql(store, 'file_changes_created')).toContain('(created_at, id)');
+    expect(tables(store)).toContain('file_change_lines');
   });
 
   it('upgrades a v4 database and keeps its data', () => {
@@ -71,33 +81,44 @@ describe('line survival schema (v5)', () => {
       branch: 'main',
       transcriptPath: null,
     }).session;
-    const c = change(old, project.id, session.id, 'src/api/a.ts', ['h1', 'h2']);
+    old.db.exec(`${DOWNGRADE} PRAGMA user_version = 4;`);
+    const c = old.fileChanges.record({
+      projectId: project.id,
+      sessionId: session.id,
+      path: 'src/api/a.ts',
+      tool: 'Edit',
+      hunkHashes: ['h1', 'h2'],
+      addedLines: 2,
+      removedLines: 0,
+      promptEventId: null,
+    });
     const run = old.runs.create({ projectId: project.id, kind: 'bisect', title: 'b', input: {} });
-    old.db.exec('DROP TABLE line_survival; PRAGMA user_version = 4;');
     expect(tables(old)).not.toContain('line_survival');
     old.close();
 
     const store = Store.open(path);
     expect(schemaVersion(store.db)).toBe(MIGRATIONS.length);
-    expect(tables(store)).toContain('line_survival');
+    expect(tables(store)).toEqual(expect.arrayContaining(['line_survival', 'file_change_lines']));
     expect(store.fileChanges.forPath(project.id, 'src/api/a.ts').map((x) => x.id)).toEqual([c.id]);
-    expect(store.track.hashes(c.id).sort()).toEqual(['h1', 'h2']);
+    expect(store.fileChanges.findByHash(project.id, 'src/api/a.ts', 'h2').map((x) => x.id)).toEqual(
+      [c.id],
+    );
+    // Edits from before v5 have no tracked lines.
+    expect(store.track.hashes(c.id)).toEqual([]);
     expect(store.runs.get(run.id).kind).toBe('bisect');
     expect(store.sessions.get(session.id).agentKind).toBe('codex');
-    store.track.recordSurvival({
-      changeId: c.id,
-      projectId: project.id,
-      totalHashes: 2,
-      keptHashes: 1,
-    });
-    expect(store.track.survivalGroups(project.id, 0, Number.MAX_SAFE_INTEGER)).toEqual([
-      { path: 'src/api/a.ts', agentKind: 'codex', totalHashes: 2, keptHashes: 1 },
-    ]);
     store.close();
   });
 });
 
 describe('TrackRepo', () => {
+  it('keeps the whole added lines apart from the provenance hashes', () => {
+    const { store, project, a } = setup();
+    const c = change(store, project.id, a.id, 'src/a.ts', ['frag', 'line1', 'line2'], ['line1']);
+    expect(store.track.hashes(c.id)).toEqual(['line1']);
+    expect(store.fileChanges.findByHash(project.id, 'src/a.ts', 'frag')).toHaveLength(1);
+  });
+
   it('groups edits by path and session within the window', () => {
     const { store, project, a, b, clock } = setup();
     change(store, project.id, a.id, 'src/api/x.ts', ['1']);
@@ -129,14 +150,16 @@ describe('TrackRepo', () => {
     ]);
   });
 
-  it('records survival once, lists and counts what is still pending', () => {
+  it('records survival once, groups it, and lists what is still pending', () => {
     const { store, project, a, clock } = setup();
     const old = change(store, project.id, a.id, 'src/a.ts', ['1', '2']);
+    const skipped = change(store, project.id, a.id, 'src/a.ts', ['3']);
     clock.advance(10 * DAY);
     const recent = change(store, project.id, a.id, 'src/b.ts', ['3']);
     const before = clock.now() - 7 * DAY;
     expect(store.track.pendingSurvival(project.id, before, 10).map((p) => p.changeId)).toEqual([
       old.id,
+      skipped.id,
     ]);
     expect(store.track.pendingSurvival(null, before, 10)[0]).toMatchObject({
       changeId: old.id,
@@ -144,33 +167,50 @@ describe('TrackRepo', () => {
       sessionId: a.id,
       path: 'src/a.ts',
       worktree: '/repo',
+      branch: 'main',
+      createdAt: old.createdAt,
     });
-    expect(store.track.countPendingSurvival(project.id, before)).toBe(1);
-    expect(store.track.countPendingSurvival(project.id, clock.now())).toBe(2);
-    store.track.recordSurvival({
-      changeId: old.id,
-      projectId: project.id,
-      totalHashes: 2,
-      keptHashes: 5,
-    });
+    // After a cursor: only what comes later.
+    expect(
+      store.track
+        .pendingSurvival(null, before, 10, 0, { createdAt: old.createdAt, id: old.id })
+        .map((p) => p.changeId),
+    ).toEqual([skipped.id]);
+    expect(store.track.countPendingSurvival(project.id, before)).toBe(2);
+    expect(store.track.countPendingSurvival(project.id, clock.now())).toBe(3);
+    const rec = (id: string, total: number, kept: number) =>
+      store.track.recordSurvival({
+        changeId: id,
+        projectId: project.id,
+        totalHashes: total,
+        keptHashes: kept,
+      });
+    rec(old.id, 2, 5);
     // Computed once: a second result for the same edit is ignored.
-    store.track.recordSurvival({
-      changeId: old.id,
-      projectId: project.id,
-      totalHashes: 2,
-      keptHashes: 0,
-    });
+    rec(old.id, 2, 0);
+    rec(skipped.id, 0, 0);
     const row = store.db
       .prepare('SELECT total_hashes, kept_hashes FROM line_survival WHERE change_id = ?')
       .get(old.id) as { total_hashes: number; kept_hashes: number };
     expect(row).toEqual({ total_hashes: 2, kept_hashes: 2 });
+    // Skipped edits (0 of 0) are not counted as checked.
+    expect(store.track.survivalGroups(project.id, 0, clock.now())).toEqual([
+      {
+        path: 'src/a.ts',
+        sessionId: a.id,
+        agentKind: 'claude-code',
+        edits: 1,
+        totalHashes: 2,
+        keptHashes: 2,
+      },
+    ]);
     expect(store.track.countPendingSurvival(project.id, before)).toBe(0);
     expect(store.track.pendingSurvival(project.id, clock.now(), 10).map((p) => p.changeId)).toEqual(
       [recent.id],
     );
   });
 
-  it('deletes survival rows with their edit (and project)', () => {
+  it('deletes added lines and survival rows with their edit (and project)', () => {
     const { store, project, a } = setup();
     const c = change(store, project.id, a.id, 'src/a.ts', ['1']);
     store.track.recordSurvival({
@@ -180,8 +220,65 @@ describe('TrackRepo', () => {
       keptHashes: 1,
     });
     store.projects.delete(project.id);
-    const n = store.db.prepare('SELECT COUNT(*) AS n FROM line_survival').get() as { n: number };
-    expect(n.n).toBe(0);
+    for (const t of ['line_survival', 'file_change_lines']) {
+      const n = store.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number };
+      expect(n.n, t).toBe(0);
+    }
+  });
+
+  it('reads each opening of a conflict from its event, and dismissed conflicts', () => {
+    const { store, project, a, b, clock } = setup();
+    const report = (ids: string[]) =>
+      store.conflicts.report({
+        projectId: project.id,
+        kind: 'merge_conflict',
+        severity: 'critical',
+        title: 't',
+        detail: 'd',
+        sessionIds: ids,
+        paths: ['src/a.ts'],
+        fingerprint: 'fp',
+      }).conflict;
+    const opened = (id: string, ids: string[] | undefined, extra: Record<string, unknown> = {}) =>
+      store.events.append({
+        projectId: project.id,
+        sessionId: null,
+        type: 'conflict.opened',
+        payload: {
+          conflictId: id,
+          kind: 'merge_conflict',
+          ...(ids ? { sessionIds: ids, paths: ['src/a.ts'] } : {}),
+          ...extra,
+        },
+      });
+    const from = clock.now();
+    const c = report([a.id]);
+    opened(c.id, [a.id]);
+    clock.advance(1000);
+    // The row is overwritten by the next report; the first opening is not.
+    report([b.id]);
+    opened(c.id, [b.id], { actorInRoot: false });
+    opened(c.id, undefined);
+    store.events.append({
+      projectId: project.id,
+      sessionId: null,
+      type: 'conflict.opened',
+      payload: { conflictId: 'x', kind: 'file_overlap', sessionIds: [a.id] },
+    });
+    const openings = store.track.conflictOpenings(
+      project.id,
+      ['merge_conflict', 'contract_broken'],
+      from,
+    );
+    expect(openings.map((o) => [o.sessionIds, o.actorInRoot])).toEqual([
+      [null, null],
+      [[b.id], false],
+      [[a.id], null],
+    ]);
+    expect(openings[2]).toMatchObject({ conflictId: c.id, kind: 'merge_conflict', at: from });
+    expect(store.track.dismissedConflicts(project.id).size).toBe(0);
+    store.conflicts.setStatus(c.id, 'dismissed');
+    expect([...store.track.dismissedConflicts(project.id)]).toEqual([c.id]);
   });
 
   it('finds sessions that hit a usage limit from events and rate-limit handoffs', () => {

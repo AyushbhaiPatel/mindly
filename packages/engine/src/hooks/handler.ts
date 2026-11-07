@@ -413,13 +413,15 @@ export class HookHandler {
     for (const edit of tool.edits.slice(0, 50)) {
       const [resolved] = await this.projectPaths(project, evt.cwd, [edit.path]);
       if (!resolved) continue;
-      const hashes = this.provenanceHashes(resolved.abs, edit.addedText);
+      const content = readBounded(resolved.abs, MAX_PROVENANCE_FILE_BYTES);
+      const hashes = this.provenanceHashes(content, edit.addedText);
       const recorded = this.k.store.fileChanges.record({
         projectId: project.project.id,
         sessionId: session.id,
         path: resolved.rel,
         tool: sanitizeLine(tool.name, 40),
         hunkHashes: hashes,
+        lineHashes: this.addedLineHashes(content, edit.addedText, edit.removedText),
         addedLines: countLines(edit.addedText),
         removedLines: countLines(edit.removedText),
         promptEventId: promptEvent?.id ?? null,
@@ -501,7 +503,7 @@ export class HookHandler {
    * so besides the added text itself, every line of the file as written that contains an added
    * fragment is hashed too; `mindly why` hashes whole lines and would otherwise miss them.
    */
-  private provenanceHashes(abs: string, addedText: string): string[] {
+  private provenanceHashes(content: string | null, addedText: string): string[] {
     const hashes = new Set(this.k.ports.git.hunkHashes(addedText));
     const fragments = addedText
       .split(/\r?\n/)
@@ -509,7 +511,6 @@ export class HookHandler {
       .filter((l) => l.length >= 4)
       .slice(0, 200);
     if (fragments.length === 0) return [...hashes];
-    const content = readBounded(abs, MAX_PROVENANCE_FILE_BYTES);
     if (content === null) return [...hashes];
     for (const line of content.split(/\r?\n/)) {
       if (line.length > 2000) continue;
@@ -518,6 +519,42 @@ export class HookHandler {
       }
     }
     return [...hashes].slice(0, 5000);
+  }
+
+  /**
+   * Hashes of the whole lines an edit added (what `mindly track` measures survival over): lines
+   * of the added text that are complete lines of the file as written, minus lines the edit also
+   * removed (unchanged context inside a replacement). A fragment of a line never counts, so every
+   * tool is measured the same way.
+   */
+  private addedLineHashes(
+    content: string | null,
+    addedText: string,
+    removedText: string,
+  ): string[] {
+    if (content === null || addedText === '') return [];
+    const git = this.k.ports.git;
+    const norm = (l: string): string => l.trim().replace(/\s+/g, ' ');
+    // Only lines of the file equal to an added line are hashed (cheap on large files).
+    const added = new Set(addedText.split(/\r?\n/).map(norm));
+    const lines = new Set<string>();
+    for (const line of content.split(/\r?\n/)) {
+      if (line.length <= 2000 && added.has(norm(line))) {
+        for (const h of git.hunkHashes(line)) lines.add(h);
+      }
+    }
+    const removed = new Map<string, number>();
+    for (const h of git.hunkHashes(removedText)) removed.set(h, (removed.get(h) ?? 0) + 1);
+    const out = new Set<string>();
+    for (const h of git.hunkHashes(addedText)) {
+      const n = removed.get(h) ?? 0;
+      if (n > 0) {
+        removed.set(h, n - 1);
+        continue;
+      }
+      if (lines.has(h)) out.add(h);
+    }
+    return [...out].slice(0, 5000);
   }
 
   private async stop(

@@ -529,6 +529,8 @@ describe('track record', () => {
     const narrowed = (await get(url(project.id, '?area=lib'))).json();
     expect(narrowed.totals.edits).toBe(0);
     expect((await get(url(project.id, '?minEdits=1'))).json().minimum.edits).toBe(1);
+    // The same durations as the CLI.
+    expect((await get(url(project.id, '?since=90m'))).json().window.since).toBe('90m');
   });
 
   it('validates the query and the project', async () => {

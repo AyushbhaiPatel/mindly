@@ -8,7 +8,7 @@ import {
   type TrackDifference,
   type TrackReport,
 } from '@mindly/engine';
-import { listWords, spanWords, type Screen, type Step } from '../present/index.js';
+import { listWords, spanWords, type Screen } from '../present/index.js';
 import { clean } from '../util.js';
 
 /** Areas shown without `--area`. */
@@ -29,10 +29,10 @@ export function percent(rate: number): string {
 }
 
 const PHRASE: Record<TrackBreakageMeasure, string> = {
-  breakages: 'breaks less',
-  bisect: 'breaks fewer checks',
-  contracts: 'breaks fewer decisions',
-  mergeChecks: 'fails fewer merge checks',
+  breakages: 'breaks less often per edit',
+  bisect: 'breaks checks less often per edit',
+  contracts: 'breaks decisions less often per edit',
+  mergeChecks: 'fails merge checks less often per edit',
 };
 
 /**
@@ -55,7 +55,9 @@ export function agentFacts(r: TrackAgentArea, minEdits: number, dot: string): st
     );
   }
   if (r.kept.rate !== null) {
-    facts.push(`kept ${percent(r.kept.rate)} of ${thousands(r.kept.of)} lines`);
+    facts.push(
+      `kept ${thousands(r.kept.count)} of ${thousands(r.kept.of)} tracked lines (${percent(r.kept.rate)})`,
+    );
   }
   return facts.join(` ${dot} `);
 }
@@ -145,9 +147,15 @@ export function renderTrack(
     }
     for (const l of differenceLines(area)) sc.text(`${sc.sym.next} ${l}`, 2);
   }
-  if (r.areas.length > shown.length) {
+  const more = r.totals.areas - shown.length;
+  if (more > 0) {
     sc.note(
-      `${sc.sym.ellipsis} and ${r.areas.length - shown.length} more ${r.areas.length - shown.length === 1 ? 'area' : 'areas'} (mindly track --area <folder>)`,
+      `${sc.sym.ellipsis} and ${thousands(more)} more ${more === 1 ? 'area' : 'areas'} (mindly track --area <folder>)`,
+    );
+  }
+  if (r.truncated) {
+    sc.note(
+      'This is a partial record: there was more data than Mindly reads at once. Use a shorter --since or one --area.',
     );
   }
 
@@ -175,13 +183,20 @@ export function renderTrack(
     return;
   }
   if (r.totals.edits === 0) return;
-  const top = r.filter.area ?? r.areas[0]?.area;
-  const steps: Step[] = [];
-  if (top !== undefined) {
-    steps.push({
-      cmd: `mindly track --area ${top === ROOT_AREA ? "'(root)'" : clean(top, 120)} --explain`,
+  sc.next([
+    {
+      cmd: `mindly track${areaArg(r.filter.area ?? r.areas[0]?.area)} --explain`,
       why: 'what each number counts',
-    });
-  }
-  sc.next(steps);
+    },
+  ]);
+}
+
+/**
+ * ` --area <folder>` for a copy-pasteable command, or nothing when the folder name has characters
+ * a shell would interpret (folder names come from agent edits and are not trusted).
+ */
+export function areaArg(area: string | undefined): string {
+  if (area === undefined) return '';
+  if (area === ROOT_AREA) return " --area '(root)'";
+  return /^[\w./@+-]+$/.test(area) && !area.startsWith('-') ? ` --area ${area}` : '';
 }

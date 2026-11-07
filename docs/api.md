@@ -247,16 +247,17 @@ and files; without it the card contains no project name, path or code.
 
 `GET …/track` is the track record of `mindly track`: per folder (area) and agent, counts of edits
 and of outcomes stored evidence ties to exactly one session of that agent. It only reads; line
-survival is computed by the daemon's background job. `since` is a duration (`24h`, `30d`, `12w`;
-default `30d`, at most 3650 days), `area` a folder prefix at any depth (or `(root)`), `agent` an
-agent kind, `minEdits` overrides `track.minEdits`. Unknown projects give 404, malformed values 400.
+survival is computed by the daemon's background job. `since` is a duration as in the CLI (`90m`,
+`24h`, `30d`, `12w`; default `30d`, at most 3650 days), `area` a folder prefix at any depth (or
+`(root)`), `agent` an agent kind, `minEdits` overrides `track.minEdits`. Unknown projects give 404,
+malformed values 400.
 
 ```ts
 interface TrackRate {
   count: number;
-  of: number; // denominator: edits in the area (lines for `kept`)
-  rate: number | null; // null below the minimum data
-  interval: { low: number; high: number } | null; // 95% Wilson score interval; null below the minimum
+  of: number; // denominator: edits in the area (tracked lines for `kept`)
+  rate: number | null; // null below the minimum data, and when count > of
+  interval: { low: number; high: number } | null; // 95% Wilson score interval; null when rate is
 }
 
 interface TrackReport {
@@ -264,7 +265,7 @@ interface TrackReport {
   areaDepth: number; // track.areaDepth (1-4)
   filter: { area: string | null; agent: string | null };
   minimum: { edits: number; sessions: number };
-  totals: { agents: number; edits: number; areas: number };
+  totals: { agents: number; edits: number; areas: number }; // areas: all, before the 200 cap
   areas: {
     area: string; // `src/api`, or `(root)`; most edits first, at most 200
     edits: number;
@@ -276,26 +277,32 @@ interface TrackReport {
       linesRemoved: number;
       enoughData: boolean; // at least minimum.edits and minimum.sessions
       breakages: TrackRate; // bisect + contracts + mergeChecks
-      bisect: TrackRate; // reliable bisect runs whose first bad step is one edit of this agent
-      contracts: TrackRate; // contract_broken conflicts naming only a session of this agent
-      mergeChecks: TrackRate; // check_failed / merge_conflict conflicts naming only its session
-      ruleAttempts: TrackRate; // confirmed rule_enforced saves (attempts, not damage)
-      kept: TrackRate; // line hashes still present, of those added at least 7 days ago
+      breakageSessions: number; // distinct sessions behind the breakages
+      bisect: TrackRate; // reliable bisect results whose first bad step is one edit of this agent (once per step)
+      contracts: TrackRate; // contract breaks right after its edit in the project's own checkout
+      mergeChecks: TrackRate; // merge conflicts (shadow merge, split merge check) naming only its session
+      ruleAttempts: TrackRate; // confirmed rule_enforced saves; a count only (rate and interval always null)
+      kept: TrackRate; // tracked (whole, added) lines still present, of those added at least 7 days ago
+      keptFrom: { edits: number; sessions: number }; // checked edits behind `kept`; its own minimum
     }[];
-    // pairs whose intervals do not overlap (agents with enough data only); empty: no clear difference
+    // pairs on breakages whose intervals do not overlap, among agents with enough data, when the
+    // higher count comes from at least 2 sessions; empty: no clear difference
     clearDifference: {
-      measure: 'breakages' | 'bisect' | 'contracts' | 'mergeChecks';
+      measure: 'breakages';
       better: { agent: string; count: number; of: number };
       worse: { agent: string; count: number; of: number };
     }[];
   }[];
   usageLimits: { agent: string; limited: number; sessions: number }[]; // per agent, not per area
   survival: { pending: number; checkedNow: number }; // edits in the window still waiting for their check
+  truncated: boolean; // a query hit its row limit: the record is partial
 }
 ```
 
-Dismissed conflicts do not count. Outcomes naming several sessions, `outside` steps and gap steps
-count for nobody.
+Outcomes are counted in the window by when they happened: a bisect blame at the time of the
+blamed edit, a conflict at each time it opened, with the sessions recorded then. Dismissed
+conflicts do not count. Outcomes naming several sessions, `outside` steps and gap steps count for
+nobody, and failing checks are not counted (a merge check cannot tell whose change made one fail).
 
 ## CLI `--json`
 

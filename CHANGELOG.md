@@ -41,26 +41,32 @@ All notable changes to `mindly-cli` are documented here. The project follows
 - `mindly track [--since 30d] [--area <folder>] [--agent <kind>] [--min-edits 20] [--explain]
 [--json]`: a track record of each agent in this repository, per folder (the first
   `track.areaDepth` folders of a path, default 2; root files are `(root)`). For each agent it
-  shows edits and sessions, how many edits broke a check (reliable `mindly bisect` results whose
-  first bad step is one of its edits), broke a recorded decision (contract conflicts naming only
-  its session) or failed a merge check (shadow-merge and split merge-check conflicts naming only
-  its session), writes blocked by an enforced rule (confirmed saves), the share of its lines
-  still in the code after 7 days, and how many of its sessions hit a usage limit. There is no
-  score: every rate shows its counts and a 95% Wilson interval, rates appear only with at least
-  `track.minEdits` (20) edits and `track.minSessions` (3) sessions in a folder, and agents are
-  called clearly different only when their intervals do not overlap. Outcomes involving several
-  sessions, outside steps or gap steps count for nobody.
+  shows edits and sessions, and how often its edits broke something: a check (reliable
+  `mindly bisect` results whose first bad step is one of its edits, once per step, at the time of
+  that edit), a recorded decision (each time a contract started failing right after its edit in
+  the project's own checkout) or a merge (shadow-merge and split merge conflicts naming only its
+  session). It also counts writes blocked by an enforced rule (confirmed saves, as a count), the
+  share of the whole lines it added that are still in the code after 7 days on the branch it
+  worked on, and how many of its sessions hit a usage limit. There is no score: every rate shows
+  its counts and a 95% Wilson interval, rates appear only with at least `track.minEdits` (20)
+  edits and `track.minSessions` (3) sessions in a folder, and agents are called clearly different
+  only on their breakages, when the intervals do not overlap and the higher count comes from at
+  least 2 sessions. Outcomes involving several sessions, outside steps and gap steps count for
+  nobody, and each opening of a conflict is attributed from the sessions recorded at that moment.
 - `mindly split` adds the track record (counts only, inside the planner's data block) to the
-  planning prompt, and the plan review shows a suggested agent next to a part when one agent
-  clearly breaks less in a folder it owns. The plan's own choice is never changed.
+  planning prompt, and the plan review shows a suggested agent next to a part when another agent
+  clearly breaks less in the folder the part mainly owns. The plan's own choice is never changed.
 - `GET /api/projects/:projectId/track?since&area&agent&minEdits` on the daemon (read-only, same
   shape as `mindly track --json`), and a daemon job that checks the lines of up to 500 edits per
-  run once they are 7 days old. `mindly track` checks up to 200 more itself (at most 3 seconds)
-  and says how many are still waiting.
-- `mindly bisect` stores the blamed step (kind, session, paths) with its run result, so the track
-  record still counts it after the checkpoint is pruned.
-- Database schema v5: a `line_survival` table (one row per agent edit: line hashes added and still
-  present; no file content). Applied automatically; upgrades from v1 to v4 keep every row.
+  run (at most 20 seconds) once they are 7 days old. `mindly track` checks up to 200 more itself
+  (at most 3 seconds) and says how many are still waiting.
+- Agent edits now record which whole lines they added, and `conflict.opened` events record the
+  sessions and paths of that opening. `mindly bisect` stores the blamed step (kind, session,
+  paths, time) with its run, so the track record still counts it after the checkpoint is pruned.
+- Database schema v5: `file_change_lines` (hashes of the whole lines each agent edit added),
+  `line_survival` (per edit: tracked lines and how many are still present; no file content) and
+  an index on `file_changes (created_at, id)`. Applied automatically; upgrades from v1 to v4 keep
+  every row.
 
 ### Changed
 

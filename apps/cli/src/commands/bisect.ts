@@ -444,6 +444,7 @@ export async function bisectRun(
               gap: result.firstBad.gap,
               sessionId: result.firstBad.sessionId,
               paths: result.firstBad.paths,
+              at: result.firstBad.createdAt,
             }
           : null,
       lastGood: lastGood?.seq ?? null,

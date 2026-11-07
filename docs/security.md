@@ -75,12 +75,14 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   beyond `checkpoints.maxPerWorktree` (5,000), by `mindly forget --project` and by
   `mindly uninstall`; `checkpoints.enabled = false` turns them off.
 - The track record (`mindly track`) checks, once per agent edit and only after it is 7 days old,
-  how many of the line hashes the edit added are still in the file. To do that it reads the
-  current file in the agent's working tree (or the project root when that tree is gone) and
-  hashes its lines; it stores only two counts per edit (`line_survival`), never file content.
-  Paths on the deny-list are never read, files over 512 KB are skipped, and a path that now
-  resolves outside the tree (a symlink) is not followed. The track record is computed from local
-  data, is not available to agents over MCP, and is never included in a saves card.
+  how many of the whole lines the edit added are still in the file. At edit time it stores only
+  hashes of those lines. To check, it reads the current file in the agent's checkout (or the
+  project root when that checkout is gone), or, when another branch is checked out there, the
+  file at the tip of the branch the agent worked on (`git cat-file`, never a checkout); it hashes
+  the lines and stores two counts per edit (`line_survival`), never file content. Paths on the
+  deny-list are never read, files over 512 KB are skipped, and a path that now resolves outside
+  the tree (a symlink) is not followed. The track record is computed from local data, is not
+  available to agents over MCP, and is never included in a saves card.
 
 ### T4. Local network and browser attacks on the daemon
 

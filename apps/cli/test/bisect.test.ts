@@ -269,8 +269,9 @@ describe('mindly bisect', () => {
       expect(run.result).toMatchObject({
         blame: { kind: 'agent', gap: false, paths: ['src/calc.js'] },
       });
-      const blame = (run.result as { blame: { sessionId: string } }).blame;
+      const blame = (run.result as { blame: { sessionId: string; at: number } }).blame;
       expect(store.sessions.get(blame.sessionId).agentKind).toBe('codex');
+      expect(blame.at).toBeLessThanOrEqual(run.createdAt);
     } finally {
       store.close();
     }

@@ -80,6 +80,9 @@ export function reportConflict(
       kind: res.conflict.kind,
       severity: res.conflict.severity,
       title: res.conflict.title,
+      // Who and what at this opening (the conflict row is overwritten when it is reported again).
+      sessionIds: report.sessionIds,
+      paths: report.paths.slice(0, 200),
     },
   });
   return { ...res, eventId: event.id };

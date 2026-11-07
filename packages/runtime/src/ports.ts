@@ -18,6 +18,7 @@ import {
   diffExportSurface,
   extractExports,
   fileAtRef,
+  fileStateAtRef,
   findRepoRoot,
   headCommit,
   hunkHashes,
@@ -202,6 +203,8 @@ export function createGitPort(): GitPort {
     headCommit: (cwd) => safe(() => headCommit(cwd), null),
     changedFiles: (cwd) => safe(async () => (await changedFiles(cwd)).map((f) => f.path), []),
     fileAtRef: (cwd, ref, path) => safe(() => fileAtRef(cwd, ref, path), null),
+    fileStateAtRef: (cwd, ref, path, maxBytes) =>
+      safe(() => fileStateAtRef(cwd, ref, path, maxBytes), null),
     hunkHashes: (text) => hunkHashes(text),
     exportSurface: (source, path) => {
       const lang = languageOf(path);

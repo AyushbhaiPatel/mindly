@@ -105,9 +105,11 @@ describe('shadow merge job', () => {
     // Same conflict again: same row, not a second one.
     await merge(s);
     expect(s.d.mindly.store.conflicts.list(s.project.id)).toHaveLength(1);
-    expect(
-      s.d.mindly.store.events.query(s.project.id, { types: ['conflict.opened'] }),
-    ).toHaveLength(1);
+    const opened = s.d.mindly.store.events.query(s.project.id, { types: ['conflict.opened'] });
+    expect(opened).toHaveLength(1);
+    // The event keeps who and what at this opening (the row is overwritten by later reports).
+    expect((opened[0]!.payload['sessionIds'] as string[]).sort()).toEqual([s.a.id, s.b.id].sort());
+    expect(opened[0]!.payload['paths']).toEqual(['a.txt']);
     // B gives up its change: the conflict is resolved.
     git(s.wt, 'checkout', '--', 'a.txt');
     const clean = await merge(s);
@@ -260,10 +262,13 @@ describe('maintenance and failover', () => {
         path,
         tool: 'Edit',
         hunkHashes: d.mindly.kernel.ports.git.hunkHashes('line 1\nline 2\nline 3'),
+        lineHashes: d.mindly.kernel.ports.git.hunkHashes('line 1\nline 2\nline 3'),
         addedLines: 3,
         removedLines: 0,
         promptEventId: null,
       });
+    // The session worked on main, which is checked out.
+    store.db.prepare("UPDATE sessions SET branch = 'main' WHERE id = ?").run(s.id);
     const old = record('a.txt');
     const fresh = record('b.txt');
     store.db

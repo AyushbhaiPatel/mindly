@@ -1,4 +1,4 @@
-import type { Clock, ConflictKind, ConflictStatus } from '@mindly/core';
+import type { Clock, ConflictKind, SaveKind } from '@mindly/core';
 import { json, num, str, strOrNull, type Db, type Row } from '../db.js';
 
 /*
@@ -16,10 +16,13 @@ export interface TrackEditGroup {
   removedLines: number;
 }
 
-/** Line survival of the edits of one agent to one path. */
+/** Line survival of the edits of one session to one path (only edits with tracked lines). */
 export interface TrackSurvivalGroup {
   path: string;
+  sessionId: string;
   agentKind: string;
+  /** Edits with at least one tracked line whose survival was checked. */
+  edits: number;
   totalHashes: number;
   keptHashes: number;
 }
@@ -32,6 +35,9 @@ export interface PendingSurvival {
   path: string;
   /** The session's working directory (its tree root or a folder inside it). */
   worktree: string;
+  /** The branch the session worked on, when known. */
+  branch: string | null;
+  createdAt: number;
 }
 
 /** A bisect run that finished with a result. */
@@ -42,13 +48,26 @@ export interface TrackBisectRun {
   createdAt: number;
 }
 
-/** A conflict as far as attribution needs it. */
-export interface TrackConflict {
-  id: string;
+/**
+ * One time a conflict was opened (or reopened), from its `conflict.opened` event: the sessions
+ * and paths as they were at that moment.
+ */
+export interface TrackConflictOpening {
+  conflictId: string;
   kind: ConflictKind;
-  status: ConflictStatus;
+  /** Null when the event predates sessions being recorded on it. */
+  sessionIds: string[] | null;
+  paths: string[];
+  /** Contracts only: whether the edit that broke it was made in the project's own checkout. */
+  actorInRoot: boolean | null;
+  at: number;
+}
+
+/** A confirmed save, as far as attribution needs it. */
+export interface TrackSave {
   sessionIds: string[];
   paths: string[];
+  createdAt: number;
 }
 
 /** A session seen in the window. */
@@ -58,7 +77,9 @@ export interface TrackSession {
   status: string;
 }
 
-const MAX_ROWS = 100_000;
+/** Rows any one query of the track record reads; reaching it means the report is partial. */
+export const TRACK_MAX_ROWS = 100_000;
+const MAX_ROWS = TRACK_MAX_ROWS;
 
 export class TrackRepo {
   constructor(
@@ -87,22 +108,24 @@ export class TrackRepo {
     }));
   }
 
-  /** Computed line survival of edits made between `from` and `before`, by path and agent. */
+  /** Computed line survival of edits made between `from` and `before`, by path and session. */
   survivalGroups(projectId: string, from: number, before: number): TrackSurvivalGroup[] {
     const rows = this.db
       .prepare(
-        `SELECT c.path AS path, s.agent_kind AS agent_kind,
-           SUM(l.total_hashes) AS total, SUM(l.kept_hashes) AS kept
+        `SELECT c.path AS path, c.session_id AS session_id, s.agent_kind AS agent_kind,
+           COUNT(*) AS edits, SUM(l.total_hashes) AS total, SUM(l.kept_hashes) AS kept
          FROM line_survival l
            JOIN file_changes c ON c.id = l.change_id
            JOIN sessions s ON s.id = c.session_id
-         WHERE l.project_id = ? AND c.created_at >= ? AND c.created_at <= ?
-         GROUP BY c.path, s.agent_kind LIMIT ?`,
+         WHERE l.project_id = ? AND l.total_hashes > 0 AND c.created_at >= ? AND c.created_at <= ?
+         GROUP BY c.path, c.session_id LIMIT ?`,
       )
       .all(projectId, from, before, MAX_ROWS) as Row[];
     return rows.map((r) => ({
       path: str(r, 'path'),
+      sessionId: str(r, 'session_id'),
       agentKind: str(r, 'agent_kind'),
+      edits: num(r, 'edits'),
       totalHashes: num(r, 'total'),
       keptHashes: num(r, 'kept'),
     }));
@@ -110,30 +133,34 @@ export class TrackRepo {
 
   /**
    * Edits made at or before `before` (and at or after `from`) without a survival row, oldest
-   * first. `projectId` null covers every project (the daemon).
+   * first, after `after` when given. `projectId` null covers every project (the daemon).
    */
   pendingSurvival(
     projectId: string | null,
     before: number,
     max: number,
     from = 0,
+    after: { createdAt: number; id: string } | null = null,
   ): PendingSurvival[] {
     const rows = this.db
       .prepare(
         `SELECT c.id AS id, c.project_id AS project_id, c.session_id AS session_id, c.path AS path,
-           s.worktree AS worktree
+           c.created_at AS created_at, s.worktree AS worktree, s.branch AS branch
          FROM file_changes c
            JOIN sessions s ON s.id = c.session_id
            LEFT JOIN line_survival l ON l.change_id = c.id
          WHERE l.change_id IS NULL AND (? IS NULL OR c.project_id = ?)
            AND c.created_at <= ? AND c.created_at >= ?
-         ORDER BY c.created_at ASC LIMIT ?`,
+           AND (c.created_at, c.id) > (?, ?)
+         ORDER BY c.created_at ASC, c.id ASC LIMIT ?`,
       )
       .all(
         projectId,
         projectId,
         before,
         from,
+        after?.createdAt ?? -1,
+        after?.id ?? '',
         Math.max(1, Math.min(10_000, Math.trunc(max))),
       ) as Row[];
     return rows.map((r) => ({
@@ -142,6 +169,8 @@ export class TrackRepo {
       sessionId: str(r, 'session_id'),
       path: str(r, 'path'),
       worktree: str(r, 'worktree'),
+      branch: strOrNull(r, 'branch'),
+      createdAt: num(r, 'created_at'),
     }));
   }
 
@@ -156,11 +185,11 @@ export class TrackRepo {
     return num(r, 'n');
   }
 
-  /** The line hashes an edit added. */
+  /** The hashes of the whole lines an edit added. */
   hashes(changeId: string): string[] {
     return (
       this.db
-        .prepare('SELECT hash FROM file_change_hunks WHERE change_id = ? LIMIT 5000')
+        .prepare('SELECT hash FROM file_change_lines WHERE change_id = ? LIMIT 5000')
         .all(changeId) as Row[]
     ).map((r) => str(r, 'hash'));
   }
@@ -192,9 +221,9 @@ export class TrackRepo {
       .prepare(
         `SELECT id, input, result, created_at FROM runs
          WHERE project_id = ? AND kind = 'bisect' AND status = 'passed' AND created_at >= ?
-         ORDER BY created_at DESC LIMIT 5000`,
+         ORDER BY created_at DESC LIMIT ?`,
       )
-      .all(projectId, from) as Row[];
+      .all(projectId, from, MAX_ROWS) as Row[];
     return rows.map((r) => ({
       id: str(r, 'id'),
       input: json<Record<string, unknown>>(r, 'input', {}),
@@ -203,22 +232,62 @@ export class TrackRepo {
     }));
   }
 
-  /** Conflicts of `kinds` opened at or after `from`, any status. */
-  conflicts(projectId: string, kinds: readonly ConflictKind[], from: number): TrackConflict[] {
+  /** Every opening of a conflict of `kinds` at or after `from`, from `conflict.opened` events. */
+  conflictOpenings(
+    projectId: string,
+    kinds: readonly ConflictKind[],
+    from: number,
+  ): TrackConflictOpening[] {
     if (kinds.length === 0) return [];
     const rows = this.db
       .prepare(
-        `SELECT id, kind, status, session_ids, paths FROM conflicts
-         WHERE project_id = ? AND kind IN (${kinds.map(() => '?').join(', ')}) AND created_at >= ?
-         ORDER BY created_at DESC LIMIT 10000`,
+        `SELECT payload, created_at FROM events
+         WHERE project_id = ? AND type = 'conflict.opened' AND created_at >= ?
+           AND json_extract(payload, '$.kind') IN (${kinds.map(() => '?').join(', ')})
+         ORDER BY seq DESC LIMIT ?`,
       )
-      .all(projectId, ...kinds, from) as Row[];
+      .all(projectId, from, ...kinds, MAX_ROWS) as Row[];
+    const out: TrackConflictOpening[] = [];
+    for (const r of rows) {
+      const p = json<Record<string, unknown>>(r, 'payload', {});
+      if (typeof p['conflictId'] !== 'string') continue;
+      const strings = (v: unknown): string[] | null =>
+        Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : null;
+      out.push({
+        conflictId: p['conflictId'],
+        kind: p['kind'] as ConflictKind,
+        sessionIds: strings(p['sessionIds']),
+        paths: strings(p['paths']) ?? [],
+        actorInRoot: typeof p['actorInRoot'] === 'boolean' ? p['actorInRoot'] : null,
+        at: num(r, 'created_at'),
+      });
+    }
+    return out;
+  }
+
+  /** Ids of the conflicts of a project the user dismissed. */
+  dismissedConflicts(projectId: string): Set<string> {
+    return new Set(
+      (
+        this.db
+          .prepare(`SELECT id FROM conflicts WHERE project_id = ? AND status = 'dismissed' LIMIT ?`)
+          .all(projectId, MAX_ROWS) as Row[]
+      ).map((r) => str(r, 'id')),
+    );
+  }
+
+  /** Confirmed saves of `kind` created at or after `from`. */
+  confirmedSaves(projectId: string, kind: SaveKind, from: number): TrackSave[] {
+    const rows = this.db
+      .prepare(
+        `SELECT session_ids, paths, created_at FROM saves
+         WHERE project_id = ? AND kind = ? AND status = 'confirmed' AND created_at >= ? LIMIT ?`,
+      )
+      .all(projectId, kind, from, MAX_ROWS) as Row[];
     return rows.map((r) => ({
-      id: str(r, 'id'),
-      kind: str(r, 'kind') as ConflictKind,
-      status: str(r, 'status') as ConflictStatus,
       sessionIds: json<string[]>(r, 'session_ids', []),
       paths: json<string[]>(r, 'paths', []),
+      createdAt: num(r, 'created_at'),
     }));
   }
 

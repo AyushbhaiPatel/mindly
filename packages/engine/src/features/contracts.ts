@@ -399,13 +399,22 @@ export class ContractService {
    * Evaluates a contract, stores the result and handles transitions: passing to failing opens a
    * critical conflict and notifies live sessions; failing to passing resolves it.
    */
-  run(contract: Contract, projectRoot: string, actor: Session | null): Contract {
+  /**
+   * `actorInRoot`: the edit that triggered this run was made in the project's own checkout. The
+   * contract is checked against that checkout, so only then can a flip be the actor's doing.
+   */
+  run(
+    contract: Contract,
+    projectRoot: string,
+    actor: Session | null,
+    opts: { actorInRoot?: boolean } = {},
+  ): Contract {
     const result = this.evaluate(contract, projectRoot);
     const saved = this.k.store.contracts.recordResult(contract.id, result.state, result.message);
     this.recordEvent(saved, result, actor?.id ?? null, contract.state);
     const fp = fingerprint('contract_broken', contract.id);
     if (contract.state === 'passing' && result.state === 'failing') {
-      this.reportBroken(saved, result, fp, actor);
+      this.reportBroken(saved, result, fp, actor, opts.actorInRoot === true);
     } else if (contract.state === 'failing' && result.state === 'passing') {
       this.resolveBroken(saved, fp, actor);
     }
@@ -418,19 +427,24 @@ export class ContractService {
     projectRoot: string,
     path: string,
     actor: Session | null,
+    opts: { actorInRoot?: boolean } = {},
   ): Contract[] {
     return this.k.store.contracts
       .forPath(projectId, path)
       .filter((c) => c.kind !== 'command')
       .slice(0, 100)
-      .map((c) => this.run(c, projectRoot, actor));
+      .map((c) => this.run(c, projectRoot, actor, opts));
   }
 
   /** Bus entry point. Never throws. */
   async onFilesChanged(p: BusEvents['files.changed']): Promise<void> {
+    let actorInRoot = false;
+    await guarded(this.k, 'contracts', async () => {
+      actorInRoot = (await this.k.ports.git.findRepoRoot(p.session.worktree)) === p.projectRoot;
+    });
     for (const f of p.files.slice(0, 20)) {
       await guarded(this.k, 'contracts', () => {
-        this.runForFile(p.projectId, p.projectRoot, f.path, p.session);
+        this.runForFile(p.projectId, p.projectRoot, f.path, p.session, { actorInRoot });
       });
     }
   }
@@ -461,6 +475,7 @@ export class ContractService {
     r: ContractEvaluation,
     fp: string,
     actor: Session | null,
+    actorInRoot: boolean,
   ): void {
     const memory = this.k.store.memories.find(c.memoryId);
     const title = sanitizeLine(memory?.title ?? 'a recorded decision', 120);
@@ -480,7 +495,15 @@ export class ContractService {
       projectId: c.projectId,
       sessionId: actor?.id ?? null,
       type: 'conflict.opened',
-      payload: { conflictId: conflict.id, kind: conflict.kind, title: conflict.title },
+      // Who and what at this opening (the conflict row is overwritten when it is reported again).
+      payload: {
+        conflictId: conflict.id,
+        kind: conflict.kind,
+        title: conflict.title,
+        sessionIds: conflict.sessionIds,
+        paths: conflict.paths,
+        actorInRoot: actor !== null && actorInRoot,
+      },
     });
     const recipients = liveSessions(this.k, c.projectId).map((s) => s.id);
     if (actor && !recipients.includes(actor.id)) recipients.push(actor.id);

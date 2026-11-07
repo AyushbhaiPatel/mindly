@@ -38,6 +38,7 @@ export {
   currentBranch,
   diffForFile,
   fileAtRef,
+  fileStateAtRef,
   findRepoRoot,
   gitCommonDir,
   headCommit,
@@ -47,7 +48,7 @@ export {
   parseWorktreeList,
   resolveCommit,
 } from './repo.js';
-export type { ChangeKind, ChangedFile, DiffOptions, WorktreeInfo } from './repo.js';
+export type { ChangeKind, ChangedFile, DiffOptions, FileAtRefState, WorktreeInfo } from './repo.js';
 
 export {
   SYNTHETIC_IDENTITY,

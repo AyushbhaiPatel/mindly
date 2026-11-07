@@ -1,12 +1,11 @@
 import { readFileSync, statSync } from 'node:fs';
+import { invalidInput, isDeniedPath, sanitizeLine, tryResolveInsideRoot } from '@mindly/core';
 import {
-  invalidInput,
-  isDeniedPath,
-  sanitizeLine,
-  tryResolveInsideRoot,
-  type Checkpoint,
-} from '@mindly/core';
-import type { PendingSurvival, TrackEditGroup, TrackSurvivalGroup } from '@mindly/store';
+  TRACK_MAX_ROWS,
+  type PendingSurvival,
+  type TrackEditGroup,
+  type TrackSurvivalGroup,
+} from '@mindly/store';
 import type { Kernel } from '../kernel.js';
 import type { Mindly } from '../mindly.js';
 import { serviceOf } from './shared.js';
@@ -31,10 +30,15 @@ export const SURVIVAL_AGE_MS = 7 * DAY_MS;
 export const SURVIVAL_MAX_FILE_BYTES = 512 * 1024;
 /** At most this many areas in a report. */
 export const TRACK_MAX_AREAS = 200;
+/**
+ * Agents are compared only when the higher breakage count comes from at least this many
+ * sessions: edits of one session are not independent, so one bad session is not a pattern.
+ */
+export const TRACK_MIN_BREAK_SESSIONS = 2;
 /** z for a two-sided 95% interval. */
 export const WILSON_Z = 1.959963984540054;
 
-/** The breakage measures, the only ones agents are compared on. */
+/** The breakage measures. Agents are compared on `breakages` (their sum) only. */
 export const TRACK_BREAKAGE_MEASURES = ['breakages', 'bisect', 'contracts', 'mergeChecks'] as const;
 export type TrackBreakageMeasure = (typeof TRACK_BREAKAGE_MEASURES)[number];
 
@@ -43,23 +47,23 @@ export const TRACK_EXPLAIN = {
   edits:
     'Edits: agent edits Mindly recorded in the area, the sessions that made them, and lines added and removed. Volume, not quality.',
   bisect:
-    "Broke a check: reliable mindly bisect runs whose first failing step is one edit of this agent (not a gap or outside step), once per run, in the areas of that step's files.",
+    "Broke a check: reliable mindly bisect results whose first failing step is one edit of this agent (not a gap or outside step), once per step, at the time of that edit, in its files' areas.",
   contracts:
-    "Broke a decision: recorded decisions (contracts) that started failing, when the conflict names exactly one session and it is this agent's, in the contract's files.",
+    "Broke a decision: each time a recorded decision (contract) started failing right after an edit of this agent in the project's own checkout, in the contract's files.",
   mergeChecks:
-    "Failed merge checks: shadow-merge and split merge checks that failed or conflicted, when the conflict names exactly one session and it is this agent's, in its files.",
+    "Failed merge checks: merge conflicts found by shadow merges and split merge checks that name exactly one session, this agent's. Failing checks are not counted: a merge check cannot tell whose change made one fail.",
   breakages:
-    'Broke: the three above added up, out of the edits in the area. Outcomes involving several sessions count for nobody; dismissed conflicts do not count.',
+    'Broke: the three above added up, out of the edits in the area. Agents are compared on this only, and only when the higher count comes from at least 2 sessions. Outcomes involving several sessions count for nobody; dismissed conflicts do not count.',
   ruleAttempts:
-    'Tried to break a rule: confirmed saves where an enforced rule blocked a write of this agent. Attempts, not damage.',
-  kept: 'Kept: of the lines this agent added at least 7 days ago, how many are still in the file. Later rewrites by anyone count as not kept; deny-listed files and files over 512 KB are skipped.',
+    'Tried to break a rule: confirmed saves where an enforced rule blocked a write of this agent. A count of attempts, not damage, and not a rate: blocked writes are not edits.',
+  kept: 'Kept: of the whole lines this agent added at least 7 days ago (tracked lines), how many are still in the file on the branch it worked on. Later rewrites by anyone count as not kept; deny-listed files and files over 512 KB are skipped.',
   usageLimits:
     'Usage limits: sessions of this agent seen in the window that hit a usage limit or handed work off because of one. Per agent, not per area.',
 } as const;
 
 /** The minimum-data rule in one line. */
 export function trackMinimumRule(minEdits: number, minSessions: number): string {
-  return `Rates appear only for an agent with at least ${minEdits} edits and ${minSessions} sessions in an area; "clear difference" means their 95% Wilson intervals do not overlap.`;
+  return `Rates appear only for an agent with at least ${minEdits} edits and ${minSessions} sessions in an area (for kept lines: that many checked edits and sessions); "clear difference" means their 95% Wilson intervals do not overlap.`;
 }
 
 // Terminal escape sequences: dropped whole, not just their escape character.
@@ -125,11 +129,13 @@ export interface TrackInterval {
   high: number;
 }
 
-/** The Wilson score interval of `k` successes in `n` trials (95% by default); null without trials. */
+/**
+ * The Wilson score interval of `k` successes in `n` trials (95% by default); null without trials
+ * or when `k` is not between 0 and `n` (then it is not a proportion).
+ */
 export function wilson(k: number, n: number, z = WILSON_Z): TrackInterval | null {
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const kk = Math.max(0, Math.min(k, n));
-  const p = kk / n;
+  if (!Number.isFinite(n) || n <= 0 || !Number.isFinite(k) || k < 0 || k > n) return null;
+  const p = k / n;
   const z2 = z * z;
   const denom = 1 + z2 / n;
   const center = (p + z2 / (2 * n)) / denom;
@@ -149,7 +155,10 @@ export function clearlyBelow(a: TrackInterval | null, b: TrackInterval | null): 
 // Report
 // ---------------------------------------------------------------------------------------------
 
-/** A count out of a denominator. `rate` and `interval` are null below the minimum data. */
+/**
+ * A count out of a denominator. `rate` and `interval` are null below the minimum data, and when
+ * the count is not a share of the denominator (larger than it, or not a rate at all).
+ */
 export interface TrackRate {
   count: number;
   of: number;
@@ -169,16 +178,20 @@ export interface TrackAgentArea {
   enoughData: boolean;
   /** Broke a check + broke a decision + failed merge checks, out of edits. */
   breakages: TrackRate;
+  /** Distinct sessions behind the breakages. */
+  breakageSessions: number;
   bisect: TrackRate;
   contracts: TrackRate;
   mergeChecks: TrackRate;
-  /** Writes blocked by an enforced rule, out of edits. */
+  /** Writes blocked by an enforced rule: a count only (`rate` is always null). */
   ruleAttempts: TrackRate;
-  /** Line hashes still in the file, out of those added at least 7 days ago. */
+  /** Tracked lines still in the file, out of those added at least 7 days ago. */
   kept: TrackRate;
+  /** Edits and sessions behind `kept` (its own minimum data). */
+  keptFrom: { edits: number; sessions: number };
 }
 
-/** One agent's breakage interval lies entirely below another's on `measure`. */
+/** One agent's breakage interval lies entirely below another's. */
 export interface TrackDifference {
   measure: TrackBreakageMeasure;
   better: { agent: string; count: number; of: number };
@@ -205,15 +218,18 @@ export interface TrackReport {
   filter: { area: string | null; agent: string | null };
   minimum: { edits: number; sessions: number };
   totals: { agents: number; edits: number; areas: number };
-  /** Most edits first, at most {@link TRACK_MAX_AREAS}. */
+  /** Most edits first, at most {@link TRACK_MAX_AREAS} (`totals.areas` counts them all). */
   areas: TrackArea[];
   usageLimits: TrackUsage[];
   survival: { pending: number; checkedNow: number };
+  /** True when a query hit its row limit, so some data was left out. */
+  truncated: boolean;
 }
 
-/** An outcome pinned to one agent, with the paths it is about. */
+/** An outcome pinned to one session of one agent, with the paths it is about. */
 export interface TrackOutcome {
   agent: string;
+  sessionId: string;
   paths: readonly string[];
   measure: 'bisect' | 'contracts' | 'mergeChecks' | 'ruleAttempts';
 }
@@ -225,6 +241,7 @@ export interface TrackInputs {
   outcomes: readonly TrackOutcome[];
   sessions: readonly { id: string; agentKind: string; status: string }[];
   limited: ReadonlySet<string>;
+  truncated?: boolean;
 }
 
 export interface TrackReportOptions {
@@ -246,18 +263,17 @@ interface Acc {
   bisect: number;
   contracts: number;
   mergeChecks: number;
+  breakSessions: Set<string>;
   ruleAttempts: number;
   keptTotal: number;
   kept: number;
+  keptEdits: number;
+  keptSessions: Set<string>;
 }
 
 function rateOf(count: number, of: number, show: boolean): TrackRate {
-  return {
-    count,
-    of,
-    rate: show && of > 0 ? count / of : null,
-    interval: show ? wilson(count, of) : null,
-  };
+  const ok = show && of > 0 && count <= of;
+  return { count, of, rate: ok ? count / of : null, interval: ok ? wilson(count, of) : null };
 }
 
 /** Builds the report from inputs already tied to agents. Pure; tested directly. */
@@ -282,9 +298,12 @@ export function buildTrackReport(inputs: TrackInputs, o: TrackReportOptions): Tr
         bisect: 0,
         contracts: 0,
         mergeChecks: 0,
+        breakSessions: new Set(),
         ruleAttempts: 0,
         keptTotal: 0,
         kept: 0,
+        keptEdits: 0,
+        keptSessions: new Set(),
       };
       agents.set(agent, a);
     }
@@ -308,12 +327,18 @@ export function buildTrackReport(inputs: TrackInputs, o: TrackReportOptions): Tr
       const a = acc(area, s.agentKind);
       a.keptTotal += s.totalHashes;
       a.kept += s.keptHashes;
+      a.keptEdits += s.edits;
+      a.keptSessions.add(s.sessionId);
     }
   }
   for (const out of inputs.outcomes) {
     if (!wanted(out.agent)) continue;
     // Once per outcome in each area it touches.
-    for (const area of areasOf(out.paths)) acc(area, out.agent)[out.measure] += 1;
+    for (const area of areasOf(out.paths)) {
+      const a = acc(area, out.agent);
+      a[out.measure] += 1;
+      if (out.measure !== 'ruleAttempts') a.breakSessions.add(out.sessionId);
+    }
   }
 
   const areas: TrackArea[] = [];
@@ -321,7 +346,8 @@ export function buildTrackReport(inputs: TrackInputs, o: TrackReportOptions): Tr
     const rows: TrackAgentArea[] = [...agents]
       .map(([agent, a]): TrackAgentArea => {
         const enough = a.edits >= o.minEdits && a.sessions.size >= o.minSessions;
-        const broke = a.bisect + a.contracts + a.mergeChecks;
+        const keptEnough =
+          enough && a.keptEdits >= o.minEdits && a.keptSessions.size >= o.minSessions;
         return {
           agent: trackLabel(agent, 40),
           edits: a.edits,
@@ -329,12 +355,14 @@ export function buildTrackReport(inputs: TrackInputs, o: TrackReportOptions): Tr
           linesAdded: a.added,
           linesRemoved: a.removed,
           enoughData: enough,
-          breakages: rateOf(broke, a.edits, enough),
+          breakages: rateOf(a.bisect + a.contracts + a.mergeChecks, a.edits, enough),
+          breakageSessions: a.breakSessions.size,
           bisect: rateOf(a.bisect, a.edits, enough),
           contracts: rateOf(a.contracts, a.edits, enough),
           mergeChecks: rateOf(a.mergeChecks, a.edits, enough),
-          ruleAttempts: rateOf(a.ruleAttempts, a.edits, enough),
-          kept: rateOf(a.kept, a.keptTotal, enough && a.keptTotal > 0),
+          ruleAttempts: rateOf(a.ruleAttempts, a.edits, false),
+          kept: rateOf(a.kept, a.keptTotal, keptEnough),
+          keptFrom: { edits: a.keptEdits, sessions: a.keptSessions.size },
         };
       })
       .sort((x, y) => y.edits - x.edits || x.agent.localeCompare(y.agent));
@@ -377,24 +405,27 @@ export function buildTrackReport(inputs: TrackInputs, o: TrackReportOptions): Tr
       (x, y) => y.sessions - x.sessions || x.agent.localeCompare(y.agent),
     ),
     survival: { pending: o.survivalPending ?? 0, checkedNow: o.checkedNow ?? 0 },
+    truncated: inputs.truncated === true,
   };
 }
 
-/** Pairs of agents with enough data whose breakage intervals do not overlap. */
+/**
+ * Pairs of agents with enough data whose breakage intervals do not overlap, where the higher
+ * count comes from at least {@link TRACK_MIN_BREAK_SESSIONS} sessions. Only the sum is compared:
+ * more comparisons would make a chance "difference" somewhere likely.
+ */
 function differences(rows: readonly TrackAgentArea[]): TrackDifference[] {
   const eligible = rows.filter((r) => r.enoughData);
   const out: TrackDifference[] = [];
-  for (const measure of TRACK_BREAKAGE_MEASURES) {
-    for (const a of eligible) {
-      for (const b of eligible) {
-        if (a === b) continue;
-        if (!clearlyBelow(a[measure].interval, b[measure].interval)) continue;
-        out.push({
-          measure,
-          better: { agent: a.agent, count: a[measure].count, of: a[measure].of },
-          worse: { agent: b.agent, count: b[measure].count, of: b[measure].of },
-        });
-      }
+  for (const a of eligible) {
+    for (const b of eligible) {
+      if (a === b || b.breakageSessions < TRACK_MIN_BREAK_SESSIONS) continue;
+      if (!clearlyBelow(a.breakages.interval, b.breakages.interval)) continue;
+      out.push({
+        measure: 'breakages',
+        better: { agent: a.agent, count: a.breakages.count, of: a.breakages.of },
+        worse: { agent: b.agent, count: b.breakages.count, of: b.breakages.of },
+      });
     }
   }
   return out;
@@ -404,12 +435,10 @@ function differences(rows: readonly TrackAgentArea[]): TrackDifference[] {
 // Split integration
 // ---------------------------------------------------------------------------------------------
 
-/** Clear breakage differences of an area among `agents` (all agents when null). */
-function areaDifferences(area: TrackArea, agents: ReadonlySet<string> | null): TrackDifference[] {
+/** Clear breakage differences of an area among `agents`. */
+function areaDifferences(area: TrackArea, agents: ReadonlySet<string>): TrackDifference[] {
   return area.clearDifference.filter(
-    (d) =>
-      d.measure === 'breakages' &&
-      (agents === null || (agents.has(d.better.agent) && agents.has(d.worse.agent))),
+    (d) => agents.has(d.better.agent) && agents.has(d.worse.agent),
   );
 }
 
@@ -428,7 +457,7 @@ export function trackPromptLines(
     if (lines.length >= max) break;
     if (areaDifferences(area, allowed).length === 0) continue;
     const rows = area.agents
-      .filter((r) => r.enoughData && allowed.has(r.agent))
+      .filter((r) => r.enoughData && r.breakages.rate !== null && allowed.has(r.agent))
       .sort((x, y) => (x.breakages.rate ?? 0) - (y.breakages.rate ?? 0));
     const parts = rows.map((r, i) =>
       i === 0
@@ -449,28 +478,46 @@ export interface TrackSuggestion {
   versus: { agent: string; count: number; of: number };
 }
 
-/** True when the owns glob covers files in `area`. */
-export function globTouchesArea(glob: string, area: string): boolean {
-  const g = posixPath(glob.trim()).toLowerCase();
-  const a = area.toLowerCase();
-  const segs = g.split('/');
+/**
+ * The single area an owns glob lies in at `depth`: `src/api/billing/**` is `src/api`, `src/*.ts`
+ * is `src`, `*.md` is `(root)`. Null when it spans several areas (`src/**` at depth 2, `**`).
+ */
+export function globArea(glob: string, depth: number): string | null {
+  const segs = posixPath(glob.trim())
+    .split('/')
+    .filter((s) => s !== '');
+  if (segs.length === 0) return null;
   const fixed: string[] = [];
   for (const s of segs) {
     if (/[*?[\]{}!]/.test(s)) break;
     fixed.push(s);
   }
-  const literal = fixed.length === segs.length;
-  const next = segs[fixed.length];
-  if (area === ROOT_AREA) return segs.length === 1 || (fixed.length === 0 && next === '**');
-  const base = fixed.join('/');
-  if (base === a || base.startsWith(`${a}/`)) return true;
-  return !literal && next === '**' && (base === '' || a.startsWith(`${base}/`));
+  if (fixed.length === segs.length) return areaOf(segs.join('/'), depth);
+  const d = Math.max(1, Math.min(4, Math.trunc(depth)));
+  if (fixed.length >= d) return fixed.slice(0, d).join('/');
+  // A pattern for the files of one folder (`src/*.ts`, `*.md`) lies in that folder's area.
+  if (fixed.length === segs.length - 1 && segs[segs.length - 1] !== '**') {
+    return fixed.length === 0 ? ROOT_AREA : fixed.join('/');
+  }
+  return null;
+}
+
+/** The area most of a part's owns globs lie in (the first one on a tie), or null. */
+export function mainArea(owns: readonly string[], depth: number): string | null {
+  const counts = new Map<string, number>();
+  for (const g of owns) {
+    const a = globArea(g, depth);
+    if (a !== null) counts.set(a, (counts.get(a) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  for (const [a, n] of counts) if (best === null || n > (counts.get(best) ?? 0)) best = a;
+  return best;
 }
 
 /**
- * The agent the track record favours for each part, by the area the part owns with the most
- * edits: an agent clearly below another on breakages and clearly above none. Parts without such
- * an area get nothing. Never changes the plan.
+ * The agent the track record favours for each part, in the part's main area: an agent clearly
+ * below another on breakages and clearly above none. Nothing when there is no clear difference
+ * there, or when it is the agent the plan already chose. Never changes the plan.
  */
 export function suggestAgents(
   report: TrackReport,
@@ -480,30 +527,29 @@ export function suggestAgents(
   const allowed = new Set(agents);
   const out = new Map<string, TrackSuggestion>();
   for (const part of parts) {
-    for (const area of report.areas) {
-      if (!part.owns.some((g) => globTouchesArea(g, area.area))) continue;
-      const diffs = areaDifferences(area, allowed);
-      if (diffs.length === 0) continue;
-      const worseOnes = new Set(diffs.map((d) => d.worse.agent));
-      const best = diffs
-        .filter((d) => !worseOnes.has(d.better.agent))
-        .sort((x, y) => x.better.count / x.better.of - y.better.count / y.better.of)[0];
-      if (!best) continue;
-      const vs =
-        diffs.find((d) => d.better.agent === best.better.agent && d.worse.agent === part.agent) ??
-        diffs
-          .filter((d) => d.better.agent === best.better.agent)
-          .sort((x, y) => y.worse.count / y.worse.of - x.worse.count / x.worse.of)[0] ??
-        best;
-      out.set(part.key, {
-        agent: best.better.agent,
-        area: area.area,
-        count: best.better.count,
-        of: best.better.of,
-        versus: vs.worse,
-      });
-      break;
-    }
+    const main = mainArea(part.owns, report.areaDepth)?.toLowerCase();
+    const area = report.areas.find((a) => a.area.toLowerCase() === main);
+    if (!area) continue;
+    const diffs = areaDifferences(area, allowed);
+    if (diffs.length === 0) continue;
+    const worseOnes = new Set(diffs.map((d) => d.worse.agent));
+    const best = diffs
+      .filter((d) => !worseOnes.has(d.better.agent))
+      .sort((x, y) => x.better.count / x.better.of - y.better.count / y.better.of)[0];
+    if (!best || best.better.agent === part.agent) continue;
+    const vs =
+      diffs.find((d) => d.better.agent === best.better.agent && d.worse.agent === part.agent) ??
+      diffs
+        .filter((d) => d.better.agent === best.better.agent)
+        .sort((x, y) => y.worse.count / y.worse.of - x.worse.count / x.worse.of)[0] ??
+      best;
+    out.set(part.key, {
+      agent: best.better.agent,
+      area: area.area,
+      count: best.better.count,
+      of: best.better.of,
+      versus: vs.worse,
+    });
   }
   return out;
 }
@@ -527,11 +573,35 @@ export interface TrackOptions {
 
 export interface SurvivalRun {
   checked: number;
-  /** Edits in scope still waiting for their check. */
+  /** Edits left unchecked this time because their file could not be read (tried again later). */
+  deferred: number;
+  /** Edits in scope still waiting for their check (0 for the all-projects run). */
   pending: number;
 }
 
+/** The blamed step of a bisect run, as far as attribution needs it. */
+interface BlamedStep {
+  key: string;
+  kind: 'agent' | 'outside' | 'baseline';
+  gap: boolean;
+  sessionId: string | null;
+  paths: string[];
+  at: number;
+}
+
+/** What survival compares against: the lines of the file, nothing (gone), skip, or try later. */
+type FileLines = Set<string> | 'absent' | 'skip' | 'defer';
+
+/** The checkout an edit's path is relative to, and its current branch. */
+interface Tree {
+  root: string;
+  branch: string | null;
+}
+
 export class TrackService {
+  /** Where the all-projects survival scan stopped, so edits it cannot read never block others. */
+  private cursor: { createdAt: number; id: string } | null = null;
+
   constructor(private readonly k: Kernel) {}
 
   /** The track record of a project. Reads only. */
@@ -540,26 +610,33 @@ export class TrackService {
     const cfg = this.k.config.track;
     const now = this.k.clock.now();
     const from = now - o.windowMs;
-    const areaDepth = o.areaDepth ?? cfg.areaDepth;
     const agentKinds = store.track.agentKinds(projectId);
-    const outcomes: TrackOutcome[] = [
-      ...this.bisectBlames(projectId, from, agentKinds),
-      ...this.conflictBlames(projectId, from, agentKinds),
-      ...this.ruleAttempts(projectId, from, agentKinds),
-    ];
+    const bisect = this.bisectBlames(projectId, from, agentKinds);
+    const conflicts = this.conflictBlames(projectId, from, agentKinds);
+    const rules = this.ruleAttempts(projectId, from, agentKinds);
     const survivedBefore = now - SURVIVAL_AGE_MS;
+    const edits = store.track.editGroups(projectId, from);
+    const survival =
+      survivedBefore >= from ? store.track.survivalGroups(projectId, from, survivedBefore) : [];
+    const sessions = store.track.sessionsSeen(projectId, from);
+    const truncated =
+      agentKinds.size >= TRACK_MAX_ROWS ||
+      bisect.truncated === true ||
+      conflicts.truncated === true ||
+      rules.truncated === true ||
+      [edits, survival, sessions].some((r) => r.length >= TRACK_MAX_ROWS);
     return buildTrackReport(
       {
-        edits: store.track.editGroups(projectId, from),
-        survival:
-          survivedBefore >= from ? store.track.survivalGroups(projectId, from, survivedBefore) : [],
-        outcomes,
-        sessions: store.track.sessionsSeen(projectId, from),
+        edits,
+        survival,
+        outcomes: [...bisect, ...conflicts, ...rules],
+        sessions,
         limited: store.track.limitedSessionIds(projectId, from),
+        truncated,
       },
       {
         window: { since: o.since, from, to: now },
-        areaDepth,
+        areaDepth: o.areaDepth ?? cfg.areaDepth,
         minEdits: o.minEdits ?? cfg.minEdits,
         minSessions: o.minSessions ?? cfg.minSessions,
         area: o.area ?? null,
@@ -573,76 +650,109 @@ export class TrackService {
     );
   }
 
-  /** Reliable bisect results whose first bad step is one agent edit (not a gap, not outside). */
+  /**
+   * Reliable bisect results whose first bad step is one agent edit (not a gap, not outside),
+   * counted once per step and only when that edit is in the window.
+   */
   private bisectBlames(
     projectId: string,
     from: number,
     agentKinds: ReadonlyMap<string, string>,
-  ): TrackOutcome[] {
-    const out: TrackOutcome[] = [];
-    for (const run of this.k.store.track.bisectRuns(projectId, from)) {
+  ): TrackOutcome[] & { truncated?: boolean } {
+    const out: TrackOutcome[] & { truncated?: boolean } = [];
+    const runs = this.k.store.track.bisectRuns(projectId, from);
+    out.truncated = runs.length >= TRACK_MAX_ROWS;
+    const seen = new Set<string>();
+    for (const run of runs) {
       const r = run.result;
       if (r['status'] !== 'found' || r['flaky'] === true) continue;
-      const step = this.blamedStep(projectId, run.input, r);
+      const step = this.blamedStep(projectId, run.input, r, run.createdAt);
       if (!step || step.kind !== 'agent' || step.gap || !step.sessionId) continue;
+      if (step.at < from || seen.has(step.key)) continue;
+      seen.add(step.key);
       const agent = agentKinds.get(step.sessionId);
       if (!agent || step.paths.length === 0) continue;
-      out.push({ agent, paths: step.paths, measure: 'bisect' });
+      out.push({ agent, sessionId: step.sessionId, paths: step.paths, measure: 'bisect' });
     }
     return out;
   }
 
   /**
    * The first bad step of a bisect run: the copy stored with the result, else the checkpoint
-   * row (older runs), looked up by working tree and step number.
+   * row (runs recorded before the copy was kept), looked up by working tree and step number.
    */
   private blamedStep(
     projectId: string,
     input: Record<string, unknown>,
     result: Record<string, unknown>,
-  ): Pick<Checkpoint, 'kind' | 'gap' | 'sessionId' | 'paths'> | null {
-    const blame = result['blame'];
-    if (blame !== null && typeof blame === 'object') {
-      const b = blame as Record<string, unknown>;
-      return {
-        kind: b['kind'] === 'agent' ? 'agent' : 'outside',
-        gap: b['gap'] !== false,
-        sessionId: typeof b['sessionId'] === 'string' ? b['sessionId'] : null,
-        paths: Array.isArray(b['paths'])
-          ? b['paths'].filter((p): p is string => typeof p === 'string').slice(0, 200)
-          : [],
-      };
-    }
+    runAt: number,
+  ): BlamedStep | null {
     const seq = result['firstBad'];
     const range = input['range'];
     const worktree =
       range !== null && typeof range === 'object'
         ? (range as Record<string, unknown>)['worktree']
         : undefined;
+    const blame = result['blame'];
+    if (blame !== null && typeof blame === 'object') {
+      const b = blame as Record<string, unknown>;
+      return {
+        key:
+          typeof b['checkpointId'] === 'string'
+            ? b['checkpointId']
+            : `${String(worktree)}\u0000${String(seq)}`,
+        kind: b['kind'] === 'agent' ? 'agent' : 'outside',
+        gap: b['gap'] !== false,
+        sessionId: typeof b['sessionId'] === 'string' ? b['sessionId'] : null,
+        paths: Array.isArray(b['paths'])
+          ? b['paths'].filter((p): p is string => typeof p === 'string').slice(0, 200)
+          : [],
+        at: typeof b['at'] === 'number' ? b['at'] : runAt,
+      };
+    }
     if (typeof seq !== 'number' || typeof worktree !== 'string') return null;
-    return this.k.store.checkpoints.bySeq(projectId, worktree, seq);
+    const step = this.k.store.checkpoints.bySeq(projectId, worktree, seq);
+    if (!step) return null;
+    return {
+      key: step.id,
+      kind: step.kind,
+      gap: step.gap,
+      sessionId: step.sessionId,
+      paths: step.paths,
+      at: step.createdAt,
+    };
   }
 
-  /** Contract and merge-check conflicts that name exactly one session. */
+  /**
+   * Each opening of a contract or merge conflict that named exactly one session, from the
+   * `conflict.opened` event of that opening (the conflict row is overwritten by later reports).
+   * A contract counts only when the edit that broke it was made in the project's own checkout,
+   * since that is what the contract is checked against. Dismissed conflicts never count.
+   */
   private conflictBlames(
     projectId: string,
     from: number,
     agentKinds: ReadonlyMap<string, string>,
-  ): TrackOutcome[] {
-    const out: TrackOutcome[] = [];
-    const conflicts = this.k.store.track.conflicts(
+  ): TrackOutcome[] & { truncated?: boolean } {
+    const out: TrackOutcome[] & { truncated?: boolean } = [];
+    const openings = this.k.store.track.conflictOpenings(
       projectId,
-      ['contract_broken', 'check_failed', 'merge_conflict'],
+      ['contract_broken', 'merge_conflict'],
       from,
     );
-    for (const c of conflicts) {
-      if (c.status === 'dismissed') continue;
+    out.truncated = openings.length >= TRACK_MAX_ROWS;
+    const dismissed = this.k.store.track.dismissedConflicts(projectId);
+    for (const c of openings) {
+      if (dismissed.has(c.conflictId) || c.sessionIds === null) continue;
       const ids = [...new Set(c.sessionIds)];
       if (ids.length !== 1) continue;
-      const agent = agentKinds.get(ids[0] as string);
+      if (c.kind === 'contract_broken' && c.actorInRoot !== true) continue;
+      const sessionId = ids[0] as string;
+      const agent = agentKinds.get(sessionId);
       if (!agent) continue;
       out.push({
         agent,
+        sessionId,
         paths: c.paths,
         measure: c.kind === 'contract_broken' ? 'contracts' : 'mergeChecks',
       });
@@ -655,26 +765,25 @@ export class TrackService {
     projectId: string,
     from: number,
     agentKinds: ReadonlyMap<string, string>,
-  ): TrackOutcome[] {
-    const out: TrackOutcome[] = [];
-    const saves = this.k.store.saves.list(projectId, {
-      since: from,
-      statuses: ['confirmed'],
-      kinds: ['rule_enforced'],
-      limit: 1000,
-    });
+  ): TrackOutcome[] & { truncated?: boolean } {
+    const out: TrackOutcome[] & { truncated?: boolean } = [];
+    const saves = this.k.store.track.confirmedSaves(projectId, 'rule_enforced', from);
+    out.truncated = saves.length >= TRACK_MAX_ROWS;
     for (const s of saves) {
-      const agent = agentKinds.get(s.sessionIds[0] ?? '');
-      if (agent) out.push({ agent, paths: s.paths, measure: 'ruleAttempts' });
+      const sessionId = s.sessionIds[0] ?? '';
+      const agent = agentKinds.get(sessionId);
+      if (agent) out.push({ agent, sessionId, paths: s.paths, measure: 'ruleAttempts' });
     }
     return out;
   }
 
   /**
-   * Computes line survival for edits at least 7 days old that have none: hashes the current
-   * file's lines and counts how many of the edit's stored hashes are still there. A missing file
-   * keeps nothing; deny-listed and large files are skipped (stored as 0 of 0, never read).
-   * Bounded by `max` edits and, when given, `budgetMs` of wall-clock time.
+   * Computes line survival for edits at least 7 days old that have none: how many of the whole
+   * lines the edit added are still in the file, on the branch the session worked on (the working
+   * file when that branch is checked out, else the branch tip). A missing file keeps nothing.
+   * Deny-listed files, files over 512 KB and edits whose branch is unknown or gone are skipped
+   * (stored as 0 of 0, never counted); edits whose checkout cannot be read now are left for a
+   * later run. Bounded by `max` edits and, when given, `budgetMs` of wall-clock time.
    */
   async computeSurvival(o: {
     projectId: string | null;
@@ -685,70 +794,150 @@ export class TrackService {
     const store = this.k.store;
     const before = this.k.clock.now() - SURVIVAL_AGE_MS;
     const started = Date.now();
-    const pending = store.track.pendingSurvival(o.projectId, before, o.max, o.from ?? 0);
-    const roots = new Map<string, string | null>();
+    const all = o.projectId === null;
+    const pending = store.track.pendingSurvival(
+      o.projectId,
+      before,
+      o.max,
+      o.from ?? 0,
+      all ? this.cursor : null,
+    );
+    const trees = new Map<string, Tree | null>();
+    const files = new Map<string, FileLines>();
     let checked = 0;
+    let deferred = 0;
+    let last: PendingSurvival | null = null;
+    let stopped = false;
     for (const p of pending) {
-      if (o.budgetMs !== undefined && Date.now() - started > o.budgetMs) break;
-      const root = await this.rootOf(p, roots);
+      if (o.budgetMs !== undefined && Date.now() - started > o.budgetMs) {
+        stopped = true;
+        break;
+      }
+      last = p;
       const hashes = store.track.hashes(p.changeId);
-      const kept = root === null ? 0 : this.keptHashes(root, p.path, hashes);
+      let lines: FileLines = 'skip';
+      if (hashes.length > 0 && !isDeniedPath(p.path, this.k.config.redaction.denyPaths)) {
+        lines = await this.linesOf(p, trees, files);
+      }
+      if (lines === 'defer') {
+        deferred++;
+        continue;
+      }
       store.track.recordSurvival({
         changeId: p.changeId,
         projectId: p.projectId,
-        totalHashes: kept === null ? 0 : hashes.length,
-        keptHashes: kept ?? 0,
+        totalHashes: lines === 'skip' ? 0 : hashes.length,
+        keptHashes: typeof lines === 'object' ? hashes.filter((h) => lines.has(h)).length : 0,
       });
       checked++;
     }
-    const left =
-      o.projectId === null ? 0 : store.track.countPendingSurvival(o.projectId, before, o.from ?? 0);
-    return { checked, pending: left };
+    if (all) {
+      // Continue after the last edit looked at; start over once the scan reached the end.
+      this.cursor =
+        (stopped || pending.length >= o.max) && last
+          ? { createdAt: last.createdAt, id: last.changeId }
+          : null;
+    }
+    return {
+      checked,
+      deferred,
+      pending:
+        o.projectId === null
+          ? 0
+          : store.track.countPendingSurvival(o.projectId, before, o.from ?? 0),
+    };
   }
 
-  /** The tree an edit's path is relative to: the session's checkout, else the project root. */
-  private async rootOf(
+  /** The current lines of an edit's file (cached per checkout, branch and path within a run). */
+  private async linesOf(
     p: PendingSurvival,
-    cache: Map<string, string | null>,
-  ): Promise<string | null> {
+    trees: Map<string, Tree | null>,
+    files: Map<string, FileLines>,
+  ): Promise<FileLines> {
+    const tree = await this.treeOf(p, trees);
+    if (tree === null) return 'defer';
+    // Without the branch the edit was made on there is no telling which code it should be in.
+    if (p.branch === null) return 'skip';
+    const key = `${tree.root}\u0000${p.branch}\u0000${p.path}`;
+    const cached = files.get(key);
+    if (cached !== undefined) return cached;
+    const lines =
+      tree.branch === p.branch
+        ? this.workingLines(tree.root, p.path)
+        : await this.branchLines(tree.root, p.branch, p.path);
+    files.set(key, lines);
+    return lines;
+  }
+
+  /**
+   * The checkout an edit's path is relative to: the session's own, else the project's (a split
+   * worktree removed after merging). Null when neither can be read now.
+   */
+  private async treeOf(p: PendingSurvival, cache: Map<string, Tree | null>): Promise<Tree | null> {
     if (cache.has(p.sessionId)) return cache.get(p.sessionId) ?? null;
+    const git = this.k.ports.git;
     let root: string | null = null;
-    try {
-      if (statSync(p.worktree).isDirectory())
-        root = await this.k.ports.git.findRepoRoot(p.worktree);
-    } catch {
-      root = null;
-    }
+    if (isDirectory(p.worktree)) root = await git.findRepoRoot(p.worktree);
     if (root === null) {
       try {
-        root = this.k.store.projects.get(p.projectId).root;
+        const projectRoot = this.k.store.projects.get(p.projectId).root;
+        if (isDirectory(projectRoot)) root = projectRoot;
       } catch {
         root = null;
       }
     }
-    cache.set(p.sessionId, root);
-    return root;
+    const tree = root === null ? null : { root, branch: await git.currentBranch(root) };
+    cache.set(p.sessionId, tree);
+    return tree;
   }
 
-  /** Kept hashes of one edit, or null when the file is skipped (deny-listed, too large, outside). */
-  private keptHashes(root: string, path: string, hashes: readonly string[]): number | null {
-    if (isDeniedPath(path, this.k.config.redaction.denyPaths)) return null;
-    if (hashes.length === 0) return 0;
+  /** Lines of the file in the checkout itself. */
+  private workingLines(root: string, path: string): FileLines {
     const resolved = tryResolveInsideRoot(root, path);
     // A path that now leads outside the tree (a symlink) or to a deny-listed file is never read.
-    if (!resolved || isDeniedPath(resolved.rel, this.k.config.redaction.denyPaths)) return null;
-    if (resolved.rel === '') return 0;
+    if (!resolved || resolved.rel === '') return 'skip';
+    if (isDeniedPath(resolved.rel, this.k.config.redaction.denyPaths)) return 'skip';
     let content: string;
     try {
       const st = statSync(resolved.abs);
-      if (!st.isFile()) return 0;
-      if (st.size > SURVIVAL_MAX_FILE_BYTES) return null;
+      if (!st.isFile()) return 'absent';
+      if (st.size > SURVIVAL_MAX_FILE_BYTES) return 'skip';
       content = readFileSync(resolved.abs, 'utf8');
-    } catch {
-      return 0;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'defer';
     }
-    const current = new Set(this.k.ports.git.hunkHashes(content));
-    return hashes.filter((h) => current.has(h)).length;
+    return new Set(this.k.ports.git.hunkHashes(content));
+  }
+
+  /** Lines of the file at the tip of `branch`, without checking it out. */
+  private async branchLines(root: string, branch: string, path: string): Promise<FileLines> {
+    const git = this.k.ports.git;
+    if (!git.fileStateAtRef) return 'skip';
+    const at = await git.fileStateAtRef(
+      root,
+      `refs/heads/${branch}`,
+      path,
+      SURVIVAL_MAX_FILE_BYTES,
+    );
+    if (at === null) return 'defer';
+    switch (at.state) {
+      case 'file':
+        return new Set(git.hunkHashes(at.content));
+      case 'absent':
+        return 'absent';
+      case 'no_ref':
+      case 'too_large':
+        return 'skip';
+    }
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
   }
 }
 

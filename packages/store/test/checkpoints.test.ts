@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CHECKPOINT_MAX_PATHS, isMindlyError, type CheckpointKind } from '@mindly/core';
 import { MIGRATIONS, Store, schemaVersion, type CheckpointCreate } from '../src/index.js';
+import { MIGRATION_V4_BISECT } from '../src/migrations/v4-bisect.js';
 import { setup } from './helpers.js';
 
 /** The `runs` table as v1 created it, before `bisect` was a run kind. */
@@ -82,7 +83,7 @@ function expectUpgraded(path: string, ids: { projectId: string; runId: string })
 
 describe('checkpoints schema (v4)', () => {
   it('is the fourth migration', () => {
-    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(4);
+    expect(MIGRATIONS[3]).toBe(MIGRATION_V4_BISECT);
     expect(MIGRATIONS[3]).toContain('CREATE TABLE checkpoints');
     expect(MIGRATIONS[2]).not.toContain('checkpoints');
   });
@@ -91,7 +92,7 @@ describe('checkpoints schema (v4)', () => {
     const path = tempDb('syn-checkpoints-v3-');
     const ids = downgrade(
       path,
-      `DROP TABLE line_survival; DROP TABLE checkpoints; ${RUNS_V1} PRAGMA user_version = 3;`,
+      `DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines; DROP TABLE checkpoints; ${RUNS_V1} PRAGMA user_version = 3;`,
     );
     expectUpgraded(path, ids);
   });
@@ -100,7 +101,7 @@ describe('checkpoints schema (v4)', () => {
     const path = tempDb('syn-checkpoints-v1-');
     const ids = downgrade(
       path,
-      `DROP TABLE line_survival; DROP TABLE checkpoints; DROP TABLE saves; DROP TABLE split_parts; DROP TABLE splits;
+      `DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines; DROP TABLE checkpoints; DROP TABLE saves; DROP TABLE split_parts; DROP TABLE splits;
        ALTER TABLE handoffs DROP COLUMN worktree; ${RUNS_V1} PRAGMA user_version = 1;`,
     );
     expectUpgraded(path, ids);

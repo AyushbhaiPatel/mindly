@@ -139,17 +139,23 @@ export const SavesCardQuery = z.object({
   details: opt(z.enum(['0', '1'])),
 });
 
-const DURATION_UNIT_MS: Record<string, number> = { h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+const DURATION_UNIT_MS: Record<string, number> = {
+  s: 1000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+  w: 604_800_000,
+};
 
-/** `GET …/track`: `since` is a duration such as `30d` (hours, days or weeks, at most 3650 days). */
+/** `GET …/track`: `since` is a duration such as `30d` (s, m, h, d or w, as in the CLI; at most 3650 days). */
 export const TrackQuery = z.object({
   since: opt(
     z
       .string()
-      .regex(/^[1-9]\d{0,4}[hdw]$/, 'must look like 24h, 30d or 12w')
+      .regex(/^[1-9]\d{0,5}[smhdw]$/i, 'must look like 90m, 24h, 30d or 12w')
       .transform((v) => ({
         label: v,
-        ms: Number(v.slice(0, -1)) * (DURATION_UNIT_MS[v.slice(-1)] as number),
+        ms: Number(v.slice(0, -1)) * (DURATION_UNIT_MS[v.slice(-1).toLowerCase()] as number),
       }))
       .refine((v) => v.ms <= 3650 * 86_400_000, 'must be at most 3650 days'),
   ),
