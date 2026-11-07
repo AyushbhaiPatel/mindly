@@ -16,6 +16,14 @@ All notable changes to `mindly-cli` are documented here. The project follows
   hex digits of the id, the same every time. Every command that takes an id accepts the name as
   well as the short or full id (`mindly conflict quiet-otter-17 resolve`). Agent sessions get a
   Session column with their name, and sentences use the same name (`Claude Code · deep-island-51`).
+- Mission Control is reorganised around what a first-time user needs to know. Five pages instead
+  of seven: Home, Memory, Agents, History and Settings. Home opens with one sentence on how the
+  project is doing, then the agents at work as cards, the decisions only you can make (suggested
+  rules grouped with a count instead of one row each), where Mindly helped, and recent activity.
+  Every page and section starts with one plain sentence saying what it shows, and a "Guide"
+  button explains the pages and the words Mindly uses. Older links (`#/overview`,
+  `#/coordination`, `#/runs`, `#/insight`, `#/split`) still open the right page.
+- The dashboard's tab icon is the Mindly logo.
 
 ## 0.4.1 — 2026-11-07
 
