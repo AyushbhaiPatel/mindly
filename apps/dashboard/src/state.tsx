@@ -16,6 +16,8 @@ export interface AppState {
   sessions: ReadonlyMap<string, Session>;
   /** Live events received since the page loaded (newest last), plus the initial backlog. */
   events: MindlyEvent[];
+  /** True once the current project's event backlog has loaded; false while loading or failed. */
+  eventsLoaded: boolean;
   versions: Readonly<Record<Topic, number>>;
   notify(text: string, tone?: Toast['tone']): void;
   navigate(tab: string, params?: Record<string, string>): void;

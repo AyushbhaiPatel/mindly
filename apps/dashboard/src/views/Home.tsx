@@ -13,7 +13,7 @@ import {
   cx,
   useNow,
 } from '../components/ui';
-import { useAction, useApp, useResource } from '../state';
+import { useAction, useApp, useResource, type Resource } from '../state';
 import type {
   Handoff,
   Intent,
@@ -46,7 +46,7 @@ import {
  * words what it shows; nothing needs the docs.
  */
 export function HomeView() {
-  const { client, project, events } = useApp();
+  const { client, project, events, eventsLoaded } = useApp();
   const res = useResource(
     () => client.overview(project.id),
     [project.id],
@@ -66,13 +66,10 @@ export function HomeView() {
   return (
     <Loaded res={res}>
       {(ov) => {
-        const memories = waiting.data?.[0] ?? [];
-        // Same rule as the overview's `needsYou.pendingHandoffs`: split parts are handled on the
-        // split page, not here.
-        const handoffs = (waiting.data?.[1] ?? []).filter(
-          (h) => h.status === 'pending' && !h.packet.split,
+        const quiet = isFirstRun(
+          ov,
+          eventsLoaded && !events.some((e) => e.projectId === project.id),
         );
-        const quiet = isFirstRun(ov) && events.length === 0;
         return (
           <div className="home view">
             <Pulse ov={ov} decisions={decisionCount(ov)} saves={saves.data?.summary.total} />
@@ -83,7 +80,7 @@ export function HomeView() {
               intents={ov.intents}
               events={events}
             />
-            <Decisions ov={ov} memories={memories} handoffs={handoffs} onChange={res.reload} />
+            <Decisions ov={ov} waiting={waiting} onChange={res.reload} />
             <SavesPanel
               res={saves.data}
               onChange={saves.reload}
@@ -112,15 +109,16 @@ function decisionCount(ov: Overview): number {
 }
 
 /**
- * True when nothing was ever recorded for this project, judged from the overview alone: the event
- * list loads separately and is empty while it loads or when it fails, and `ov.sessions` only holds
- * the last 30 minutes. `lastSeq` is the highest event number across all projects, so 0 means
- * nothing happened anywhere; otherwise the project's own memories, tasks, conflicts, runs, split
- * and updates show whether it has a history.
+ * True when nothing was ever recorded for this project. `lastSeq` is the highest event number
+ * across all projects, so 0 means nothing happened anywhere. Otherwise the overview only describes
+ * the current state (agents of the last 30 minutes, open work, active memories), so a project that
+ * worked yesterday looks empty too: it also takes `noEvents`, true only once the project's event
+ * backlog has loaded and holds nothing. While that list loads, or when it fails, this says no.
  */
-function isFirstRun(ov: Overview): boolean {
+function isFirstRun(ov: Overview, noEvents: boolean): boolean {
   if (ov.lastSeq === 0) return true;
   return (
+    noEvents &&
     ov.sessions.length === 0 &&
     ov.tasks.length === 0 &&
     ov.conflicts.length === 0 &&
@@ -338,20 +336,23 @@ const quoted = (s: string) => `“${s}”`;
 
 function Decisions({
   ov,
-  memories,
-  handoffs,
+  waiting,
   onChange,
 }: {
   ov: Overview;
-  memories: Memory[];
-  handoffs: Handoff[];
+  /** Suggested memories (for samples) and handoffs (for rows); undefined until they load. */
+  waiting: Resource<[Memory[], Handoff[]]>;
   onChange(): void;
 }) {
   const { navigate, sessions, client } = useApp();
   const { busy, run } = useAction();
   const conflicts = ov.conflicts.filter((c) => c.status === 'open' && c.severity !== 'info');
-  const rules = memories.filter((m) => m.kind === 'rule');
-  const others = memories.filter((m) => m.kind !== 'rule');
+  const memories = waiting.data?.[0];
+  // Same rule as the overview's `needsYou.pendingHandoffs`: split parts are handled on the split
+  // page, not here. Empty when the request failed, so the count row below covers them all.
+  const handoffs =
+    waiting.data?.[1].filter((h) => h.status === 'pending' && !h.packet.split) ??
+    (waiting.error ? [] : undefined);
   const total = decisionCount(ov);
 
   const rows: ReactNode[] = [];
@@ -391,11 +392,14 @@ function Decisions({
     );
   }
 
-  const group = (kind: 'rule' | 'memory', pending: number, items: Memory[]) => {
+  const group = (kind: 'rule' | 'memory', pending: number, items: Memory[] | undefined) => {
     if (pending === 0) return;
-    const shown = items.slice(0, 3);
+    const shown = items?.slice(0, 3) ?? [];
     // The Memory page filters by one kind; suggested memories of several kinds get one link each.
-    const kinds: MemoryKind[] = kind === 'rule' ? ['rule'] : [...new Set(items.map((m) => m.kind))];
+    // Which kinds wait is only known once the samples load, so until then the button is disabled.
+    const kinds: MemoryKind[] =
+      kind === 'rule' ? ['rule'] : [...new Set((items ?? []).map((m) => m.kind))];
+    const ready = kind === 'rule' || items !== undefined;
     rows.push(
       <li key={`g:${kind}`} className="decision">
         <Dot tone="warn" />
@@ -437,6 +441,7 @@ function Decisions({
             <button
               type="button"
               className="btn-primary"
+              disabled={!ready}
               onClick={() =>
                 navigate(
                   'memory',
@@ -451,8 +456,16 @@ function Decisions({
       </li>,
     );
   };
-  group('rule', ov.needsYou.proposedRules, rules);
-  group('memory', ov.needsYou.proposedMemories, others);
+  group(
+    'rule',
+    ov.needsYou.proposedRules,
+    memories?.filter((m) => m.kind === 'rule'),
+  );
+  group(
+    'memory',
+    ov.needsYou.proposedMemories,
+    memories?.filter((m) => m.kind !== 'rule'),
+  );
 
   if (ov.split) {
     for (const p of ov.split.blockedParts) {
@@ -502,7 +515,7 @@ function Decisions({
     }
   }
 
-  for (const h of handoffs) {
+  for (const h of handoffs ?? []) {
     rows.push(
       <li key={`h:${h.id}`} className="decision">
         <Dot tone="warn" />
@@ -524,6 +537,33 @@ function Decisions({
     );
   }
 
+  // Home lists the newest handoffs only; the rest are one row, so the rows add up to the count.
+  const moreHandoffs = handoffs ? ov.needsYou.pendingHandoffs - handoffs.length : 0;
+  if (moreHandoffs > 0) {
+    const waits = moreHandoffs === 1 ? 'waits' : 'wait';
+    rows.push(
+      <li key="h:more" className="decision">
+        <Dot tone="warn" />
+        <div className="decision-body">
+          <p className="decision-text">
+            {handoffs!.length > 0
+              ? `${count(moreHandoffs, 'more handoff')} ${waits} for an agent`
+              : `${count(moreHandoffs, 'handoff')} ${waits} for an agent`}
+          </p>
+          <p className="decision-why">
+            Unfinished work an agent packaged up. Start the agent it names in this folder and it
+            picks the work up.
+          </p>
+        </div>
+        <span className="decision-action">
+          <TextLink go onClick={() => navigate('coordination', { focus: 'handoffs' })}>
+            Details
+          </TextLink>
+        </span>
+      </li>,
+    );
+  }
+
   return (
     <Panel
       title="Needs your decision"
@@ -532,12 +572,15 @@ function Decisions({
       meta={total > 0 ? String(total) : undefined}
       className="needs"
     >
-      {rows.length === 0 ? (
-        <Empty>
-          Nothing waits for you. Agents keep working; Mindly asks when a choice is yours.
-        </Empty>
+      {rows.length > 0 && <ul className="decisions">{rows}</ul>}
+      {waiting.data === undefined ? (
+        <Loaded res={waiting}>{() => null}</Loaded>
       ) : (
-        <ul className="decisions">{rows}</ul>
+        rows.length === 0 && (
+          <Empty>
+            Nothing waits for you. Agents keep working; Mindly asks when a choice is yours.
+          </Empty>
+        )
       )}
     </Panel>
   );

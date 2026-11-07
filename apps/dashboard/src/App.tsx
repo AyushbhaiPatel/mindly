@@ -313,6 +313,8 @@ function Shell({
   const [theme, setTheme] = useState<ThemePref>(loadTheme);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const [events, setEvents] = useState<MindlyEvent[]>([]);
+  // The project whose backlog loaded, so a slow or failed request never reads as "no events".
+  const [eventsLoadedFor, setEventsLoadedFor] = useState<string | null>(null);
   const [sessionList, setSessionList] = useState<Session[]>([]);
   const [versions, setVersions] = useState<Record<Topic, number>>(EMPTY_VERSIONS);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -376,6 +378,7 @@ function Shell({
     let cancelled = false;
     saveString(PROJECT_KEY, projectId);
     setEvents([]);
+    setEventsLoadedFor(null);
     setSessionList([]);
     client
       .events(projectId, { limit: 80, order: 'desc' })
@@ -383,6 +386,7 @@ function Shell({
         if (cancelled) return;
         const sorted = [...evs].sort((a, b) => a.seq - b.seq);
         setEvents(sorted);
+        setEventsLoadedFor(projectId);
         liveRef.current?.subscribe(projectId, sorted.at(-1)?.seq);
       })
       .catch(() => {
@@ -421,12 +425,13 @@ function Shell({
       project,
       sessions,
       events,
+      eventsLoaded: eventsLoadedFor === project.id,
       versions,
       notify,
       navigate,
       params: route.params,
     }),
-    [client, project, sessions, events, versions, notify, navigate, route.params],
+    [client, project, sessions, events, eventsLoadedFor, versions, notify, navigate, route.params],
   );
 
   const changeProject = (id: string) => {
