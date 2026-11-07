@@ -94,7 +94,7 @@ describe('vocabulary', () => {
 
   it('rewrites engine labels inside stored text', () => {
     expect(humanizeText('claude-code #6518e3b9 changed the exports of src/auth.ts')).toBe(
-      'Claude Code \u00B7 6518e3b9 changed the exports of src/auth.ts',
+      'Claude Code changed the exports of src/auth.ts',
     );
     expect(humanizeText('Stated by the user in a codex session')).toBe(
       'Stated by the user in a Codex session',

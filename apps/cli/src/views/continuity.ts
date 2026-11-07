@@ -5,7 +5,6 @@ import {
   handoffReasonWord,
   handoffStatusWord,
   relativeTime,
-  sessionName,
   type Screen,
   type TableRow,
 } from '../present/index.js';
