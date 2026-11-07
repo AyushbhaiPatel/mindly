@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Memory, Project, Run, Session } from '@mindly/core';
 import { USER } from '@mindly/engine';
 import type { Daemon } from '../src/index.js';
-import { bearer, git, repo, seedSession, testDaemon, write, type TestDaemon } from './helpers.js';
+import {
+  bearer,
+  git,
+  HOST,
+  repo,
+  seedSession,
+  testDaemon,
+  write,
+  type TestDaemon,
+} from './helpers.js';
 
 const LINE = 'export function login(user: string) { return user.trim(); }';
 
@@ -469,5 +478,72 @@ describe('validation', () => {
     const unknown = await get('/api/nope');
     expect(unknown.statusCode).toBe(404);
     expect(unknown.json().error.code).toBe('not_found');
+  });
+});
+
+describe('track record', () => {
+  const url = (pid: string, query = '') => `/api/projects/${pid}/track${query}`;
+
+  it('needs the token', async () => {
+    const res = await d.app.inject({
+      method: 'GET',
+      url: url(project.id),
+      headers: { host: HOST },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('returns the report of one project only', async () => {
+    // Another project with many edits: none of them may show up here.
+    const otherRoot = repo();
+    const other = seedSession(d, otherRoot, { agentKind: 'codex' });
+    for (let i = 0; i < 5; i++) {
+      d.mindly.store.fileChanges.record({
+        projectId: other.projectId,
+        sessionId: other.id,
+        path: `lib/x${i}.ts`,
+        tool: 'Edit',
+        hunkHashes: [],
+        addedLines: 1,
+        removedLines: 0,
+        promptEventId: null,
+      });
+    }
+    const res = await get(url(project.id));
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.window.since).toBe('30d');
+    expect(body.totals).toEqual({ agents: 1, edits: 1, areas: 1 });
+    expect(body.areas).toHaveLength(1);
+    expect(body.areas[0].area).toBe('src');
+    expect(body.areas[0].agents[0]).toMatchObject({
+      agent: 'claude-code',
+      edits: 1,
+      enoughData: false,
+      breakages: { count: 0, of: 1, rate: null, interval: null },
+    });
+    const otherBody = (await get(url(other.projectId, '?area=lib&since=7d&agent=codex'))).json();
+    expect(otherBody.window.since).toBe('7d');
+    expect(otherBody.filter).toEqual({ area: 'lib', agent: 'codex' });
+    expect(otherBody.totals.edits).toBe(5);
+    const narrowed = (await get(url(project.id, '?area=lib'))).json();
+    expect(narrowed.totals.edits).toBe(0);
+    expect((await get(url(project.id, '?minEdits=1'))).json().minimum.edits).toBe(1);
+  });
+
+  it('validates the query and the project', async () => {
+    for (const q of [
+      '?since=soon',
+      '?since=0d',
+      '?since=99999w',
+      '?area=../etc',
+      '?area=%1b%5b31m',
+      '?agent=Not%20An%20Agent',
+      '?minEdits=0',
+    ]) {
+      expect((await get(url(project.id, q))).statusCode, q).toBe(400);
+    }
+    expect((await get('/api/projects/not-a-uuid/track')).statusCode).toBe(400);
+    expect((await get(url('0190a000-0000-7000-8000-000000000000'))).statusCode).toBe(404);
   });
 });

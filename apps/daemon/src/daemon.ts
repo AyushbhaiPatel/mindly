@@ -21,6 +21,7 @@ import {
   housekeepingTick,
   selfHealingTick,
   standupTick,
+  trackSurvivalTick,
 } from './jobs/maintenance.js';
 import { failoverTick } from './jobs/runs.js';
 import { Scheduler } from './jobs/scheduler.js';
@@ -290,6 +291,14 @@ export function registerJobs(jobs: JobContext): void {
     intervalMs: 60 * MINUTE,
     initialDelayMs: 3 * MINUTE,
     run: () => checkpointPruneTick(jobs),
+  });
+  scheduler.every({
+    name: 'track-survival',
+    intervalMs: 30 * MINUTE,
+    initialDelayMs: 4 * MINUTE,
+    run: async () => {
+      await trackSurvivalTick(jobs);
+    },
   });
   if (config.standup.time) {
     scheduler.every({ name: 'standup', intervalMs: MINUTE, run: () => standupTick(jobs) });

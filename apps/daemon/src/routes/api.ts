@@ -15,6 +15,8 @@ import {
   snapshotService,
   splitOf,
   standupService,
+  TRACK_DEFAULT_WINDOW_MS,
+  trackOf,
   type Mindly,
 } from '@mindly/engine';
 import { captureWorktreeCommit, runGit } from '@mindly/git';
@@ -52,6 +54,7 @@ import {
   SplitsQuery,
   StandupQuery,
   TasksQuery,
+  TrackQuery,
   TrustBody,
   XrayQuery,
 } from './schemas.js';
@@ -416,6 +419,19 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
       const svc = standupService(mindly);
       const digest = svc.build(pid, since);
       return { digest, markdown: svc.render(digest) };
+    });
+
+    // ---- track record (read-only; survival is computed by the daemon's job, not here) -----
+    api.get('/api/projects/:projectId/track', async (req) => {
+      const pid = projectOf(req).id;
+      const q = parse(TrackQuery, req.query);
+      return trackOf(mindly).report(pid, {
+        windowMs: q.since?.ms ?? TRACK_DEFAULT_WINDOW_MS,
+        since: q.since?.label ?? '30d',
+        area: q.area ?? null,
+        agent: q.agent ?? null,
+        ...(q.minEdits !== undefined ? { minEdits: q.minEdits } : {}),
+      });
     });
 
     // ---- saves (read and reject only; nothing here creates or confirms a save) -----------

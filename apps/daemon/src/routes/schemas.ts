@@ -1,4 +1,5 @@
 import {
+  AGENT_KIND_RE,
   CONFLICT_STATUSES,
   EVENT_TYPES,
   isUuid,
@@ -11,7 +12,7 @@ import {
   SAVE_STATUSES,
   type EventType,
 } from '@mindly/core';
-import { isValidBranchName } from '@mindly/engine';
+import { isValidBranchName, parseAreaPrefix } from '@mindly/engine';
 import { isRunnerAgentKind } from '@mindly/runners';
 import { z } from 'zod';
 
@@ -136,6 +137,40 @@ export const SavesQuery = z.object({
 export const SavesCardQuery = z.object({
   since: opt(int(0, Number.MAX_SAFE_INTEGER)),
   details: opt(z.enum(['0', '1'])),
+});
+
+const DURATION_UNIT_MS: Record<string, number> = { h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+
+/** `GET …/track`: `since` is a duration such as `30d` (hours, days or weeks, at most 3650 days). */
+export const TrackQuery = z.object({
+  since: opt(
+    z
+      .string()
+      .regex(/^[1-9]\d{0,4}[hdw]$/, 'must look like 24h, 30d or 12w')
+      .transform((v) => ({
+        label: v,
+        ms: Number(v.slice(0, -1)) * (DURATION_UNIT_MS[v.slice(-1)] as number),
+      }))
+      .refine((v) => v.ms <= 3650 * 86_400_000, 'must be at most 3650 days'),
+  ),
+  area: opt(
+    z
+      .string()
+      .max(512)
+      .transform((v, ctx) => {
+        try {
+          return parseAreaPrefix(v);
+        } catch {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'must be a folder path such as src/api, or (root)',
+          });
+          return z.NEVER;
+        }
+      }),
+  ),
+  agent: opt(z.string().regex(AGENT_KIND_RE, 'invalid agent kind')),
+  minEdits: opt(int(1, 100_000)),
 });
 
 export const SnapshotBody = z.strictObject({ label: z.string().trim().min(1).max(80) });
