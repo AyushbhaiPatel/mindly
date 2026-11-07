@@ -1,12 +1,14 @@
-import { shortId, type Save, type SaveStatus } from '@mindly/core';
+import { codename, type Save, type SaveStatus } from '@mindly/core';
 import type { SavesSummary } from '@mindly/engine';
 import {
   count,
   relativeTime,
   spanWords,
+  type Column,
   type Row,
   type Screen,
   type Step,
+  type TableRow,
 } from '../present/index.js';
 import { clean } from '../util.js';
 
@@ -38,17 +40,33 @@ export interface SavesData {
   all: boolean;
 }
 
-function row(s: Save, now: number, marker: Row['marker']): Row {
-  const facts: string[] = [];
+function row(sc: Screen, s: Save, marker: Row['marker']): TableRow {
+  // Where it happened: the files and the command, under the sentence (it wraps there, so long
+  // paths are shown in full).
+  const where: string[] = [];
   if (s.paths.length) {
     const shown = s.paths.slice(0, 2).map((p) => clean(p, 100));
-    facts.push(`${shown.join(', ')}${s.paths.length > 2 ? ` +${s.paths.length - 2} more` : ''}`);
+    where.push(`${shown.join(', ')}${s.paths.length > 2 ? ` +${s.paths.length - 2} more` : ''}`);
   }
-  if (s.refs.command) facts.push(`\`${clean(s.refs.command, 60)}\``);
-  facts.push(relativeTime(s.createdAt, now));
-  if (s.status === 'expired' || s.status === 'rejected') facts.push(saveStatusWord(s.status));
-  return { marker, text: clean(s.title, 160), id: s.id, details: [facts.join(' \u00B7 ')] };
+  if (s.refs.command) where.push(`\`${clean(s.refs.command, 60)}\``);
+  const status = s.status === 'expired' || s.status === 'rejected' ? saveStatusWord(s.status) : '';
+  return {
+    cells: [
+      `${sc.mark(marker)} ${relativeTime(s.createdAt, sc.now)}`,
+      clean(s.title, 160),
+      status,
+      sc.ref(s.id),
+    ],
+    ...(where.length > 0 ? { note: where.join(` ${sc.sym.dot} `) } : {}),
+  };
 }
+
+const SAVE_COLUMNS: Column[] = [
+  { header: 'When' },
+  { header: 'What', fill: true, min: 36 },
+  { header: 'Status', drop: 1 },
+  { header: 'Name', keep: true },
+];
 
 const MAX_ROWS = 20;
 
@@ -74,7 +92,10 @@ export function renderSaves(sc: Screen, d: SavesData): void {
   const section = (title: string, list: Save[], marker: Row['marker']): void => {
     if (list.length === 0) return;
     sc.section(title);
-    sc.rows(list.slice(0, MAX_ROWS).map((s) => row(s, sc.now, marker)));
+    sc.table(
+      SAVE_COLUMNS,
+      list.slice(0, MAX_ROWS).map((s) => row(sc, s, marker)),
+    );
     if (list.length > MAX_ROWS) sc.note(`  ${sc.sym.ellipsis} and ${list.length - MAX_ROWS} more`);
   };
   section('Saves', confirmed, 'ok');
@@ -84,7 +105,7 @@ export function renderSaves(sc: Screen, d: SavesData): void {
   const first = confirmed[0] ?? pending[0];
   if (first) {
     steps.push({
-      cmd: `mindly saves reject ${shortId(first.id)}`,
+      cmd: `mindly saves reject ${codename(first.id)}`,
       why: 'not a save? remove it from every total',
     });
   }

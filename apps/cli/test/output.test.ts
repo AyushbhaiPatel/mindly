@@ -1,4 +1,4 @@
-import { shortId } from '@mindly/core';
+import { codename, shortId } from '@mindly/core';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { cli, git, sandbox, write, type Sandbox } from './helpers.js';
 
@@ -100,18 +100,25 @@ describe('human output on a real project', () => {
     expect(lines[0]).toMatch(
       /^Mindly - mindly-cli-repo-\w+ - 2 agents working - 4 things need you$/,
     );
-    expect(r.stdout).toMatch(/\* Codex - [0-9a-f]{8}\s+working - main - editing src\/dash\.ts/);
+    // Agents are a table: name, status, branch, what the agent is doing.
+    expect(r.stdout).toMatch(/Agent[\s|]+Session[\s|]+Status[\s|]+Branch[\s|]+Doing/);
     expect(r.stdout).toMatch(
-      /\* Claude Code - [0-9a-f]{8}\s+working - main - edited src\/auth\.ts/,
+      /\* Codex[\s|]+[a-z]+-[a-z]+-\d+[\s|]+working[\s|]+main[\s|]+editing src\/dash\.ts/,
     );
-    expect(r.stdout).toContain('Conflict: Claude Code - ');
-    expect(r.stdout.replace(/\s+/g, ' ')).toMatch(
-      /changed the exports of src\/auth\.ts; Codex's src\/dash\.ts uses them \[[0-9a-f]{8}\]/,
-    );
-    expect(r.stdout).toContain('Suggested rule from Claude Code: "Don\'t use default exports"');
-    expect(r.stdout).toContain('Handoff waiting for Cursor: "Finish the dashboard login form"');
     expect(r.stdout).toMatch(
-      /^-> mindly conflict [0-9a-f]{8} resolve\s+mark the conflict resolved$/m,
+      /\* Claude Code[\s|]+[a-z]+-[a-z]+-\d+[\s|]+working[\s|]+main[\s|]+edited src\/auth\.ts/,
+    );
+    expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code - [a-z]+-[a-z]+-\d+ changed/);
+    const flat = r.stdout.replace(/[\s|]+/g, ' ');
+    // The sentence wraps inside its cell, so the Name cell may sit between its words.
+    expect(flat).toContain('changed the exports of');
+    expect(flat).toContain("src/auth.ts; Codex's src/dash.ts uses them");
+    expect(flat).toMatch(/Conflict Claude Code - [a-z]+-[a-z]+-\d+ changed .* [a-z]+-[a-z]+-\d+ /);
+    expect(flat).toContain('- Rule "Don\'t use default exports" - suggested by you');
+    expect(flat).toContain('- Handoff Waiting for Cursor:');
+    expect(flat).toContain('Finish the dashboard login form');
+    expect(r.stdout).toMatch(
+      /^-> mindly conflict [a-z]+-[a-z]+-\d+ resolve\s+mark the conflict resolved$/m,
     );
     expect(r.stdout).not.toMatch(UUID_RE);
     expect(r.stdout).not.toMatch(JARGON_RE);
@@ -137,10 +144,10 @@ describe('human output on a real project', () => {
     }
     const xray = (await cli(sb, ['xray'])).stdout;
     expect(xray).toMatch(/At session start \(just now\), Codex received 1 item:/);
-    expect(xray).toMatch(/Claude Code - [0-9a-f]{8} is working in this project too/);
+    expect(xray).toMatch(/Claude Code - [a-z]+-[a-z]+-\d+ is working in this project too/);
   });
 
-  it('accepts short ids, unique prefixes and full ids; lists candidates when ambiguous', async () => {
+  it('accepts names, short ids, unique prefixes and full ids; lists candidates when ambiguous', async () => {
     const rules = json<{ proposed: { id: string; title: string }[] }>(
       (await cli(sb, ['rules', '--json'])).stdout,
     );
@@ -158,26 +165,30 @@ describe('human output on a real project', () => {
     const ambiguous = await cli(sb, ['memory', 'show', rule.id.slice(0, 6)]);
     expect(ambiguous.code).toBe(1);
     expect(ambiguous.stderr).toMatch(/matches \d+ memories:/);
-    expect(ambiguous.stderr).toContain(`${shortId(rule.id)}  Don't use default exports`);
+    expect(ambiguous.stderr).toMatch(
+      new RegExp(`${shortId(rule.id)}  [a-z]+-[a-z]+-\\d+  Don't use default exports`),
+    );
     expect(ambiguous.stderr).toContain('-> Use one of the ids above');
 
     const missing = await cli(sb, ['memory', 'show', 'deadbeef']);
     expect(missing.code).toBe(1);
-    expect(missing.stderr).toContain('[x] No memory with id deadbeef in this project.');
-    expect(missing.stderr).toContain('-> See the memories and their ids with: mindly memory list');
+    expect(missing.stderr).toContain('[x] No memory named deadbeef in this project.');
+    expect(missing.stderr).toContain(
+      '-> See the memories and their names with: mindly memory list',
+    );
 
     const bad = await cli(sb, ['memory', 'show', 'nope']);
     expect(bad.code).toBe(2);
     expect(bad.stderr).toContain('-> See the options with: mindly memory show --help');
 
-    const approve = await cli(sb, ['rules', '--approve', shortId(rule.id)]);
+    const approve = await cli(sb, ['rules', '--approve', codename(rule.id)]);
     expect(approve.code).toBe(0);
     expect(approve.stdout).toContain('Approved rule "Don\'t use default exports".');
 
     const conflict = json<{ id: string }[]>((await cli(sb, ['conflicts', '--json'])).stdout)[0];
     if (!conflict) throw new Error('expected a conflict');
-    const ack = await cli(sb, ['conflict', shortId(conflict.id), 'ack']);
-    expect(ack.stdout).toContain(`Conflict ${shortId(conflict.id)} marked seen:`);
+    const ack = await cli(sb, ['conflict', codename(conflict.id), 'ack']);
+    expect(ack.stdout).toContain(`Conflict ${codename(conflict.id)} marked seen:`);
 
     const sessions = json<{ sessions: { id: string; agentKind: string }[] }>(
       (await cli(sb, ['status', '--json'])).stdout,
@@ -186,11 +197,11 @@ describe('human output on a real project', () => {
     if (!claude) throw new Error('expected a Claude Code session');
     const xray = await cli(sb, ['xray', '--session', shortId(claude.id)]);
     expect(xray.code).toBe(0);
-    expect(xray.stdout).toContain(`Context sent to Claude Code - ${shortId(claude.id)}`);
+    expect(xray.stdout).toContain(`Context sent to Claude Code - ${codename(claude.id)}`);
 
     const snap = json<{ id: string }[]>((await cli(sb, ['snapshot', 'list', '--json'])).stdout)[0];
     if (!snap) throw new Error('expected a snapshot');
-    expect((await cli(sb, ['snapshot', 'diff', shortId(snap.id)])).code).toBe(0);
+    expect((await cli(sb, ['snapshot', 'diff', codename(snap.id)])).code).toBe(0);
   });
 
   it('keeps --json output exactly as before (full ids, raw enums, ms timestamps)', async () => {

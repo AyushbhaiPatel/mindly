@@ -1,7 +1,7 @@
 import {
   CONTRACT_KINDS,
   MEMORY_KINDS,
-  shortId,
+  codename,
   TRUST_LEVELS,
   type ContractKind,
   type Memory,
@@ -204,8 +204,8 @@ export async function rules(out: Out, o: { approve?: string; json?: boolean }): 
       if (m.kind !== 'rule') {
         throw new HintedError(
           'invalid_input',
-          `${shortId(m.id)} is a ${memoryKindWord(m.kind)}, not a rule.`,
-          `Approve it with: mindly memory approve ${shortId(m.id)}`,
+          `${codename(m.id)} is a ${memoryKindWord(m.kind)}, not a rule.`,
+          `Approve it with: mindly memory approve ${codename(m.id)}`,
         );
       }
       scope.mindly.memory.approve(m.id);
