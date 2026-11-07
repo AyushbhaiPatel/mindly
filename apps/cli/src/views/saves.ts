@@ -41,31 +41,30 @@ export interface SavesData {
 }
 
 function row(sc: Screen, s: Save, marker: Row['marker']): TableRow {
-  const where = s.paths.length
-    ? `${s.paths
-        .slice(0, 2)
-        .map((p) => clean(p, 100))
-        .join(', ')}${s.paths.length > 2 ? ` +${s.paths.length - 2} more` : ''}`
-    : s.refs.command
-      ? `\`${clean(s.refs.command, 60)}\``
-      : '';
+  // Where it happened: the files and the command, under the sentence (it wraps there, so long
+  // paths are shown in full).
+  const where: string[] = [];
+  if (s.paths.length) {
+    const shown = s.paths.slice(0, 2).map((p) => clean(p, 100));
+    where.push(`${shown.join(', ')}${s.paths.length > 2 ? ` +${s.paths.length - 2} more` : ''}`);
+  }
+  if (s.refs.command) where.push(`\`${clean(s.refs.command, 60)}\``);
   const status = s.status === 'expired' || s.status === 'rejected' ? saveStatusWord(s.status) : '';
   return {
     cells: [
       `${sc.mark(marker)} ${relativeTime(s.createdAt, sc.now)}`,
       clean(s.title, 160),
-      where,
       status,
       sc.ref(s.id),
     ],
+    ...(where.length > 0 ? { note: where.join(` ${sc.sym.dot} `) } : {}),
   };
 }
 
 const SAVE_COLUMNS: Column[] = [
   { header: 'When' },
   { header: 'What', fill: true, min: 36 },
-  { header: 'Where', max: 36, drop: 1 },
-  { header: 'Status', drop: 2 },
+  { header: 'Status', drop: 1 },
   { header: 'Name', keep: true },
 ];
 
