@@ -66,7 +66,8 @@ the docs understands what they see, knows what matters, and knows what to do nex
   ids and times. Respect `NO_COLOR` and non-TTY output (no colour, same text).
 - Width: wrap long lines at the terminal width (default 100); never truncate ids or paths silently.
 - Lists of things of the same kind (agents, rules, memories, conflicts, saves, handoffs) are
-  tables: a dimmed header row, one row per item, columns aligned, the id last. One column takes
+  bordered tables (box-drawing characters, `+-|` in ASCII): a dimmed header row, one row per
+  item, columns aligned, the id last. One column takes
   the remaining width and wraps; on a narrow terminal the least important columns are left out
   rather than squeezed, and a column that is empty for every row is not shown.
 
@@ -76,15 +77,21 @@ the docs understands what they see, knows what matters, and knows what to do nex
 Mindly · my-app · 2 agents working · 2 things need you
 
 Agents
-  Agent                     Status   Branch  Doing                      Active
-  ● Claude Code · 4409d433  working  main    edited src/auth.ts 1m ago  1m ago
-  ● Codex · f57f6d10        working  main    editing src/dash.ts        1m ago
+  ┌──────────────────────────┬─────────┬────────┬───────────────────────────┬────────┐
+  │ Agent                    │ Status  │ Branch │ Doing                     │ Active │
+  ├──────────────────────────┼─────────┼────────┼───────────────────────────┼────────┤
+  │ ● Claude Code · 4409d433 │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
+  │ ● Codex · f57f6d10       │ working │ main   │ editing src/dash.ts       │ 1m ago │
+  └──────────────────────────┴─────────┴────────┴───────────────────────────┴────────┘
 
 Needs you
-  Type        What
-  ! Conflict  Claude Code · 4409d433 changed the exports of src/auth.ts; Codex's          [9f02a0c3]
-              src/dash.ts uses them
-  • Rule      "Don't use default exports" · suggested by you, in Claude Code              [7bc7e9b7]
+  ┌────────────┬────────────────────────────────────────────────────────────────┬────────────┐
+  │ Type       │ What                                                           │ Id         │
+  ├────────────┼────────────────────────────────────────────────────────────────┼────────────┤
+  │ ! Conflict │ Claude Code · 4409d433 changed the exports of src/auth.ts;     │ [9f02a0c3] │
+  │            │ Codex's src/dash.ts uses them                                  │            │
+  │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code │ [7bc7e9b7] │
+  └────────────┴────────────────────────────────────────────────────────────────┴────────────┘
 
 → mindly conflict 9f02a0c3 resolve   mark the conflict resolved
 → mindly rules --approve 7bc7e9b7    make the rule apply to every agent

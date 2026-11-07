@@ -66,7 +66,7 @@ const SAVE_COLUMNS: Column[] = [
   { header: 'What', fill: true, min: 36 },
   { header: 'Where', max: 36, drop: 1 },
   { header: 'Status', drop: 2 },
-  { header: '' },
+  { header: 'Id' },
 ];
 
 const MAX_ROWS = 20;

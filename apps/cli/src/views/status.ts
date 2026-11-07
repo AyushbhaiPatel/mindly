@@ -175,7 +175,7 @@ export function renderStatus(sc: Screen, d: StatusData): void {
   if (needs.length) {
     sc.section('Needs you');
     sc.table(
-      [{ header: 'Type' }, { header: 'What', fill: true, min: 30 }, { header: '' }],
+      [{ header: 'Type' }, { header: 'What', fill: true, min: 30 }, { header: 'Id' }],
       needs.slice(0, MAX_ITEMS),
     );
     if (needs.length > MAX_ITEMS) {

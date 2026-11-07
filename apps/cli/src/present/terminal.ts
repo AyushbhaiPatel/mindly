@@ -16,6 +16,20 @@ export interface Symbols {
   /** Separator between facts on one line (`working - main`). */
   dot: string;
   ellipsis: string;
+  /** Table borders: corners, edges and junctions. */
+  box: {
+    tl: string;
+    tr: string;
+    bl: string;
+    br: string;
+    h: string;
+    v: string;
+    tj: string;
+    bj: string;
+    lj: string;
+    rj: string;
+    x: string;
+  };
 }
 
 const UTF8: Symbols = {
@@ -28,6 +42,19 @@ const UTF8: Symbols = {
   idle: '\u25CB',
   dot: '\u00B7',
   ellipsis: '\u2026',
+  box: {
+    tl: '\u250C',
+    tr: '\u2510',
+    bl: '\u2514',
+    br: '\u2518',
+    h: '\u2500',
+    v: '\u2502',
+    tj: '\u252C',
+    bj: '\u2534',
+    lj: '\u251C',
+    rj: '\u2524',
+    x: '\u253C',
+  },
 };
 
 const ASCII: Symbols = {
@@ -40,6 +67,19 @@ const ASCII: Symbols = {
   idle: 'o',
   dot: '-',
   ellipsis: '...',
+  box: {
+    tl: '+',
+    tr: '+',
+    bl: '+',
+    br: '+',
+    h: '-',
+    v: '|',
+    tj: '+',
+    bj: '+',
+    lj: '+',
+    rj: '+',
+    x: '+',
+  },
 };
 
 /**
@@ -286,7 +326,8 @@ export function screenFor(
     },
     table: (columns, rows) => {
       const indent = 2;
-      const gap = 2;
+      const padCells = 1; // spaces inside a cell, each side
+      const box = sym.box;
       const normalised: TableRow[] = rows.map((r) =>
         Array.isArray(r) ? { cells: r as readonly string[] } : (r as TableRow),
       );
@@ -305,10 +346,12 @@ export function screenFor(
       let shown = columns
         .map((_, i) => i)
         .filter((i) => i === fillAt || normalised.some((r) => (r.cells[i] ?? '') !== ''));
+      // Total printed width: indent, one border per gap plus the outer two, padding in each cell.
       const widthOf = (idx: readonly number[], fillWidth: number): number =>
         indent +
-        idx.reduce((n, i) => n + (i === fillAt ? fillWidth : (natural[i] ?? 0)), 0) +
-        gap * Math.max(0, idx.length - 1);
+        idx.reduce((n, i) => n + (i === fillAt ? fillWidth : (natural[i] ?? 0)) + 2 * padCells, 0) +
+        idx.length +
+        1;
       // Shrink the fill column to its minimum, then drop columns until the table fits.
       const fillMin = fillAt >= 0 ? Math.min(natural[fillAt] ?? 0, columns[fillAt]?.min ?? 24) : 0;
       for (;;) {
@@ -325,7 +368,7 @@ export function screenFor(
           ? Math.max(fillMin, Math.min(natural[fillAt] ?? 0, width - widthOf(shown, 0)))
           : 0;
       const colWidth = (i: number): number => (i === fillAt ? fillWidth : (natural[i] ?? 0));
-      const pad = (text: string, i: number): string => {
+      const fit = (text: string, i: number): string => {
         const w = colWidth(i);
         const len = visibleLength(text);
         if (len > w) {
@@ -337,31 +380,42 @@ export function screenFor(
         return columns[i]?.right ? `${fillBy}${text}` : `${text}${fillBy}`;
       };
       const lead = ' '.repeat(indent);
-      const sep = ' '.repeat(gap);
-      write(
+      const side = ' '.repeat(padCells);
+      const edge = style.dim(box.v);
+      const line = (cells: readonly string[]): string =>
+        `${lead}${edge}${cells.map((c) => `${side}${c}${side}`).join(edge)}${edge}`;
+      const rule = (l: string, j: string, r: string): string =>
         style.dim(
-          `${lead}${shown.map((i) => pad(columns[i]?.header ?? '', i)).join(sep)}`.trimEnd(),
-        ),
-      );
+          `${lead}${l}${shown.map((i) => box.h.repeat(colWidth(i) + 2 * padCells)).join(j)}${r}`,
+        );
+      write(rule(box.tl, box.tj, box.tr));
+      write(line(shown.map((i) => style.dim(fit(columns[i]?.header ?? '', i)))));
+      write(rule(box.lj, box.x, box.rj));
+      const fillPos = shown.indexOf(fillAt);
       for (const r of normalised) {
         const cells = shown.map((i) => r.cells[i] ?? '');
-        const fillPos = shown.indexOf(fillAt);
+        // The fill column wraps; a note continues under it, dimmed, inside the same row.
         const fillLines = fillPos >= 0 ? wrap(cells[fillPos] ?? '', fillWidth) : [];
-        const lineCount = Math.max(1, fillLines.length);
+        const noteLines =
+          fillPos >= 0 && r.note !== undefined && r.note !== ''
+            ? wrap(r.note, fillWidth).map((l) => style.dim(l))
+            : [];
+        const body = [...fillLines, ...noteLines];
+        const lineCount = Math.max(1, body.length);
         for (let n = 0; n < lineCount; n++) {
-          const parts = shown.map((i, k) => {
-            if (k === fillPos) return pad(fillLines[n] ?? '', i);
-            return n === 0 ? pad(cells[k] ?? '', i) : ' '.repeat(colWidth(i));
-          });
-          write(`${lead}${parts.join(sep)}`.trimEnd());
-        }
-        if (r.note !== undefined && r.note !== '') {
-          const noteIndent = ' '.repeat(
-            indent + (fillPos > 0 ? widthOf(shown.slice(0, fillPos), 0) - indent + gap : 0),
+          write(
+            line(
+              shown.map((i, k) => {
+                if (k === fillPos) return fit(body[n] ?? '', i);
+                return n === 0 ? fit(cells[k] ?? '', i) : ' '.repeat(colWidth(i));
+              }),
+            ),
           );
-          for (const l of wrap(r.note, width, noteIndent)) write(style.dim(l));
         }
+        if (fillPos < 0 && r.note)
+          for (const l of wrap(r.note, width, `${lead} `)) write(style.dim(l));
       }
+      write(rule(box.bl, box.bj, box.br));
     },
     next: (steps) => {
       if (steps.length === 0) return;

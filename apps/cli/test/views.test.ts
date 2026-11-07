@@ -166,15 +166,21 @@ describe('status screen', () => {
       Mindly · my-app · 2 agents working · 2 things need you
 
       Agents
-        Agent                     Status   Branch  Doing                      Active
-        ● Claude Code · 4409d433  working  main    edited src/auth.ts 1m ago  1m ago
-        ● Codex · f57f6d10        working  main    editing src/dash.ts        1m ago
+        ┌──────────────────────────┬─────────┬────────┬───────────────────────────┬────────┐
+        │ Agent                    │ Status  │ Branch │ Doing                     │ Active │
+        ├──────────────────────────┼─────────┼────────┼───────────────────────────┼────────┤
+        │ ● Claude Code · 4409d433 │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
+        │ ● Codex · f57f6d10       │ working │ main   │ editing src/dash.ts       │ 1m ago │
+        └──────────────────────────┴─────────┴────────┴───────────────────────────┴────────┘
 
       Needs you
-        Type        What
-        ! Conflict  Claude Code · 4409d433 changed the exports of src/auth.ts; Codex's          [9f02a0c3]
-                    src/dash.ts uses them
-        • Rule      "Don't use default exports" · suggested by you, in Claude Code              [7bc7e9b7]
+        ┌────────────┬──────────────────────────────────────────────────────────────────────┬────────────┐
+        │ Type       │ What                                                                 │ Id         │
+        ├────────────┼──────────────────────────────────────────────────────────────────────┼────────────┤
+        │ ! Conflict │ Claude Code · 4409d433 changed the exports of src/auth.ts; Codex's   │ [9f02a0c3] │
+        │            │ src/dash.ts uses them                                                │            │
+        │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code       │ [7bc7e9b7] │
+        └────────────┴──────────────────────────────────────────────────────────────────────┴────────────┘
 
       → mindly conflict 9f02a0c3 resolve   mark the conflict resolved
       → mindly rules --approve 7bc7e9b7    make the rule apply to every agent
@@ -208,18 +214,24 @@ describe('status screen', () => {
       Mindly - my-app - 1 agent idle - 5 things need you
 
       Agents
-        Agent                 Status               Branch  Doing               Active
-        [!] Codex - f57f6d10  hit its usage limit  main    last active 1m ago  1m ago
+        +----------------------+---------------------+--------+--------------------+--------+
+        | Agent                | Status              | Branch | Doing              | Active |
+        +----------------------+---------------------+--------+--------------------+--------+
+        | [!] Codex - f57f6d10 | hit its usage limit | main   | last active 1m ago | 1m ago |
+        +----------------------+---------------------+--------+--------------------+--------+
 
       Needs you
-        Type             What
-        [!] Config       This project's .mindly/config.json is not trusted yet, so its checks
-                         do not run
-        [!] Conflict     Claude Code - 4409d433 changed the exports of src/auth.ts; Codex's     [9f02a0c3]
-                         src/dash.ts uses them
-        - Rule           "Don't use default exports" - suggested by you, in Claude Code         [7bc7e9b7]
-        - Known pitfall  "Command fails: npm test" - suggested by Codex                         [bf1da9e0]
-        - Handoff        Waiting for Cursor: "Finish the dashboard login form"                  [2bc5385b]
+        +-----------------+-----------------------------------------------------------------+------------+
+        | Type            | What                                                            | Id         |
+        +-----------------+-----------------------------------------------------------------+------------+
+        | [!] Config      | This project's .mindly/config.json is not trusted yet, so its   |            |
+        |                 | checks do not run                                               |            |
+        | [!] Conflict    | Claude Code - 4409d433 changed the exports of src/auth.ts;      | [9f02a0c3] |
+        |                 | Codex's src/dash.ts uses them                                   |            |
+        | - Rule          | "Don't use default exports" - suggested by you, in Claude Code  | [7bc7e9b7] |
+        | - Known pitfall | "Command fails: npm test" - suggested by Codex                  | [bf1da9e0] |
+        | - Handoff       | Waiting for Cursor: "Finish the dashboard login form"           | [2bc5385b] |
+        +-----------------+-----------------------------------------------------------------+------------+
 
       -> mindly trust                       review the project config and its commands
       -> mindly conflict 9f02a0c3 resolve   mark the conflict resolved
@@ -246,12 +258,18 @@ describe('memory screens', () => {
       Rules · 1 rule every agent follows · 1 waiting for you
 
       Every agent follows
-        Status                 Rule                        From  Updated
-        ✓ approved · enforced  Always use pnpm, never npm  you    1h ago  [a9884755]
+        ┌───────────────────────┬────────────────────────────┬──────┬─────────┬────────────┐
+        │ Status                │ Rule                       │ From │ Updated │ Id         │
+        ├───────────────────────┼────────────────────────────┼──────┼─────────┼────────────┤
+        │ ✓ approved · enforced │ Always use pnpm, never npm │ you  │  1h ago │ [a9884755] │
+        └───────────────────────┴────────────────────────────┴──────┴─────────┴────────────┘
 
       Waiting for you
-        Status             Rule                       From                 Updated
-        ! waiting for you  Don't use default exports  you, in Claude Code   1h ago  [7bc7e9b7]
+        ┌───────────────────┬───────────────────────────┬─────────────────────┬─────────┬────────────┐
+        │ Status            │ Rule                      │ From                │ Updated │ Id         │
+        ├───────────────────┼───────────────────────────┼─────────────────────┼─────────┼────────────┤
+        │ ! waiting for you │ Don't use default exports │ you, in Claude Code │  1h ago │ [7bc7e9b7] │
+        └───────────────────┴───────────────────────────┴─────────────────────┴─────────┴────────────┘
 
       → mindly rules --approve 7bc7e9b7   make the rule apply to every agent
       → mindly memory reject 7bc7e9b7     drop the suggestion
@@ -273,12 +291,13 @@ describe('memory screens', () => {
         "
         3 memories - 2 waiting for you
 
-          Status                    Kind           Title                     From
-          [ok] approved - enforced  rule           Always use pnpm, never    you                  [a9884755]
-                                                   npm
-          [!] waiting for you       rule           Don't use default         you, in Claude Code  [7bc7e9b7]
-                                                   exports
-          [!] waiting for you       known pitfall  Command fails: npm test   Codex                [bf1da9e0]
+          +--------------------------+---------------+----------------------------+------------+
+          | Status                   | Kind          | Title                      | Id         |
+          +--------------------------+---------------+----------------------------+------------+
+          | [ok] approved - enforced | rule          | Always use pnpm, never npm | [a9884755] |
+          | [!] waiting for you      | rule          | Don't use default exports  | [7bc7e9b7] |
+          | [!] waiting for you      | known pitfall | Command fails: npm test    | [bf1da9e0] |
+          +--------------------------+---------------+----------------------------+------------+
 
         -> mindly memory approve 7bc7e9b7   share it with every agent
         -> mindly memory show 7bc7e9b7      see the details and history
@@ -294,10 +313,14 @@ describe('insight screens', () => {
         "
         1 open conflict
 
-          Severity      What                                                      Status    When
-          ! check this  Claude Code · 4409d433 changed the exports of             open    2m ago  [9f02a0c3]
-                        src/auth.ts; Codex's src/dash.ts uses them
-                        Changed signature: login. 1 file imports it: src/dash.ts.
+          ┌──────────────┬──────────────────────────────────────────────────┬────────┬────────┬────────────┐
+          │ Severity     │ What                                             │ Status │   When │ Id         │
+          ├──────────────┼──────────────────────────────────────────────────┼────────┼────────┼────────────┤
+          │ ! check this │ Claude Code · 4409d433 changed the exports of    │ open   │ 2m ago │ [9f02a0c3] │
+          │              │ src/auth.ts; Codex's src/dash.ts uses them       │        │        │            │
+          │              │ Changed signature: login. 1 file imports it:     │        │        │            │
+          │              │ src/dash.ts.                                     │        │        │            │
+          └──────────────┴──────────────────────────────────────────────────┴────────┴────────┴────────────┘
 
         → mindly conflict 9f02a0c3 resolve   mark it resolved once fixed
         → mindly conflict 9f02a0c3 dismiss   if it is not a real problem
@@ -507,9 +530,13 @@ describe('continuity screens', () => {
       "
       1 handoff - 1 waiting to be picked up
 
-        Status                  Work                             From                When
-        [!] waiting for Cursor  Finish the dashboard login form  Codex - f57f6d10  5m ago  [2bc5385b]
-                                Next: Wire the submit button
+        +------------------------+------------------------------+------------------+--------+------------+
+        | Status                 | Work                         | From             |   When | Id         |
+        +------------------------+------------------------------+------------------+--------+------------+
+        | [!] waiting for Cursor | Finish the dashboard login   | Codex - f57f6d10 | 5m ago | [2bc5385b] |
+        |                        | form                         |                  |        |            |
+        |                        | Next: Wire the submit button |                  |        |            |
+        +------------------------+------------------------------+------------------+--------+------------+
 
       -> Start Cursor in this project: it picks the handoff up at the start of its session.
       "
