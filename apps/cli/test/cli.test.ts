@@ -652,7 +652,7 @@ describe('memory and rules', () => {
     ).checks;
     const check = checks.find((c) => c.name === 'contract-patterns');
     expect(check?.status).toBe('warn');
-    expect(check?.detail).toContain(`(memory ${codename(m.id)}: ${pattern.slice(0, 60)}`);
+    expect(check?.detail).toContain(`(memory ${shortId(m.id)}: ${pattern.slice(0, 60)}`);
   });
 });
 
