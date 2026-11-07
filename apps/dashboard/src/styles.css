@@ -169,6 +169,8 @@ html {
   -webkit-text-size-adjust: 100%;
   /* Never scroll the page sideways (hidden tooltips near the edge must not widen it). */
   overflow-x: clip;
+  /* Scrolling to a section (e.g. ?focus=handoffs) stops below the sticky top bar. */
+  scroll-padding-top: 5.5rem;
 }
 
 body {
@@ -2219,6 +2221,10 @@ dialog::backdrop {
 /* ------------------------------------------------------------------ responsive */
 
 @media (max-width: 1180px) {
+  html {
+    scroll-padding-top: 7rem;
+  }
+
   .topbar {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
