@@ -1,4 +1,4 @@
-import { shortId } from '@mindly/core';
+import { codename, shortId } from '@mindly/core';
 import { describe, expect, it } from 'vitest';
 import { normaliseIdRef } from '../src/index.js';
 import { setup } from './helpers.js';
@@ -45,6 +45,27 @@ describe('id lookup', () => {
       type: 'prefix',
       matches: [{ id: later.id, title: 'Later' }],
     });
+  });
+
+  it('resolves a readable name to the record whose id it spells', () => {
+    const { store, project, m1, m2 } = twoMemories();
+    // Ids whose names were the same (ruby-fox) when names were a 2-word hash of the id.
+    const a = '01a1a6ed-0000-7000-8000-000010036224';
+    const decoy = '01a1a6ed-0000-7000-8000-0000100bd77e';
+    // Give the memories those ids (their version rows keep the old ones, so skip the FK check).
+    store.db.exec('PRAGMA foreign_keys = OFF');
+    const setId = store.db.prepare('UPDATE memories SET id = ? WHERE id = ?');
+    setId.run(a, m1.id);
+    setId.run(decoy, m2.id);
+    expect(store.ids.lookup('memory', project.id, codename(a))).toEqual({
+      type: 'name',
+      matches: [{ id: a, title: 'Use pnpm' }],
+    });
+    expect(store.ids.lookup('memory', project.id, ` ${codename(decoy).toUpperCase()} `)).toEqual({
+      type: 'name',
+      matches: [{ id: decoy, title: 'No default exports' }],
+    });
+    expect(store.ids.lookup('conflict', project.id, codename(a)).type).toBe('none');
   });
 
   it('reports every candidate of an ambiguous prefix', () => {

@@ -14,9 +14,11 @@ the docs understands what they see, knows what matters, and knows what to do nex
 4. **Always end with what to do next** when there is something to do: one or two exact commands
    (CLI) or buttons (dashboard).
 5. **Hide what is empty.** No `Tasks (0)` sections. Empty states are one friendly line.
-6. **Short ids only.** Show the 8-character short id (`shortId()` in core), never a full UUID. Every
-   command that takes an id accepts the short id (and a full id). Ambiguous short ids are reported
-   with the candidates.
+6. **Names, not ids.** Every record is shown by its readable name (`quiet-otter-17`): an
+   adjective, a noun and a number from 0 to 255 that spell the last 6 hex digits of its id, the
+   same every time. Every command that takes an id accepts the name, the 8-character short id or
+   the full id. Two records share a name only when their ids end in the same 6 digits; an
+   ambiguous name is reported with the full ids of the candidates.
 7. **Relative times.** "2m ago", "yesterday 14:05"; absolute local time only where precision matters
    (provenance), never UTC.
 8. **Machine output stays exact.** `--json` output is unchanged by any of this: full ids, raw enums,
@@ -27,7 +29,7 @@ the docs understands what they see, knows what matters, and knows what to do nex
 | Internal concept                                           | Say                                                                           | Example                                                                                  |
 | ---------------------------------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | agent kind `claude-code`                                   | the product name                                                              | Claude Code, Codex, Cursor, Gemini CLI                                                   |
-| session                                                    | the agent plus its short tag                                                  | Claude Code · 4409d433                                                                   |
+| session                                                    | the agent and its readable name (in a Session column in tables)               | Claude Code · deep-island-51                                                             |
 | session status active / idle / rate_limited / ended        | working / idle / hit its usage limit / finished                               |                                                                                          |
 | intent                                                     | "is editing" / "plans to edit"                                                | Codex is editing `src/dash.ts`                                                           |
 | delivery                                                   | update for an agent                                                           | 1 update waiting for Codex                                                               |
@@ -65,6 +67,15 @@ the docs understands what they see, knows what matters, and knows what to do nex
 - Colour only adds emphasis (never the only signal): green ok, yellow attention, red urgent, dim for
   ids and times. Respect `NO_COLOR` and non-TTY output (no colour, same text).
 - Width: wrap long lines at the terminal width (default 100); never truncate ids or paths silently.
+- Lists of things of the same kind (agents, rules, memories, conflicts, saves, handoffs) are
+  bordered tables (box-drawing characters, `+-|` in ASCII): a dimmed header row, one row per
+  item, columns aligned, the id last. One column takes
+  the remaining width and wraps; on a narrow terminal the least important columns are left out
+  rather than squeezed, and a column that is empty for every row is not shown. If the table still
+  does not fit, long labels are cut with an ellipsis and the wrapping column gets narrower; a
+  record's name is never cut, since it is what people type. A word too long for the wrapping
+  column (a path, a URL) is broken across lines, never cut. Widths
+  are counted in terminal columns: CJK characters and emoji take two.
 
 ## Shape of a screen (CLI)
 
@@ -72,15 +83,26 @@ the docs understands what they see, knows what matters, and knows what to do nex
 Mindly · my-app · 2 agents working · 2 things need you
 
 Agents
-  ● Claude Code · 4409d433   working · main · edited src/auth.ts 1m ago
-  ● Codex · f57f6d10         working · main · editing src/dash.ts
+  ┌───────────────┬────────────────┬─────────┬────────┬───────────────────────────┬────────┐
+  │ Agent         │ Session        │ Status  │ Branch │ Doing                     │ Active │
+  ├───────────────┼────────────────┼─────────┼────────┼───────────────────────────┼────────┤
+  │ ● Claude Code │ deep-island-51 │ working │ main   │ edited src/auth.ts 1m ago │ 1m ago │
+  ├───────────────┼────────────────┼─────────┼────────┼───────────────────────────┼────────┤
+  │ ● Codex       │ icy-spider-16  │ working │ main   │ editing src/dash.ts       │ 1m ago │
+  └───────────────┴────────────────┴─────────┴────────┴───────────────────────────┴────────┘
 
 Needs you
-  ! Conflict: Claude Code changed the exports of src/auth.ts; Codex's src/dash.ts uses them  [9f02a0c3]
-  • Suggested rule from Claude Code: "Don't use default exports"                          [7bc7e9b7]
+  ┌────────────┬────────────────────────────────────────────────────────────────┬──────────────────┐
+  │ Type       │ What                                                           │ Name             │
+  ├────────────┼────────────────────────────────────────────────────────────────┼──────────────────┤
+  │ ! Conflict │ Claude Code · deep-island-51 changed the exports of            │ brave-shrimp-195 │
+  │            │ src/auth.ts; Codex's src/dash.ts uses them                     │                  │
+  ├────────────┼────────────────────────────────────────────────────────────────┼──────────────────┤
+  │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code │ stormy-star-183  │
+  └────────────┴────────────────────────────────────────────────────────────────┴──────────────────┘
 
-→ mindly conflict 9f02a0c3 resolve     mark the conflict resolved
-→ mindly rules --approve 7bc7e9b7      make the rule apply to every agent
+→ mindly conflict brave-shrimp-195 resolve   mark the conflict resolved
+→ mindly rules --approve stormy-star-183     make the rule apply to every agent
 ```
 
 ## Mission Control

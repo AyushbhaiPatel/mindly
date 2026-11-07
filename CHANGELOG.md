@@ -7,6 +7,15 @@ All notable changes to `mindly-cli` are documented here. The project follows
 
 ### Changed
 
+- The terminal shows lists as bordered tables. `mindly status`, `rules`, `memory list`,
+  `conflicts`, `saves` and `handoffs` print a header row and aligned columns (status, what, who, when,
+  id) instead of one long sentence per item. On a narrow terminal the least important columns are
+  left out rather than squeezed. `--json` output is unchanged.
+- Records have readable names instead of hex ids. Where the terminal used to show `[9f02a0c3]`,
+  it shows a name like `quiet-otter-17`: an adjective, a noun and a number that spell the last 6
+  hex digits of the id, the same every time. Every command that takes an id accepts the name as
+  well as the short or full id (`mindly conflict quiet-otter-17 resolve`). Agent sessions get a
+  Session column with their name, and sentences use the same name (`Claude Code · deep-island-51`).
 - Mission Control is reorganised around what a first-time user needs to know. Five pages instead
   of seven: Home, Memory, Agents, History and Settings. Home opens with one sentence on how the
   project is doing, then the agents at work as cards, the decisions only you can make (suggested

@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { shortId } from '@mindly/core';
+import { codename, shortId } from '@mindly/core';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary, runHook, styleFor } from '../src/index.js';
 import { cli, fixture, sandbox, tempDir, testIo, write, type Sandbox } from './helpers.js';
@@ -290,7 +290,8 @@ describe('rule import', () => {
       expect(rules.proposed.sort()).toEqual([injected, 'Run the linter before every commit']);
       // Shown as coming from the file, never as the user's own rules.
       const listed = (await cli(sb, ['rules'])).stdout.replace(/\s+/g, ' ');
-      expect(listed).toContain('imported from a repository file, waiting for you');
+      expect(listed).toContain('waiting for you');
+      expect(listed).toContain('a repository file');
       expect(listed).not.toContain('approved by you');
     }
   });
@@ -562,7 +563,7 @@ describe('memory and rules', () => {
     expect(forget.code).toBe(0);
     const gone = await cli(sb, ['memory', 'show', added.id]);
     expect(gone.code).toBe(1);
-    expect(gone.stderr).toContain('No memory with id');
+    expect(gone.stderr).toContain('No memory named');
     expect(gone.stderr).toContain('mindly memory list');
   });
 
@@ -813,7 +814,7 @@ describe('doctor, config, export, misc', () => {
       (await cli(sb, ['snapshot', 'create', 'before', '--json'])).stdout,
     );
     const list = (await cli(sb, ['snapshot', 'list'])).stdout;
-    expect(list).toContain(`[${shortId(snap.id)}]`);
+    expect(list).toContain(codename(snap.id));
     expect(list).not.toContain(snap.id);
     expect((await cli(sb, ['snapshot', 'diff', shortId(snap.id)])).stdout).toContain(
       'nothing changed',

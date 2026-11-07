@@ -1,4 +1,4 @@
-import { AGENT_KIND_RE, shortId } from '@mindly/core';
+import { AGENT_KIND_RE, codename } from '@mindly/core';
 import { failoverService, isValidBranchName, snapshotService } from '@mindly/engine';
 import { z } from 'zod';
 import { pickSession, withProject, type ProjectScope } from '../context.js';
@@ -76,7 +76,7 @@ export async function snapshotCreate(
           2,
         );
       }
-      sc.note(`See what changes from here on with: mindly snapshot diff ${shortId(snap.id)}`, 2);
+      sc.note(`See what changes from here on with: mindly snapshot diff ${codename(snap.id)}`, 2);
     }
     return 0;
   });
@@ -126,7 +126,7 @@ export async function snapshotRestore(
     const svc = snapshotService(scope.mindly);
     const snap = svc.list(scope.project.project.id, 1000).find((s) => s.id === sid);
     out.line(
-      `This puts memory and tasks back the way they were at snapshot "${clean(snap?.label ?? shortId(sid), 80)}"${snap ? ` (${relativeTime(snap.createdAt, Date.now())})` : ''}${o.branch ? ` and creates the branch ${clean(o.branch, 100)} with its code` : ''}.`,
+      `This puts memory and tasks back the way they were at snapshot "${clean(snap?.label ?? codename(sid), 80)}"${snap ? ` (${relativeTime(snap.createdAt, Date.now())})` : ''}${o.branch ? ` and creates the branch ${clean(o.branch, 100)} with its code` : ''}.`,
     );
     out.line(
       out.style.dim(

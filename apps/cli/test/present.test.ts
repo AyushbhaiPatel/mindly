@@ -78,23 +78,29 @@ describe('symbols and width', () => {
 });
 
 describe('vocabulary', () => {
-  it('names agents and sessions by product name and short id', () => {
+  it('names agents and sessions by product name and readable name', () => {
     expect(agentName('claude-code')).toBe('Claude Code');
     expect(agentName('gemini')).toBe('Gemini CLI');
     expect(agentName('augment')).toBe('Augment');
     expect(agentName('my-agent')).toBe('my-agent');
     const id = '01a1a6ed-ddf5-7ae7-8e36-9ff94409d433';
     expect(sessionName({ id, agentKind: 'claude-code', label: null })).toBe(
-      'Claude Code \u00B7 4409d433',
+      'Claude Code \u00B7 deep-island-51',
     );
     expect(sessionName({ id, agentKind: 'codex', label: 'auth' })).toBe(
-      'Codex "auth" \u00B7 4409d433',
+      'Codex "auth" \u00B7 deep-island-51',
     );
   });
 
   it('rewrites engine labels inside stored text', () => {
     expect(humanizeText('claude-code #6518e3b9 changed the exports of src/auth.ts')).toBe(
-      'Claude Code \u00B7 6518e3b9 changed the exports of src/auth.ts',
+      'Claude Code \u00B7 hardy-quartz-185 changed the exports of src/auth.ts',
+    );
+    // Two sessions of the same agent stay apart, by the same name as everywhere else.
+    expect(
+      humanizeText('claude-code #aaaa1111 and claude-code #bbbb2222 are both changing src/x.ts'),
+    ).toBe(
+      'Claude Code \u00B7 rocky-falcon-17 and Claude Code \u00B7 snug-oriole-34 are both changing src/x.ts',
     );
     expect(humanizeText('Stated by the user in a codex session')).toBe(
       'Stated by the user in a Codex session',
@@ -143,6 +149,89 @@ describe('screen', () => {
     return { sc, lines };
   }
 
+  it('keeps table borders straight in ASCII mode and with wide characters', () => {
+    const ascii = capture({ LANG: 'C', COLUMNS: '60' });
+    ascii.sc.table(
+      [
+        { header: 'What', fill: true },
+        { header: 'Next', max: 12 },
+      ],
+      [['Use pnpm\u2026 never npm', 'a \u2192 b \u2192 c \u2192 d']],
+    );
+    expect(ascii.lines).toEqual([
+      '  +-----------------------+--------------+',
+      '  | What                  | Next         |',
+      '  +-----------------------+--------------+',
+      '  | Use pnpm... never npm | a -> b ->... |',
+      '  +-----------------------+--------------+',
+    ]);
+    const cjk = capture({ LANG: 'en_US.UTF-8' });
+    cjk.sc.table([{ header: 'Rule' }, { header: 'Name' }], [['使用 pnpm 而不是 npm', 'x']]);
+    expect(cjk.lines).toEqual([
+      '  ┌──────────────────────┬──────┐',
+      '  │ Rule                 │ Name │',
+      '  ├──────────────────────┼──────┤',
+      '  │ 使用 pnpm 而不是 npm │ x    │',
+      '  └──────────────────────┴──────┘',
+    ]);
+    expect(visibleLength('使用 pnpm 🚀 e\u0301')).toBe(14);
+    // Emoji made of a text symbol and the emoji selector, flags, keycaps and joined emoji.
+    expect(
+      visibleLength('\u26A0\uFE0F \u{1F1EE}\u{1F1F3} 1\uFE0F\u20E3 \u{1F469}\u200D\u{1F4BB}'),
+    ).toBe(11);
+    expect(visibleLength('\u231A\uFE0E')).toBe(1);
+  });
+
+  it('keeps the colour of a cut cell and never splits a glyph', () => {
+    const { sc, lines } = capture({ LANG: 'en_US.UTF-8', COLUMNS: '80' }, true);
+    sc.table(
+      [
+        { header: 'Agent', max: 8 },
+        { header: 'Flag', max: 4 },
+      ],
+      [
+        [
+          '\u001b[31m!\u001b[39m Claude Code',
+          '\u{1F1EE}\u{1F1F3}\u{1F1EE}\u{1F1F3}\u{1F1EE}\u{1F1F3}',
+        ],
+      ],
+    );
+    const row = lines[3] ?? '';
+    expect(row).toContain('\u001b[31m!\u001b[39m Claud\u2026');
+    expect(row).toContain(' \u{1F1EE}\u{1F1F3} \u2026');
+    expect(new Set(lines.map((l) => visibleLength(l))).size).toBe(1);
+  });
+
+  it('keeps record names whole and fits a narrow terminal', () => {
+    for (const LANG of ['C', 'en_US.UTF-8']) {
+      const { sc, lines } = capture({ LANG, COLUMNS: '40' });
+      sc.table(
+        [
+          { header: 'Status' },
+          { header: 'Title', fill: true, min: 24 },
+          { header: 'From', drop: 1 },
+          { header: 'Name', keep: true },
+        ],
+        [
+          ['[!] waiting for you', "Don't use default exports", 'you', 'tranquil-woolly-255'],
+          ['[ok] approved', 'Use pnpm', 'Claude Code', 'calm-otter-7'],
+        ],
+      );
+      expect(lines.every((l) => visibleLength(l) <= 40)).toBe(true);
+      expect(lines.join('\n')).toContain(' tranquil-woolly-255 ');
+      expect(lines.join('\n')).toContain(' calm-otter-7 ');
+    }
+  });
+
+  it('wraps a long path in the fill column in full', () => {
+    const { sc, lines } = capture({ LANG: 'C', COLUMNS: '40' });
+    const path = 'packages/billing/src/services/invoice-generator-v2.ts';
+    sc.table([{ header: 'Doing', fill: true }], [[`editing ${path}`]]);
+    const text = lines.filter((l) => l.startsWith('  | ')).map((l) => l.slice(4, -2).trim());
+    expect(text.slice(1).join('')).toBe(`editing${path}`);
+    expect(lines.every((l) => l.length <= 40)).toBe(true);
+  });
+
   it('aligns ids and next steps', () => {
     const { sc, lines } = capture({ LANG: 'en_US.UTF-8' });
     sc.rows([
@@ -154,8 +243,8 @@ describe('screen', () => {
       { cmd: 'mindly longer', why: 'second' },
     ]);
     expect(lines).toEqual([
-      '  ! Short              [6518e3b9]',
-      '  \u2713 A bit longer text  [aaaaaaaa]',
+      '  ! Short              hardy-quartz-185',
+      '  \u2713 A bit longer text  rocky-weasel-170',
       '',
       '\u2192 mindly a        first',
       '\u2192 mindly longer   second',

@@ -80,6 +80,10 @@ interface SavesJson {
   saves: { id: string; kind: string; status: string; title: string; evidence: string[] }[];
 }
 
+/** Table output as one line: borders and the name column removed, so wrapping cannot matter. */
+const flat = (s: string): string =>
+  s.replace(/[\s|]+/g, ' ').replace(/ [a-z]{3,8}-[a-z]{3,8}-\d{1,3} /g, ' ');
+
 describe('mindly saves', () => {
   let sb: Sandbox;
   beforeAll(async () => {
@@ -106,13 +110,14 @@ describe('mindly saves', () => {
   });
 
   it('shows plain sentences, what is pending and what to do next', async () => {
-    const r = await cli(sb, ['saves']);
+    // Wide enough that each sentence stays on one line of its table row.
+    const r = await cli({ ...sb, env: { ...sb.env, COLUMNS: '160' } }, ['saves']);
     expect(r.code).toBe(0);
     expect(r.stdout).toMatch(/^Mindly - mindly-cli-repo-\w+ - 1 save in the last 7 days/);
-    expect(r.stdout).toContain('A write by Codex was blocked by your rule');
+    expect(flat(r.stdout)).toContain('A write by Codex was blocked by your rule');
     expect(r.stdout).toContain('Pending (waiting for evidence, not counted yet)');
-    expect(r.stdout).toContain('Codex was warned about a command that failed before');
-    expect(r.stdout).toMatch(/mindly saves reject [0-9a-f]{8}/);
+    expect(flat(r.stdout)).toContain('Codex was warned about a command that failed before');
+    expect(r.stdout).toMatch(/mindly saves reject [a-z]+-[a-z]+-\d+/);
     expect(r.stdout).not.toMatch(/rule_enforced|mistake_avoided|caught|confirmed/);
   });
 
@@ -178,7 +183,7 @@ describe('mindly saves card (AC6)', () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain(basename(sb.repo));
     expect(r.stdout).toContain('src/generated/api.ts');
-    expect(r.stdout).toContain('A write by Codex was blocked by your rule');
+    expect(flat(r.stdout)).toContain('A write by Codex was blocked by your rule');
     expect(r.stdout).not.toContain(SECRET_CODE);
   });
 
@@ -206,7 +211,7 @@ describe('mindly saves reject (AC2)', () => {
     const rule = before.saves.find((s) => s.kind === 'rule_enforced')!;
     const r = await cli(sb, ['saves', 'reject', shortId(rule.id)]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toMatch(/Save [0-9a-f]{8} removed from every total/);
+    expect(r.stdout).toMatch(/Save [a-z]+-[a-z]+-\d+ removed from every total/);
     const after = json<SavesJson>((await cli(sb, ['saves', '--json'])).stdout);
     expect(after.summary.total).toBe(0);
     expect(after.saves.map((s) => s.kind)).toEqual(['mistake_avoided']);
