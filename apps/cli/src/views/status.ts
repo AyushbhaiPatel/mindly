@@ -120,12 +120,15 @@ export function renderStatus(sc: Screen, d: StatusData): void {
     sc.table(
       [
         { header: 'Agent', max: 32 },
-        { header: 'Session', drop: 4 },
-        { header: 'Status' },
-        { header: 'Branch', max: 24, drop: 2 },
+        // The session's name tells sessions of one agent apart and is what Needs you refers to.
+        { header: 'Session', keep: true },
+        // The marker in the Agent column shows the status too, so it can go last.
+        { header: 'Status', drop: 1 },
+        { header: 'Branch', max: 24, drop: 3 },
         { header: 'Doing', fill: true, min: 24 },
-        { header: 'Task', max: 36, drop: 1 },
-        { header: 'Active', right: true, drop: 3 },
+        { header: 'Task', max: 36, drop: 2 },
+        // Repeats what Doing often says, so it goes first.
+        { header: 'Active', right: true, drop: 4 },
       ],
       d.agents.map((a) => [
         `${sc.mark(agentMarker(a.session))} ${agentName(a.session.agentKind)}${a.session.label ? ` "${clean(a.session.label, 40)}"` : ''}`,

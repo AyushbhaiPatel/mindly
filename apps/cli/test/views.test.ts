@@ -246,7 +246,7 @@ describe('status screen', () => {
     `);
   });
 
-  it('fits an agent with a long label into 80 columns', () => {
+  it('fits an agent with a long label into 80 columns and keeps its session name', () => {
     const labelled = { ...claude, label: 'refactor the billing service' };
     const agents = [{ ...statusData().agents[0]!, session: labelled }];
     const out = render((sc) => renderStatus(sc, statusData({ agents })), {
@@ -255,7 +255,8 @@ describe('status screen', () => {
     });
     const widths = out.split('\n').map((l) => [...l].length);
     expect(Math.max(...widths)).toBeLessThanOrEqual(80);
-    expect(out).toContain('● Claude Code "refactor the bil…');
+    // The label is cut, never the session's name.
+    expect(out).toMatch(/│ ● Claude Code "refactor the b… │ deep-island-51 │/);
   });
 
   it('says "All quiet." when nothing is happening', () => {
