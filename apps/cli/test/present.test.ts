@@ -78,23 +78,29 @@ describe('symbols and width', () => {
 });
 
 describe('vocabulary', () => {
-  it('names agents and sessions by product name and short id', () => {
+  it('names agents and sessions by product name and readable name', () => {
     expect(agentName('claude-code')).toBe('Claude Code');
     expect(agentName('gemini')).toBe('Gemini CLI');
     expect(agentName('augment')).toBe('Augment');
     expect(agentName('my-agent')).toBe('my-agent');
     const id = '01a1a6ed-ddf5-7ae7-8e36-9ff94409d433';
     expect(sessionName({ id, agentKind: 'claude-code', label: null })).toBe(
-      'Claude Code \u00B7 4409d433',
+      'Claude Code \u00B7 deep-island-51',
     );
     expect(sessionName({ id, agentKind: 'codex', label: 'auth' })).toBe(
-      'Codex "auth" \u00B7 4409d433',
+      'Codex "auth" \u00B7 deep-island-51',
     );
   });
 
   it('rewrites engine labels inside stored text', () => {
     expect(humanizeText('claude-code #6518e3b9 changed the exports of src/auth.ts')).toBe(
-      'Claude Code changed the exports of src/auth.ts',
+      'Claude Code \u00B7 hardy-quartz-185 changed the exports of src/auth.ts',
+    );
+    // Two sessions of the same agent stay apart, by the same name as everywhere else.
+    expect(
+      humanizeText('claude-code #aaaa1111 and claude-code #bbbb2222 are both changing src/x.ts'),
+    ).toBe(
+      'Claude Code \u00B7 rocky-falcon-17 and Claude Code \u00B7 snug-oriole-34 are both changing src/x.ts',
     );
     expect(humanizeText('Stated by the user in a codex session')).toBe(
       'Stated by the user in a Codex session',

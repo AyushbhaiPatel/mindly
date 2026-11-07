@@ -108,12 +108,12 @@ describe('human output on a real project', () => {
     expect(r.stdout).toMatch(
       /\* Claude Code[\s|]+[a-z]+-[a-z]+-\d+[\s|]+working[\s|]+main[\s|]+edited src\/auth\.ts/,
     );
-    expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code changed/);
+    expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code - [a-z]+-[a-z]+-\d+ changed/);
     const flat = r.stdout.replace(/[\s|]+/g, ' ');
-    expect(flat).toContain('changed the exports of src/auth.ts;');
-    expect(flat).toContain("Codex's");
-    expect(flat).toContain('src/dash.ts uses them');
-    expect(flat).toMatch(/Conflict Claude Code changed .* [a-z]+-[a-z]+-\d+ /);
+    // The sentence wraps inside its cell, so the Name cell may sit between its words.
+    expect(flat).toContain('changed the exports of');
+    expect(flat).toContain("src/auth.ts; Codex's src/dash.ts uses them");
+    expect(flat).toMatch(/Conflict Claude Code - [a-z]+-[a-z]+-\d+ changed .* [a-z]+-[a-z]+-\d+ /);
     expect(flat).toContain('- Rule "Don\'t use default exports" - suggested by you');
     expect(flat).toContain('- Handoff Waiting for Cursor:');
     expect(flat).toContain('Finish the dashboard login form');
@@ -144,7 +144,7 @@ describe('human output on a real project', () => {
     }
     const xray = (await cli(sb, ['xray'])).stdout;
     expect(xray).toMatch(/At session start \(just now\), Codex received 1 item:/);
-    expect(xray).toMatch(/Claude Code is working in this project too/);
+    expect(xray).toMatch(/Claude Code - [a-z]+-[a-z]+-\d+ is working in this project too/);
   });
 
   it('accepts names, short ids, unique prefixes and full ids; lists candidates when ambiguous', async () => {
@@ -197,7 +197,7 @@ describe('human output on a real project', () => {
     if (!claude) throw new Error('expected a Claude Code session');
     const xray = await cli(sb, ['xray', '--session', shortId(claude.id)]);
     expect(xray.code).toBe(0);
-    expect(xray.stdout).toContain(`Context sent to Claude Code - ${shortId(claude.id)}`);
+    expect(xray.stdout).toContain(`Context sent to Claude Code - ${codename(claude.id)}`);
 
     const snap = json<{ id: string }[]>((await cli(sb, ['snapshot', 'list', '--json'])).stdout)[0];
     if (!snap) throw new Error('expected a snapshot');

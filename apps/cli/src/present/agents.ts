@@ -1,5 +1,5 @@
 import { adapters, getAdapter } from '@mindly/adapters';
-import { sanitizeLine, shortId, type Session } from '@mindly/core';
+import { codename, sanitizeLine, type Session } from '@mindly/core';
 
 /** Product name of an agent kind (`claude-code` -> `Claude Code`), from the adapters. */
 export function agentName(kind: string): string {
@@ -9,10 +9,13 @@ export function agentName(kind: string): string {
   return adapter ? adapter.displayName.replace(/\s*\(.*\)$/, '') : sanitizeLine(kind, 32);
 }
 
-/** A session as people see it: `Claude Code - 4409d433` (with its label when it has one). */
+/**
+ * A session as people see it: `Claude Code · deep-island-51` (with its label when it has one),
+ * the same readable name the Session column shows.
+ */
 export function sessionName(s: Pick<Session, 'id' | 'agentKind' | 'label'>): string {
   const label = s.label ? sanitizeLine(s.label, 40) : '';
-  return `${agentName(s.agentKind)}${label ? ` "${label}"` : ''} \u00B7 ${shortId(s.id)}`;
+  return `${agentName(s.agentKind)}${label ? ` "${label}"` : ''} \u00B7 ${codename(s.id)}`;
 }
 
 /** Agent kinds known to the adapters, longest first so `claude-code` wins over a prefix. */
@@ -26,12 +29,15 @@ const KIND_IN_TEXT_RE = new RegExp(
 
 /**
  * Rewrites engine-made labels inside stored text (conflict titles, update titles) into plain
- * words: `claude-code #4409d433` -> `Claude Code`, `a codex session` -> `a Codex session`. The
- * session tag is dropped from running text; tables show it in a column of their own. The input
+ * words: `claude-code #4409d433` -> `Claude Code · deep-island-51` (the session's readable name,
+ * so two sessions of one agent stay apart), `a codex session` -> `a Codex session`. The input
  * must already be sanitised.
  */
 export function humanizeText(text: string): string {
   return text
-    .replace(SESSION_TAG_RE, (_m, kind: string) => agentName(kind))
+    .replace(
+      SESSION_TAG_RE,
+      (_m, kind: string, tag: string) => `${agentName(kind)} \u00B7 ${codename(tag)}`,
+    )
     .replace(KIND_IN_TEXT_RE, (kind: string) => agentName(kind));
 }

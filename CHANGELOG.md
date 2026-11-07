@@ -15,7 +15,7 @@ All notable changes to `mindly-cli` are documented here. The project follows
   it shows a name like `quiet-otter-17`: an adjective, a noun and a number that spell the last 6
   hex digits of the id, the same every time. Every command that takes an id accepts the name as
   well as the short or full id (`mindly conflict quiet-otter-17 resolve`). Agent sessions get a
-  Session column with their name; sentences say just "Claude Code".
+  Session column with their name, and sentences use the same name (`Claude Code · deep-island-51`).
 
 ## 0.4.1 — 2026-11-07
 

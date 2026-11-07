@@ -178,8 +178,8 @@ describe('status screen', () => {
         ┌────────────┬────────────────────────────────────────────────────────────────┬──────────────────┐
         │ Type       │ What                                                           │ Name             │
         ├────────────┼────────────────────────────────────────────────────────────────┼──────────────────┤
-        │ ! Conflict │ Claude Code changed the exports of src/auth.ts; Codex's        │ brave-shrimp-195 │
-        │            │ src/dash.ts uses them                                          │                  │
+        │ ! Conflict │ Claude Code · deep-island-51 changed the exports of            │ brave-shrimp-195 │
+        │            │ src/auth.ts; Codex's src/dash.ts uses them                     │                  │
         ├────────────┼────────────────────────────────────────────────────────────────┼──────────────────┤
         │ • Rule     │ "Don't use default exports" · suggested by you, in Claude Code │ stormy-star-183  │
         └────────────┴────────────────────────────────────────────────────────────────┴──────────────────┘
@@ -229,8 +229,8 @@ describe('status screen', () => {
         | [!] Config      | This project's .mindly/config.json is not trusted yet,   |                   |
         |                 | so its checks do not run                                 |                   |
         +-----------------+----------------------------------------------------------+-------------------+
-        | [!] Conflict    | Claude Code changed the exports of src/auth.ts; Codex's  | brave-shrimp-195  |
-        |                 | src/dash.ts uses them                                    |                   |
+        | [!] Conflict    | Claude Code - deep-island-51 changed the exports of      | brave-shrimp-195  |
+        |                 | src/auth.ts; Codex's src/dash.ts uses them               |                   |
         +-----------------+----------------------------------------------------------+-------------------+
         | - Rule          | "Don't use default exports" - suggested by you, in       | stormy-star-183   |
         |                 | Claude Code                                              |                   |
@@ -326,8 +326,9 @@ describe('insight screens', () => {
           ┌──────────────┬────────────────────────────────────────────┬────────┬────────┬──────────────────┐
           │ Severity     │ What                                       │ Status │   When │ Name             │
           ├──────────────┼────────────────────────────────────────────┼────────┼────────┼──────────────────┤
-          │ ! check this │ Claude Code changed the exports of         │ open   │ 2m ago │ brave-shrimp-195 │
-          │              │ src/auth.ts; Codex's src/dash.ts uses them │        │        │                  │
+          │ ! check this │ Claude Code · deep-island-51 changed the   │ open   │ 2m ago │ brave-shrimp-195 │
+          │              │ exports of src/auth.ts; Codex's            │        │        │                  │
+          │              │ src/dash.ts uses them                      │        │        │                  │
           │              │ Changed signature: login. 1 file imports   │        │        │                  │
           │              │ it: src/dash.ts.                           │        │        │                  │
           └──────────────┴────────────────────────────────────────────┴────────┴────────┴──────────────────┘
@@ -378,7 +379,7 @@ describe('insight screens', () => {
       src/auth.ts:1
         export function login(u: string, pw: string) {
 
-      Written by Claude Code - 4409d433 with its Edit tool, 2026-11-04 15:28 (2m ago)
+      Written by Claude Code - deep-island-51 with its Edit tool, 2026-11-04 15:28 (2m ago)
         Asked to: "Add a password parameter to login"
 
       Related memories
@@ -424,12 +425,12 @@ describe('insight screens', () => {
     };
     expect(render((sc) => renderXray(sc, codex, r), UTF8)).toMatchInlineSnapshot(`
       "
-      Context sent to Codex · f57f6d10
+      Context sent to Codex · icy-spider-16
 
       At session start (3m ago), Codex received 3 items:
-        ✓ Claude Code is working in this project too
+        ✓ Claude Code · deep-island-51 is working in this project too
         ✓ Rule "Always use pnpm, never npm"
-        ✓ Conflict: Claude Code changed the exports of src/auth.ts
+        ✓ Conflict: Claude Code · deep-island-51 changed the exports of src/auth.ts
       Left out (no room left in the context): 1 item
         ! Decision "Auth uses sessions, not JWT"
 
@@ -467,7 +468,7 @@ describe('insight screens', () => {
       ),
     ).toMatchInlineSnapshot(`
       "
-      Would memories about "exports" reach Codex - f57f6d10?
+      Would memories about "exports" reach Codex - icy-spider-16?
 
         [!] Rule "Don't use default exports": not sent: waiting for your approval  stormy-star-183
         [ok] Rule "Always use pnpm, never npm": would be sent                      large-iguana-85
