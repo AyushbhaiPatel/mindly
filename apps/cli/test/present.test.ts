@@ -175,6 +175,31 @@ describe('screen', () => {
       '  └──────────────────────┴──────┘',
     ]);
     expect(visibleLength('使用 pnpm 🚀 e\u0301')).toBe(14);
+    // Emoji made of a text symbol and the emoji selector, flags, keycaps and joined emoji.
+    expect(
+      visibleLength('\u26A0\uFE0F \u{1F1EE}\u{1F1F3} 1\uFE0F\u20E3 \u{1F469}\u200D\u{1F4BB}'),
+    ).toBe(11);
+    expect(visibleLength('\u231A\uFE0E')).toBe(1);
+  });
+
+  it('keeps the colour of a cut cell and never splits a glyph', () => {
+    const { sc, lines } = capture({ LANG: 'en_US.UTF-8', COLUMNS: '80' }, true);
+    sc.table(
+      [
+        { header: 'Agent', max: 8 },
+        { header: 'Flag', max: 4 },
+      ],
+      [
+        [
+          '\u001b[31m!\u001b[39m Claude Code',
+          '\u{1F1EE}\u{1F1F3}\u{1F1EE}\u{1F1F3}\u{1F1EE}\u{1F1F3}',
+        ],
+      ],
+    );
+    const row = lines[3] ?? '';
+    expect(row).toContain('\u001b[31m!\u001b[39m Claud\u2026');
+    expect(row).toContain(' \u{1F1EE}\u{1F1F3} \u2026');
+    expect(new Set(lines.map((l) => visibleLength(l))).size).toBe(1);
   });
 
   it('keeps record names whole and fits a narrow terminal', () => {

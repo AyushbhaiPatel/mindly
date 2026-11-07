@@ -130,8 +130,6 @@ export function widthFor(out: TextOut, env: NodeJS.ProcessEnv): number {
 }
 
 // eslint-disable-next-line no-control-regex
-const ANSI_RE = /\u001b\[[0-9;]*m/g;
-// eslint-disable-next-line no-control-regex
 const SGR_RE = /\u001b\[([0-9;]*)m/g;
 /** Codes that end a style: normal intensity, default colours, no italic/underline/inverse. */
 const SGR_CLOSE = new Set(['22', '23', '24', '27', '39', '49']);
@@ -209,16 +207,50 @@ function charWidth(ch: string): number {
   return within(cp, WIDE) ? 2 : 1;
 }
 
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const isRegionalIndicator = (cp: number): boolean => cp >= 0x1f1e6 && cp <= 0x1f1ff;
+
 /**
- * The code points of `text` (colour codes removed) with their width. A code point after a
- * zero-width joiner takes no column: it joins the previous emoji into one glyph (👩‍💻).
+ * Columns one grapheme (what a terminal draws as one glyph) takes. A text symbol with the emoji
+ * variation selector (⚠️, 1️⃣) and a flag (🇮🇳) are emoji, two columns; the text selector makes
+ * one column. Joined emoji (👩‍💻) take the width of their widest part.
  */
-function* measured(text: string): Generator<readonly [string, number]> {
-  let joined = false;
-  for (const ch of text.replace(ANSI_RE, '')) {
-    yield [ch, joined ? 0 : charWidth(ch)];
-    joined = ch === '\u200D';
+function graphemeWidth(g: string): number {
+  if (g.includes('\uFE0E')) return 1;
+  if (g.includes('\uFE0F') || isRegionalIndicator(g.codePointAt(0) ?? 0)) return 2;
+  let w = 0;
+  for (const ch of g) w = Math.max(w, charWidth(ch));
+  return w;
+}
+
+/**
+ * The pieces of `text` with their width in columns: graphemes, and colour codes (width 0) when
+ * `keepColour` is set. Cutting between pieces never splits a glyph.
+ */
+function* measured(text: string, keepColour = false): Generator<readonly [string, number]> {
+  // eslint-disable-next-line no-control-regex
+  for (const part of text.split(/(\u001b\[[0-9;]*m)/)) {
+    if (part === '') continue;
+    if (part.startsWith('\u001b[')) {
+      if (keepColour) yield [part, 0];
+      continue;
+    }
+    for (const { segment } of GRAPHEMES.segment(part)) yield [segment, graphemeWidth(segment)];
   }
+}
+
+/**
+ * The colour codes still open after `line`, given those open before it. Codes come from io.ts
+ * styles, which nest properly.
+ */
+function openColour(line: string, open: readonly string[] = []): string[] {
+  const now = [...open];
+  for (const [code, params] of line.matchAll(SGR_RE)) {
+    if (params === '' || params === '0') now.length = 0;
+    else if (SGR_CLOSE.has(params ?? '')) now.pop();
+    else now.push(code);
+  }
+  return now;
 }
 
 /**
@@ -232,15 +264,15 @@ export function visibleLength(text: string): number {
 }
 
 /**
- * Cuts `text` (colour codes removed) into pieces at most `width` columns wide, at code-point
- * boundaries. The last piece may be shorter.
+ * Cuts `text` into pieces at most `width` columns wide, between glyphs. Colour codes are kept;
+ * the caller closes and reopens colour that spans pieces. The last piece may be shorter.
  */
 function cutByWidth(text: string, width: number): string[] {
   const pieces: string[] = [];
   let current = '';
   let used = 0;
-  for (const [ch, w] of measured(text)) {
-    if (used + w > width && current !== '') {
+  for (const [ch, w] of measured(text, true)) {
+    if (used + w > width && used > 0) {
       pieces.push(current);
       current = '';
       used = 0;
@@ -261,15 +293,11 @@ function wrapCell(text: string, width: number): string[] {
     .split(/ +/)
     .flatMap((w) => (visibleLength(w) > width ? cutByWidth(w, Math.max(1, width)) : [w]));
   // Colour that spans a line break is closed at the end of the line and reopened on the next,
-  // so it never runs into the borders. Codes come from io.ts styles, which nest properly.
+  // so it never runs into the borders.
   let open: string[] = [];
   return wrap(words.join(' '), width).map((line) => {
     const start = open.join('');
-    for (const [code, params] of line.matchAll(SGR_RE)) {
-      if (params === '' || params === '0') open = [];
-      else if (SGR_CLOSE.has(params ?? '')) open.pop();
-      else open.push(code);
-    }
+    open = openColour(line, open);
     return `${start}${line}${open.length > 0 ? '\u001b[0m' : ''}`;
   });
 }
@@ -555,8 +583,10 @@ export function screenFor(
           // column has room for one.
           const mark = w > visibleLength(sym.ellipsis) ? sym.ellipsis : '';
           const room = w - visibleLength(mark);
+          // The kept part keeps its colour (a red marker stays red); close what is still open.
           const kept = room > 0 ? (cutByWidth(text, room)[0] ?? '') : '';
-          return `${kept}${' '.repeat(Math.max(0, room - visibleLength(kept)))}${mark}`;
+          const close = openColour(kept).length > 0 ? '\u001b[0m' : '';
+          return `${kept}${close}${' '.repeat(Math.max(0, room - visibleLength(kept)))}${mark}`;
         }
         const fillBy = ' '.repeat(w - len);
         return columns[i]?.right ? `${fillBy}${text}` : `${text}${fillBy}`;
