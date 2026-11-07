@@ -80,6 +80,10 @@ interface SavesJson {
   saves: { id: string; kind: string; status: string; title: string; evidence: string[] }[];
 }
 
+/** Table output as one line: borders and the name column removed, so wrapping cannot matter. */
+const flat = (s: string): string =>
+  s.replace(/[\s|]+/g, ' ').replace(/ [a-z]{3,8}-[a-z]{3,8} /g, ' ');
+
 describe('mindly saves', () => {
   let sb: Sandbox;
   beforeAll(async () => {
@@ -109,9 +113,9 @@ describe('mindly saves', () => {
     const r = await cli(sb, ['saves']);
     expect(r.code).toBe(0);
     expect(r.stdout).toMatch(/^Mindly - mindly-cli-repo-\w+ - 1 save in the last 7 days/);
-    expect(r.stdout).toContain('A write by Codex was blocked by your rule');
+    expect(flat(r.stdout)).toContain('A write by Codex was blocked by your rule');
     expect(r.stdout).toContain('Pending (waiting for evidence, not counted yet)');
-    expect(r.stdout).toContain('Codex was warned about a command that failed before');
+    expect(flat(r.stdout)).toContain('Codex was warned about a command that failed before');
     expect(r.stdout).toMatch(/mindly saves reject [a-z]+-[a-z]+/);
     expect(r.stdout).not.toMatch(/rule_enforced|mistake_avoided|caught|confirmed/);
   });
@@ -178,7 +182,7 @@ describe('mindly saves card (AC6)', () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain(basename(sb.repo));
     expect(r.stdout).toContain('src/generated/api.ts');
-    expect(r.stdout).toContain('A write by Codex was blocked by your rule');
+    expect(flat(r.stdout)).toContain('A write by Codex was blocked by your rule');
     expect(r.stdout).not.toContain(SECRET_CODE);
   });
 
