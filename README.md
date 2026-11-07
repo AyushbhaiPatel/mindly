@@ -4,15 +4,15 @@
 
 # Mindly
 
-**Shared project memory for your coding agents, so they stop repeating mistakes and stop breaking each other's work.**
+**The coordination layer for teams of coding agents.**
 
-Claude Code, Codex, Cursor and Gemini CLI learn your project rules once, see what the other agents are
-working on, and get a warning before they build on code another agent just changed.
-Everything stays on your computer.
+[Quickstart](#quickstart) · [What it does](#what-it-does) · [Commands](#commands) ·
+[Configuration](#configuration) · [How it works](#how-it-works) · [Security](#privacy-and-security) ·
+[Changelog](CHANGELOG.md)
 
 [![npm](https://img.shields.io/npm/v/mindly-cli?color=2b7489&label=npm)](https://www.npmjs.com/package/mindly-cli)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![node](https://img.shields.io/badge/node-%E2%89%A522.13-43853d)](#install)
+[![node](https://img.shields.io/badge/node-%E2%89%A522.13-43853d)](#quickstart)
 
 ```bash
 npx mindly-cli init
@@ -20,187 +20,191 @@ npx mindly-cli init
 
 </div>
 
-<p align="center"><img src="docs/assets/demo.svg" alt="Demo: Claude Code changes login() in src/auth.ts; before Codex edits src/dashboard.ts, which calls it, Mindly tells Codex about the change; mindly status and Mission Control show both agents and the open conflict." width="860"></p>
+Run Claude Code, Codex, Cursor and Gemini CLI on the same codebase without them overwriting each
+other, breaking each other's work, or forgetting what the project decided. Mindly sits in each
+agent's hooks, keeps one shared record of the project, and steps in at the moment it matters,
+before the edit, not after the incident. Open source, and everything stays on your machine.
 
----
+|                                     |                                                                                                     |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **Change warnings**                 | When one agent changes a function, every agent with code that uses it is told before its next step. |
+| **Decisions that check themselves** | Turn a decision into a check that runs after every edit, and alert every agent when it breaks.      |
+| **Enforced rules**                  | Block writes that break a rule you marked as enforced, in every connected agent.                    |
+| **Bisect for agent edits**          | Find the exact agent edit that broke a command, who made it and from which prompt.                  |
+| **Split**                           | Divide one goal across agents in separate worktrees, with file ownership and merge checks.          |
+| **Usage-limit handoff**             | When an agent hits its limit, the next one starts with the goal, plan, files and next steps.        |
+| **Shared rules and memory**         | Rules and decisions every agent starts with, labelled by who said them and whether you approved.    |
+
+<p align="center"><img src="docs/assets/demo.svg" alt="Demo recorded from a real run: three agents on one billing repository. Codex is warned before it uses a function Claude Code changed, a broken decision and a blocked migration edit are flagged, mindly bisect finds the edit that broke the tests, and Mission Control shows it all live." width="860"></p>
 
 ## Why
 
-If you use more than one coding agent, you have probably seen this:
+One agent is a tool. Three agents on one repository are a team, and they have the problems of a
+team that never talks to each other:
 
-- You tell Claude Code "we use pnpm". The next day Codex runs `npm install` anyway.
-- Claude renames a function while Codex is writing code that calls the old name.
-- Claude hits its usage limit halfway through a task, and you explain everything again to Codex.
-- Weeks later, nobody remembers why a line exists or which agent wrote it.
+- One agent changes a shared interface while another is halfway through code that depends on it.
+  Nobody finds out until CI fails, or production does.
+- The decisions behind your codebase ("webhooks must verify signatures", "applied migrations are
+  never edited") live in one agent's chat history and nowhere else.
+- An agent hits its usage limit in the middle of a migration, and the next one starts from zero.
+- Something broke after 140 agent edits across three tools, and none of it was committed.
+  `git bisect` can't help, because the edits aren't commits.
 
-Each agent has its own memory and doesn't know the others exist. Mindly gives them one shared
-memory and tells each of them what the others are doing.
-
-## What it does
-
-### You say it once, every agent knows
-
-Correct one agent:
-
-```text
-you → Claude Code:  From now on always use pnpm, never npm.
-```
-
-From then on, every agent starts its sessions with this:
-
-```text
-## Project rules (from the user)
-- [rule · user-approved · user] From now on always use pnpm, never npm
-```
-
-An agent can only _suggest_ a rule. Only you can approve one, so one agent's wrong guess doesn't
-become an instruction for all of them.
-
-### Agents hear about changes that affect them
-
-Claude changes `login()` while Codex is editing a file that uses it. Before Codex's next step,
-Mindly tells it:
-
-```text
-## Updates from other agents since your last turn
-- [impact · from claude-code #7c3476be · just now] claude-code #7c3476be changed the exports of
-  src/auth.ts — Changed signature: login. Your files that import it: src/dash.ts.
-  Re-check usages of these exports before continuing.
-```
-
-### You see what every agent is doing
-
-```text
-$ mindly status
-Agents (2)
-  codex #dd7a9a10        active  main  0s ago
-  claude-code #7c3476be  active  main  0s ago
-
-Intents (1)
-  Editing src/dash.ts (src/dash.ts)
-
-Open conflicts (1)
-  01a1a6c4…  warning  open  claude-code #7c3476be changed the exports of src/auth.ts
-```
-
-`mindly dashboard` opens the same view in your browser, live (Mission Control).
-
-### You can ask who wrote a line, and why
-
-```text
-$ mindly why src/auth.ts:1
-src/auth.ts:1  export function login(u: string, pw: string) {
-Written by claude-code #7c3476be with Edit at 2026-11-04 19:04
-  prompt: Add a password parameter to login
-```
-
-### New in 0.3: saves
-
-`mindly saves` lists the times Mindly actually prevented a problem: a write blocked by your
-rule, an agent warned about a changed function before it used it, a merge conflict found before
-either branch was merged, and so on. A save counts only when the agent's later actions show the
-problem was avoided. If there's no proof, it doesn't count. Each save shows the events behind it,
-and `mindly saves reject <id>` removes one you disagree with.
-
-`mindly saves card` makes an image of your saves to share. It shows counts and agent names only:
-no project names, file paths or code.
-
-### New in 0.3: split one goal between agents
-
-```bash
-mindly split "add billing: API, webhook handler, settings page"
-```
-
-An agent plans the work in read-only mode (or you pass your own plan with `--plan plan.json`).
-You review the plan before anything is created. Then Mindly:
-
-1. creates one git worktree and branch per part, next to your repository (your own checkout is
-   not touched),
-2. tells each agent which part is its job, which files it owns and what the parts agree on,
-3. warns an agent that writes to another part's files (`--strict` blocks it instead),
-4. checks in the background that all the parts still merge cleanly and pass your checks.
-
-`mindly split status` shows how each part is going. `mindly split merge` merges the parts into one
-new branch. It never pushes. `mindly split abort` removes only what the split created.
-
-### New: find the edit that broke it
-
-```bash
-mindly bisect -- pnpm test
-```
-
-Agents make dozens of edits between commits, often several agents in the same checkout, so when a
-test breaks `git bisect` cannot tell you which edit did it. Mindly can: it keeps a checkpoint of
-the code after every agent edit (a hidden git commit in your repository, so unchanged files cost
-nothing, and your branch, index and files are never touched). `mindly bisect` checks out those
-checkpoints one by one in a scratch folder, runs your command there (exit 0 is good, 125 is skip,
-anything else is bad, like `git bisect run`), and binary-searches to the first step that fails.
-It re-runs the two steps around the answer so a flaky test cannot get an agent blamed, and it
-tells you who made the edit, from which prompt, and which rules were in effect:
-
-```text
-Broke at step 87 of 140 · 6 runs · 41s
-  codex #dd7a9a10 · Edit src/auth.ts · 14:32
-  prompt: make login faster, skip the db lookup
-  rules in effect for src/auth.ts then: login must return user.role (it was told)
-  last good: step 86 (claude-code #7c34 · Edit src/ui/nav.tsx)
--> mindly bisect show 87 --patch     see exactly what changed
--> mindly bisect revert 87           undo only that edit in your checkout
-```
-
-`mindly bisect list` shows the steps of the last 24 hours, `mindly bisect show <step>` one step
-with its diff, and `mindly bisect revert <step>` undoes that one edit in your checkout after
-showing you the patch (never a commit, never a reset). A reliable result is remembered as a
-mistake in the project's memory so the agents are warned before they repeat it. Checkpoints are
-kept 14 days (`checkpoints.keepDays`) and can be turned off with `checkpoints.enabled`.
-
-## Install
+## Quickstart
 
 You need **Node.js 22.13 or newer** and **git**, on macOS or Linux.
 
-```bash
-npx mindly-cli init
-```
-
-or install the `mindly` command globally:
+**1. Install**
 
 ```bash
 npm i -g mindly-cli
+```
+
+**2. Connect your agents** (run inside your repository)
+
+```bash
 mindly init
 ```
 
 `init` finds the agents you have installed, shows every file and line it will change, and asks
-before writing anything. Then use your agents as usual. There is nothing else to start.
+before writing anything. It also offers to import the rules you already wrote in `CLAUDE.md`,
+`AGENTS.md`, `.cursorrules` and similar files.
 
-- `--project` sets up only the current repository. `--dry-run` shows the changes without making
-  them.
-- Inside a repository, `init` offers to import the rules you already wrote in `CLAUDE.md`,
-  `AGENTS.md`, `.cursorrules` and similar files. Mindly can also keep your approved rules written
-  back into those files. See [docs/rules.md](docs/rules.md).
-- `mindly doctor` checks the setup. `mindly uninstall` removes everything Mindly added.
-- Config files that are symlinks (stow, chezmoi and other dotfile managers) stay symlinks. If a
-  config file is read-only (for example from Nix home-manager), Mindly skips that agent and prints
-  the lines to add yourself.
+**3. Restart your agent sessions and work as usual**
 
-### Supported agents
+Agents read their hook settings when they start, so restart any that were already open. In Codex,
+approve the Mindly hooks once with `/hooks`. Then check that everything is connected:
 
-| Agent                                                                                                                                          | How it connects | What you get                                                                 |
-| ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ---------------------------------------------------------------------------- |
-| Claude Code, Codex CLI, Cursor, Gemini CLI                                                                                                     | hooks + MCP     | Everything works automatically: memory, warnings, tracking, rule enforcement |
-| Windsurf, Kiro, VS Code (GitHub Copilot), Cline, Roo Code, Claude Desktop, OpenCode, Zed, Amp, Augment (Auggie CLI), LM Studio, any MCP client | MCP tools only  | The agent can read and add memory, but only when it calls Mindly's tools     |
+```bash
+mindly status
+```
 
-Claude Code is the most tested. Codex asks you to approve its hooks once with `/hooks`.
+There is nothing else to run. `mindly doctor` checks the setup, and `mindly uninstall` removes
+everything Mindly added.
 
-For the MCP-only agents, add a line such as "Call `mindly_context` at the start of each task" to
-that agent's rules file, or it won't check Mindly. `mindly init --list-agents` prints the names to
-pass to `--agents` (for example `mindly init --agents windsurf,gemini`). `init` changes only the
-`mindly` entry in each config file and keeps your comments, other servers and formatting.
+## What it does
+
+### Catches breaking changes between agents before they land
+
+Claude Code is refactoring the billing package and changes `createInvoice` to take an options
+object. At the same time Codex is wiring the Stripe webhook, which calls `createInvoice`. Before
+Codex's next step, Mindly tells it:
+
+```text
+## Updates from other agents since your last turn
+- [impact · from claude-code #7c3476be · just now] claude-code #7c3476be changed the exports of
+  packages/billing/src/invoice.ts — Changed signature: createInvoice. Your files that import it:
+  apps/api/src/webhooks/stripe.ts.
+  Re-check usages of these exports before continuing.
+```
+
+Mindly finds this from the import graph and the exports that actually changed. Codex fixes its
+call before it writes more code against the old signature.
+
+### Turns decisions into checks that run after every edit
+
+A decision written down is a suggestion. A decision Mindly can check is a guardrail:
+
+```bash
+mindly memory add --kind decision --title "Stripe webhooks verify the signature" \
+  --body "Every handler calls stripe.webhooks.constructEvent before reading the event."
+mindly contract add <id> --kind pattern_present \
+  --path apps/api/src/webhooks/stripe.ts --pattern "constructEvent\("
+```
+
+Weeks later an agent "simplifies" the handler and drops the verification. The check fails after
+that edit, a critical conflict opens, and every agent on the project is told on its next step:
+
+```text
+Decision 'Stripe webhooks verify the signature' no longer holds:
+pattern not found in apps/api/src/webhooks/stripe.ts
+```
+
+Checks can test for a pattern, the absence of a pattern, a file, a JSON key, an export, or run a
+command you approved.
+
+### Enforces the rules that must not bend
+
+Mark a rule as enforced and Mindly blocks the write itself, in every connected agent:
+
+```text
+Blocked by a project rule the user marked as enforced: "Applied migrations are never edited;
+add a new migration instead". Ask the user before changing
+prisma/migrations/20261103_add_currency/migration.sql.
+```
+
+Rules can be scoped to paths and branches. Agents can only propose rules; you approve them.
+
+### Finds the exact agent edit that broke your build
+
+Your test suite passed this morning. Since then three agents made 140 edits and nothing was
+committed:
+
+```text
+$ mindly bisect --setup "pnpm install --frozen-lockfile" -- pnpm test billing
+Broke at step 87 of 140 · 9 runs · 2m 41s
+  codex #dd7a9a10 · Edit packages/billing/src/tax.ts · 14:32
+  prompt: make tax calculation faster, cache the rates per region
+  rules in effect for packages/billing/src/tax.ts then: Tax rates are not cached across requests (it was told)
+  last good: step 86 (claude-code #7c3476be · Edit apps/web/src/settings/billing.tsx)
+-> mindly bisect show 87 --patch     see exactly what changed
+-> mindly bisect revert 87           undo only that edit in your checkout
+```
+
+Mindly keeps a checkpoint of the code after every agent edit. Bisect replays them in a separate
+copy of the repository, never in your checkout, and re-checks the answer so a flaky test doesn't
+blame the wrong agent.
+
+### Splits one goal across agents working in parallel
+
+```bash
+mindly split "add multi-currency billing: pricing API, Stripe webhook, settings page"
+```
+
+An agent plans the split in read-only mode, and you review it. Then each part gets its own git
+worktree and branch, the agent is told which files it owns and what the parts agreed on, and
+writes into another part's files are flagged (or blocked with `--strict`). In the background
+Mindly keeps checking that all the parts still merge and pass your checks. `mindly split merge`
+combines them into one new branch, in dependency order, and never pushes.
+
+### Keeps work going when an agent hits its limit
+
+When Claude Code hits its usage limit mid-task, the next agent you open starts with the goal, the
+plan, the files already changed and the next steps, instead of a blank session.
+
+### Shows its work
+
+- `mindly why apps/api/src/webhooks/stripe.ts:42`: which agent wrote this line, when, and from
+  which prompt.
+- `mindly xray`: the exact context an agent was given, and why a memory did not reach it.
+- `mindly saves`: each time Mindly prevented a problem, with the events that prove it. A save
+  counts only when the agent's later actions show the problem was avoided.
+- `mindly dashboard`: Mission Control, a live local view of agents, tasks, conflicts and memory.
+
+## Supported agents
+
+| Agent                                                                                                                                          | Connects through | What works                                                                    |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------- |
+| Claude Code, Codex CLI, Cursor, Gemini CLI                                                                                                     | hooks + MCP      | Everything, automatically: warnings, checks, enforcement, checkpoints, memory |
+| Windsurf, Kiro, VS Code (GitHub Copilot), Cline, Roo Code, Claude Desktop, OpenCode, Zed, Amp, Augment (Auggie CLI), LM Studio, any MCP client | MCP tools only   | Reading and adding memory, when the agent calls Mindly's tools                |
+
+Claude Code is the most tested. For MCP-only agents, add a line such as "Call `mindly_context` at
+the start of each task" to that agent's rules file. `mindly init --list-agents` prints the names
+to pass to `--agents`.
+
+<details>
+<summary>Setup details</summary>
+
+- `mindly init --project` sets up only the current repository; `--dry-run` previews.
+- `init` changes only the `mindly` entry in each agent config file and keeps your comments, other
+  servers and formatting. Symlinked configs (stow, chezmoi) stay symlinks. Read-only configs (Nix
+  home-manager) are skipped, with the lines to add printed for you.
+- Importing and syncing rules with your instruction files: [docs/rules.md](docs/rules.md).
+
+</details>
 
 <details>
 <summary>Adding an MCP client that isn't listed</summary>
-
-Add a stdio server to the client's MCP config. Most clients use this shape (use the full path from
-`which mindly` if the client doesn't see your `PATH`):
 
 ```json
 {
@@ -210,25 +214,22 @@ Add a stdio server to the client's MCP config. Most clients use this shape (use 
 }
 ```
 
-`--agent` is any short lowercase name. It is how the client shows up in Mindly.
+Use the full path from `which mindly` if the client doesn't see your `PATH`. `--agent` is any
+short lowercase name.
 
 </details>
 
 <details>
 <summary>Claude Code status line</summary>
 
-`init` also adds a line to the bottom of Claude Code:
+`init` adds a status line to Claude Code:
 
 ```
 mindly · 2 saves today · 3 rules · 1 update · 0 conflicts
 ```
 
-That shows today's saves (when there are any), the rules in effect, updates from other agents waiting for this session,
-and conflicts that need you. It only reads, refreshes every 10 seconds, and shows just `mindly` if
-something goes wrong.
-
-If you already have a status line, `init` leaves it alone. To show both, pass the same input to
-`mindly statusline` from your own script:
+If you already have one, `init` leaves it alone. To show both, pipe the same input to
+`mindly statusline` from your script:
 
 ```bash
 #!/bin/bash
@@ -237,113 +238,122 @@ mine=$(printf '%s' "$input" | ~/.claude/my-statusline.sh)
 printf '%s · %s\n' "$mine" "$(printf '%s' "$input" | mindly statusline)"
 ```
 
-`mindly init --no-statusline` skips it.
-
 </details>
 
-## Everything else it can do
+## Commands
 
-**Memory**
+**Daily**
 
-- **Session start:** every new session gets your rules, recent decisions, work in progress and
-  open conflicts.
-- **Labels on everything:** each memory says who it came from and whether it is approved by you,
-  confirmed by the code, only proposed, or possibly outdated.
-- **Outdated notes are flagged:** a memory is linked to the code it describes and gets flagged
-  when that code changes.
-- **Decisions that check themselves:** turn a decision ("login returns `user.role`") into a check
-  that runs after every edit (`mindly contract`).
-- **Failed commands are remembered:** before an agent runs a command that failed before, it is
-  told what went wrong.
-- **History:** memories follow your git branches, and every change to them is kept.
+```bash
+mindly status                        # agents, edits in progress, conflicts, what needs you
+mindly dashboard                     # Mission Control in the browser
+mindly standup [--since 24h]         # what your agents did, and what needs you
+mindly conflicts                     # open conflicts; mindly conflict <id> resolve|dismiss|ack
+```
 
-**Working together**
+**Rules, decisions and checks**
 
-- **Who's editing what:** agents' in-progress edits are tracked, and two agents heading for the
-  same file get a warning.
-- **Background merge check:** when agents work in separate worktrees, Mindly regularly checks in
-  the background that their work still merges and passes your checks.
-- **Usage-limit handoff:** when an agent hits its usage limit, the next agent gets the goal, the
-  plan, the files touched and the next steps.
-- **Handoffs:** pass an unfinished task to another agent (`mindly handoff`).
+```bash
+mindly rules [--approve <id>]        # approved and proposed rules
+mindly rules import [--dry-run]      # import rules from CLAUDE.md, AGENTS.md, .cursorrules, …
+mindly rules sync [--dry-run|--off]  # keep approved rules in AGENTS.md, CLAUDE.md, GEMINI.md
+mindly memory add --kind rule|decision|fact|mistake|note --title "…" [--enforce] [--scope <glob>]
+mindly memory list|search <q>|show <id>|approve|reject|archive|forget
+mindly contract add <memoryId> --kind <kind> …   # turn a decision into a check
+mindly trust                         # review and allow this repo's .mindly/config.json checks
+```
 
-**Looking back**
+**Parallel work**
 
-- **What an agent was told:** `mindly xray` shows the exact context a session received, and why a
-  memory did not reach it.
-- **Second opinion:** one agent reviews another agent's changes, read-only (`mindly review`).
-- **Compare agents:** run the same prompt with several agents from the same commit
-  (`mindly replay`).
-- **Snapshots:** save memory, tasks and code together, and restore them to a new branch
-  (`mindly snapshot`).
-- **Daily summary:** what your agents did and what needs you (`mindly standup`).
-- **Notifications:** optional desktop, ntfy or webhook alerts when an agent is stuck or hits its
-  limit. Off by default.
+```bash
+mindly split "<goal>" [--plan plan.json] [--strict]
+mindly split status|check|merge|abort
+mindly handoff --summary "…" [--to codex]
+```
+
+**Debugging and history**
+
+```bash
+mindly bisect [--setup "<cmd>"] -- <command>   # the agent edit that broke a command
+mindly bisect list|show <step> [--patch]|revert <step>
+mindly why <file>:<line>             # who wrote a line, and from which prompt
+mindly xray [--session <id>]         # the context an agent was given
+mindly saves [--since 7d]            # problems Mindly prevented, with proof
+mindly snapshot create|list|diff|restore
+mindly review --session <id> --reviewer codex
+mindly replay --prompt "…" --agents claude-code,codex
+```
+
+**Setup and data**
+
+```bash
+mindly init | uninstall | doctor
+mindly config get|set <key> <value>
+mindly daemon start|stop|status
+mindly export | forget --project
+```
+
+Most commands take `--json`. Run `mindly <command> --help` for every option.
+
+## Configuration
+
+Settings live in `~/.mindly/config.json`. Read and change them with `mindly config`, which
+validates every value:
+
+```bash
+mindly config get shadowMerge
+mindly config set checkpoints.keepDays 30
+```
+
+| Setting                                 | Default       | What it does                                                      |
+| --------------------------------------- | ------------- | ----------------------------------------------------------------- |
+| `rules.autoCapture`                     | `true`        | Turn corrections like "from now on use pnpm" into proposed rules  |
+| `checkpoints.enabled`                   | `true`        | Keep a checkpoint after every agent edit, for `mindly bisect`     |
+| `checkpoints.keepDays`                  | `14`          | How long checkpoints are kept                                     |
+| `shadowMerge.enabled` / `intervalSec`   | `true` / `90` | Background merge checks between agents in separate worktrees      |
+| `failover.enabled`                      | `true`        | Brief the next agent when one hits its usage limit                |
+| `retention.promptsDays` / `eventsDays`  | `30` / `180`  | How long prompt text and event history are kept                   |
+| `notify.channels`                       | none          | Desktop, ntfy or webhook alerts when an agent is stuck or limited |
+| `llm.provider`                          | `none`        | Optional model for extra checks; your own key or a local model    |
+| `redaction.extraPatterns` / `denyPaths` | none          | More secrets to redact and paths Mindly never reads               |
+
+Per-repository checks (commands Mindly may run, such as your test suite) go in
+`.mindly/config.json` and run only after you approve that exact version with `mindly trust`.
 
 ## How it works
 
 ```text
- Claude Code      Codex        Cursor / any MCP client
-     │ hooks        │ hooks          │ MCP
-     └──────────────┴────────────────┘
-                    │
-             mindly (on your machine)
-                    │
-     ┌──────────────┴──────────────┐
-     │  memory · rules · who's     │      optional background service:
-     │  editing what · warnings    │ ───▶ dashboard, merge checks,
-     └──────────────┬──────────────┘      daily summary
-                    │
-            ~/.mindly/mindly.db (a SQLite file on your machine)
+ Claude Code      Codex        Cursor      Gemini CLI     any MCP client
+     │ hooks        │ hooks      │ hooks      │ hooks          │ MCP
+     └──────────────┴────────────┴────────────┴────────────────┘
+                                  │
+                          mindly (on your machine)
+                                  │
+     ┌────────────────────────────┴────────────────────────────┐
+     │ rules · decisions · checks · who's editing what ·       │      optional background service:
+     │ change warnings · checkpoints · handoffs                │ ───▶ dashboard, merge checks,
+     └────────────────────────────┬────────────────────────────┘      daily summary, pruning
+                                  │
+               ~/.mindly/mindly.db (SQLite)  +  hidden git refs for checkpoints
 ```
 
-Agents call Mindly through their own hooks at session start, on each prompt, and around each
-tool call. Mindly answers with a short block of context that is marked as reference information,
-not as instructions. More detail in [docs/architecture.md](docs/architecture.md).
-
-## Commands
-
-```bash
-mindly status                       # agents, tasks, edits in progress, conflicts, what needs you
-mindly dashboard                    # open Mission Control in the browser
-mindly saves [--since 7d]           # times Mindly prevented a problem, with proof
-mindly saves card --out saves.svg   # an image of your saves to share
-mindly split "<goal>"               # divide a goal between agents in separate worktrees
-mindly split status|check|merge|abort
-mindly bisect -- <command>          # the agent edit that broke a command, who made it and why
-mindly bisect list|show <step>|revert <step>
-mindly rules [--approve <id>]       # project rules, approved and proposed
-mindly rules import [--dry-run]     # import rules from CLAUDE.md, AGENTS.md, .cursorrules, …
-mindly rules sync [--dry-run|--off] # keep approved rules in AGENTS.md, CLAUDE.md, GEMINI.md
-mindly memory list|search <q>|show <id>|add|approve|reject|archive|forget
-mindly why <file>:<line>            # who wrote a line, and why
-mindly xray [--session <id>]        # what context an agent got
-mindly standup [--since 24h]        # daily summary
-mindly conflicts                    # open conflicts; mindly conflict <id> resolve|dismiss|ack
-mindly handoff --summary "…" [--to codex]
-mindly snapshot create|list|diff|restore
-mindly review --session <id> --reviewer codex
-mindly replay --prompt "…" --agents claude-code,codex
-mindly trust                        # review and allow this repo's .mindly/config.json checks
-mindly export | forget              # get your data as JSON, or delete it
-mindly doctor | config | daemon start|stop|status
-```
-
-Most commands take `--json`. Run `mindly <command> --help` for all options.
+Agents call Mindly through their own hooks at session start, on each prompt, and around each tool
+call. Mindly answers with a short block of context, marked as reference information and never as
+instructions, or with a block when an enforced rule is broken. Each hook call takes about 0.2
+seconds on a laptop, and if Mindly fails or takes longer than 10 seconds the agent carries on
+without it. More detail: [docs/architecture.md](docs/architecture.md).
 
 ## Privacy and security
 
 - **Nothing leaves your machine.** Everything is stored in `~/.mindly`, readable only by you. No
-  account, no server, no telemetry. Features that use a language model are off by default and use
-  your own API key or a local model.
+  account, no server, no telemetry. Model features are off by default.
 - **Secrets are removed** before anything is saved, and secret files (`.env`, keys, credentials)
-  are never read. Checkpoints for `mindly bisect` are git commits inside your own repository,
-  under hidden refs a normal `git push` never sends, and they leave secret files out.
-- **Agents can't make rules on their own.** They can only suggest; you approve. Everything Mindly
-  gives an agent is labelled as reference information, so text in a malicious README or web page
-  can't become an instruction for all your agents.
-- **A repository can't run commands on your machine through Mindly.** Checks defined in
-  `.mindly/config.json` run only after you review and trust that exact version (`mindly trust`).
+  are never read or checkpointed. Checkpoints are git commits under hidden refs that a normal
+  `git push` doesn't send.
+- **Agents can't make rules on their own.** They can only propose; you approve. Text in a
+  malicious README or web page can't become an instruction for all your agents.
+- **A repository can't run commands on your machine through Mindly.** Its checks run only after
+  you trust that exact version.
 - **The dashboard** listens only on `127.0.0.1` and needs a one-time login code.
 
 Full details: [docs/security.md](docs/security.md). To report a vulnerability, see
@@ -351,27 +361,27 @@ Full details: [docs/security.md](docs/security.md). To report a vulnerability, s
 
 ## FAQ
 
-**Does it slow my agents down?** A little. Each hook call takes about 0.2 seconds on a laptop, most
-of it starting Node. If Mindly fails or doesn't answer within 10 seconds, the agent carries on
-without it.
+**Is this just another memory tool?** Memory is the base, not the point. Mindly's job is
+coordination between different agents: warning them about each other's changes, checking and
+enforcing decisions, splitting work, and finding which agent's edit broke something.
 
-**Does it send my code anywhere?** No. Nothing leaves your machine unless you set up a language
-model provider or a notification channel yourself.
+**Does it work with one agent?** Yes: rules, decision checks, enforcement and bisect all work with
+a single agent. Change warnings, split and usage-limit handoffs need two or more.
 
-**Do I need to keep something running?** No. Memory, rules and warnings work without the
-background service. It's only needed for the dashboard and the background jobs (merge checks,
-daily summary). `mindly dashboard` starts it for you.
+**Do I need to keep something running?** No. The background service is only for the dashboard
+and background jobs, and `mindly dashboard` starts it for you.
 
-**What if an agent learns something wrong?** It stays marked as proposed and unverified. Reject it
-with `mindly memory reject <id>` and it won't be shown again.
+**What if an agent learns something wrong?** It stays marked as proposed and unverified. Reject
+it with `mindly memory reject <id>`.
 
-**Can I remove it?** Yes. `mindly uninstall` removes the hooks and config entries it added, and
+**Can I remove it?** `mindly uninstall` removes everything it added to your agents, and
 `mindly forget --project` deletes everything Mindly stored for the project.
 
 ## Status
 
-Mindly is **before 1.0**. It works and has 950 automated tests, but the storage format and
-commands may still change between versions. Bug reports and feedback are very welcome.
+Mindly is **before 1.0**. It works and has over 1,000 automated tests, but the storage format and
+commands may still change between versions. Bug reports and feedback are welcome in
+[issues](https://github.com/AyushbhaiPatel/mindly/issues).
 
 ## Contributing
 
