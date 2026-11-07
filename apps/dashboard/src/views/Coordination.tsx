@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Age,
   CopyId,
@@ -13,11 +13,12 @@ import {
   Status,
   type Column,
 } from '../components/ui';
-import { useApp, useResource } from '../state';
+import { useApp, useResource, type Resource } from '../state';
 import type { Delivery, Handoff, Intent, Task, TaskStatus } from '../types';
 import {
   COLUMNS,
   EMPTY,
+  INTRO,
   deliveryKindWords,
   deliveryStatusWords,
   handoffReasonWords,
@@ -39,29 +40,55 @@ const STATUS_ORDER: Record<TaskStatus, number> = {
 
 export function CoordinationView() {
   const { params, client, project } = useApp();
-  useEffect(() => {
-    if (params.get('focus') === 'handoffs') document.getElementById('handoffs')?.scrollIntoView();
-  }, [params]);
+  const tasks = useResource(() => client.tasks(project.id), [project.id], ['tasks']);
+  const intents = useResource(() => client.intents(project.id), [project.id], ['intents']);
   const ov = useResource(
     () => client.overview(project.id),
     [project.id],
     ['overview', 'conflicts', 'runs', 'sessions'],
   );
+  const deliveries = useResource(() => client.deliveries(project.id), [project.id], ['deliveries']);
+  const handoffs = useResource(() => client.handoffs(project.id), [project.id], ['handoffs']);
+
+  // `?focus=handoffs` (Home's "Details" on a handoff): scroll once the panels above the handoffs
+  // and the handoffs themselves have rendered, since each loads on its own and would push the list
+  // down after an earlier scroll. Once per request, so later reloads don't move the page.
+  const settled = [tasks, intents, ov, deliveries, handoffs].every(
+    (r) => r.data !== undefined || !!r.error,
+  );
+  const focusedFor = useRef<URLSearchParams | null>(null);
+  useEffect(() => {
+    if (params.get('focus') !== 'handoffs' || !settled || focusedFor.current === params) return;
+    focusedFor.current = params;
+    document.getElementById('handoffs')?.scrollIntoView();
+  }, [params, settled]);
+
   return (
     <div className="view">
-      <TasksPanel />
-      <IntentsPanel />
-      {ov.data && <ConflictsPanel ov={ov.data} onChange={ov.reload} />}
-      <DeliveriesPanel />
-      <HandoffsPanel />
-      {ov.data && <MergeCheckPanel ov={ov.data} onQueued={ov.reload} />}
+      <TasksPanel res={tasks} />
+      <IntentsPanel res={intents} />
+      {ov.data ? (
+        <ConflictsPanel ov={ov.data} onChange={ov.reload} />
+      ) : (
+        <Panel title="Conflicts" intro={INTRO.conflicts}>
+          <Loaded res={ov}>{() => null}</Loaded>
+        </Panel>
+      )}
+      <DeliveriesPanel res={deliveries} />
+      <HandoffsPanel res={handoffs} />
+      {ov.data ? (
+        <MergeCheckPanel ov={ov.data} onQueued={ov.reload} />
+      ) : (
+        <Panel title="Merge check" intro={INTRO.mergeCheck}>
+          <Loaded res={ov}>{() => null}</Loaded>
+        </Panel>
+      )}
     </div>
   );
 }
 
-function TasksPanel() {
-  const { client, project, sessions } = useApp();
-  const res = useResource(() => client.tasks(project.id), [project.id], ['tasks']);
+function TasksPanel({ res }: { res: Resource<Task[]> }) {
+  const { sessions } = useApp();
   const cols: Column<Task>[] = [
     {
       key: 'status',
@@ -143,9 +170,8 @@ function TasksPanel() {
   );
 }
 
-function IntentsPanel() {
-  const { client, project, sessions } = useApp();
-  const res = useResource(() => client.intents(project.id), [project.id], ['intents']);
+function IntentsPanel({ res }: { res: Resource<Intent[]> }) {
+  const { sessions } = useApp();
   const cols: Column<Intent>[] = [
     {
       key: 'agent',
@@ -216,10 +242,9 @@ function ExpiresIn({ ms }: { ms: number | null }) {
   return <span>{m < 60 ? `in ${m}m` : `in ${Math.round(m / 60)}h`}</span>;
 }
 
-function DeliveriesPanel() {
-  const { client, project, sessions } = useApp();
+function DeliveriesPanel({ res }: { res: Resource<Delivery[]> }) {
+  const { sessions } = useApp();
   const [status, setStatus] = useState<'all' | 'unseen' | 'seen'>('all');
-  const res = useResource(() => client.deliveries(project.id), [project.id], ['deliveries']);
   const shown = res.data?.filter((d) =>
     status === 'all'
       ? true
@@ -303,9 +328,8 @@ function DeliveriesPanel() {
   );
 }
 
-function HandoffsPanel() {
-  const { client, project, sessions } = useApp();
-  const res = useResource(() => client.handoffs(project.id), [project.id], ['handoffs']);
+function HandoffsPanel({ res }: { res: Resource<Handoff[]> }) {
+  const { sessions } = useApp();
   const cols: Column<Handoff>[] = [
     {
       key: 'status',
