@@ -159,6 +159,98 @@ describe('trust layer', () => {
     });
   });
 
+  it('tells the caller when a restated memory was left as the user decided', () => {
+    const { root, mindly, pid } = project();
+    const base = { projectId: pid, projectRoot: root, kind: 'fact' as const, source: agent };
+    const updates = (): number =>
+      mindly.store.events.query(pid, { types: ['memory.updated'], limit: 100 }).length;
+
+    const created = mindly.memory.rememberResult({
+      ...base,
+      title: 'Login is in auth',
+      body: 'v1',
+    });
+    expect(created.outcome).toBe('created');
+    expect(
+      mindly.memory.rememberResult({ ...base, title: 'Login is in auth', body: 'v2' }),
+    ).toMatchObject({ outcome: 'updated', memory: { id: created.memory.id, body: 'v2' } });
+
+    // Approved: the text stays, but evidence that checks out and the occurrence are recorded.
+    const approved = mindly.memory.approve(created.memory.id);
+    const before = updates();
+    const kept = mindly.memory.rememberResult({
+      ...base,
+      title: 'login is in auth!',
+      body: 'corrected text',
+      evidence: [{ path: 'src/auth.ts', excerpt: 'export function login(user: string) {' }],
+    });
+    expect(kept.outcome).toBe('kept_approved');
+    expect(kept.memory).toEqual(mindly.store.memories.get(approved.id));
+    expect(kept.memory).toMatchObject({ body: 'v2', trust: 'approved', version: approved.version });
+    expect(mindly.store.memories.evidenceFor(approved.id).map((e) => e.ref)).toEqual([
+      'src/auth.ts',
+    ]);
+    expect(updates()).toBe(before + 1);
+    // Evidence that does not check out is refused as before, not dropped.
+    expect(() =>
+      mindly.memory.rememberResult({
+        ...base,
+        title: 'Login is in auth',
+        body: 'x',
+        evidence: [{ path: 'src/auth.ts', excerpt: 'this text is not in the file at all' }],
+      }),
+    ).toThrow(/evidence excerpt not found/);
+
+    // Rejected: nothing is stored, and the caller can say so.
+    mindly.memory.update(approved.id, { trust: 'rejected' }, USER, 'wrong');
+    const events = updates();
+    const refused = mindly.memory.rememberResult({
+      ...base,
+      title: 'Login is in auth',
+      body: 'again',
+      evidence: [{ path: 'src/auth.ts', excerpt: 'export function login(user: string) {' }],
+    });
+    expect(refused).toMatchObject({ outcome: 'kept_rejected', memory: { trust: 'rejected' } });
+    expect(mindly.store.memories.evidenceFor(approved.id)).toHaveLength(1);
+    expect(updates()).toBe(events);
+  });
+
+  it('still records a command that fails again after its mistake was approved', () => {
+    const { root, mindly, pid } = project();
+    const { session } = mindly.store.sessions.upsert({
+      projectId: pid,
+      agentKind: 'codex',
+      externalId: 'cx-1',
+      worktree: root,
+      branch: null,
+      transcriptPath: null,
+    });
+    const fail = () =>
+      mindly.mistakes.recordFailedCommand({
+        projectId: pid,
+        projectRoot: root,
+        session,
+        command: 'pnpm test --run',
+        output: null,
+      });
+    const first = fail();
+    expect(first?.trust).toBe('proposed');
+    const approved = mindly.memory.approve(first!.id);
+    const repeats = (): number =>
+      mindly.store.events
+        .query(pid, { types: ['memory.updated'], limit: 100 })
+        .filter((e) => e.payload['memoryId'] === first!.id && e.payload['restated'] === true)
+        .length;
+    expect(repeats()).toBe(0);
+    const again = fail();
+    expect(again).toMatchObject({ id: first!.id, trust: 'approved', version: approved.version });
+    fail();
+    expect(repeats()).toBe(2);
+    expect(mindly.mistakes.forCommand(pid, 'pnpm test --run').map((m) => m.id)).toEqual([
+      first!.id,
+    ]);
+  });
+
   it('neutralises delimiter forgery when rendering', () => {
     const { root, mindly, pid } = project();
     const m = mindly.memory.remember({

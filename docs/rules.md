@@ -37,7 +37,7 @@ What it skips and keeps:
 - A rule Mindly already has is not imported again. That includes rules you archived or rejected.
 - Your decision on a rule stands. An agent that states a rule you rejected does not bring it back,
   and one that restates a rule you approved does not change its text or its approval. Only you
-  can do either.
+  can do either. The agent is told that nothing was stored, so it can ask you instead.
 - Path patterns in Cursor, Copilot and Kiro rules become the rule's scope.
 - If you later delete a line from the file, its rule is marked as possibly outdated.
 

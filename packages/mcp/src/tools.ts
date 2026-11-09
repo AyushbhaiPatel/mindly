@@ -26,6 +26,7 @@ import {
   splitOf,
   LIVE_WINDOW_MS,
   type Mindly,
+  type RememberOutcome,
   type Section,
 } from '@mindly/engine';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -104,6 +105,29 @@ function memorySummary(m: Memory): Record<string, unknown> {
     version: m.version,
     updatedAt: m.updatedAt,
   };
+}
+
+/**
+ * The reply when a memory was not stored because the user already decided on one with this title;
+ * null when it was stored. The agent is told plainly, so it does not assume its text was saved.
+ */
+function notStored(outcome: RememberOutcome, m: Memory): CallToolResult | null {
+  if (outcome !== 'kept_approved' && outcome !== 'kept_rejected') return null;
+  const approved = outcome === 'kept_approved';
+  const text = approved
+    ? 'Not stored: an approved memory with this title exists and was left unchanged (new ' +
+      'evidence, if any, was added to it). Propose the change under a different title or ask ' +
+      'the user to edit it.'
+    : 'Not stored: the user rejected a memory with this title. Do not propose it again; ask ' +
+      'the user if you think it should be reconsidered.';
+  return ok(
+    block(
+      [{ heading: approved ? 'Existing approved memory' : 'Rejected', lines: [memoryItem(m)] }],
+      text,
+      text,
+    ),
+    { stored: false, outcome, memory: memorySummary(m) },
+  );
 }
 
 function taskLine(mindly: Mindly, t: Task, now: number): string {
@@ -273,7 +297,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         path: projectPath(mindly, project, e.path),
         ...(e.excerpt !== undefined ? { excerpt: e.excerpt } : {}),
       }));
-      const m = mindly.memory.remember({
+      const { memory: m, outcome } = mindly.memory.rememberResult({
         projectId: project.project.id,
         projectRoot: project.root,
         kind: args.kind as MemoryKind,
@@ -285,6 +309,8 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         source: { type: 'agent', sessionId: session.id, agentKind: session.agentKind },
         reason: 'remembered via MCP',
       });
+      const kept = notStored(outcome, m);
+      if (kept) return kept;
       return ok(
         block(
           [{ heading: 'Stored memory', lines: [memoryItem(m)] }],
@@ -371,7 +397,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
     (args, { project, session }) => {
       const body = [`What failed: ${args.what}`, `Do instead: ${args.instead}`];
       if (args.details) body.push(`Details: ${args.details}`);
-      const m = mindly.memory.remember({
+      const { memory: m, outcome } = mindly.memory.rememberResult({
         projectId: project.project.id,
         projectRoot: project.root,
         kind: 'mistake',
@@ -382,6 +408,8 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         source: { type: 'agent', sessionId: session.id, agentKind: session.agentKind },
         reason: 'mistake recorded via MCP',
       });
+      const kept = notStored(outcome, m);
+      if (kept) return kept;
       return ok(block([{ heading: 'Recorded pitfall', lines: [memoryItem(m)] }], 'Recorded.'), {
         memory: memorySummary(m),
       });

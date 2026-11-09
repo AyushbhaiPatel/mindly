@@ -12,6 +12,7 @@ import {
   installDefaultModules,
   Mindly,
   splitOf,
+  USER,
 } from '@mindly/engine';
 import { createGitPort } from '@mindly/runtime';
 import { createMcpServer, startMcpServer, type McpContext } from '../src/index.js';
@@ -279,6 +280,58 @@ describe('mindly MCP server', () => {
     });
     expect(trust.isError).toBe(true);
     expect(h.mindly.store.memories.list(pidOf(h, m.id))).toHaveLength(1);
+  });
+
+  it('says so when a memory the user approved or rejected is not rewritten', async () => {
+    const h = await harness();
+    const first = await h.call('mindly_remember', {
+      kind: 'decision',
+      title: 'Sessions live in Redis',
+      body: 'Chosen for expiry.',
+    });
+    const id = (first.structured?.['memory'] as { id: string }).id;
+    expect(first.text).not.toMatch(/Not stored/);
+    expect(first.structured).not.toHaveProperty('stored');
+    h.mindly.memory.approve(id);
+
+    const corrected = await h.call('mindly_remember', {
+      kind: 'decision',
+      title: 'sessions live in Redis.',
+      body: 'Actually they live in Postgres.',
+    });
+    expect(corrected.isError).toBe(false);
+    expect(corrected.text).toMatch(/Not stored: an approved memory with this title exists/);
+    expect(corrected.text).toMatch(/different title or ask the user/);
+    expect(corrected.structured).toMatchObject({
+      stored: false,
+      outcome: 'kept_approved',
+      memory: { id, trust: 'approved' },
+    });
+    expect(h.mindly.store.memories.get(id).body).toBe('Chosen for expiry.');
+
+    const pitfall = await h.call('mindly_record_mistake', {
+      what: 'Mocking the database in integration tests',
+      instead: 'Use the test container',
+    });
+    const mistakeId = (pitfall.structured?.['memory'] as { id: string }).id;
+    h.mindly.memory.update(mistakeId, { trust: 'rejected' }, USER, 'not true here');
+    for (const call of [
+      h.call('mindly_record_mistake', {
+        what: 'Mocking the database in integration tests',
+        instead: 'Never mock anything',
+      }),
+      h.call('mindly_remember', {
+        kind: 'mistake',
+        title: 'Mocking the database in integration tests',
+        body: 'again',
+      }),
+    ]) {
+      const out = await call;
+      expect(out.isError).toBe(false);
+      expect(out.text).toMatch(/Not stored: the user rejected a memory with this title/);
+      expect(out.structured).toMatchObject({ stored: false, outcome: 'kept_rejected' });
+    }
+    expect(h.mindly.store.memories.get(mistakeId)).toMatchObject({ trust: 'rejected', version: 2 });
   });
 
   it('validates evidence paths and verifies facts backed by real excerpts', async () => {

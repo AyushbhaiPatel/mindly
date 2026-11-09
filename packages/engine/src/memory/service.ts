@@ -53,6 +53,18 @@ export interface RememberInput {
 }
 
 /**
+ * What {@link MemoryService.rememberResult} did. `kept_approved`: a memory the user approved has
+ * this title, so its text, scope and trust were left as they are (new evidence and the occurrence
+ * are recorded). `kept_rejected`: the user rejected a memory with this title; nothing was stored.
+ */
+export type RememberOutcome = 'created' | 'updated' | 'kept_approved' | 'kept_rejected';
+
+export interface RememberResult {
+  memory: Memory;
+  outcome: RememberOutcome;
+}
+
+/**
  * Agents can only ever propose. Users approve. Code-derived facts are verified. Nobody but the
  * user can create an `enforce` rule. This is the core of the trust layer (see docs/security.md).
  */
@@ -173,9 +185,15 @@ export class MemoryService {
 
   /**
    * Stores a memory. If an active memory of the same kind with the same normalised title already
-   * exists, it is updated as a new version instead of creating a duplicate.
+   * exists, it is updated as a new version instead of creating a duplicate. Callers that must tell
+   * the author when nothing was stored use {@link rememberResult}.
    */
   remember(input: RememberInput): Memory {
+    return this.rememberResult(input).memory;
+  }
+
+  /** {@link remember}, also saying what happened to the memory (see {@link RememberOutcome}). */
+  rememberResult(input: RememberInput): RememberResult {
     const title = sanitizeLine(
       redactText(input.title, { extraPatterns: this.k.config.redaction.extraPatterns }),
       MAX_TITLE,
@@ -211,14 +229,14 @@ export class MemoryService {
       );
     }
     // What the user decided about a memory is not undone by saying it again: a memory they
-    // rejected stays rejected, and one they approved keeps its text, scope, evidence and trust.
-    // Only the user changes either (only the user can set these two trust levels).
-    if (
-      existing &&
-      input.source.type !== 'user' &&
-      (existing.trust === 'rejected' || existing.trust === 'approved')
-    ) {
-      return existing;
+    // rejected stays rejected, and one they approved keeps its text, scope and trust. Only the
+    // user changes either (only the user can set these two trust levels). The caller is told, so
+    // nothing is dropped without its author knowing.
+    if (existing && input.source.type !== 'user') {
+      if (existing.trust === 'rejected') return { memory: existing, outcome: 'kept_rejected' };
+      if (existing.trust === 'approved') {
+        return { memory: this.restated(existing, input, evidence), outcome: 'kept_approved' };
+      }
     }
     const memory = this.k.store.transaction(() => {
       let m: Memory;
@@ -280,7 +298,46 @@ export class MemoryService {
       return m;
     });
     this.rulesChanged(memory);
-    return memory;
+    return { memory, outcome: existing ? 'updated' : 'created' };
+  }
+
+  /**
+   * Records that an approved memory was stated again, without changing it: evidence that checks
+   * out is added to it, and the event log keeps the occurrence (a command that failed again, an
+   * agent reaching the same conclusion) with who restated it.
+   */
+  private restated(
+    existing: Memory,
+    input: RememberInput,
+    evidence: readonly { rel: string; excerpt: string | null; hash: string | null }[],
+  ): Memory {
+    this.k.store.transaction(() => {
+      for (const e of evidence) {
+        this.k.store.memories.addEvidence({
+          memoryId: existing.id,
+          projectId: input.projectId,
+          type: 'file',
+          ref: e.rel,
+          excerpt: e.excerpt,
+          contentHash: e.hash,
+        });
+      }
+      this.k.store.events.append({
+        projectId: input.projectId,
+        sessionId: input.source.sessionId,
+        type: 'memory.updated',
+        payload: {
+          memoryId: existing.id,
+          kind: existing.kind,
+          title: existing.title,
+          trust: existing.trust,
+          source: existing.source.type,
+          restated: true,
+          reason: input.reason ?? 'restated',
+        },
+      });
+    });
+    return existing;
   }
 
   /** The active memory of `kind` with the same normalised title on `branch`, if any. */
