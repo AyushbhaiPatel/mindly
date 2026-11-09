@@ -67,15 +67,30 @@ function normaliseKey(raw: string): string {
     .join('.');
 }
 
-/** Drops `[table]` and its sub-tables (`[table.x]`) from the line list. */
+/**
+ * Drops `[table]` and its sub-tables (`[table.x]`) from the line list. Comment lines sitting
+ * directly above the next table's header describe that table, not the one removed, and stay.
+ */
 function removeTable(lines: string[], table: string): string[] {
   const out: string[] = [];
   let skipping = false;
+  // Comment and blank lines seen since the removed table's last line of content.
+  let trailing: string[] = [];
   for (const line of lines) {
     const m = HEADER_RE.exec(line);
     if (m) {
       const key = normaliseKey(m[1] ?? '');
-      skipping = key === table || key.startsWith(`${table}.`);
+      const skip = key === table || key.startsWith(`${table}.`);
+      if (skipping && !skip) {
+        const firstComment = trailing.findIndex((l) => l.trim().startsWith('#'));
+        if (firstComment >= 0) out.push(...trailing.slice(firstComment));
+      }
+      trailing = [];
+      skipping = skip;
+    } else if (skipping) {
+      const t = line.trim();
+      if (t === '' || t.startsWith('#')) trailing.push(line);
+      else trailing = [];
     }
     if (!skipping) out.push(line);
   }
@@ -119,7 +134,18 @@ export function upsertMcpServerToml(
     lines.push(TOML_BLOCK_BEGIN, ...table, TOML_BLOCK_END);
   }
   const result = lines.length === 0 ? '' : `${lines.join(eol)}${eol}`;
-  const doc = parseToml(path, result);
+  let doc: Record<string, unknown>;
+  try {
+    doc = parse(result) as Record<string, unknown>;
+  } catch (cause) {
+    // The file itself parsed above: it is our table that does not fit, which happens when
+    // `mcp_servers` (or the server) is written as an inline table or with dotted keys.
+    throw new MindlyError(
+      'invalid_input',
+      `${path} defines mcp_servers in a form Mindly cannot add a server to (an inline table or dotted keys); write each server as its own [mcp_servers.<name>] table`,
+      { cause },
+    );
+  }
   const ok = server === null ? !hasServer(doc, name) : hasServer(doc, name);
   if (!ok) {
     throw new MindlyError(

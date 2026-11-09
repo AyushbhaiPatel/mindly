@@ -306,6 +306,38 @@ describe('codex install', () => {
     await expect(codex.planInstall(opts(home))).rejects.toSatisfy((e) =>
       isMindlyError(e, 'invalid_input'),
     );
+    // Valid TOML that Mindly's table cannot be appended to is not called invalid.
+    write(file, 'mcp_servers = { other = { command = "o" } }\n');
+    const refused = await codex.planInstall(opts(home)).catch((e: unknown) => e);
+    expect(isMindlyError(refused, 'invalid_input')).toBe(true);
+    expect((refused as Error).message).toContain('inline table');
+    expect((refused as Error).message).not.toContain('not valid TOML');
+    expect(readFileSync(file, 'utf8')).toBe('mcp_servers = { other = { command = "o" } }\n');
+  });
+
+  it("keeps the comments above the table after the user's own mindly table", async () => {
+    const home = tempDir();
+    const file = join(home, '.codex', 'config.toml');
+    write(
+      file,
+      [
+        '[mcp_servers.mindly]',
+        'command = "old"',
+        '# about mindly',
+        'args = []',
+        '',
+        '# about other',
+        '# second line',
+        '[mcp_servers.other]',
+        'command = "o"',
+        '',
+      ].join('\n'),
+    );
+    await install(codex, opts(home));
+    const toml = readFileSync(file, 'utf8');
+    expect(toml).toContain('# about other\n# second line\n[mcp_servers.other]');
+    expect(toml).not.toContain('# about mindly');
+    expect(toml).not.toContain('"old"');
   });
 });
 

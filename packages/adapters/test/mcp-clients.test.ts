@@ -343,6 +343,25 @@ describe('jsonc edits', () => {
     expect(removeJsoncValue('/x.json', added, 'json', ['a', 'mindly'])).toBe(compact);
   });
 
+  it('keeps a servers object that still holds a comment', () => {
+    const original =
+      '{\n  "theme": "x",\n  "context_servers": {\n    // "postgres": { "command": "pg-mcp" }\n  },\n}\n';
+    const path = ['context_servers', 'mindly'];
+    const added = setJsoncValue('/x.json', original, 'jsonc', path, { command: 'm' });
+    const removed = removeJsoncValue('/x.json', added, 'jsonc', path, { pruneEmptyParent: true });
+    expect(removed).toBe(original);
+    const block =
+      '{\n  "context_servers": {\n    /* none yet */\n    "mindly": { "a": 1 }\n  }\n}\n';
+    expect(removeJsoncValue('/x.json', block, 'jsonc', path, { pruneEmptyParent: true })).toContain(
+      '/* none yet */',
+    );
+    // Nothing but whitespace left: the object goes, as before.
+    const bare = '{\n  "theme": "x",\n  "context_servers": {\n    "mindly": { "a": 1 }\n  }\n}\n';
+    expect(removeJsoncValue('/x.json', bare, 'jsonc', path, { pruneEmptyParent: true })).toBe(
+      '{\n  "theme": "x"\n}\n',
+    );
+  });
+
   it('refuses a non-object top level', () => {
     expect(() => setJsoncValue('/x.json', '[]', 'json', ['a'], 1)).toThrow(/JSON object/);
   });
