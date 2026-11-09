@@ -104,7 +104,9 @@ export function resolveInsideRoot(root: string, input: string): ResolvedProjectP
     isAbsolute(input) ? resolve(input) : resolve(realRoot, input),
   );
   const rel = relative(realRoot, candidate);
-  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) {
+  // Only a `..` segment leaves the root; a name that merely starts with dots (`..cache`) does not.
+  const leaves = rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+  if (!leaves) {
     return { abs: candidate, rel: toPosix(rel) };
   }
   throw new MindlyError('path_outside_project', 'path resolves outside the project root');

@@ -17,6 +17,13 @@ describe('resolveInsideRoot', () => {
     expect(resolveInsideRoot(root, 'src/new/file.ts').rel).toBe('src/new/file.ts');
   });
 
+  it('keeps names that only start with dots inside the root', () => {
+    expect(resolveInsideRoot(root, '..cache/a.ts').rel).toBe('..cache/a.ts');
+    expect(resolveInsideRoot(root, join(root, '...', 'b.ts')).rel).toBe('.../b.ts');
+    expect(() => resolveInsideRoot(root, '..')).toThrow(/outside/);
+    expect(() => resolveInsideRoot(root, '../..cache/a.ts')).toThrow(/outside/);
+  });
+
   it('rejects traversal, symlink escapes and NUL bytes', () => {
     expect(() => resolveInsideRoot(root, '../etc/passwd')).toThrow(/outside/);
     expect(() => resolveInsideRoot(root, '/etc/passwd')).toThrow(/outside/);
