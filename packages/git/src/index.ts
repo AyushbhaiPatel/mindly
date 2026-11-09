@@ -134,7 +134,7 @@ export { languageOf } from './analysis/language.js';
 export type { Language } from './analysis/language.js';
 export { MAX_ANALYSIS_BYTES, diffExportSurface, extractExports } from './analysis/exports.js';
 export type { ExportKind, ExportSurfaceDiff, ExportedSymbol } from './analysis/exports.js';
-export { extractImports } from './analysis/imports.js';
+export { extractImports, extractReexports } from './analysis/imports.js';
 export {
   DEFAULT_GRAPH_MAX_FILES,
   EXCLUDED_DIRS,

@@ -78,6 +78,26 @@ interface Stmt {
   c: string;
 }
 
+const NEXT_EXPORT_RE = /\n(?=export\b|module\s*\.\s*exports\b|exports\s*\.)/g;
+
+/**
+ * End of a statement that ran to the end of the file. When its brackets do not balance (text the
+ * lexer cannot read, such as an unmatched bracket in JSX text), the statement is cut at the next
+ * export that starts a line, so one unreadable declaration does not hide every export after it.
+ */
+function recoverStatementEnd(mask: string, start: number): number {
+  let depth = 0;
+  for (let k = start; k < mask.length; k++) {
+    const ch = mask[k] as string;
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+  }
+  if (depth <= 0) return mask.length;
+  NEXT_EXPORT_RE.lastIndex = start + 1;
+  const next = NEXT_EXPORT_RE.exec(mask);
+  return next ? next.index : mask.length;
+}
+
 function topLevelStatements(mask: string, code: string): Stmt[] {
   const out: Stmt[] = [];
   let i = 0;
@@ -87,7 +107,8 @@ function topLevelStatements(mask: string, code: string): Stmt[] {
       i = skipWs(mask, i + 1);
     }
     if (i >= mask.length) break;
-    const end = Math.max(scanStatementEnd(mask, i), i + 1);
+    let end = Math.max(scanStatementEnd(mask, i), i + 1);
+    if (end >= mask.length) end = recoverStatementEnd(mask, i);
     out.push({ m: mask.slice(i, end), c: code.slice(i, end) });
     i = end;
   }
@@ -155,21 +176,62 @@ function skeleton(m: string, c: string): string {
   return out;
 }
 
+/**
+ * Splits a class body skeleton into members at `;` and line ends outside brackets, so a parameter
+ * list written one parameter per line stays with its constructor or method.
+ */
+function splitMembers(body: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let k = 0; k < body.length; k++) {
+    const ch = body[k] as string;
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
+    else if ((ch === ';' || ch === '\n') && depth === 0) {
+      out.push(body.slice(start, k));
+      start = k + 1;
+    }
+  }
+  out.push(body.slice(start));
+  return out;
+}
+
+/**
+ * When the initialiser starting at `p` is a function or arrow function, returns where its
+ * signature ends (after `=>`, or the end of the member for `function`); -1 otherwise.
+ */
+function functionValueEnd(seg: string, p: number): number {
+  let k = skipWs(seg, p);
+  const asyncM = /^async\b\s*/.exec(seg.slice(k));
+  if (asyncM) k += asyncM[0].length;
+  if (/^function\b/.test(seg.slice(k))) return seg.length;
+  const single = new RegExp(`^${IDENT}\\s*=>`).exec(seg.slice(k));
+  if (single) return k + single[0].length;
+  if (seg[k] === '<') k = skipWs(seg, matchBalanced(seg, k));
+  if (seg[k] !== '(') return -1;
+  const arrow = seg.indexOf('=>', matchBalanced(seg, k));
+  return arrow === -1 ? -1 : arrow + 2;
+}
+
 function classSig(st: Stmt, p: number): { sig: string; end: number } {
   const open = st.m.indexOf('{', p);
   if (open === -1) return { sig: shortHash(normalizeSig(st.c.slice(p))), end: st.m.length };
   const close = matchBalanced(st.m, open);
   const header = normalizeSig(st.c.slice(p, open));
   const body = skeleton(st.m.slice(open + 1, close - 1), st.c.slice(open + 1, close - 1));
-  const members = body
-    .split(/[;\n]/)
+  const members = splitMembers(body)
     .map((seg) => seg.trim())
     .filter((seg) => seg !== '' && !/^(private\b|protected\b|#)/.test(seg))
     .map((seg) => {
       // Drop property initialisers; keep the declared shape.
       const eq = seg.search(/=(?!>)/);
       const paren = seg.indexOf('(');
-      return normalizeSig(eq !== -1 && (paren === -1 || eq < paren) ? seg.slice(0, eq) : seg);
+      if (eq === -1 || (paren !== -1 && paren < eq)) return normalizeSig(seg);
+      // A member holding a function (`run = (a: string) => {…}`) is called like a method: its
+      // parameters and return type are part of the shape.
+      const fn = functionValueEnd(seg, eq + 1);
+      return normalizeSig(fn === -1 ? seg.slice(0, eq) : seg.slice(0, fn));
     })
     .filter((seg) => seg !== '');
   return { sig: shortHash(`${header}|${members.join(';')}`), end: close };
