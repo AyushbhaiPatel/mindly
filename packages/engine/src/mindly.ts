@@ -1,5 +1,6 @@
 import {
   createLogger,
+  describeError,
   ensureHome,
   fileSink,
   loadUserConfig,
@@ -62,6 +63,7 @@ export class Mindly {
   /** Checkpoints of the code after every agent edit (`mindly bisect`). */
   readonly checkpoints: CheckpointService;
   readonly hooks: HookHandler;
+  private readonly closers: (() => void)[] = [];
 
   constructor(
     kernel: Kernel,
@@ -84,6 +86,7 @@ export class Mindly {
       paths ? join(paths.home, 'checkpoints') : null,
       paths?.daemonState ?? null,
     );
+    this.onClose(() => this.checkpoints.dispose());
     this.hooks = new HookHandler(kernel, {
       projects: this.projects,
       context: this.context,
@@ -143,7 +146,19 @@ export class Mindly {
     return this;
   }
 
+  /** Runs `fn` when this instance closes (e.g. to remove a temp folder an in-memory one made). */
+  onClose(fn: () => void): void {
+    this.closers.push(fn);
+  }
+
   close(): void {
+    for (const fn of this.closers.splice(0)) {
+      try {
+        fn();
+      } catch (err) {
+        this.kernel.logger.warn('close step failed', { error: describeError(err) });
+      }
+    }
     this.kernel.store.close();
   }
 }
