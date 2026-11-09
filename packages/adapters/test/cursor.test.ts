@@ -75,6 +75,37 @@ describe('cursor parse', () => {
     expect(a.parse('sessionEnd', f('sessionEnd'))?.event).toBe('session_end');
   });
 
+  it('picks the workspace root that holds the file, then the one that holds cwd', () => {
+    const fx = f('preToolUse') as Record<string, unknown>;
+    const roots = ['/Users/dev/docs', '/Users/dev/shop', '/Users/dev/shop/packages/web'];
+    // The fixture writes /Users/dev/shop/src/new.ts with cwd /Users/dev/shop.
+    expect(a.parse('preToolUse', { ...fx, workspace_roots: roots })?.cwd).toBe('/Users/dev/shop');
+    const nested = {
+      ...fx,
+      workspace_roots: roots,
+      tool_input: { file_path: '/Users/dev/shop/packages/web/a.ts', contents: 'x' },
+    };
+    expect(a.parse('preToolUse', nested)?.cwd).toBe('/Users/dev/shop/packages/web');
+    // A sibling whose name merely starts like a root is not inside it.
+    const sibling = {
+      ...fx,
+      workspace_roots: ['/Users/dev/sh', '/Users/dev/docs'],
+      cwd: '/Users/dev/docs',
+    };
+    expect(a.parse('preToolUse', sibling)?.cwd).toBe('/Users/dev/docs');
+    // Shell events carry no file: the reported working directory decides.
+    const shell = f('beforeShellExecution') as Record<string, unknown>;
+    expect(
+      a.parse('beforeShellExecution', { ...shell, workspace_roots: roots, cwd: '/Users/dev/shop' })
+        ?.cwd,
+    ).toBe('/Users/dev/shop');
+    // Nothing points at another root: the first one, as with a single root.
+    expect(
+      a.parse('beforeShellExecution', { ...shell, workspace_roots: roots, cwd: '/somewhere/else' })
+        ?.cwd,
+    ).toBe('/Users/dev/docs');
+  });
+
   it('returns null without an id or workspace root', () => {
     const fx = f('stop');
     expect(a.parse('stop', { ...fx, conversation_id: undefined })).toBeNull();

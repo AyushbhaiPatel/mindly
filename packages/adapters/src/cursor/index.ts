@@ -79,12 +79,38 @@ const RequiredSchema = z.object({
   cwd: z.string().min(1).max(MAX_PATH_CHARS),
 });
 
-function firstRoot(payload: Record<string, unknown>): string | null {
-  const roots = payload['workspace_roots'] ?? payload['workspaceRoots'];
-  if (Array.isArray(roots)) {
-    for (const r of roots) if (typeof r === 'string' && r.trim() !== '') return r;
+/** True when `path` is `root` or lies under it (both absolute, compared as text). */
+function isUnder(root: string, path: string): boolean {
+  const base = root.replace(/[\\/]+$/, '');
+  return path === base || path.startsWith(`${base}/`) || path.startsWith(`${base}\\`);
+}
+
+/**
+ * The workspace root an event belongs to. Cursor reports every root of a multi-root workspace;
+ * the event is about the one that holds the file being written, or else the one that holds the
+ * reported working directory. With a single root, or when neither says, it is the first root.
+ */
+function eventRoot(payload: Record<string, unknown>): string | null {
+  const cwd = readNonEmptyString(payload, ['cwd'], MAX_PATH_CHARS + 1);
+  const listed = payload['workspace_roots'] ?? payload['workspaceRoots'];
+  const roots = Array.isArray(listed)
+    ? listed.filter((r): r is string => typeof r === 'string' && r.trim() !== '')
+    : [];
+  if (roots.length === 0) return cwd;
+  if (roots.length > 1) {
+    const input = asRecord(payload['tool_input']);
+    const file =
+      readNonEmptyString(payload, ['file_path'], MAX_PATH_CHARS + 1) ??
+      readNonEmptyString(input, ['file_path', 'path', 'target_file'], MAX_PATH_CHARS + 1);
+    // The deepest root wins when one root is nested in another.
+    const deepestFirst = [...roots].sort((a, b) => b.length - a.length);
+    for (const at of [file, cwd]) {
+      if (at === null) continue;
+      const holder = deepestFirst.find((r) => isUnder(r, at));
+      if (holder !== undefined) return holder;
+    }
   }
-  return readNonEmptyString(payload, ['cwd'], MAX_PATH_CHARS + 1);
+  return roots[0] ?? cwd;
 }
 
 function parseCursor(nativeEvent: string, payload: unknown): NormalizedHookEvent | null {
@@ -94,7 +120,7 @@ function parseCursor(nativeEvent: string, payload: unknown): NormalizedHookEvent
     const [name, spec] = found;
     const required = RequiredSchema.safeParse({
       id: readNonEmptyString(payload, ['conversation_id', 'session_id', 'conversationId'], 513),
-      cwd: firstRoot(payload),
+      cwd: eventRoot(payload),
     });
     if (!required.success) return null;
     const ev = baseEvent(KIND, spec.event, name, required.data.id, required.data.cwd);
