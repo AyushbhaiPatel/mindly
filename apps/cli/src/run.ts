@@ -123,12 +123,22 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
   config
     .command('set')
     .argument('<key>', 'dotted key, e.g. hooks.timeoutMs')
-    .argument('<value>', 'JSON value or plain text')
+    .argument('<value>', 'JSON value or plain text; a list is JSON or a,b')
     .description('Validate and write one setting')
     .action(
       act(
         (key: string, value: string) => async (out) =>
           (await import('./commands/config.js')).configSet(out, key, value),
+      ),
+    );
+  config
+    .command('unset')
+    .argument('<key>', 'dotted key, e.g. standup.time')
+    .description('Remove one setting, so it goes back to its default (or off)')
+    .action(
+      act(
+        (key: string) => async (out) =>
+          (await import('./commands/config.js')).configUnset(out, key),
       ),
     );
   config

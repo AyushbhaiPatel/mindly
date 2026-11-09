@@ -7,6 +7,7 @@ import {
   readRegularFileBounded,
   UserConfigSchema,
   writeJsonFile,
+  type UserConfig,
 } from '@mindly/core';
 import { z } from 'zod';
 import { HintedError, UsageError, type Out } from '../util.js';
@@ -55,15 +56,97 @@ export function parseValue(raw: string): unknown {
   }
 }
 
+const WRAPPERS = new Set([
+  'optional',
+  'default',
+  'prefault',
+  'nullable',
+  'nonoptional',
+  'readonly',
+]);
+
+interface Setting {
+  /** The setting's own type, with optional/default wrappers removed. */
+  schema: z.ZodType;
+  /** True when the setting may be absent and has no default (`standup.time`, `llm.model`). */
+  optional: boolean;
+}
+
+function unwrap(schema: z.ZodType): Setting {
+  let cur = schema;
+  let optional = false;
+  let hasDefault = false;
+  while (WRAPPERS.has(cur.def.type)) {
+    if (cur.def.type === 'optional') optional = true;
+    if (cur.def.type === 'default' || cur.def.type === 'prefault') hasDefault = true;
+    cur = (cur.def as unknown as { innerType: z.ZodType }).innerType;
+  }
+  return { schema: cur, optional: optional && !hasDefault };
+}
+
+/** The setting `parts` names in `UserConfigSchema`, or null when there is none. */
+function settingAt(parts: readonly string[]): Setting | null {
+  let cur = unwrap(UserConfigSchema);
+  for (const p of parts) {
+    if (!(cur.schema instanceof z.ZodObject)) return null;
+    const shape = cur.schema.shape as Record<string, z.ZodType>;
+    const next = Object.hasOwn(shape, p) ? shape[p] : undefined;
+    if (next === undefined) return null;
+    cur = unwrap(next);
+  }
+  return cur;
+}
+
+function noSuchSetting(key: string): HintedError {
+  return new HintedError(
+    'not_found',
+    `There is no setting called ${key}`,
+    'See every setting and its value with: mindly config get',
+  );
+}
+
+/**
+ * The value to store for what was typed, by the setting's type: a text setting takes the text as
+ * typed (so a model called `4` stays text), a list takes JSON or `a,b`, anything else is JSON.
+ */
+export function settingValue(setting: Setting | null, raw: string): unknown {
+  const json = parseValue(raw);
+  const type = setting?.schema.def.type;
+  if (type === 'string' || type === 'enum') return typeof json === 'string' ? json : raw;
+  if (type === 'array' && !Array.isArray(json)) {
+    const element = unwrap((setting?.schema.def as unknown as { element: z.ZodType }).element);
+    const kind = element.schema.def.type;
+    if (kind === 'string' || kind === 'enum') {
+      return raw
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item !== '');
+    }
+  }
+  return json;
+}
+
 function configPath(out: Out): string {
   return ensureHome(mindlyHome(out.io.env)).config;
 }
 
 function readRaw(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
+  // Refused files (a symlink, a directory, too large) say so themselves.
+  let text: string;
+  try {
+    text = readRegularFileBounded(path, 256 * 1024);
+  } catch (cause) {
+    const why = cause instanceof MindlyError ? cause.message : 'it could not be read';
+    throw new HintedError(
+      'invalid_input',
+      `Mindly does not read ${path}: ${why}`,
+      'The config must be a regular file, not a link to one: replace it with the file itself',
+    );
+  }
   let json: unknown;
   try {
-    json = JSON.parse(readRegularFileBounded(path, 256 * 1024));
+    json = JSON.parse(text);
   } catch (cause) {
     throw new MindlyError('invalid_input', `${path} is not valid JSON; fix or remove it`, {
       cause,
@@ -81,19 +164,32 @@ export function configPathCmd(out: Out): number {
   return 0;
 }
 
-/** `mindly config get [key]`: the effective value (defaults included). */
+/**
+ * `mindly config get [key]`: the effective value (defaults included). A setting that exists but
+ * is not set (it is optional and has no default) prints `null`.
+ */
 export function configGet(out: Out, key: string | undefined): number {
   const config = loadUserConfig(configPath(out));
-  const value = key === undefined ? config : getPath(config, configKey(key));
+  const parts = key === undefined ? [] : configKey(key);
+  const value = getPath(config, parts);
   if (value === undefined) {
-    throw new HintedError(
-      'not_found',
-      `There is no setting called ${key ?? ''}`,
-      'See every setting and its value with: mindly config get',
-    );
+    if (settingAt(parts) === null) throw noSuchSetting(key ?? '');
+    out.json(null);
+    return 0;
   }
   out.json(value);
   return 0;
+}
+
+function validated(raw: Record<string, unknown>, key: string): UserConfig {
+  const parsed = UserConfigSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MindlyError(
+      'invalid_input',
+      `invalid value for ${key}: ${z.prettifyError(parsed.error)}`,
+    );
+  }
+  return parsed.data;
 }
 
 /**
@@ -104,17 +200,12 @@ export function configSet(out: Out, key: string, rawValue: string): number {
   const parts = configKey(key);
   const path = configPath(out);
   const raw = readRaw(path);
-  const value = parseValue(rawValue);
+  const setting = settingAt(parts);
+  const value = settingValue(setting, rawValue);
   setPath(raw, parts, value);
-  const parsed = UserConfigSchema.safeParse(raw);
-  if (!parsed.success) {
-    throw new MindlyError(
-      'invalid_input',
-      `invalid value for ${key}: ${z.prettifyError(parsed.error)}`,
-    );
-  }
-  // zod strips unknown keys, so a key that is missing after parsing does not exist.
-  if (getPath(parsed.data, parts) === undefined) {
+  validated(raw, key);
+  // zod strips unknown keys, so validation alone does not catch a key that does not exist.
+  if (setting === null) {
     throw new HintedError(
       'invalid_input',
       `There is no setting called ${key}`,
@@ -123,5 +214,39 @@ export function configSet(out: Out, key: string, rawValue: string): number {
   }
   writeJsonFile(path, raw);
   out.line(`${key} = ${JSON.stringify(value)}`);
+  return 0;
+}
+
+/**
+ * `mindly config unset <key>`: removes one setting (or a whole group) from the file, so it goes
+ * back to its default; an optional setting such as `standup.time` is turned off.
+ */
+export function configUnset(out: Out, key: string): number {
+  const parts = configKey(key);
+  const path = configPath(out);
+  if (settingAt(parts) === null) throw noSuchSetting(key);
+  const raw = readRaw(path);
+  if (getPath(raw, parts) === undefined) {
+    out.line(`${key} is not set in ${path}: nothing changed.`);
+    return 0;
+  }
+  // Remove the key, then the groups this leaves empty.
+  for (let depth = parts.length; depth > 0; depth--) {
+    const holder = getPath(raw, parts.slice(0, depth - 1)) as Record<string, unknown>;
+    const name = parts[depth - 1] as string;
+    if (depth < parts.length) {
+      const child = holder[name];
+      const empty = child !== null && typeof child === 'object' && Object.keys(child).length === 0;
+      if (!empty) break;
+    }
+    Reflect.deleteProperty(holder, name);
+  }
+  const now = getPath(validated(raw, key), parts);
+  writeJsonFile(path, raw);
+  out.line(
+    now === undefined
+      ? `${key} is no longer set.`
+      : `${key} is back to its default: ${JSON.stringify(now)}`,
+  );
   return 0;
 }

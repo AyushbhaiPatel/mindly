@@ -778,6 +778,56 @@ describe('doctor, config, export, misc', () => {
     expect((await cli(sb, ['config', 'path'])).stdout.trim()).toBe(file);
   });
 
+  it('config unsets optional settings and takes text and lists as typed', async () => {
+    const sb = sandbox();
+    const file = join(sb.mindlyHome, 'config.json');
+    // A setting that exists but is not set is not "no such setting".
+    const unset = await cli(sb, ['config', 'get', 'llm.model']);
+    expect(unset.code).toBe(0);
+    expect(unset.stdout.trim()).toBe('null');
+    expect((await cli(sb, ['config', 'get', 'llm.nope'])).code).toBe(1);
+
+    expect((await cli(sb, ['config', 'set', 'standup.time', '09:30'])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'hooks.timeoutMs', '1000'])).code).toBe(0);
+    const off = await cli(sb, ['config', 'unset', 'standup.time']);
+    expect(off.code).toBe(0);
+    expect(off.stdout).toContain('standup.time is no longer set.');
+    expect(json(readFileSync(file, 'utf8'))).toEqual({ hooks: { timeoutMs: 1000 } });
+    const back = await cli(sb, ['config', 'unset', 'hooks.timeoutMs']);
+    expect(back.stdout).toContain('hooks.timeoutMs is back to its default: 1500');
+    expect(json(readFileSync(file, 'utf8'))).toEqual({});
+    expect((await cli(sb, ['config', 'unset', 'hooks.timeoutMs'])).stdout).toContain(
+      'nothing changed',
+    );
+    expect((await cli(sb, ['config', 'unset', 'hooks.nope'])).code).toBe(1);
+
+    // Text stays text, lists take a,b or JSON.
+    expect((await cli(sb, ['config', 'set', 'llm.model', '4'])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'notify.triggers', 'standup'])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'failover.order', 'codex, claude-code'])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'redaction.denyPaths', '["a,b", "c"]'])).code).toBe(0);
+    expect(json(readFileSync(file, 'utf8'))).toEqual({
+      llm: { model: '4' },
+      notify: { triggers: ['standup'] },
+      failover: { order: ['codex', 'claude-code'] },
+      redaction: { denyPaths: ['a,b', 'c'] },
+    });
+    expect((await cli(sb, ['config', 'set', 'notify.triggers', 'standup,nope'])).code).toBe(1);
+  });
+
+  it('config set says why it will not read a linked config file', async () => {
+    const sb = sandbox();
+    mkdirSync(sb.mindlyHome, { recursive: true });
+    const real = join(tempDir('mindly-cli-cfg-'), 'config.json');
+    writeFileSync(real, '{}');
+    symlinkSync(real, join(sb.mindlyHome, 'config.json'));
+    const r = await cli(sb, ['config', 'set', 'hooks.timeoutMs', '1000']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('not a regular file');
+    expect(r.stderr).not.toContain('not valid JSON');
+    expect(readFileSync(real, 'utf8')).toBe('{}');
+  });
+
   it('export writes owner-only JSON and refuses to overwrite', async () => {
     const sb = sandbox();
     await cli(sb, ['memory', 'add', '--kind', 'fact', '--title', 'Exported fact']);
