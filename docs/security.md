@@ -126,13 +126,16 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   scratch worktree under `$MINDLY_HOME/sentinel/` (mode `0700`), outside the repository, never in
   the user's checkout; the path is refused if it is inside or around the repository (the sentinel
   reports `MINDLY_HOME` inside the repository as not ready). One pass at a time holds a checkout,
-  by a lock released only when its process ends, and the daemon queues passes behind the
-  project's merge checks. Bisects the sentinel starts are capped per project per day
-  (`sentinel.maxBisectsPerDay`), and a step where nothing could run is retried with a growing
-  back-off (15 minutes up to 6 hours), not on every tick. Agents cannot start a pass: there is no
-  MCP tool, and the daemon endpoint only reads. A mistake the sentinel records from its own bisect
-  has the system as its source, so it is only `proposed` (a user-run `mindly bisect` records an
-  approved one): nobody looked at the result before agents are warned with it.
+  by a lock that stays held while the process that took it lives (the lock records its PID, an
+  id of its own and, on Linux, when the process started, so a PID used again by another process
+  does not keep it), and the daemon queues passes behind the project's merge checks. Bisects the
+  sentinel starts are capped per project per day (`sentinel.maxBisectsPerDay`), and a step where
+  nothing could run, or whose pass failed, is retried with a growing back-off counted from the
+  end of the pass (15 minutes up to 6 hours), not on every tick. Agents cannot start a pass:
+  there is no MCP tool, and the daemon endpoint only reads. A mistake the sentinel records from
+  its own bisect has the system as its source, so it is only `proposed` (a user-run
+  `mindly bisect` records an approved one): nobody looked at the result before agents are warned
+  with it.
 - Check output reaches agents only as a redacted, sanitized, length-capped tail inside the
   delivery of a break, rendered as reference data like every other delivery: a test that prints
   instructions cannot turn them into a rule, a memory or a command.

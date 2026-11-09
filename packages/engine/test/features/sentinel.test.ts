@@ -579,6 +579,147 @@ describe('sentinel pass', () => {
     expect(r.checks[0]?.transition).toBe('baseline_fail');
   });
 
+  it('closes the conflict of a break when the check passes under an edited command', async () => {
+    let fixedFrom = Infinity;
+    const w = await world((_c, commit) =>
+      seqOf(commit) >= 3 && seqOf(commit) < fixedFrom ? 'fail' : 'pass',
+    );
+    const retrust = (argv: string[]): void => {
+      writeFileSync(
+        join(w.root, '.mindly', 'config.json'),
+        JSON.stringify({ checks: [{ name: 'unit', argv }] }),
+      );
+      const hash = loadProjectConfig(join(w.root, '.mindly', 'config.json')).hash as string;
+      w.mindly.projects.trust(w.pid, hash);
+    };
+    w.addSteps(1, 2);
+    await w.pass();
+    w.addSteps(3, 4);
+    const broke = await w.pass();
+    const conflictId = broke.checks[0]!.conflictId!;
+    expect(w.mindly.store.conflicts.get(conflictId).status).toBe('open');
+
+    // The command is edited while the check still fails: the conflict stays, and stays known.
+    retrust(['npm', 'test', '--', '--bail']);
+    w.addSteps(5, 5);
+    const still = await w.pass();
+    expect(still.checks[0]).toMatchObject({ transition: 'baseline_fail', conflictId });
+    expect(w.mindly.store.conflicts.get(conflictId).status).toBe('open');
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checks['unit']?.conflictId).toBe(conflictId);
+
+    // Edited again, and this time the agent fixed the code: it passes, the conflict is closed.
+    retrust(['npm', 'run', 'test:unit']);
+    fixedFrom = 6;
+    w.addSteps(6, 6);
+    const fixed = await w.pass();
+    expect(fixed.checks[0]).toMatchObject({ transition: 'baseline_pass', conflictId });
+    expect(w.mindly.store.conflicts.get(conflictId).status).toBe('resolved');
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checks['unit']).toMatchObject({
+      state: 'passing',
+      conflictId: null,
+    });
+    const [save] = w.mindly.store.saves.list(w.pid, { limit: 10 });
+    expect(save).toMatchObject({ kind: 'check_broken_early', status: 'confirmed' });
+  });
+
+  it('keeps the conflict of an edited command known while the new command cannot run', async () => {
+    let mode: Verdict | null = null;
+    const w = await world((_c, commit) => mode ?? breaksAt(3)(_c, commit));
+    w.addSteps(1, 2);
+    await w.pass();
+    w.addSteps(3, 4);
+    const conflictId = (await w.pass()).checks[0]!.conflictId!;
+    writeFileSync(
+      join(w.root, '.mindly', 'config.json'),
+      JSON.stringify({ checks: [{ name: 'unit', argv: ['npm', 'run', 'test:unit'] }] }),
+    );
+    w.mindly.projects.trust(
+      w.pid,
+      loadProjectConfig(join(w.root, '.mindly', 'config.json')).hash as string,
+    );
+    mode = 'timeout';
+    w.addSteps(5, 5);
+    expect((await w.pass()).checks[0]).toMatchObject({ outcome: 'skip' });
+    expect(w.mindly.store.conflicts.get(conflictId).status).toBe('open');
+    mode = 'pass';
+    expect((await w.pass()).checks[0]).toMatchObject({ transition: 'baseline_pass', conflictId });
+    expect(w.mindly.store.conflicts.get(conflictId).status).toBe('resolved');
+  });
+
+  it('closes the conflict of a check the sentinel no longer runs', async () => {
+    const w = await world(
+      (check, commit) => (check === 'unit' ? breaksAt(3)(check, commit) : 'pass'),
+      {
+        project: {
+          checks: [
+            { name: 'unit', argv: ['npm', 'test'] },
+            { name: 'lint', argv: ['npm', 'run', 'lint'] },
+          ],
+        },
+      },
+    );
+    w.addSteps(1, 2);
+    await w.pass();
+    w.addSteps(3, 4);
+    const broke = await w.pass();
+    const conflictId = broke.checks.find((c) => c.name === 'unit')!.conflictId!;
+    expect(w.mindly.store.conflicts.get(conflictId).status).toBe('open');
+    writeFileSync(
+      join(w.root, '.mindly', 'config.json'),
+      JSON.stringify({
+        checks: [
+          { name: 'unit', argv: ['npm', 'test'] },
+          { name: 'lint', argv: ['npm', 'run', 'lint'] },
+        ],
+        sentinel: { checks: ['lint'] },
+      }),
+    );
+    w.mindly.projects.trust(
+      w.pid,
+      loadProjectConfig(join(w.root, '.mindly', 'config.json')).hash as string,
+    );
+    w.addSteps(5, 5);
+    const r = await w.pass();
+    expect(r.checks.map((c) => c.name)).toEqual(['lint']);
+    // Nothing would ever see it pass again: closed, but the check was not fixed, so the save
+    // of the break is not confirmed.
+    expect(w.mindly.store.conflicts.get(conflictId).status).toBe('resolved');
+    expect(Object.keys(w.mindly.store.sentinel.get(w.pid, w.root)?.checks ?? {})).toEqual(['lint']);
+    expect(w.mindly.store.saves.list(w.pid, { limit: 10 })[0]?.status).not.toBe('confirmed');
+  });
+
+  it('treats a check named like an inherited object member as any other check', async () => {
+    const w = await world(() => 'fail', {
+      project: {
+        checks: [
+          { name: 'constructor', argv: ['npm', 'test'] },
+          { name: 'toString', argv: ['npm', 'run', 'lint'] },
+          { name: '__proto__', argv: ['npm', 'run', 'types'] },
+        ],
+      },
+    });
+    w.addSteps(1, 2);
+    const r = await w.pass();
+    // Failing from the first look: a baseline, not a break of something seen passing.
+    expect(r.checks.map((c) => [c.name, c.transition])).toEqual([
+      ['constructor', 'baseline_fail'],
+      ['toString', 'baseline_fail'],
+      ['__proto__', 'baseline_fail'],
+    ]);
+    expect(w.mindly.store.conflicts.list(w.pid)).toEqual([]);
+    expect(Object.keys(w.mindly.store.sentinel.get(w.pid, w.root)?.checks ?? {})).toEqual([
+      'constructor',
+      'toString',
+      '__proto__',
+    ]);
+    w.addSteps(3, 3);
+    expect((await w.pass()).checks.map((c) => c.transition)).toEqual([
+      'still_failing',
+      'still_failing',
+      'still_failing',
+    ]);
+  });
+
   it('runs the setup command once, again on a manifest change, and skips when it fails', async () => {
     let setupFails = false;
     const w = await world(
@@ -685,6 +826,60 @@ describe('sentinel pass', () => {
     expect(w.mindly.store.memories.list(w.pid, { kinds: ['mistake'] })).toHaveLength(mistakes + 1);
   });
 
+  it('releases the checkout when a pass fails before it starts checking', async () => {
+    const w = await world(() => 'pass');
+    const svc = sentinelOf(w.mindly);
+    w.addSteps(1, 2);
+    const create = w.mindly.store.runs.create.bind(w.mindly.store.runs);
+    let fail = true;
+    w.mindly.store.runs.create = (input) => {
+      if (fail) throw new Error('database is locked');
+      return create(input);
+    };
+    // The run could not be recorded: an error, not an exception, and the lock is not left behind.
+    const r = await w.pass();
+    expect(r).toMatchObject({ status: 'error', runId: null, reason: 'Error: database is locked' });
+    expect(svc.busy(w.pid)).toBe(false);
+    fail = false;
+    expect((await w.pass()).status).toBe('checked');
+    expect(await svc.reset(w.pid, w.root)).toBe('reset');
+  });
+
+  it('never throws, whatever fails', async () => {
+    const w = await world(() => 'pass');
+    w.addSteps(1, 2);
+    w.mindly.store.sentinel.get = () => {
+      throw new Error('disk I/O error');
+    };
+    expect(await w.pass()).toMatchObject({ status: 'error', reason: 'Error: disk I/O error' });
+  });
+
+  it('makes a scratch tree again when it can no longer be checked out', async () => {
+    const w = await world(() => 'pass', {
+      project: {
+        checks: [{ name: 'unit', argv: ['npm', 'test'] }],
+        sentinel: { setup: ['npm', 'ci'] },
+      },
+    });
+    const svc = sentinelOf(w.mindly);
+    w.addSteps(1, 2);
+    await w.pass();
+    const path = svc.warmPath(w.pid, w.root);
+    // A lock file a killed git left in the tree: every checkout of it fails from now on.
+    const warm = w.steps.warm;
+    writeFileSync(join(path, 'index.lock'), '');
+    w.steps.warm = async (repo, at, commit) => {
+      if (existsSync(join(at, 'index.lock'))) throw new Error('git checkout failed');
+      return warm(repo, at, commit);
+    };
+    w.addSteps(3, 3);
+    const r = await w.pass();
+    expect(r.status).toBe('checked');
+    expect(w.steps.warmRemoved).toEqual([path]);
+    // The new tree has nothing installed: the setup command ran again.
+    expect(w.steps.ran.filter((x) => x.startsWith('setup@'))).toEqual(['setup@c2', 'setup@c3']);
+  });
+
   it("refuses to run when Mindly's home is inside the repository", async () => {
     const w = await world(() => 'pass');
     const svc = new SentinelService(
@@ -772,6 +967,122 @@ describe('sentinel schedule', () => {
       skippedSeq: null,
       retryAt: null,
     });
+  });
+
+  it('backs off a pass that fails instead of failing again every tick', async () => {
+    const w = await world(() => 'pass', { config: (c) => (c.sentinel.quietSec = 10) });
+    const svc = sentinelOf(w.mindly);
+    let broken = true;
+    const warm = w.steps.warm;
+    w.steps.warm = async (repo, at, commit) => {
+      if (broken) throw new Error('git checkout failed');
+      return warm(repo, at, commit);
+    };
+    w.addSteps(1, 3);
+    w.clock.advance(60_000);
+    const tick = async (): Promise<string | null> => {
+      w.clock.advance(15_000);
+      if (svc.dueWorktrees(w.pid).length === 0) return null;
+      return (await svc.pass(w.pid, w.root, { trigger: 'schedule' })).status;
+    };
+    const statuses: (string | null)[] = [];
+    for (let i = 0; i < 20; i++) statuses.push(await tick()); // 5 minutes of ticks
+    expect(statuses.filter((x) => x !== null)).toEqual(['error']);
+    expect(w.mindly.store.runs.list(w.pid, { kind: 'sentinel' })).toHaveLength(1);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toMatchObject({
+      checkedSeq: null,
+      skips: 1,
+      skippedSeq: 3,
+    });
+
+    // Tried again after the back-off, which doubles while it keeps failing.
+    w.clock.advance(SKIP_RETRY_MS);
+    expect(await tick()).toBe('error');
+    const second = w.mindly.store.sentinel.get(w.pid, w.root)!;
+    expect(second.skips).toBe(2);
+    expect(second.retryAt).toBe(w.clock.now() + 2 * SKIP_RETRY_MS);
+
+    // `mindly sentinel run` does not wait for it, and a pass that works clears it.
+    broken = false;
+    expect((await w.pass()).status).toBe('checked');
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toMatchObject({
+      checkedSeq: 3,
+      skips: 0,
+      skippedSeq: null,
+      retryAt: null,
+    });
+  });
+
+  it('counts the back-off from the end of the pass, not from its start', async () => {
+    const clock: { advance?: (ms: number) => void } = {};
+    // Every check runs into its five-minute limit.
+    const w = await world(
+      () => {
+        clock.advance?.(5 * 60_000);
+        return 'timeout';
+      },
+      {
+        config: (c) => (c.sentinel.quietSec = 10),
+        project: {
+          checks: [
+            { name: 'unit', argv: ['npm', 'test'], timeoutSec: 300 },
+            { name: 'lint', argv: ['npm', 'run', 'lint'], timeoutSec: 300 },
+            { name: 'types', argv: ['npm', 'run', 'types'], timeoutSec: 300 },
+          ],
+        },
+      },
+    );
+    clock.advance = (ms) => w.clock.advance(ms);
+    const svc = sentinelOf(w.mindly);
+    w.addSteps(1, 3);
+    w.clock.advance(60_000);
+    const started = w.clock.now();
+    await svc.pass(w.pid, w.root, { trigger: 'schedule' });
+    // The pass took as long as the whole first back-off.
+    expect(w.clock.now() - started).toBe(SKIP_RETRY_MS);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.retryAt).toBe(w.clock.now() + SKIP_RETRY_MS);
+    w.clock.advance(15_000);
+    expect(svc.dueWorktrees(w.pid)).toEqual([]);
+  });
+
+  it('never checks a checkout that was removed, and does not watch it again', async () => {
+    const w = await world(() => 'pass', { config: (c) => (c.sentinel.quietSec = 10) });
+    const svc = sentinelOf(w.mindly);
+    const part = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-part-')));
+    const step = (seq: number): void => {
+      w.mindly.store.checkpoints.create({
+        projectId: w.pid,
+        worktree: part,
+        seq,
+        commit: `c${seq}`,
+        parentCommit: seq === 1 ? null : `c${seq - 1}`,
+        kind: seq === 1 ? 'baseline' : 'outside',
+        sessionId: null,
+        fileChangeId: null,
+        promptEventId: null,
+        tool: null,
+        paths: [],
+        gap: false,
+      });
+    };
+    step(1);
+    await svc.pass(w.pid, part, { trigger: 'user', force: true });
+    step(2);
+    w.clock.advance(60_000);
+    expect(svc.dueWorktrees(w.pid)).toEqual([part]);
+    // The split part is merged and its worktree removed, with a step still unchecked.
+    rmSync(part, { recursive: true, force: true });
+    expect(svc.dueWorktrees(w.pid)).toEqual([]);
+    const runs = w.mindly.store.runs.list(w.pid, { kind: 'sentinel' }).length;
+    expect(await svc.pass(w.pid, part, { trigger: 'schedule' })).toMatchObject({
+      status: 'not_ready',
+      reason: 'checkout_gone',
+    });
+    expect(w.mindly.store.runs.list(w.pid, { kind: 'sentinel' })).toHaveLength(runs);
+    // Once cleanup forgot it, nothing brings its watch back.
+    expect(await svc.pruneWarm()).toBe(1);
+    await svc.pass(w.pid, part, { trigger: 'user', force: true });
+    expect(w.mindly.store.sentinel.get(w.pid, part)).toBeNull();
   });
 
   it('looks at a new checkout once enough steps piled up, even without a pause', async () => {

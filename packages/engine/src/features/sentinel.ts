@@ -246,6 +246,9 @@ export class SentinelService {
       since,
       MAX_WORKTREES,
     )) {
+      // A checkout removed since (a finished split part) still has recent steps, but nothing
+      // to check: `pruneWarm` forgets it.
+      if (!existsSync(worktree)) continue;
       const latest = this.k.store.checkpoints.latest(projectId, worktree);
       if (!latest || latest.createdAt < since) continue;
       if (this.isDue(this.k.store.sentinel.get(projectId, worktree), latest, now)) {
@@ -340,6 +343,27 @@ export class SentinelService {
     worktree: string,
     opts: SentinelPassOptions,
   ): Promise<SentinelPassResult> {
+    try {
+      return await this.runPass(projectId, worktree, opts);
+    } catch (err) {
+      this.k.logger.error('sentinel pass failed', { projectId, error: describeError(err) });
+      return {
+        status: 'error',
+        worktree,
+        step: null,
+        runId: null,
+        checks: [],
+        reason: sanitizeLine(redactText(describeError(err)), 300),
+        setupFailed: false,
+      };
+    }
+  }
+
+  private async runPass(
+    projectId: string,
+    worktree: string,
+    opts: SentinelPassOptions,
+  ): Promise<SentinelPassResult> {
     const result = (
       status: SentinelPassStatus,
       extra: Partial<SentinelPassResult> = {},
@@ -359,54 +383,57 @@ export class SentinelService {
     if (!ready.ready || !steps) {
       return result('not_ready', { reason: ready.reason ?? 'no_git' });
     }
+    // A checkout removed since its last step (a finished split part) has nothing to check; its
+    // state and scratch tree go with `pruneWarm`.
+    if (!existsSync(worktree)) return result('not_ready', { reason: 'checkout_gone' });
     const latest = this.k.store.checkpoints.latest(projectId, worktree);
     if (!latest) return result('no_steps');
-    const now = this.k.clock.now();
     const notDue = (watch: SentinelWatch | null): SentinelPassResult | null => {
       if (opts.force) return null;
       if (watch?.checkedSeq !== null && watch?.checkedSeq !== undefined) {
         if (latest.seq <= watch.checkedSeq) return result('up_to_date', { step: latest.seq });
       }
-      return this.isDue(watch, latest, now) ? null : result('not_due', { step: latest.seq });
+      return this.isDue(watch, latest, this.k.clock.now())
+        ? null
+        : result('not_due', { step: latest.seq });
     };
     const early = notDue(this.k.store.sentinel.get(projectId, worktree));
     if (early) return early;
     const lock = this.lock(projectId, worktree);
     if (!lock) return result('busy', { step: latest.seq });
-    // Read again under the lock: a pass elsewhere (the daemon, `sentinel run`) may have finished
-    // between the first read and the lock, and its state must not be redone or overwritten.
-    const watch = this.k.store.sentinel.get(projectId, worktree);
-    const late = notDue(watch);
-    if (late) {
-      lock.release();
-      return late;
-    }
-    if (!watch) {
-      // Recorded before the scratch tree exists, so cleanup (`reset`, `forget`, `pruneWarm`)
-      // finds the tree even when this first pass is cancelled before it saves anything.
-      this.k.store.sentinel.save(projectId, worktree, {
-        checkedSeq: null,
-        checkedAt: null,
-        setupCommit: null,
-        checks: {},
-      });
-    }
 
+    // Everything from here runs under the lock, and whatever happens the lock is released.
     const signal = opts.signal ?? new AbortController().signal;
-    const run = this.startRun(project, latest, ready, opts.trigger);
+    let run: Run | null = null;
     let ws: StepWorkspace | null = null;
-    let setupCommit = watch?.setupCommit ?? null;
+    let watch: SentinelWatch | null = null;
+    let setupCommit: string | null = null;
+    // What is known per check: what the last pass left, replaced as each check settles.
+    let checks: Record<string, SentinelCheck> | null = null;
     const reports: SentinelCheckReport[] = [];
     try {
-      ws = await steps.warm(worktree, this.warmPath(projectId, worktree), latest.commit);
+      // Read again under the lock: a pass elsewhere (the daemon, `sentinel run`) may have
+      // finished between the first read and the lock, and its state must not be redone or
+      // overwritten.
+      watch = this.k.store.sentinel.get(projectId, worktree);
+      const late = notDue(watch);
+      if (late) return late;
+      if (!watch) {
+        // Recorded before the scratch tree exists, so cleanup (`reset`, `forget`, `pruneWarm`)
+        // finds the tree even when this first pass is cancelled before it saves anything.
+        this.k.store.sentinel.save(projectId, worktree, {
+          checkedSeq: null,
+          checkedAt: null,
+          setupCommit: null,
+          checks: {},
+        });
+      }
+      setupCommit = watch?.setupCommit ?? null;
+      run = this.startRun(project, latest, ready, opts.trigger);
+      ws = await this.openWarm(steps, projectId, worktree, latest.commit, signal);
       // A tree made again (it was missing or broken) has none of the dependencies installed before.
       if (ws.fresh) setupCommit = null;
-      const checks: Record<string, SentinelCheck> = {};
-      // Checks the sentinel no longer runs are dropped with their state.
-      for (const check of ready.checks) {
-        const prev = watch?.checks[check.name];
-        if (prev && prev.argvHash === commandHash(check)) checks[check.name] = prev;
-      }
+      const known = (checks = this.carryChecks(projectId, watch, ready.checks));
       let setupFailed = false;
       const outcomes = new Map<string, StepCheck>();
       for (const check of ready.checks) {
@@ -445,7 +472,7 @@ export class SentinelService {
           latest,
           check,
           setup: ready.setup,
-          checks,
+          checks: known,
           outcome,
           ws,
           setupCommit,
@@ -462,23 +489,25 @@ export class SentinelService {
           checkedSeq: watch?.checkedSeq ?? null,
           checkedAt: watch?.checkedAt ?? null,
           setupCommit,
-          checks,
+          checks: known,
           skips: watch?.skips ?? 0,
           skippedSeq: watch?.skippedSeq ?? null,
           retryAt: watch?.retryAt ?? null,
         });
       }
       const ran = reports.some((r) => r.outcome !== 'skip');
-      // A pass where nothing could run leaves the step unchecked, retried after a back-off.
-      const skips = ran ? 0 : (watch?.skippedSeq === latest.seq ? watch.skips : 0) + 1;
+      // A pass where nothing could run leaves the step unchecked, retried after a back-off. It
+      // counts from the end of the pass: a pass of timeouts must not use its own back-off up.
+      const done = this.k.clock.now();
+      const skips = ran ? 0 : skipsAt(watch, latest.seq) + 1;
       this.k.store.sentinel.save(projectId, worktree, {
         checkedSeq: ran ? latest.seq : (watch?.checkedSeq ?? null),
-        checkedAt: now,
+        checkedAt: done,
         setupCommit,
-        checks,
+        checks: known,
         skips,
         skippedSeq: ran ? null : latest.seq,
-        retryAt: ran ? null : now + SentinelService.retryDelayMs(skips),
+        retryAt: ran ? null : done + SentinelService.retryDelayMs(skips),
       });
       const failing = reports.some((r) => r.outcome === 'fail');
       this.finishRun(run, setupFailed || !ran ? 'error' : failing ? 'failed' : 'passed', {
@@ -488,18 +517,83 @@ export class SentinelService {
       });
       return result('checked', { step: latest.seq, runId: run.id, checks: reports, setupFailed });
     } catch (err) {
+      const runId = run?.id ?? null;
       if (err instanceof BisectAborted || signal.aborted) {
-        this.finishRun(run, 'cancelled', { step: latest.seq, checks: reports });
-        return result('cancelled', { step: latest.seq, runId: run.id, checks: reports });
+        if (run) this.finishRunQuietly(run, 'cancelled', { step: latest.seq, checks: reports });
+        return result('cancelled', { step: latest.seq, runId, checks: reports });
       }
       const reason = sanitizeLine(redactText(describeError(err)), 300);
       this.k.logger.error('sentinel pass failed', { projectId, error: describeError(err) });
-      this.finishRun(run, 'error', { step: latest.seq, error: reason, checks: reports });
-      return result('error', { step: latest.seq, runId: run.id, checks: reports, reason });
+      // A pass that failed is backed off like one where nothing could run: it would be due
+      // again at the next tick, and fail the same way.
+      try {
+        const done = this.k.clock.now();
+        const skips = skipsAt(watch, latest.seq) + 1;
+        this.k.store.sentinel.save(projectId, worktree, {
+          checkedSeq: watch?.checkedSeq ?? null,
+          checkedAt: watch?.checkedAt ?? null,
+          setupCommit,
+          checks: checks ?? watch?.checks ?? {},
+          skips,
+          skippedSeq: latest.seq,
+          retryAt: done + SentinelService.retryDelayMs(skips),
+        });
+      } catch (saveErr) {
+        this.k.logger.error('sentinel: back-off not saved', { error: describeError(saveErr) });
+      }
+      if (run) {
+        this.finishRunQuietly(run, 'error', { step: latest.seq, error: reason, checks: reports });
+      }
+      return result('error', { step: latest.seq, runId, checks: reports, reason });
     } finally {
       lock.release();
       await ws?.dispose().catch(() => undefined);
     }
+  }
+
+  /**
+   * Opens the warm scratch tree at `commit`. A tree git can no longer check out (a lock file
+   * left by a killed process, a damaged index) would fail every pass: it is removed and made
+   * again once, at the price of running the setup command again.
+   */
+  private async openWarm(
+    steps: StepGitPort,
+    projectId: string,
+    worktree: string,
+    commit: string,
+    signal: AbortSignal,
+  ): Promise<StepWorkspace> {
+    const path = this.warmPath(projectId, worktree);
+    try {
+      return await steps.warm(worktree, path, commit);
+    } catch (err) {
+      if (signal.aborted || !existsSync(path)) throw err;
+      this.k.logger.warn('sentinel: scratch tree made again', { error: describeError(err) });
+      await steps.removeWarm(worktree, path);
+      return steps.warm(worktree, path, commit);
+    }
+  }
+
+  /**
+   * The per-check state a pass starts from. A check keeps its entry even when its command was
+   * edited: `settle` starts it over once the new command gave a result, and until then the
+   * entry still names the conflict to close. A check the sentinel no longer runs is dropped,
+   * and the conflict of its break is closed with it: nothing would ever see it pass again.
+   */
+  private carryChecks(
+    projectId: string,
+    watch: SentinelWatch | null,
+    running: readonly CommandSpec[],
+  ): Record<string, SentinelCheck> {
+    const checks: Record<string, SentinelCheck> = {};
+    const names = new Set(running.map((c) => c.name));
+    for (const [name, prev] of Object.entries(watch?.checks ?? {})) {
+      if (names.has(name)) setOwn(checks, name, prev);
+      else if (prev.state === 'failing' && prev.conflictId) {
+        this.resolve(projectId, prev.conflictId, { fixed: false });
+      }
+    }
+    return checks;
   }
 
   /** Moves one check's state for the outcome at the newest step, and reports it. */
@@ -519,7 +613,10 @@ export class SentinelService {
   }): Promise<SentinelCheckReport> {
     const { check, outcome, latest, checks } = input;
     const now = this.k.clock.now();
-    const prev = checks[check.name];
+    const stored = getOwn(checks, check.name);
+    // An edited command starts over, but the conflict of the old command's break is still open.
+    const prev = stored && stored.argvHash === commandHash(check) ? stored : undefined;
+    const carried = stored && !prev && stored.state === 'failing' ? stored.conflictId : null;
     const report: SentinelCheckReport = {
       name: check.name,
       outcome: outcome.outcome === 'good' ? 'pass' : outcome.outcome === 'bad' ? 'fail' : 'skip',
@@ -551,15 +648,25 @@ export class SentinelService {
 
     if (!prev) {
       if (report.outcome === 'pass') {
-        checks[check.name] = fresh('passing', { goodSeq: latest.seq });
+        setOwn(checks, check.name, fresh('passing', { goodSeq: latest.seq }));
         report.transition = 'baseline_pass';
+        // The check broke under its old command and passes under the new one: that is fixed.
+        if (carried) {
+          report.conflictId = carried;
+          this.resolve(input.project.project.id, carried, { fixed: true });
+        }
       } else {
-        checks[check.name] = fresh('failing', {
-          failingSeq: latest.seq,
-          note: 'already failing when the sentinel started watching',
-        });
+        const note = carried
+          ? 'its command changed while it was failing, and it still fails'
+          : 'already failing when the sentinel started watching';
+        setOwn(
+          checks,
+          check.name,
+          fresh('failing', { failingSeq: latest.seq, conflictId: carried, note }),
+        );
         report.transition = 'baseline_fail';
-        report.note = 'already failing when the sentinel started watching';
+        report.conflictId = carried;
+        report.note = note;
       }
       return report;
     }
@@ -570,16 +677,18 @@ export class SentinelService {
         report.conflictId = prev.conflictId;
         return report;
       }
-      checks[check.name] = fresh('passing', { goodSeq: latest.seq });
+      setOwn(checks, check.name, fresh('passing', { goodSeq: latest.seq }));
       report.transition = 'fixed';
       report.conflictId = prev.conflictId;
-      if (prev.conflictId) this.resolve(input.project.project.id, prev.conflictId);
+      if (prev.conflictId) {
+        this.resolve(input.project.project.id, prev.conflictId, { fixed: true });
+      }
       return report;
     }
 
     // Passing before.
     if (report.outcome === 'pass') {
-      checks[check.name] = { ...prev, goodSeq: latest.seq };
+      setOwn(checks, check.name, { ...prev, goodSeq: latest.seq });
       report.transition = 'still_passing';
       return report;
     }
@@ -608,7 +717,7 @@ export class SentinelService {
     if (prev.goodSeq === latest.seq) {
       // It passed at this very step before (a forced pass with no new edit): the same code gave
       // two results. Nobody is blamed and nothing is opened; it stays passing.
-      input.checks[check.name] = { ...prev };
+      setOwn(input.checks, check.name, { ...prev });
       report.transition = 'flaky';
       report.note = 'passed at this same step before and fails now: looks flaky, nobody is blamed';
       return report;
@@ -630,11 +739,8 @@ export class SentinelService {
       const note = !kept
         ? 'the step it last passed at is no longer kept, so the edit cannot be found'
         : 'not searched: the sentinel reached its daily bisect limit (sentinel.maxBisectsPerDay)';
-      input.checks[check.name] = fresh('failing', {
-        goodSeq: prev.goodSeq,
-        failingSeq: latest.seq,
-        note,
-      });
+      const failing = fresh('failing', { goodSeq: prev.goodSeq, failingSeq: latest.seq, note });
+      setOwn(input.checks, check.name, failing);
       report.transition = 'broke';
       report.note = note;
       report.bisect = !kept
@@ -649,10 +755,7 @@ export class SentinelService {
         firstBad: null,
         note,
       });
-      input.checks[check.name] = {
-        ...(input.checks[check.name] as SentinelCheck),
-        conflictId: conflict?.id ?? null,
-      };
+      setOwn(input.checks, check.name, { ...failing, conflictId: conflict?.id ?? null });
       report.conflictId = conflict?.id ?? null;
       if (conflict) {
         // Nobody is blamed, but the agents working in this checkout should not build on it.
@@ -747,7 +850,7 @@ export class SentinelService {
 
     if (status === 'unreliable' || status === 'bad_passes') {
       // Flaky: it failed once but not when run again. Nobody is told; it stays passing.
-      input.checks[check.name] = { ...prev };
+      setOwn(input.checks, check.name, { ...prev });
       report.transition = 'flaky';
       report.note =
         status === 'bad_passes'
@@ -758,7 +861,7 @@ export class SentinelService {
     if (status === 'bad_skipped') {
       // It failed, then could not run at all at the same step (timeout, exit 125): nothing is
       // known yet. It stays passing, and the next pass looks again.
-      input.checks[check.name] = { ...prev };
+      setOwn(input.checks, check.name, { ...prev });
       report.transition = 'skipped';
       report.note = 'failed, then could not run when checked again: looked at again next time';
       return report;
@@ -780,13 +883,14 @@ export class SentinelService {
         : status === 'good_fails'
           ? `it now also fails at step ${steps[0]?.seq ?? '?'}, where it passed before: something outside the checkpoints changed (dependencies, environment, time)`
           : 'the steps in between could not all be run, so the edit could not be narrowed down';
-    input.checks[check.name] = fresh('failing', {
+    const state = fresh('failing', {
       goodSeq: prev.goodSeq,
       failingSeq: latest.seq,
       brokeAt: status === 'found' ? (firstBad?.seq ?? null) : null,
       culpritSessionId: blamed?.id ?? null,
       note,
     });
+    setOwn(input.checks, check.name, state);
     report.transition = 'broke';
     report.note = note;
     const conflict = this.open({
@@ -800,10 +904,7 @@ export class SentinelService {
       note,
     });
     if (conflict) {
-      input.checks[check.name] = {
-        ...(input.checks[check.name] as SentinelCheck),
-        conflictId: conflict.id,
-      };
+      setOwn(input.checks, check.name, { ...state, conflictId: conflict.id });
       report.conflictId = conflict.id;
       report.told = this.tell({
         project,
@@ -959,8 +1060,11 @@ export class SentinelService {
     return sent.map((d) => d.targetSessionId).filter((id): id is string => id !== null);
   }
 
-  /** Resolves a break's conflict once the check passes again (and confirms its save). */
-  private resolve(projectId: string, conflictId: string): void {
+  /**
+   * Closes a break's conflict: `fixed` when the check passes again (its save is confirmed), not
+   * when the sentinel merely stopped running the check (the save is left to expire).
+   */
+  private resolve(projectId: string, conflictId: string, how: { fixed: boolean }): void {
     const c = this.k.store.conflicts.find(conflictId);
     if (!c || (c.status !== 'open' && c.status !== 'acknowledged')) return;
     this.k.store.conflicts.setStatus(c.id, 'resolved');
@@ -970,7 +1074,7 @@ export class SentinelService {
       type: 'conflict.updated',
       payload: { conflictId: c.id, kind: c.kind, status: 'resolved' },
     });
-    this.saves?.brokenChecksFixed(projectId, [c.id], event.id);
+    if (how.fixed) this.saves?.brokenChecksFixed(projectId, [c.id], event.id);
   }
 
   private startRun(
@@ -1012,6 +1116,19 @@ export class SentinelService {
       type: 'run.finished',
       payload: { runId: run.id, kind: run.kind, status },
     });
+  }
+
+  /** `finishRun` for a pass that already failed or was cancelled: it must not throw again. */
+  private finishRunQuietly(
+    run: Run,
+    status: 'error' | 'cancelled',
+    result: Record<string, unknown>,
+  ): void {
+    try {
+      this.finishRun(run, status, result);
+    } catch (err) {
+      this.k.logger.error('sentinel: run not finished', { error: describeError(err) });
+    }
   }
 
   /** What `mindly sentinel` shows. */
@@ -1160,6 +1277,28 @@ function checkoutOf(cwd: string, trees: readonly string[]): string | null {
     }
   }
   return best;
+}
+
+/** Passes in a row that could not check step `seq` (nothing ran, or the pass failed). */
+function skipsAt(watch: SentinelWatch | null, seq: number): number {
+  return watch?.skippedSeq === seq ? watch.skips : 0;
+}
+
+/**
+ * A check may be named like a member every object inherits (`constructor`, `toString`): its
+ * state is read and written as an own property only.
+ */
+function getOwn(checks: Record<string, SentinelCheck>, name: string): SentinelCheck | undefined {
+  return Object.hasOwn(checks, name) ? checks[name] : undefined;
+}
+
+function setOwn(checks: Record<string, SentinelCheck>, name: string, value: SentinelCheck): void {
+  Object.defineProperty(checks, name, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
 }
 
 /** Stable hash of a check's command, so editing it starts its state over. */
