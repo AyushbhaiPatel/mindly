@@ -249,8 +249,8 @@ When Claude Code hits its usage limit mid-task, the next agent you open starts w
 plan, the files already changed and the next steps, instead of a blank session.
 
 A limit is recognised from the notice the agent prints, not from an agent writing about rate
-limits in your code. If the limited agent is asked to carry on and finishes a turn, the handoff is
-withdrawn; one that nobody picked up is dropped after a week. With more than two agents in
+limits in your code. If the limited agent is asked to carry on and gets work done in a later turn,
+the handoff is withdrawn; one that nobody picked up is dropped after a week. With more than two agents in
 `failover.order`, the work goes to the one after the limited agent, skipping agents that hit their
 own limit in the last day.
 

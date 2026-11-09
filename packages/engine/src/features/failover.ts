@@ -54,10 +54,10 @@ export const HANDOFF_SUMMARY_MAX_CHARS = 300;
 const MAX_NOTICE_LINE_CHARS = 300;
 
 const APOS = "(?:'|\\u2019)";
-// The label an agent or API client puts in front of an error: "Error:", "API Error: 429",
-// "stream error:", "[API Error: ...".
+// The label an agent or API client puts in front of a failure: "Error:", "API Error: 429",
+// "stream error:", "[API Error: ...", "Request failed:", "Fatal:", "ERROR", "Warning:".
 const LABEL =
-  '(?:\\[?(?:(?:api|stream|http|request|provider|server|unexpected) )?error\\b\\]?\\s*[:\\-]?\\s*(?:\\(?\\d{3}\\)?\\s*[:\\-]?\\s*)?)';
+  '(?:\\[?(?:(?:api|stream|http|request|provider|server|unexpected|fatal) )?(?:error|failed|failure|fatal|warning|warn)\\b\\]?\\s*[:\\-]?\\s*(?:\\(?\\d{3}\\)?\\s*[:\\-]?\\s*)?)';
 // What may follow the phrase in a notice: the end of the line, punctuation, or when to retry.
 // "Rate limit exceeded handling added" is a sentence about code, not a notice.
 const TAIL =
@@ -102,10 +102,11 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
       ),
     },
     { id: 'claude.limit_will_reset', re: /^(?:your )?limit will reset (?:at|in|on)\b/i },
-    // The API error type only counts behind an error label: on its own it is a name in code.
+    // The API error type is a name in code unless it comes straight after the label or as the
+    // quoted value of an error body ("API Error: 429 {"type":"rate_limit_error"}").
     {
       id: 'claude.rate_limit_error',
-      re: new RegExp(`^${LABEL}.{0,80}\\brate_limit_error\\b`, 'i'),
+      re: new RegExp(`^${LABEL}(?:rate_limit_error\\b|.{0,80}"rate_limit_error")`, 'i'),
     },
     { id: 'claude.http_429', re: HTTP_429 },
   ],
@@ -164,12 +165,30 @@ export function signaturesFor(agentKind: string): RateLimitSignature[] {
 }
 
 const FENCE = /^\s*(?:```|~~~)/;
-// List bullets, quote marks and the gutters agents draw in front of a status line.
-const LEAD = /^[\s>*#|•·∙⎿│└├-]+/;
+// Whatever a terminal UI draws in front of a status line: bullets, quote marks, gutters,
+// box-drawing, status glyphs and emoji. "[" is kept: it may open a tag or an error label.
+const LEAD_SYMBOLS = /^[^\p{L}\p{N}[]+/u;
+const CLOCK = '\\d{1,2}:\\d{2}(?::\\d{2})?(?:[.,]\\d{1,6})?';
+const STAMP = `(?:\\d{4}-\\d{2}-\\d{2}(?:[T ]${CLOCK})?(?:Z|[+-]\\d{2}:?\\d{2})?|${CLOCK})`;
+// A log timestamp, bare or bracketed, or a short bracketed tag without spaces ("[error]").
+const LEAD_STAMP = new RegExp(`^(?:\\[${STAMP}\\]|${STAMP}(?=\\s))\\s*`);
+const LEAD_TAG = /^\[[^\]\s]{1,24}\]\s+/;
+
+/** `line` without the decoration and log prefixes in front of its first word. */
+function stripLead(line: string): string {
+  let rest = line;
+  for (let i = 0; i < 4; i++) {
+    const next = rest.replace(LEAD_SYMBOLS, '').replace(LEAD_STAMP, '').replace(LEAD_TAG, '');
+    if (next === rest) break;
+    rest = next;
+  }
+  return rest;
+}
 
 /**
- * The lines of `text` that could be a notice: outside code fences, without their bullet or
- * gutter, and short. Agents quote failing logs in fences; a limit notice is never fenced.
+ * The lines of `text` that could be a notice: outside code fences, without the decoration,
+ * timestamp or tag in front of them, and short. Agents quote failing logs in fences; a limit
+ * notice is never fenced.
  */
 export function noticeLines(text: string): string[] {
   const out: string[] = [];
@@ -179,8 +198,8 @@ export function noticeLines(text: string): string[] {
       fenced = !fenced;
       continue;
     }
-    if (fenced) continue;
-    const line = raw.replace(LEAD, '').trimEnd();
+    if (fenced || raw.length > 4 * MAX_NOTICE_LINE_CHARS) continue;
+    const line = stripLead(raw).trimEnd();
     if (line.length === 0 || line.length > MAX_NOTICE_LINE_CHARS) continue;
     out.push(line);
   }
@@ -632,12 +651,30 @@ export class FailoverService {
   }
 
   /**
-   * A session that finishes a turn without a limit notice is working again, so the handoff it
-   * left when it hit the limit is withdrawn: nobody else should be told to take the work over.
+   * Withdraws the handoff a session left when it hit its limit, once the session has plainly
+   * carried on: a turn that started after the handoff ended with work done in it (a file
+   * changed, a tool ran) or with an answer longer than any notice. A turn that shows no notice
+   * and no work proves nothing: the notice may be worded in a way no signature knows, and
+   * cancelling then would lose the handoff exactly when it is needed.
    */
-  private withdrawStaleHandoff(projectId: string, session: Session, since: number): void {
+  private withdrawStaleHandoff(
+    projectId: string,
+    session: Session,
+    turnStartedAt: number,
+    said: readonly string[],
+  ): void {
     const stale = this.pendingRateLimitHandoff(projectId, session.id);
-    if (!stale || stale.createdAt >= since) return;
+    if (!stale || stale.createdAt >= turnStartedAt) return;
+    const worked =
+      this.k.store.fileChanges.recentPaths(session.id, turnStartedAt).length > 0 ||
+      this.k.store.events.query(projectId, {
+        sessionId: session.id,
+        types: ['tool.before', 'tool.after'],
+        since: turnStartedAt,
+        limit: 1,
+      }).length > 0;
+    const answered = said.some((t) => t.trim().length > MAX_NOTICE_LINE_CHARS);
+    if (!worked && !answered) return;
     this.k.store.handoffs.setStatus(stale.id, 'cancelled');
   }
 
@@ -662,13 +699,18 @@ export class FailoverService {
     const texts: string[] = [];
     if (p.lastMessage) texts.push(p.lastMessage.slice(0, MAX_TEXT_PER_ENTRY));
     const path = p.transcriptPath ?? session.transcriptPath;
+    let transcriptRead = true;
     if (path) {
       const tail = readTranscriptTail(path, this.homeDir);
-      if (tail) texts.push(...recentAgentTexts(parseTranscriptTail(tail), since));
+      if (tail === null) transcriptRead = false;
+      else texts.push(...recentAgentTexts(parseTranscriptTail(tail), since));
     }
     const signature = detectRateLimit(session.agentKind, texts);
     if (!signature) {
-      this.withdrawStaleHandoff(p.projectId, session, since);
+      // Without the transcript the turn was not really looked at: leave the handoff alone.
+      if (lastPrompt && transcriptRead) {
+        this.withdrawStaleHandoff(p.projectId, session, lastPrompt.createdAt, texts);
+      }
       return null;
     }
     this.k.store.kv.set(guardKey, epoch);

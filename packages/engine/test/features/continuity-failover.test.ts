@@ -303,6 +303,62 @@ describe('rate-limit failover', () => {
     }
   });
 
+  it('recognises a notice behind a status glyph, a timestamp or a failure label', () => {
+    const notices: [string, string, string][] = [
+      ['codex', '\u26a0 You\u2019ve hit your usage limit. Try again at 3pm', 'codex.usage_limit'],
+      ['codex', '\u25a0 stream error: rate limit reached', 'codex.rate_limit'],
+      ['claude-code', '[12:03:11] Usage limit reached', 'claude.usage_limit_reached'],
+      ['claude-code', '2026-01-01T12:00:00Z Usage limit reached.', 'claude.usage_limit_reached'],
+      ['claude-code', '[2026-01-01 12:00:00] [error] Weekly limit reached', 'claude.limit_reached'],
+      ['cursor', 'Request failed: 429 Too Many Requests', 'generic.too_many_requests'],
+      ['cursor', '\u2717 Usage limit reached', 'generic.usage_limit'],
+      ['cursor', 'ERROR  rate limit exceeded', 'generic.rate_limit'],
+      ['cursor', '\u2502 \ud83d\udeab Fatal: quota exceeded', 'generic.quota_exceeded'],
+      ['cursor', 'Warning: usage limit reached, resets at 5pm', 'generic.usage_limit'],
+      [
+        'gemini',
+        '\u2715 [API Error: got status: RESOURCE_EXHAUSTED]',
+        'gemini.resource_exhausted_status',
+      ],
+    ];
+    for (const [kind, text, id] of notices) {
+      expect([text, detectRateLimit(kind, [text])]).toEqual([text, id]);
+    }
+  });
+
+  it('still ignores prose however the line is decorated', () => {
+    const prose = [
+      'Done. The /login endpoint is now rate limited to 5 attempts per minute per IP.',
+      'I added a handler that returns HTTP 429 with a Retry-After header.',
+      'The client now retries when the server responds with "Too Many Requests".',
+      'Fixed: the test expected rate_limit_error but the mock returned overloaded_error.',
+      'The docs say the free tier limit will reset monthly; I updated the README.',
+      'Added a quota exceeded banner to the billing page.',
+    ];
+    const extra = [
+      'Error handling for rate_limit_error is now covered by a test.',
+      'Warning: the mock returns rate_limit_error for every third call.',
+      'Failed requests are retried when the rate limit is exceeded.',
+      '`Usage limit reached`',
+      '"Too Many Requests"',
+      '12:30 standup notes: usage limit reached twice last week',
+    ];
+    const decorate = [
+      (t: string) => t,
+      (t: string) => `\u2705 ${t}`,
+      (t: string) => `\u2022 ${t}`,
+      (t: string) => `[12:03:11] ${t}`,
+      (t: string) => `> **${t}**`,
+    ];
+    for (const kind of ['claude-code', 'codex', 'gemini', 'cursor']) {
+      for (const text of [...prose, ...extra]) {
+        for (const d of decorate) {
+          expect([kind, d(text), detectRateLimit(kind, [d(text)])]).toEqual([kind, d(text), null]);
+        }
+      }
+    }
+  });
+
   it('reads only what the agent said from a transcript', () => {
     const at = new Date(1_750_000_000_000).toISOString();
     const notice = 'Usage limit reached.';
@@ -451,6 +507,12 @@ describe('rate-limit failover', () => {
     );
     clock.advance(60_000);
     await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', {
+        tool: writeTool('src/auth.ts', 'export function login() { return 2; }'),
+      }),
+    );
+    clock.advance(1000);
+    await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'stop', { lastMessage: 'All done.' }),
     );
     expect(mindly.store.handoffs.get(h!.id).status).toBe('cancelled');
@@ -460,6 +522,65 @@ describe('rate-limit failover', () => {
     const cx = await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
     expect(cx.context ?? '').not.toContain('Handoff for you');
     expect(mindly.store.tasks.get(task.id).status).toBe('done');
+  });
+
+  it('keeps the handoff when a later turn shows neither a notice nor any work', async () => {
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    await hitLimit(mindly, root);
+    const [h] = mindly.store.handoffs.list(pid);
+    const status = () => mindly.store.handoffs.get(h!.id).status;
+
+    // The limit is still on, and this time it is worded in a way no signature knows.
+    clock.advance(60_000);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'continue' }));
+    clock.advance(1000);
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'stop', { lastMessage: 'Out of credits until 3pm.' }),
+    );
+    expect(status()).toBe('pending');
+
+    // A stop without any message, and a stop on the same prompt again.
+    clock.advance(1000);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'stop'));
+    expect(status()).toBe('pending');
+
+    // Work was done, but the transcript of the turn could not be read.
+    clock.advance(60_000);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'continue' }));
+    clock.advance(1000);
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', {
+        tool: writeTool('src/auth.ts', 'export function login() { return 3; }'),
+      }),
+    );
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'stop', { transcriptPath: join(root, 'missing.jsonl') }),
+    );
+    expect(status()).toBe('pending');
+
+    const cx = await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    expect(cx.context).toContain('Handoff for you');
+  });
+
+  it('withdraws the handoff after a turn that ends with a real answer', async () => {
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    await hitLimit(mindly, root);
+    const [h] = mindly.store.handoffs.list(pid);
+    clock.advance(60_000);
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'prompt', { prompt: 'explain the session store' }),
+    );
+    clock.advance(1000);
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'stop', {
+        lastMessage: `The session store keeps one row per login. ${'It is read on every request. '.repeat(15)}`,
+      }),
+    );
+    expect(mindly.store.handoffs.get(h!.id).status).toBe('cancelled');
   });
 
   it('keeps the handoff when the resumed session hits the limit again', async () => {
