@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { fingerprint, type Conflict, type Session } from '@mindly/core';
+import { fingerprint, sha256, type Conflict, type Session } from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { sessionLabel } from '../coordination/work.js';
 import type { BusEvents, ChangedFile, Kernel } from '../kernel.js';
@@ -13,6 +13,9 @@ export const IMPACT_FILE_RE = /\.(?:[cm]?[jt]sx?|py)$/i;
 const MAX_DEPENDENTS = 200;
 const RECENT_CHANGES_MS = 2 * 60 * 60_000;
 const SYMBOL_RE = /^[\w$.]{1,80}$/;
+/** Open impact conflicts remembered per file, so they can be closed when the exports come back. */
+const MAX_OPEN_PER_FILE = 20;
+const MAX_BASELINE_BYTES = 512 * 1024;
 
 /** Result of analysing one changed file. */
 export interface ImpactReport {
@@ -24,9 +27,47 @@ export interface ImpactReport {
   conflict: Conflict | null;
 }
 
-/** kv key under which the last known export surface of a file is stored. */
-export function surfaceKey(projectId: string, path: string): string {
-  return `surface:${projectId}:${path}`;
+/**
+ * kv key under which the last known export surface of a file is stored. Each linked worktree has
+ * its own copy of the file, so it has its own surface: pass `worktree` for any checkout other than
+ * the project's main one.
+ */
+export function surfaceKey(projectId: string, path: string, worktree?: string): string {
+  if (worktree === undefined) return `surface:${projectId}:${path}`;
+  return `surface:${projectId}:@${sha256(worktree).slice(0, 16)}:${path}`;
+}
+
+/** What is remembered next to a stored surface. */
+interface SurfaceState {
+  /** HEAD of the checkout when the surface was stored (null when unknown). */
+  head: string | null;
+  /** Conflicts this file's changes opened, with the exports as they were before. */
+  open: { conflictId: string; before: Record<string, string> }[];
+}
+
+function stateKey(surface: string): string {
+  return `surface-state:${surface.slice('surface:'.length)}`;
+}
+
+function readState(value: unknown): SurfaceState {
+  const v = (value ?? {}) as Partial<SurfaceState>;
+  const open = Array.isArray(v.open)
+    ? v.open.filter(
+        (o): o is SurfaceState['open'][number] =>
+          typeof o === 'object' &&
+          o !== null &&
+          typeof o.conflictId === 'string' &&
+          typeof o.before === 'object' &&
+          o.before !== null,
+      )
+    : [];
+  return { head: typeof v.head === 'string' ? v.head : null, open };
+}
+
+/** Root of the checkout `file` lives in: the actor's worktree, which may not be the project root. */
+function treeRootOf(file: ChangedFile, projectRoot: string): string {
+  const suffix = `/${file.path}`;
+  return file.abs.endsWith(suffix) ? file.abs.slice(0, -suffix.length) || '/' : projectRoot;
 }
 
 /**
@@ -92,28 +133,45 @@ export class ImpactService {
     }
     if (!after) return null;
 
-    const key = surfaceKey(projectId, file.path);
+    // The file, its HEAD version and its importers are those of the checkout the agent works in.
+    const tree = treeRootOf(file, projectRoot);
+    const key = surfaceKey(projectId, file.path, tree === projectRoot ? undefined : tree);
     const stored = this.k.store.kv.get<Record<string, string>>(key);
+    const state = readState(this.k.store.kv.get<unknown>(stateKey(key)));
+    const head = await git.headCommit(tree);
     let before: Map<string, string> | null;
     if (stored && typeof stored === 'object') {
       before = new Map(Object.entries(stored).filter(([, v]) => typeof v === 'string'));
+      if (head !== null && state.head !== null && head !== state.head) {
+        before = (await this.committedSurface(tree, file.path, state.head, head)) ?? before;
+      }
     } else {
-      const head = await git.fileAtRef(projectRoot, 'HEAD', file.path);
-      before = head === null ? null : git.exportSurface(head, file.path);
+      const atHead = await git.fileAtRef(tree, 'HEAD', file.path);
+      before = atHead === null ? null : git.exportSurface(atHead, file.path);
     }
     this.k.store.kv.set(key, Object.fromEntries(after));
-    if (!before) return null;
+    const saveState = (): void => {
+      this.k.store.kv.set(stateKey(key), { head, open: state.open.slice(-MAX_OPEN_PER_FILE) });
+    };
+    if (!before) {
+      saveState();
+      return null;
+    }
 
+    state.open = this.closeRestored(projectId, session, file.path, state.open, after);
     const raw = git.diffExportSurface(before, after);
     const diff: ExportSurfaceDiff = {
       added: cleanNames(raw.added),
       removed: cleanNames(raw.removed),
       changed: cleanNames(raw.changed),
     };
-    if (diff.removed.length === 0 && diff.changed.length === 0) return null;
+    if (diff.removed.length === 0 && diff.changed.length === 0) {
+      saveState();
+      return null;
+    }
 
     const dependents = [
-      ...new Set((await git.dependentsOf(projectRoot, file.path)).filter((d) => d !== file.path)),
+      ...new Set((await git.dependentsOf(tree, file.path)).filter((d) => d !== file.path)),
     ].slice(0, MAX_DEPENDENTS);
     const targets = new Set([file.path, ...dependents]);
     const affected = this.affectedSessions(projectId, session, targets);
@@ -126,6 +184,7 @@ export class ImpactService {
       }
     }
     if (affected.length === 0 && dependents.length === 0) {
+      saveState();
       return { path: file.path, diff, dependents, affected: [], conflict: null };
     }
 
@@ -159,6 +218,16 @@ export class ImpactService {
         payload: { conflictId: conflict.id, kind: conflict.kind, title: conflict.title },
       });
     }
+    const was: Record<string, string> = {};
+    for (const name of [...diff.removed, ...diff.changed]) {
+      const sig = before.get(name);
+      if (sig !== undefined) was[name] = sig;
+    }
+    state.open = [
+      ...state.open.filter((o) => o.conflictId !== conflict.id),
+      { conflictId: conflict.id, before: was },
+    ];
+    saveState();
     const diffKey = fingerprint(...diff.removed, '|', ...diff.changed, '|', ...diff.added);
     for (const a of affected) {
       this.send(
@@ -180,6 +249,77 @@ export class ImpactService {
       affected: affected.map((a) => ({ sessionId: a.session.id, files: a.files })),
       conflict,
     };
+  }
+
+  /**
+   * The surface to compare against after HEAD moved since the stored one was taken. A commit,
+   * checkout or pull that changed the file's exports happened outside any agent edit, so the
+   * stored surface no longer describes what the agent started from: the committed file does.
+   * Null when the commits left the exports alone (or cannot be read), and the stored surface holds.
+   */
+  private async committedSurface(
+    tree: string,
+    path: string,
+    oldHead: string,
+    newHead: string,
+  ): Promise<Map<string, string> | null> {
+    const git = this.k.ports.git;
+    const surfaceAt = async (ref: string): Promise<Map<string, string> | null> => {
+      if (!git.fileStateAtRef) return null;
+      const at = await git.fileStateAtRef(tree, ref, path, MAX_BASELINE_BYTES);
+      if (at?.state === 'absent') return new Map();
+      return at?.state === 'file' ? git.exportSurface(at.content, path) : null;
+    };
+    const [then, now] = [await surfaceAt(oldHead), await surfaceAt(newHead)];
+    if (!then || !now) return null;
+    const moved = git.diffExportSurface(then, now);
+    const same = moved.added.length + moved.removed.length + moved.changed.length === 0;
+    return same ? null : now;
+  }
+
+  /**
+   * Closes the conflicts of earlier changes to `path` whose exports are back as they were, and
+   * tells the sessions that were warned. Returns the conflicts that stay open.
+   */
+  private closeRestored(
+    projectId: string,
+    actor: Session,
+    path: string,
+    open: SurfaceState['open'],
+    after: ReadonlyMap<string, string>,
+  ): SurfaceState['open'] {
+    const kept: SurfaceState['open'] = [];
+    for (const o of open) {
+      const names = Object.keys(o.before);
+      const restored = names.length > 0 && names.every((n) => after.get(n) === o.before[n]);
+      if (!restored) {
+        kept.push(o);
+        continue;
+      }
+      const conflict = this.k.store.conflicts.find(o.conflictId);
+      if (!conflict || (conflict.status !== 'open' && conflict.status !== 'acknowledged')) continue;
+      this.k.store.conflicts.setStatus(conflict.id, 'resolved');
+      this.k.store.events.append({
+        projectId,
+        sessionId: actor.id,
+        type: 'conflict.updated',
+        payload: { conflictId: conflict.id, kind: conflict.kind, status: 'resolved' },
+      });
+      const live = new Set(liveSessions(this.k, projectId).map((s) => s.id));
+      const told = conflict.sessionIds.filter((id) => id !== actor.id && live.has(id));
+      if (told.length === 0) continue;
+      this.telepathy.send({
+        projectId,
+        from: actor,
+        to: { sessionIds: told },
+        kind: 'impact',
+        priority: 5,
+        title: `${sessionLabel(actor)} restored the exports of ${path}`,
+        body: `Back as before: ${nameList(cleanNames(names))}. The earlier warning about ${path} no longer applies.`,
+        dedupeKey: `impact-restored:${conflict.id}:${conflict.updatedAt}`,
+      });
+    }
+    return kept;
   }
 
   private send(
