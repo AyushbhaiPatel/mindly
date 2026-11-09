@@ -55,11 +55,16 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 
 - A redaction pass runs on every prompt, tool payload, memory body and notification before it is
   stored or sent: private keys, common provider tokens (AWS, GitHub, Slack, Stripe, OpenAI,
-  Anthropic, Google, npm, JWTs), `.env`-style assignments and high-entropy strings next to
-  secret-like names.
-- Paths matching the default deny-list (`.env*`, `*.pem`, `*.key`, `id_*`, `.ssh/`, `.aws/`,
-  `.npmrc`, `.netrc`, `secrets/`, credential stores) are never read for evidence and their content
-  is never captured.
+  Anthropic, Google, npm, JWTs), credentials in URLs, and values next to secret-like names:
+  `.env`-style assignments (a quoted value is removed whole), command-line flags such as
+  `--token <value>` and `--password <value>`, `docker login -p <value>` and `-u user:<value>`.
+  Task titles, plan steps and blockers go through the same pass. Type annotations and references
+  such as `process.env.X` or `$TOKEN` are left alone, since they hold no secret.
+- Paths matching the default deny-list are never read for evidence and their content is never
+  captured: `.env`, `.env.*`, `.env-*`, `.env_*`, `.envrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
+  `*.keystore`, `*.kdbx`, SSH private keys (`id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`),
+  `.ssh/`, `.aws/`, `.gnupg/`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `secrets/`,
+  `credentials.json` and `service-account*.json`, at any depth. `redaction.denyPaths` adds more.
 - Model API keys are read from environment variables at call time and never written to disk by
   Mindly.
 - Pager payloads contain titles and counts only, never code or prompt text.
@@ -139,8 +144,9 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 
 ### T7. Denial of service against agents
 
-- Hooks have a hard deadline (default 1500 ms) and fail open: on any internal error they print
-  nothing and exit 0 so the agent continues.
+- Hooks have a hard deadline (`hooks.timeoutMs`, default 1500 ms, at most 10 s) and fail open: on
+  any internal error they print nothing and exit 0 so the agent continues. The hooks are also
+  registered with each agent's own 10 second limit, as a backstop if the process hangs.
 - Context packets are bounded by a token budget; retrieval queries are bounded by `LIMIT`.
 - SQLite runs with `busy_timeout` and WAL; long-running work happens in the daemon, not in hooks.
 

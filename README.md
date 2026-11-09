@@ -432,8 +432,9 @@ for its scratch copy, run again only when a lockfile or manifest changes:
 Agents call Mindly through their own hooks at session start, on each prompt, and around each tool
 call. Mindly answers with a short block of context, marked as reference information and never as
 instructions, or with a block when an enforced rule is broken. Each hook call takes about 0.2
-seconds on a laptop, and if Mindly fails or takes longer than 10 seconds the agent carries on
-without it. More detail: [docs/architecture.md](docs/architecture.md).
+seconds on a laptop, and if Mindly fails or takes longer than its deadline (1.5 seconds by
+default, `hooks.timeoutMs`) the agent carries on without it. More detail:
+[docs/architecture.md](docs/architecture.md).
 
 ## Privacy and security
 

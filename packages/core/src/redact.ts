@@ -16,8 +16,11 @@ interface Rule {
   re: RegExp;
   /** Replacement; `$1` style groups keep non-secret context such as the variable name. */
   replace: string;
-  /** Returns true for matches that are clearly not secrets (receives the capture groups). */
-  skip?: (groups: readonly string[]) => boolean;
+  /**
+   * Returns true for matches that are clearly not secrets. Receives the capture groups and the
+   * few characters that follow the match.
+   */
+  skip?: (groups: readonly string[], after: string) => boolean;
 }
 
 /** Type names that follow `password:` in code (TypeScript, Python, Go, …), never secrets. */
@@ -48,18 +51,29 @@ const TYPE_WORDS = new Set([
  * True when an assignment's value is a type annotation or a reference to where the secret lives
  * (`process.env.X`, `config.password`), not a literal secret. Redacting those only garbles code.
  */
-function isNonSecretValue(prefix: string, raw: string): boolean {
+function isNonSecretValue(prefix: string, raw: string, after = ''): boolean {
   const value = raw.replace(/[)\]}>.;,]+$/, '');
   // Type names only count after an unquoted `:` (an annotation), never after `=` or a quote.
   const annotation = /:\s*$/.test(prefix);
   if (annotation && TYPE_WORDS.has(value.toLowerCase())) return true;
   if (annotation && /^[A-Z][A-Za-z0-9]*(?:[<[(|].*)?$/.test(value) && !/\d/.test(value)) {
-    return true;
+    // A capitalised word is a type name only where code continues around it: a generic or union
+    // (`Optional[str]`, `Foo | null`), or a closing bracket, separator or default value after it
+    // (`password: SecretString }`). Alone on its line (`password: Wintermute`) it is a value.
+    const typeSyntax = value !== raw || /[<[(|]/.test(value);
+    if (typeSyntax || /^[ \t]{0,8}(?:\r?\n[ \t]{0,8})?[;,)}\]|=>]/.test(after)) return true;
   }
   return /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|env\.|config\.|settings\.|this\.|self\.|options\.|opts\.|props\.|req\.|args\.)/.test(
     value,
   );
 }
+
+/** Words that mark a name (variable, key or flag) as holding a secret. */
+const SECRET_WORDS =
+  'secret|token|passwd|password|pwd|api[_-]?key|apikey|private[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?key|credentials?';
+
+/** A secret-bearing name: a secret word with up to 60 name characters on either side. */
+const SECRET_NAME = `[A-Za-z0-9_.-]{0,60}(?:${SECRET_WORDS})[A-Za-z0-9_.-]{0,60}`;
 
 const RULES: Rule[] = [
   {
@@ -107,11 +121,51 @@ const RULES: Rule[] = [
     replace: `$1${REDACTED}@`,
   },
   {
+    kind: 'cli_credentials',
+    // `-u user:password` / `--user user:password` (curl, wget). A numeric value is a uid:gid.
+    re: /((?:^|\s)(?:-u|--user)\s{1,5}["']?[^\s:"'`]{1,200}:)([^\s"'`]{3,200})/g,
+    replace: `$1${REDACTED}`,
+    skip: (g) => /^\d+$/.test(g[2] ?? '') || (g[2] ?? '').startsWith('$'),
+  },
+  {
+    kind: 'cli_credentials',
+    // `docker login -p value`: `-p` means a password only for this command.
+    re: /\b(docker\s{1,5}login\s[^\n|;&]{0,200}?-p\s{1,5}["']?)([^\s"'`]{3,4000})/g,
+    replace: `$1${REDACTED}`,
+    skip: (g) => (g[2] ?? '').startsWith('$'),
+  },
+  {
+    kind: 'cli_flag',
+    // `--token value` / `--db-password value`: a flag whose name ends in a secret word, with the
+    // value as the next argument. `--password-stdin`, `--token-file` and the like do not end in
+    // one; a value that is another flag or a shell variable is not a literal secret.
+    re: new RegExp(
+      `((?:^|[\\s"'\`(])--?(?:[A-Za-z0-9]{1,30}[-_]){0,6}(?:${SECRET_WORDS})\\s{1,5}["']?)([^\\s"'\`,;]{6,4000})`,
+      'gi',
+    ),
+    replace: `$1${REDACTED}`,
+    skip: (g) => /^[-$]/.test(g[2] ?? ''),
+  },
+  {
     kind: 'assignment',
-    // NAME=value / "name": "value" where NAME looks secret-bearing.
-    re: /\b([A-Za-z0-9_.-]{0,60}(?:secret|token|passwd|password|pwd|api[_-]?key|apikey|private[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?key|credentials?)[A-Za-z0-9_.-]{0,60}["']?\s{0,5}[:=]\s{0,5}["']?)([^\s"'`,;]{6,4000})/gi,
+    // NAME="value" / "name": "value": a quoted value is taken whole, spaces and punctuation
+    // included, up to its closing quote.
+    re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}")([^"\\n]{6,4000})(?=")`, 'gi'),
     replace: `$1${REDACTED}`,
     skip: (g) => isNonSecretValue(g[1] ?? '', g[2] ?? ''),
+  },
+  {
+    kind: 'assignment',
+    re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}')([^'\\n]{6,4000})(?=')`, 'gi'),
+    replace: `$1${REDACTED}`,
+    skip: (g) => isNonSecretValue(g[1] ?? '', g[2] ?? ''),
+  },
+  {
+    kind: 'assignment',
+    // NAME=value / name: value where NAME looks secret-bearing.
+    re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}["']?)([^\\s"'\`,;]{6,4000})`, 'gi'),
+    replace: `$1${REDACTED}`,
+    skip: (g, after) => isNonSecretValue(g[1] ?? '', g[2] ?? '', after),
   },
 ];
 
@@ -150,10 +204,19 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
   const apply = (kind: string, re: RegExp, replace: string, skip?: Rule['skip']): void => {
     re.lastIndex = 0;
     text = text.replace(re, (...args: unknown[]) => {
-      // Do not double-count already-redacted values.
       const match = String(args[0]);
-      if (match.endsWith(REDACTED) || match === REDACTED) return match;
-      if (skip?.(args.map((a) => (typeof a === 'string' ? a : '')))) return match;
+      const groups = args.map((a) => (typeof a === 'string' ? a : ''));
+      // Do not double-count a value that is already redacted. Only the secret part is looked
+      // at (the match without its kept prefix), and only when nothing else is left in it: a
+      // value that merely ends in an earlier redaction still has a secret in front of it.
+      const prefix = replace.startsWith('$1') ? (groups[1] ?? '') : '';
+      const secret = match.startsWith(prefix) ? match.slice(prefix.length) : match;
+      if (secret.includes(REDACTED) && !/[A-Za-z0-9]/.test(secret.split(REDACTED).join(''))) {
+        return match;
+      }
+      const offset = args.find((a) => typeof a === 'number');
+      const end = (typeof offset === 'number' ? offset : 0) + match.length;
+      if (skip?.(groups, text.slice(end, end + 12))) return match;
       count++;
       kinds.add(kind);
       return replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? ''));
@@ -194,12 +257,16 @@ export function redactDeep<T>(value: T, options?: RedactOptions, depth = 0): T {
 export const DEFAULT_DENY_PATHS: readonly string[] = [
   '**/.env',
   '**/.env.*',
+  '**/.env-*',
+  '**/.env_*',
+  '**/.envrc',
   '**/*.pem',
   '**/*.key',
   '**/*.p12',
   '**/*.pfx',
   '**/*.keystore',
   '**/id_rsa*',
+  '**/id_dsa*',
   '**/id_ed25519*',
   '**/id_ecdsa*',
   '**/.ssh/**',
