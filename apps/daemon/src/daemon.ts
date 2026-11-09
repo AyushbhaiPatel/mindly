@@ -25,6 +25,7 @@ import {
 } from './jobs/maintenance.js';
 import { failoverTick } from './jobs/runs.js';
 import { Scheduler } from './jobs/scheduler.js';
+import { sentinelPruneTick, sentinelTick } from './jobs/sentinel.js';
 import { shadowMergeTick } from './jobs/shadow-merge.js';
 import { LiveFeed } from './live.js';
 import { buildServer, defaultDashboardDir } from './server.js';
@@ -299,6 +300,22 @@ export function registerJobs(jobs: JobContext): void {
     run: async () => {
       await trackSurvivalTick(jobs);
     },
+  });
+  // Always scheduled: the tick reads `sentinel.*` from the config file, so turning it on or off
+  // with `mindly config set` needs no restart.
+  scheduler.every({
+    name: 'sentinel',
+    intervalMs: 15_000,
+    initialDelayMs: 30_000,
+    run: async () => {
+      await sentinelTick(jobs);
+    },
+  });
+  scheduler.every({
+    name: 'sentinel-prune',
+    intervalMs: 60 * MINUTE,
+    initialDelayMs: 5 * MINUTE,
+    run: () => sentinelPruneTick(jobs),
   });
   if (config.standup.time) {
     scheduler.every({ name: 'standup', intervalMs: MINUTE, run: () => standupTick(jobs) });

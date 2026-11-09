@@ -132,6 +132,21 @@ export const UserConfigSchema = z.object({
       minSessions: z.number().int().min(1).max(10_000).default(3),
     })
     .prefault({}),
+  sentinel: z
+    .object({
+      /**
+       * Run the project's trusted checks in the background (daemon) as agents edit, and find the
+       * edit that broke one. Off by default: it runs your test commands on its own.
+       */
+      enabled: z.boolean().default(false),
+      /** Check a working tree once this many new steps have piled up since the last check. */
+      everySteps: z.number().int().min(1).max(1000).default(10),
+      /** Or once no new step has come for this long (the agents paused). */
+      quietSec: z.number().int().min(10).max(3600).default(60),
+      /** Bisects the sentinel may start per project in 24 hours (each runs a check several times). */
+      maxBisectsPerDay: z.number().int().min(0).max(1000).default(20),
+    })
+    .prefault({}),
 });
 export type UserConfig = z.infer<typeof UserConfigSchema>;
 
@@ -221,6 +236,22 @@ export const ProjectConfigSchema = z.object({
   ignore: z.array(z.string().max(512)).max(200).default([]),
   /** Optional fixed context included in every session start (subject to trust labelling). */
   notes: z.string().max(4000).optional(),
+  /**
+   * What the sentinel runs after agent edits: a subset of `checks` by name (default: all), and a
+   * setup command for its scratch tree (e.g. installing dependencies), run again only when a
+   * lockfile or manifest changes.
+   */
+  sentinel: z
+    .object({
+      checks: z
+        .array(z.string().regex(/^[A-Za-z0-9 _.-]{1,64}$/))
+        .min(1)
+        .max(20)
+        .optional(),
+      setup: ArgvSchema.optional(),
+      setupTimeoutSec: z.number().int().min(5).max(3600).default(600),
+    })
+    .optional(),
 });
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 

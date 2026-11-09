@@ -11,7 +11,7 @@ import {
 } from '@mindly/core';
 import { sessionLabel } from '../coordination/work.js';
 import type { Kernel } from '../kernel.js';
-import { USER, type MemoryService } from '../memory/service.js';
+import { SYSTEM, USER, type MemoryService } from '../memory/service.js';
 
 /*
  * `mindly bisect`: binary search over checkpoints for the first step where a command fails. The
@@ -326,16 +326,60 @@ export class BisectService {
   }
 
   /**
-   * Remembers a reliable result as a mistake in the project (source: the user, who ran the
-   * bisect), scoped to the step's paths, so agents are warned before they repeat it. Only agent
-   * steps are recorded: nobody is blamed for a change made outside any agent.
+   * The stored result of a bisect run, the same for `mindly bisect` and the sentinel. The blamed
+   * step is kept as it was when found, so `mindly track` can still attribute the run after the
+   * checkpoint itself is pruned. `checks` must already be sanitized.
+   */
+  resultRecord(input: {
+    status: BisectStatus | 'cancelled';
+    search: BisectSearchResult | null;
+    checks: readonly StepCheck[];
+    firstBad: StepInfo | null;
+    lastGood: StepInfo | null;
+    output: string | null;
+    durationMs: number;
+    mistakeId: string | null;
+  }): Record<string, unknown> {
+    const { status, search } = input;
+    return {
+      status,
+      checks: input.checks,
+      firstBad: input.firstBad?.seq ?? null,
+      blame:
+        status === 'found' && search?.firstBad
+          ? {
+              checkpointId: search.firstBad.id,
+              kind: search.firstBad.kind,
+              gap: search.firstBad.gap,
+              sessionId: search.firstBad.sessionId,
+              paths: search.firstBad.paths,
+              at: search.firstBad.createdAt,
+            }
+          : null,
+      lastGood: input.lastGood?.seq ?? null,
+      flaky: search?.flaky ?? false,
+      skipped: (search?.skipped ?? []).map((s) => s.seq),
+      output: input.output,
+      runs: input.checks.length,
+      durationMs: input.durationMs,
+      mistakeId: input.mistakeId,
+    };
+  }
+
+  /**
+   * Remembers a reliable result as a mistake in the project, scoped to the step's paths, so agents
+   * are warned before they repeat it. Found by the user (`mindly bisect`), it is approved; found by
+   * the sentinel on its own, nobody looked at it, so it is only proposed. Only agent steps are
+   * recorded: nobody is blamed for a change made outside any agent.
    */
   recordMistake(input: {
     projectId: string;
     projectRoot: string;
     step: StepInfo;
     command: string;
+    foundBy?: 'user' | 'sentinel';
   }): Memory | null {
+    const bySentinel = input.foundBy === 'sentinel';
     const { step } = input;
     // A gap step may hold more than one edit, so nobody is blamed for it.
     if (step.kind !== 'agent' || !step.agentKind || step.gap) return null;
@@ -346,7 +390,7 @@ export class BisectService {
       .join(' ');
     const body = [
       `${step.agentKind} step ${step.seq} (${what}${paths.length > 3 ? ` and ${paths.length - 3} more` : ''}) broke \`${command}\`.`,
-      `Found with mindly bisect. See the edit and its prompt with: mindly bisect show ${step.seq}; undo that edit alone with: mindly bisect revert ${step.seq}`,
+      `Found with ${bySentinel ? "Mindly's sentinel" : 'mindly bisect'}. See the edit and its prompt with: mindly bisect show ${step.seq}; undo that edit alone with: mindly bisect revert ${step.seq}`,
     ].join(' ');
     return this.memory.remember({
       projectId: input.projectId,
@@ -356,8 +400,8 @@ export class BisectService {
       body,
       tags: ['mistake', 'bisect'],
       scopePaths: paths,
-      source: USER,
-      reason: 'found by mindly bisect',
+      source: bySentinel ? SYSTEM : USER,
+      reason: bySentinel ? "found by Mindly's sentinel" : 'found by mindly bisect',
     });
   }
 }

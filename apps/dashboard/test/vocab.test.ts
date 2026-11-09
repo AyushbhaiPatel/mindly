@@ -129,6 +129,7 @@ describe('status words', () => {
       'picked up by Codex',
     );
     expect(runKindWords('shadow_merge')).toBe('merge check');
+    expect(runKindWords('sentinel')).toBe('sentinel check');
   });
 });
 

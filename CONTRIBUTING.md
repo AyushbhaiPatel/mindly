@@ -34,6 +34,10 @@ pnpm check
 > ```bash
 > export MINDLY_HOME="$(pwd)/.mindly-dev"
 > ```
+>
+> To try the sentinel, use a folder outside the repository instead (for example
+> `"$(mktemp -d)/mindly-dev"`): it keeps scratch worktrees under `MINDLY_HOME`, and refuses to put
+> them inside the repository it checks.
 
 ### Try your changes
 

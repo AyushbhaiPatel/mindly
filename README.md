@@ -31,6 +31,7 @@ before the edit, not after the incident. Open source, and everything stays on yo
 | **Decisions that check themselves** | Turn a decision into a check that runs after every edit, and alert every agent when it breaks.      |
 | **Enforced rules**                  | Block writes that break a rule you marked as enforced, in every connected agent.                    |
 | **Bisect for agent edits**          | Find the exact agent edit that broke a command, who made it and from which prompt.                  |
+| **Sentinel**                        | Run your checks in the background as agents edit, and tell the agent whose edit broke one.          |
 | **Split**                           | Divide one goal across agents in separate worktrees, with file ownership and merge checks.          |
 | **Usage-limit handoff**             | When an agent hits its limit, the next one starts with the goal, plan, files and next steps.        |
 | **Shared rules and memory**         | Rules and decisions every agent starts with, labelled by who said them and whether you approved.    |
@@ -154,6 +155,35 @@ Broke at step 87 of 140 · 9 runs · 2m 41s
 Mindly keeps a checkpoint of the code after every agent edit. Bisect replays them in a separate
 copy of the repository, never in your checkout, and re-checks the answer so a flaky test doesn't
 blame the wrong agent.
+
+### Catches the break while the agent that made it is still working
+
+`mindly bisect` answers "which edit broke this?" after you notice. The sentinel asks it for you, as
+the agents work. Turn it on and it runs your trusted checks on the newest checkpoint every few
+edits (or when the agents pause), in its own scratch copy of the code:
+
+```bash
+mindly config set sentinel.enabled true
+mindly daemon start
+```
+
+When a check that was passing fails, it bisects the steps in between and tells the agent whose
+edit broke it, before that agent builds more on top:
+
+```text
+## Updates from other agents since your last turn
+- [conflict · from Mindly · just now] Your edit broke check "unit" — Mindly's sentinel ran the
+  project check "unit" (pnpm test billing) after recent edits. It passed at step 86 and fails from
+  step 87, your Edit of packages/billing/src/tax.ts (prompt: make tax calculation faster, cache
+  the rates per region). Failing output (last lines): "FAIL tax.test.ts > applies the regional
+  rate | expected 8.25, got 7.5". Fix this before building more on that change. The user can undo
+  that one edit with: mindly bisect revert 87
+```
+
+You get a conflict naming the step, and the same `mindly bisect show` / `revert` commands. A flaky
+failure (one that passes when run again) blames nobody, and a break that is not one agent's edit
+is reported without blame. `mindly sentinel` shows what it watches; `mindly sentinel run` checks
+the newest step now, even while it is off.
 
 ### Splits one goal across agents working in parallel
 
@@ -322,6 +352,7 @@ mindly handoff --summary "…" [--to codex]
 ```bash
 mindly bisect [--setup "<cmd>"] -- <command>   # the agent edit that broke a command
 mindly bisect list|show <step> [--patch]|revert <step>
+mindly sentinel [run|reset]          # background checks after agent edits, and who broke one
 mindly why <file>:<line>             # who wrote a line, and from which prompt
 mindly xray [--session <id>]         # the context an agent was given
 mindly saves [--since 7d]            # problems Mindly prevented, with proof
@@ -359,6 +390,9 @@ mindly config set checkpoints.keepDays 30
 | `checkpoints.keepDays`                  | `14`          | How long checkpoints are kept                                     |
 | `track.areaDepth`                       | `2`           | Folder depth of an area in `mindly track` (1-4)                   |
 | `track.minEdits` / `minSessions`        | `20` / `3`    | Data an agent needs in a folder before rates are shown            |
+| `sentinel.enabled`                      | `false`       | Run your trusted checks in the background after agent edits       |
+| `sentinel.everySteps` / `quietSec`      | `10` / `60`   | Check after this many new steps, or once the agents pause         |
+| `sentinel.maxBisectsPerDay`             | `20`          | Bisects the sentinel may start per project in 24 hours            |
 | `shadowMerge.enabled` / `intervalSec`   | `true` / `90` | Background merge checks between agents in separate worktrees      |
 | `failover.enabled`                      | `true`        | Brief the next agent when one hits its usage limit                |
 | `retention.promptsDays` / `eventsDays`  | `30` / `180`  | How long prompt text and event history are kept                   |
@@ -367,7 +401,16 @@ mindly config set checkpoints.keepDays 30
 | `redaction.extraPatterns` / `denyPaths` | none          | More secrets to redact and paths Mindly never reads               |
 
 Per-repository checks (commands Mindly may run, such as your test suite) go in
-`.mindly/config.json` and run only after you approve that exact version with `mindly trust`.
+`.mindly/config.json` and run only after you approve that exact version with `mindly trust`. The
+sentinel runs those checks too; a `sentinel` section can pick some of them and add a setup command
+for its scratch copy, run again only when a lockfile or manifest changes:
+
+```json
+{
+  "checks": [{ "name": "unit", "argv": ["pnpm", "test"], "timeoutSec": 300 }],
+  "sentinel": { "checks": ["unit"], "setup": ["pnpm", "install", "--frozen-lockfile"] }
+}
+```
 
 ## How it works
 
@@ -381,7 +424,7 @@ Per-repository checks (commands Mindly may run, such as your test suite) go in
      ┌────────────────────────────┴────────────────────────────┐
      │ rules · decisions · checks · who's editing what ·       │      optional background service:
      │ change warnings · checkpoints · handoffs                │ ───▶ dashboard, merge checks,
-     └────────────────────────────┬────────────────────────────┘      daily summary, pruning
+     └────────────────────────────┬────────────────────────────┘      sentinel, daily summary, pruning
                                   │
                ~/.mindly/mindly.db (SQLite)  +  hidden git refs for checkpoints
 ```
@@ -418,7 +461,7 @@ enforcing decisions, splitting work, and finding which agent's edit broke someth
 a single agent. Change warnings, split and usage-limit handoffs need two or more.
 
 **Do I need to keep something running?** No. The background service is only for the dashboard
-and background jobs, and `mindly dashboard` starts it for you.
+and background jobs (merge checks, the sentinel), and `mindly dashboard` starts it for you.
 
 **What if an agent learns something wrong?** It stays marked as proposed and unverified. Reject
 it with `mindly memory reject <id>`.

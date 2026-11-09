@@ -19,9 +19,15 @@ export class Scheduler {
   private readonly timers = new Set<NodeJS.Timeout>();
   private readonly chains = new Map<string, Promise<void>>();
   private readonly inFlight = new Set<Promise<void>>();
+  private readonly aborter = new AbortController();
   private stopped = false;
 
   constructor(private readonly logger: Logger) {}
+
+  /** Aborted when the scheduler stops, so long jobs can end their child processes. */
+  get signal(): AbortSignal {
+    return this.aborter.signal;
+  }
 
   /** True while a task for `key` is running or queued. */
   busy(key: string): boolean {
@@ -83,6 +89,7 @@ export class Scheduler {
    */
   async stop(graceMs = 10_000): Promise<boolean> {
     this.stopped = true;
+    this.aborter.abort();
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
     if (this.inFlight.size === 0) return true;

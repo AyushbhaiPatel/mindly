@@ -8,6 +8,7 @@ export {
   createLlmPort,
   createNotifierPort,
   createSplitGitPort,
+  createStepGitPort,
 } from './ports.js';
 
 export interface RuntimeOptions extends Omit<MindlyOptions, 'ports' | 'config'> {

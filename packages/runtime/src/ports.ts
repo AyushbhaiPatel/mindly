@@ -9,6 +9,7 @@ import {
   captureCheckpoint,
   captureWorktreeCommit,
   changedFiles,
+  createBisectWorkspace,
   checkpointDiskUsage,
   checkpointRefName,
   createSnapshotRef,
@@ -22,23 +23,27 @@ import {
   findRepoRoot,
   headCommit,
   hunkHashes,
+  isManifestPath,
   languageOf,
   listCheckpointRefs,
   listFiles,
   materializeTree,
   mergeIntoNewBranch,
+  openWarmWorkspace,
+  removeWarmWorkspace,
   removeWorktree,
   restoreSnapshotToBranch,
   runChecks,
   runGit,
   shadowMerge,
+  stepChanges,
   tryLockCheckpoint,
   worktreeId,
   assertValidBranchName,
   type ExportedSymbol,
   type ImportGraph,
 } from '@mindly/git';
-import type { CheckpointGitPort, SplitGitPort } from '@mindly/engine';
+import type { CheckpointGitPort, SplitGitPort, StepGitPort } from '@mindly/engine';
 
 /** `CheckpointGitPort` backed by `@mindly/git`. Errors propagate: the checkpoint service fails open. */
 export function createCheckpointGitPort(): CheckpointGitPort {
@@ -57,6 +62,33 @@ export function createCheckpointGitPort(): CheckpointGitPort {
     deleteRefs: (repoDir, refs) => deleteCheckpointRefs(repoDir, refs),
     diskUsage: (repoDir) => checkpointDiskUsage(repoDir),
     tryLock: (lockFile) => tryLockCheckpoint(lockFile),
+  };
+}
+
+/** `StepGitPort` backed by `@mindly/git`. Errors propagate: bisect and the sentinel report them. */
+export function createStepGitPort(): StepGitPort {
+  return {
+    scratch: (repoDir, commit) => createBisectWorkspace(repoDir, commit),
+    warm: (repoDir, path, commit) => openWarmWorkspace(repoDir, path, commit),
+    removeWarm: (repoDir, path) => removeWarmWorkspace(repoDir, path),
+    changedPaths: async (repoDir, from, to) =>
+      (await stepChanges(repoDir, from, to)).map((c) => c.path),
+    isManifestPath: (path) => isManifestPath(path),
+    run: async (dir, command, signal) => {
+      const [r] = await runChecks(
+        dir,
+        [{ name: command.name, argv: command.argv, timeoutSec: command.timeoutSec }],
+        signal ? { signal } : {},
+      );
+      if (!r) throw new Error('the command did not run');
+      return {
+        name: r.name,
+        status: r.status,
+        exitCode: r.exitCode,
+        durationMs: r.durationMs,
+        output: r.output,
+      };
+    },
   };
 }
 
@@ -248,6 +280,7 @@ export function createGitPort(): GitPort {
       }, false),
     split: createSplitGitPort(),
     checkpoints: createCheckpointGitPort(),
+    steps: createStepGitPort(),
   };
 }
 

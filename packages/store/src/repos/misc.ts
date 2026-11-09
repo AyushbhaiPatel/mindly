@@ -492,6 +492,36 @@ export class RunRepo {
     return this.list(projectId, { kind, limit: 1 })[0] ?? null;
   }
 
+  /**
+   * Runs of `kind` created at or after `since`, optionally only those whose `input.<field>`
+   * equals `value` (e.g. the bisects the sentinel started today).
+   */
+  countSince(
+    projectId: string,
+    kind: RunKind,
+    since: number,
+    where?: { field: string; value: string },
+  ): number {
+    if (where && !/^[A-Za-z][A-Za-z0-9]*$/.test(where.field)) {
+      throw new Error(`unsafe input field ${where.field}`);
+    }
+    const r = (
+      where
+        ? this.db
+            .prepare(
+              `SELECT COUNT(*) AS n FROM runs WHERE project_id = ? AND kind = ? AND created_at >= ?
+               AND json_extract(input, '$.${where.field}') = ?`,
+            )
+            .get(projectId, kind, since, where.value)
+        : this.db
+            .prepare(
+              'SELECT COUNT(*) AS n FROM runs WHERE project_id = ? AND kind = ? AND created_at >= ?',
+            )
+            .get(projectId, kind, since)
+    ) as Row;
+    return num(r, 'n');
+  }
+
   /** The newest run of `kind` whose `input.<field>` equals `value` (e.g. the merge check of one split). */
   latestWithInput(projectId: string, kind: RunKind, field: string, value: string): Run | null {
     if (!/^[A-Za-z][A-Za-z0-9]*$/.test(field)) throw new Error(`unsafe input field ${field}`);

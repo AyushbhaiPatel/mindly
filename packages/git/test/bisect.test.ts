@@ -7,6 +7,8 @@ import {
   createBisectWorkspace,
   isManifestPath,
   lockfileIn,
+  openWarmWorkspace,
+  removeWarmWorkspace,
   revertStep,
   runChecks,
   stepChanges,
@@ -316,5 +318,102 @@ describe('runChecks with a signal', () => {
     expect(post?.status).toBe('error');
     expect(post?.durationMs).toBeLessThan(5000);
     expect(Date.now() - started).toBeLessThan(8000);
+  });
+});
+
+describe('warm workspace (sentinel)', () => {
+  const worktreePaths = (root: string): string[] =>
+    git(root, 'worktree', 'list', '--porcelain')
+      .split('\n')
+      .filter((l) => l.startsWith('worktree '))
+      .map((l) => l.slice('worktree '.length));
+
+  it('is created outside the repository and reused, keeping ignored folders', async () => {
+    const { root, steps } = await chainRepo();
+    const path = join(tempDir(), 'sentinel', 'tree');
+    const first = await openWarmWorkspace(root, path, steps[0] as string);
+    expect(first.path).toBe(path);
+    expect(first.current).toBe(steps[0]);
+    expect(first.fresh).toBe(true);
+    expect(readFileSync(join(path, 'src/a.ts'), 'utf8')).toBe('export const a = 22;\n');
+    // What a setup command installs (ignored) and what a test run leaves (untracked, modified).
+    write(path, 'node_modules/dep/index.js', 'module.exports = 1;\n');
+    write(path, 'scratch.log', 'left by the command\n');
+    write(path, 'src/a.ts', 'garbage\n');
+    await first.dispose();
+    expect(existsSync(path)).toBe(true);
+
+    // Reopened at the same commit: reset anyway, dependencies kept.
+    const again = await openWarmWorkspace(root, path, steps[0] as string);
+    expect(again.fresh).toBe(false);
+    expect(readFileSync(join(path, 'src/a.ts'), 'utf8')).toBe('export const a = 22;\n');
+    expect(existsSync(join(path, 'scratch.log'))).toBe(false);
+    expect(existsSync(join(path, 'node_modules/dep/index.js'))).toBe(true);
+    // A checkout of the commit already there still discards what a command wrote meanwhile.
+    write(path, 'src/a.ts', 'written by the first check\n');
+    write(path, 'out.txt', 'left by the first check\n');
+    await again.checkout(steps[0] as string);
+    expect(readFileSync(join(path, 'src/a.ts'), 'utf8')).toBe('export const a = 22;\n');
+    expect(existsSync(join(path, 'out.txt'))).toBe(false);
+    expect(existsSync(join(path, 'node_modules/dep/index.js'))).toBe(true);
+    await again.checkout(steps[3] as string);
+    expect(again.current).toBe(steps[3]);
+    expect(readFileSync(join(path, 'src/c.ts'), 'utf8')).toBe('export const c = 1;\n');
+    expect(worktreePaths(root)).toContain(path);
+
+    await removeWarmWorkspace(root, path);
+    expect(existsSync(path)).toBe(false);
+    expect(worktreePaths(root)).not.toContain(path);
+    // Removing it again is fine.
+    await removeWarmWorkspace(root, path);
+  });
+
+  it('replaces a folder that is not a worktree of this repository', async () => {
+    const { root, steps } = await chainRepo();
+    const other = makeRepo({ 'x.txt': 'other\n' });
+    const path = join(tempDir(), 'tree');
+    // Another repository's worktree at the path, and a stale admin entry for a deleted folder.
+    git(other, 'worktree', 'add', '--detach', '-q', path, 'HEAD');
+    const ws = await openWarmWorkspace(root, path, steps[1] as string);
+    expect(existsSync(join(path, 'src/b.ts'))).toBe(true);
+    expect(existsSync(join(path, 'x.txt'))).toBe(false);
+    expect(worktreePaths(root)).toContain(path);
+
+    rmSync(path, { recursive: true, force: true });
+    const recreated = await openWarmWorkspace(root, path, steps[2] as string);
+    expect(recreated.current).toBe(steps[2]);
+    expect(recreated.fresh).toBe(true);
+    expect(existsSync(join(path, 'README.md'))).toBe(false);
+    await removeWarmWorkspace(root, ws.path);
+  });
+
+  it('is removed even when the checkout it was made for is gone', async () => {
+    const { root, steps } = await chainRepo();
+    const linked = join(tempDir(), 'part');
+    git(root, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+    const path = join(tempDir(), 'sentinel', 'tree');
+    await openWarmWorkspace(linked, path, steps[1] as string);
+    write(path, 'node_modules/dep/index.js', 'x\n');
+    git(root, 'worktree', 'remove', '--force', linked);
+    expect(existsSync(linked)).toBe(false);
+    await removeWarmWorkspace(linked, path);
+    expect(existsSync(path)).toBe(false);
+    expect(worktreePaths(root)).not.toContain(path);
+    // A folder that is not a linked worktree is never deleted this way.
+    const plain = join(tempDir(), 'plain');
+    write(plain, 'keep.txt', 'mine\n');
+    await expect(removeWarmWorkspace(linked, plain)).rejects.toThrow(/not a linked git worktree/);
+    expect(existsSync(join(plain, 'keep.txt'))).toBe(true);
+  });
+
+  it('refuses a path inside or around the repository', async () => {
+    const { root, steps } = await chainRepo();
+    for (const bad of [join(root, 'tree'), root, resolve(root, '..'), 'relative/tree']) {
+      await expect(openWarmWorkspace(root, bad, steps[0] as string)).rejects.toThrow(
+        /scratch tree/,
+      );
+      await expect(removeWarmWorkspace(root, bad)).rejects.toThrow(/scratch tree/);
+    }
+    expect(existsSync(join(root, 'src/a.ts'))).toBe(true);
   });
 });

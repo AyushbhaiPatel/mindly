@@ -56,7 +56,7 @@ their own internals; this file describes the contracts between them.
  ┌───────┴──────────────────────────────────────────────┐
  │ daemon (optional): Mission Control dashboard, live   │
  │ WebSocket feed, background jobs (shadow merge,       │
- │ self-healing sweeps, standup schedule, pager)        │
+ │ sentinel, self-healing sweeps, standup, pager)       │
  └──────────────────────────────────────────────────────┘
 ```
 
@@ -96,25 +96,27 @@ All state lives in one database at `$MINDLY_HOME/mindly.db` (default `~/.mindly`
 scoped to a `project_id`; a project is identified by the canonical (realpath) root of its git
 repository.
 
-| Table             | Purpose                                                                   |
-| ----------------- | ------------------------------------------------------------------------- |
-| `projects`        | Known project roots and their trust state                                 |
-| `sessions`        | One row per agent session (agent kind, external id, branch, worktree)     |
-| `events`          | Append-only log of everything that happened; monotonic `seq`, unique `id` |
-| `memories`        | Current version of each memory (fact, decision, rule, mistake, …)         |
-| `memory_versions` | Full history of every memory change (time travel)                         |
-| `memory_evidence` | Links a memory to files/commits/tests that support it (+ content hash)    |
-| `memories_fts`    | FTS5 index over memory title/body/tags                                    |
-| `tasks`           | Work items, owner session, status, plan                                   |
-| `intents`         | What a session is about to change (files, symbols, contracts)             |
-| `file_changes`    | Every edit an agent made: file, hunk hash, session, triggering prompt     |
-| `conflicts`       | Detected problems between sessions, with severity and lifecycle           |
-| `deliveries`      | Messages queued for a session/agent, with delivered/acked timestamps      |
-| `context_packets` | What context was given to which session and why (Context X-Ray)           |
-| `handoffs`        | Packaged task state for another agent to resume                           |
-| `contracts`       | Executable memory: declarative checks bound to a memory                   |
-| `snapshots`       | Multi-agent time-machine points (git ref + engine state)                  |
-| `runs`            | Shadow merge, replay and review executions and their results              |
+| Table              | Purpose                                                                   |
+| ------------------ | ------------------------------------------------------------------------- |
+| `projects`         | Known project roots and their trust state                                 |
+| `sessions`         | One row per agent session (agent kind, external id, branch, worktree)     |
+| `events`           | Append-only log of everything that happened; monotonic `seq`, unique `id` |
+| `memories`         | Current version of each memory (fact, decision, rule, mistake, …)         |
+| `memory_versions`  | Full history of every memory change (time travel)                         |
+| `memory_evidence`  | Links a memory to files/commits/tests that support it (+ content hash)    |
+| `memories_fts`     | FTS5 index over memory title/body/tags                                    |
+| `tasks`            | Work items, owner session, status, plan                                   |
+| `intents`          | What a session is about to change (files, symbols, contracts)             |
+| `file_changes`     | Every edit an agent made: file, hunk hash, session, triggering prompt     |
+| `conflicts`        | Detected problems between sessions, with severity and lifecycle           |
+| `deliveries`       | Messages queued for a session/agent, with delivered/acked timestamps      |
+| `context_packets`  | What context was given to which session and why (Context X-Ray)           |
+| `handoffs`         | Packaged task state for another agent to resume                           |
+| `contracts`        | Executable memory: declarative checks bound to a memory                   |
+| `snapshots`        | Multi-agent time-machine points (git ref + engine state)                  |
+| `runs`             | Shadow merge, replay, review, bisect and sentinel runs and their results  |
+| `checkpoints`      | A copy of the code after every agent edit (`mindly bisect`)               |
+| `sentinel_watches` | Per checkout: newest step checked, per-check state, warm tree setup       |
 
 Design rules:
 
@@ -197,6 +199,7 @@ dropped with an event.
 | Memory branches           | memories scoped to a git branch, promoted when the branch merges                                                                                     |
 | Morning standup           | digest built from the event log; CLI, dashboard, optional scheduled pager                                                                            |
 | Saves                     | `engine/features/saves` follows the event log of hook, CLI and daemon processes (not MCP); confirmed only on later evidence, expired by housekeeping |
+| Sentinel                  | `engine/features/sentinel`: trusted checks on the newest checkpoint per checkout (daemon job), bisect on passing → failing, delivery to the culprit  |
 
 ## Processes and IPC
 

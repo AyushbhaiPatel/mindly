@@ -157,6 +157,7 @@ export function runKindWord(kind: RunKind): string {
     replay: 'replay',
     contract_sweep: 'check sweep',
     bisect: 'bisect',
+    sentinel: 'sentinel check',
   };
   return words[kind];
 }

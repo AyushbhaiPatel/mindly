@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -74,6 +74,13 @@ export class CheckpointService {
       this.roots.set(cwd, p);
     }
     return p;
+  }
+
+  /** Removes the temp folder an instance without a home made for its private indexes. */
+  dispose(): void {
+    if (this.tmpDir === null) return;
+    rmSync(this.tmpDir, { recursive: true, force: true });
+    this.tmpDir = null;
   }
 
   /** Private directory (index and lock) of a working tree. */

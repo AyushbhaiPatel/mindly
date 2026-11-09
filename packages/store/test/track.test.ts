@@ -8,7 +8,7 @@ import { setup } from './helpers.js';
 
 const DAY = 86_400_000;
 const DOWNGRADE =
-  'DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines;';
+  'DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines;';
 
 function change(
   store: Store,
@@ -50,10 +50,10 @@ function indexSql(store: Store, name: string): string | undefined {
 describe('line survival schema (v5)', () => {
   it('is the fifth migration: added lines, survival and an index for the scan', () => {
     const { store } = setup();
-    expect(MIGRATIONS).toHaveLength(5);
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(5);
     expect(MIGRATIONS[4]).toBe(MIGRATION_V5_TRACK);
     expect(MIGRATIONS[3]).not.toContain('line_survival');
-    expect(schemaVersion(store.db)).toBe(5);
+    expect(schemaVersion(store.db)).toBe(MIGRATIONS.length);
     const cols = (
       store.db.prepare('PRAGMA table_info(line_survival)').all() as { name: string; pk: number }[]
     ).map((c) => [c.name, c.pk]);

@@ -1,30 +1,18 @@
 import { resolve } from 'node:path';
-import {
-  describeError,
-  redactText,
-  sanitizeForContext,
-  type Checkpoint,
-  type Run,
-} from '@mindly/core';
+import { describeError, redactText, type Checkpoint, type Run } from '@mindly/core';
 import {
   BisectAborted,
   bisectOf,
   bisectSearch,
-  type BisectRunner,
+  outputTail,
+  StepCommandRunner,
   type BisectSearchResult,
   type StepCheck,
+  type StepGitPort,
   type StepInfo,
+  type StepWorkspace,
 } from '@mindly/engine';
-import {
-  createBisectWorkspace,
-  isManifestPath,
-  lockfileIn,
-  revertStep,
-  runChecks,
-  stepChanges,
-  stepDiff,
-  type BisectWorkspace,
-} from '@mindly/git';
+import { lockfileIn, revertStep, stepDiff } from '@mindly/git';
 import { z } from 'zod';
 import { withProject, type ProjectScope } from '../context.js';
 import { confirm } from '../io.js';
@@ -55,8 +43,6 @@ const DEFAULT_SINCE = '24h';
 /** Time limit per run of the command (and of the setup command). */
 export const DEFAULT_TIMEOUT_SEC = 300;
 const MAX_TIMEOUT_SEC = 3600;
-/** Characters of command output kept in the run record and shown. */
-const OUTPUT_TAIL_CHARS = 4000;
 const MAX_STEP = 1_000_000_000;
 const MAX_LIST = 500;
 
@@ -114,7 +100,7 @@ export function splitCommandLine(text: string): string[] {
 /** The canonical working tree to search: `--worktree`, else the current folder's. */
 async function worktreeFor(scope: ProjectScope, cwd: string, override?: string): Promise<string> {
   const { mindly } = scope;
-  if (!mindly.kernel.ports.git.checkpoints) {
+  if (!mindly.kernel.ports.git.checkpoints || !mindly.kernel.ports.git.steps) {
     throw new HintedError(
       'unavailable',
       'git is not available, so Mindly has no checkpoints to search',
@@ -210,105 +196,6 @@ function stepsFor(
   return { steps, since };
 }
 
-// Terminal escape sequences (colours, cursor moves) in command output; the core sanitizers drop
-// the escape character, this drops the whole sequence so no `[31m` residue is shown.
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b[@-Z\\-_]/g;
-
-/** Last `OUTPUT_TAIL_CHARS` of process output, redacted and free of control characters. */
-function outputTail(text: string): string {
-  const redacted = redactText(text.replace(ANSI_RE, ''));
-  return sanitizeForContext(redacted.slice(-OUTPUT_TAIL_CHARS), OUTPUT_TAIL_CHARS);
-}
-
-/**
- * Runs the command at a step in the scratch worktree. The setup command runs before the first
- * step and again whenever the step checked out changes a lockfile or manifest; untracked
- * dependency folders stay in the scratch tree between checkouts.
- */
-class ScratchRunner implements BisectRunner {
-  private setupDone = false;
-
-  constructor(
-    private readonly ws: BisectWorkspace,
-    private readonly argv: readonly string[],
-    private readonly setup: readonly string[] | null,
-    private readonly timeoutSec: number,
-    private readonly signal: AbortSignal,
-  ) {}
-
-  async run(step: Checkpoint): Promise<StepCheck> {
-    const started = Date.now();
-    const done = (
-      partial: Pick<StepCheck, 'outcome' | 'skipReason' | 'exitCode' | 'output' | 'setupRan'>,
-    ): StepCheck => ({ seq: step.seq, durationMs: Date.now() - started, ...partial });
-    let setupRan = false;
-    try {
-      const previous = this.ws.current;
-      await this.ws.checkout(step.commit);
-      if (this.setup && (!this.setupDone || (await this.manifestChanged(previous, step.commit)))) {
-        setupRan = true;
-        const [s] = await runChecks(
-          this.ws.path,
-          [{ name: 'setup', argv: this.setup, timeoutSec: this.timeoutSec }],
-          { signal: this.signal },
-        );
-        if (this.signal.aborted) throw new BisectAborted();
-        // A failed install is tried again at the next step rather than blaming that step's edit.
-        this.setupDone = s?.status === 'pass';
-        if (!s || s.status !== 'pass') {
-          return done({
-            outcome: 'skip',
-            skipReason: 'setup_failed',
-            exitCode: s?.exitCode ?? null,
-            output: outputTail(s?.output ?? ''),
-            setupRan,
-          });
-        }
-      }
-      const [c] = await runChecks(
-        this.ws.path,
-        [{ name: 'command', argv: this.argv, timeoutSec: this.timeoutSec }],
-        { signal: this.signal },
-      );
-      if (!c) throw new Error('no result');
-      if (this.signal.aborted) throw new BisectAborted();
-      const output = outputTail(c.output);
-      if (c.status === 'timeout') {
-        return done({ outcome: 'skip', skipReason: 'timeout', exitCode: null, output, setupRan });
-      }
-      if (c.status === 'error') {
-        return done({ outcome: 'skip', skipReason: 'error', exitCode: null, output, setupRan });
-      }
-      if (c.exitCode === 125) {
-        return done({ outcome: 'skip', skipReason: 'exit_125', exitCode: 125, output, setupRan });
-      }
-      return done({
-        outcome: c.status === 'pass' ? 'good' : 'bad',
-        skipReason: null,
-        exitCode: c.exitCode,
-        output,
-        setupRan,
-      });
-    } catch (err) {
-      if (err instanceof BisectAborted || this.signal.aborted) throw new BisectAborted();
-      return done({
-        outcome: 'skip',
-        skipReason: 'error',
-        exitCode: null,
-        output: outputTail(describeError(err)),
-        setupRan,
-      });
-    }
-  }
-
-  private async manifestChanged(from: string, to: string): Promise<boolean> {
-    if (from === to) return false;
-    const changes = await stepChanges(this.ws.path, from, to);
-    return changes.some((c) => isManifestPath(c.path));
-  }
-}
-
 function sanitizeCheck(c: StepCheck): StepCheck {
   return { ...c, output: outputTail(c.output) };
 }
@@ -369,11 +256,16 @@ export async function bisectRun(
     const started = Date.now();
     let result: BisectSearchResult | null = null;
     let status: BisectReport['status'] = 'cancelled';
-    let ws: BisectWorkspace | null = null;
+    let ws: StepWorkspace | null = null;
     try {
-      ws = await createBisectWorkspace(worktree, good.commit);
+      const git = mindly.kernel.ports.git.steps as StepGitPort;
+      ws = await git.scratch(worktree, good.commit);
       deps.onWorkspace?.(ws.path);
-      const runner = new ScratchRunner(ws, argv, setup, timeoutSec, ac.signal);
+      const runner = new StepCommandRunner(git, ws, {
+        command: { name: 'command', argv, timeoutSec },
+        setup: setup ? { name: 'setup', argv: setup, timeoutSec } : null,
+        signal: ac.signal,
+      });
       result = await bisectSearch(steps, runner, {
         signal: ac.signal,
         onProgress: (p) => {
@@ -430,31 +322,20 @@ export async function bisectRun(
     }
     const runStatus: Exclude<Run['status'], 'queued' | 'running'> =
       status === 'found' ? 'passed' : status === 'cancelled' ? 'cancelled' : 'failed';
-    const saved = svc.finishRun(run, runStatus, {
-      status,
-      checks,
-      firstBad: firstBad?.seq ?? null,
-      // The blamed step as it was when found, so `mindly track` can still attribute the run
-      // after the checkpoint itself is pruned.
-      blame:
-        status === 'found' && result?.firstBad
-          ? {
-              checkpointId: result.firstBad.id,
-              kind: result.firstBad.kind,
-              gap: result.firstBad.gap,
-              sessionId: result.firstBad.sessionId,
-              paths: result.firstBad.paths,
-              at: result.firstBad.createdAt,
-            }
-          : null,
-      lastGood: lastGood?.seq ?? null,
-      flaky: report.flaky,
-      skipped: report.skipped,
-      output: report.output,
-      runs: report.runs,
-      durationMs,
-      mistakeId: report.mistakeId,
-    });
+    const saved = svc.finishRun(
+      run,
+      runStatus,
+      svc.resultRecord({
+        status,
+        search: result,
+        checks,
+        firstBad,
+        lastGood,
+        output: report.output,
+        durationMs,
+        mistakeId: report.mistakeId,
+      }),
+    );
     if (o.json) out.json({ ...report, run: { id: saved.id, status: saved.status } });
     else renderBisect(out.screen(), report);
     return status === 'found' ? 0 : 1;

@@ -620,6 +620,41 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
       ),
     );
 
+  // ---- sentinel ------------------------------------------------------------------------------
+  const sentinelCmd = program
+    .command('sentinel')
+    .description('Background checks after agent edits, and the edit that broke one')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (o: object) => async (out) =>
+          (await import('./commands/sentinel.js')).sentinelStatus(out, o),
+      ),
+    );
+  sentinelCmd
+    .command('run')
+    .description('Check the newest step now, in the foreground (works while it is off)')
+    .option('--worktree <path>', 'checkout to check (default: the current folder)')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/sentinel.js')).sentinelRun(out, cmd.optsWithGlobals()),
+      ),
+    );
+  sentinelCmd
+    .command('reset')
+    .description("Forget a checkout's sentinel state and delete its scratch copy")
+    .option('--worktree <path>', 'checkout to reset (default: the current folder)')
+    .option('-y, --yes', 'do not ask')
+    .option('--json', 'machine-readable output')
+    .action(
+      act(
+        (_o: object, cmd: Command) => async (out) =>
+          (await import('./commands/sentinel.js')).sentinelReset(out, cmd.optsWithGlobals()),
+      ),
+    );
+
   program
     .command('export')
     .description("Export this project's data as JSON")

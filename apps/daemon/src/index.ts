@@ -1,8 +1,8 @@
 /**
  * `@mindly/daemon`: the optional long-running local process. Serves the Mission Control dashboard
  * and the API in docs/api.md on 127.0.0.1 only, pushes the live event feed over WebSocket and runs
- * background jobs (shadow merge, command contracts, self-healing sweeps, housekeeping, standup,
- * review/replay queue, opt-in failover launch).
+ * background jobs (shadow merge, command contracts, the sentinel, self-healing sweeps,
+ * housekeeping, standup, review/replay queue, opt-in failover launch).
  */
 export {
   createDaemon,
@@ -47,3 +47,4 @@ export {
   type HousekeepingResult,
 } from './jobs/maintenance.js';
 export { executeReplay, executeReview, failoverTick, queueRun, resumePrompt } from './jobs/runs.js';
+export { sentinelPruneTick, sentinelTick } from './jobs/sentinel.js';
