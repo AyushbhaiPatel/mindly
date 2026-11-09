@@ -124,9 +124,13 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   again). It runs them the same way as the merge checks: argument list, no shell, minimal
   environment, time limit, own process group, killed when the daemon stops. They run in a warm
   scratch worktree under `$MINDLY_HOME/sentinel/` (mode `0700`), outside the repository, never in
-  the user's checkout; the path is refused if it is inside or around the repository. Bisects the
-  sentinel starts are capped per project per day (`sentinel.maxBisectsPerDay`). Agents cannot
-  start a pass: there is no MCP tool, and the daemon endpoint only reads.
+  the user's checkout; the path is refused if it is inside or around the repository (the sentinel
+  reports `MINDLY_HOME` inside the repository as not ready). One pass at a time holds a checkout,
+  by a lock released only when its process ends, and the daemon queues passes behind the
+  project's merge checks. Bisects the sentinel starts are capped per project per day
+  (`sentinel.maxBisectsPerDay`), and a step where nothing could run is retried with a growing
+  back-off (15 minutes up to 6 hours), not on every tick. Agents cannot start a pass: there is no
+  MCP tool, and the daemon endpoint only reads.
 - Check output reaches agents only as a redacted, sanitized, length-capped tail inside the
   delivery of a break, rendered as reference data like every other delivery: a test that prints
   instructions cannot turn them into a rule, a memory or a command.
@@ -215,7 +219,9 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - `mindly export` writes everything for a project as JSON.
 - `mindly forget --project` hard-deletes a project's rows, deletes its checkpoint refs and the
   sentinel's scratch worktrees from the repositories and vacuums the database. Scratch worktrees
-  unused for 3 days are removed by the daemon (and made again when needed).
+  unused for 3 days, and those of checkouts that no longer exist, are removed by the daemon (and
+  made again when needed). A scratch worktree pins the commit it last checked out, so git keeps
+  that commit's objects until the tree is removed, even past `checkpoints.keepDays`.
 - `mindly forget --memory <id>` hard-deletes one memory and its history.
 - Raw prompts are kept for 30 days by default (`retention.promptsDays`), then reduced to their
   redacted summary.

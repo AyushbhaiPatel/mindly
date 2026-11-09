@@ -13,15 +13,20 @@ All notable changes to `mindly-cli` are documented here. The project follows
   `mindly config set sentinel.enabled true` (the daemon picks the change up without a restart).
   - The daemon checks the newest checkpoint of each checkout that had an agent edit in the last
     24 hours, once `sentinel.everySteps` (10) new steps piled up or no new step came for
-    `sentinel.quietSec` (60). Checkouts are checked one at a time across all projects. It runs the
+    `sentinel.quietSec` (60). Checkouts are checked one at a time across all projects, each pass
+    queued behind the project's merge checks, and a checkout is held by one pass at a time (the
+    daemon's or `mindly sentinel run`) for as long as it runs. A step where nothing could run
+    (setup failed, every check timed out) is retried after a back-off of 15 minutes, doubling up
+    to 6 hours, or at the next new step. It runs the
     project's `checks` from `.mindly/config.json`, only while that file is trusted; an optional
     `sentinel` section picks some of them (`checks`) and adds a `setup` command (installing
     dependencies), run again only when a lockfile or manifest changed. `mindly trust` now lists
     the setup command.
   - Checks run in a warm scratch worktree under `$MINDLY_HOME/sentinel/`, one per checkout,
     outside the repository and never in your checkout; ignored folders (`node_modules`, `.venv`)
-    survive between passes, so dependencies are not installed every time. Trees unused for 3 days
-    are removed by the daemon.
+    survive between passes, so dependencies are not installed every time. Trees unused for 3 days,
+    and those of checkouts that no longer exist, are removed by the daemon, never while a pass
+    uses them. The sentinel does not run when `MINDLY_HOME` is inside the repository.
   - A check going from passing to failing starts a `mindly bisect` over the steps in between,
     in the same tree (at most `sentinel.maxBisectsPerDay`, 20, per project). When one agent edit
     broke it: a critical `check_failed` conflict names the step, the session and the paths; that
