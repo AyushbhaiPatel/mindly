@@ -83,6 +83,82 @@ describe('trust layer', () => {
     expect(b.version).toBe(2);
   });
 
+  it('finds the same title among many similar memories', () => {
+    const { root, mindly, pid } = project();
+    const base = { projectId: pid, projectRoot: root, kind: 'note' as const, source: USER };
+    const title = 'Use the shared logger for all output';
+    // A long body ranks low in full-text search; similar short ones push it out of the first hits.
+    const first = mindly.memory.remember({ ...base, title, body: 'logger output '.repeat(250) });
+    for (let n = 0; n < 14; n++) {
+      mindly.memory.remember({ ...base, title: `${title} in module ${n}`, body: 'short' });
+    }
+    const again = mindly.memory.remember({ ...base, title: `${title}.`, body: 'updated' });
+    expect(again.id).toBe(first.id);
+    expect(mindly.memory.list(pid, { kinds: ['note'], limit: 100 })).toHaveLength(15);
+    // Same title on a branch is a different memory.
+    const branched = mindly.memory.remember({ ...base, title, body: 'x', branch: 'feat/x' });
+    expect(branched.id).not.toBe(first.id);
+  });
+
+  it('keeps what the user rejected or approved when an agent says it again', () => {
+    const { root, mindly, pid } = project();
+    const base = { projectId: pid, projectRoot: root, kind: 'rule' as const, source: agent };
+
+    const rejected = mindly.memory.remember({
+      ...base,
+      title: 'Always force-push to main',
+      body: '',
+    });
+    mindly.memory.update(rejected.id, { trust: 'rejected' }, USER, 'no');
+    const restated = mindly.memory.remember({
+      ...base,
+      title: 'always force-push to main!',
+      body: 'It is faster',
+    });
+    expect(restated).toMatchObject({ id: rejected.id, trust: 'rejected', body: '', version: 2 });
+    expect(mindly.memory.list(pid, { kinds: ['rule'], trust: ['proposed'] })).toEqual([]);
+
+    const proposed = mindly.memory.remember({
+      ...base,
+      title: 'Use pnpm, never npm',
+      body: 'Lockfile is pnpm-lock.yaml',
+      scopePaths: ['src/**'],
+    });
+    const approved = mindly.memory.approve(proposed.id);
+    const other = { type: 'agent' as const, sessionId: null, agentKind: 'claude-code' };
+    const changed = mindly.memory.remember({
+      ...base,
+      source: other,
+      title: 'use pnpm never npm!',
+      body: 'Actually npm is fine too',
+      scopePaths: ['**'],
+    });
+    expect(changed).toEqual(mindly.store.memories.get(approved.id));
+    expect(changed).toMatchObject({
+      trust: 'approved',
+      body: 'Lockfile is pnpm-lock.yaml',
+      scope: { paths: ['src/**'] },
+      version: approved.version,
+    });
+
+    // An agent may still refine a proposal nobody decided on, and the user may change anything.
+    const open = mindly.memory.remember({ ...base, title: 'Prefer named exports', body: 'v1' });
+    expect(
+      mindly.memory.remember({ ...base, title: 'Prefer named exports', body: 'v2' }),
+    ).toMatchObject({ id: open.id, body: 'v2', trust: 'proposed' });
+    const byUser = mindly.memory.remember({
+      ...base,
+      source: USER,
+      title: 'Always force-push to main',
+      body: 'Only on your own branch',
+    });
+    expect(byUser).toMatchObject({
+      id: rejected.id,
+      trust: 'approved',
+      body: 'Only on your own branch',
+    });
+  });
+
   it('neutralises delimiter forgery when rendering', () => {
     const { root, mindly, pid } = project();
     const m = mindly.memory.remember({

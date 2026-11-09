@@ -28,9 +28,16 @@ you to approve.
 
 What it skips and keeps:
 
-- Headings, code blocks and boilerplate are skipped.
+- Headings, code blocks and boilerplate are skipped. A code block ends only at a fence of the same
+  kind that is at least as long as the one that opened it, so examples that contain their own
+  fences are skipped whole.
+- Bold and link markup is removed. Inline code is kept exactly as written, and so are names such
+  as `__init__.py` or `MY__ENV__VAR`.
 - Context such as a "Don'ts" heading stays attached to the items under it.
 - A rule Mindly already has is not imported again. That includes rules you archived or rejected.
+- Your decision on a rule stands. An agent that states a rule you rejected does not bring it back,
+  and one that restates a rule you approved does not change its text or its approval. Only you
+  can do either.
 - Path patterns in Cursor, Copilot and Kiro rules become the rule's scope.
 - If you later delete a line from the file, its rule is marked as possibly outdated.
 
@@ -53,7 +60,8 @@ Once it is on:
 - Mindly only writes between `<!-- mindly:rules:start -->` and `<!-- mindly:rules:end -->`.
   Everything else in the file stays exactly as you wrote it.
 - Only rules you approved yourself are written. A rule picked up from a prompt reaches connected
-  agents right away, but goes into the files only after you approve it.
+  agents right away, but goes into the files only after you approve it. Restoring a snapshot does
+  not count as that approval.
 - A rule imported from a file is not written back into that same file.
 - Edits made inside the section are replaced, with a warning. Change rules with `mindly rules` or
   in Mission Control.

@@ -210,6 +210,16 @@ export class MemoryService {
         'a user memory with this title exists; propose the change under a different title',
       );
     }
+    // What the user decided about a memory is not undone by saying it again: a memory they
+    // rejected stays rejected, and one they approved keeps its text, scope, evidence and trust.
+    // Only the user changes either (only the user can set these two trust levels).
+    if (
+      existing &&
+      input.source.type !== 'user' &&
+      (existing.trust === 'rejected' || existing.trust === 'approved')
+    ) {
+      return existing;
+    }
     const memory = this.k.store.transaction(() => {
       let m: Memory;
       if (existing) {
@@ -281,11 +291,12 @@ export class MemoryService {
     branch: string | null,
   ): Memory | null {
     const norm = normalizeTitle(title);
-    const candidates = this.k.store.memories.search(projectId, title, { kinds: [kind], limit: 10 });
-    for (const { memory } of candidates) {
-      if (normalizeTitle(memory.title) === norm && memory.scope.branch === branch) return memory;
-    }
-    return null;
+    return this.k.store.memories.findByTitle(
+      projectId,
+      kind,
+      branch,
+      (other) => normalizeTitle(other) === norm,
+    );
   }
 
   /** Validates a piece of file evidence: path containment, deny-list, size, and excerpt presence. */

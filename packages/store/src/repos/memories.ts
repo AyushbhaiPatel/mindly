@@ -351,6 +351,30 @@ export class MemoryRepo {
     return rows.map((r) => ({ memory: toMemory(r), rank: num(r, 'rank') }));
   }
 
+  /**
+   * The most recently updated active memory of `kind` on `branch` whose title `matches`. Reads
+   * titles only, so callers can compare normalised titles exactly instead of relying on search
+   * ranking, which drops a long memory out of the first hits once enough similar ones exist.
+   */
+  findByTitle(
+    projectId: string,
+    kind: MemoryKind,
+    branch: string | null,
+    matches: (title: string) => boolean,
+  ): Memory | null {
+    const rows = this.db
+      .prepare(
+        `SELECT id, title FROM memories
+         WHERE project_id = ? AND kind = ? AND status = 'active' AND scope_branch IS ?
+         ORDER BY updated_at DESC, id DESC`,
+      )
+      .iterate(projectId, kind, branch) as Iterable<Row>;
+    for (const r of rows) {
+      if (matches(str(r, 'title'))) return this.get(str(r, 'id'));
+    }
+    return null;
+  }
+
   versions(id: string): MemoryVersion[] {
     return (
       this.db

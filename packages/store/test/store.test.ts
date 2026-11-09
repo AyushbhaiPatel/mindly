@@ -180,6 +180,30 @@ describe('memories', () => {
     expect(store.memories.search(project.id, 'title:pnpm OR NEAR(a b)')).toBeInstanceOf(Array);
   });
 
+  it('finds an active memory by its title, per kind and branch', () => {
+    const { store, project } = setup();
+    const make = (title: string, extra: { kind?: 'rule' | 'fact'; branch?: string } = {}) =>
+      store.memories.create({
+        projectId: project.id,
+        kind: extra.kind ?? 'rule',
+        title,
+        body: '',
+        trust: 'approved',
+        source: user,
+        ...(extra.branch ? { scope: { branch: extra.branch } } : {}),
+      });
+    const shared = make('Use pnpm');
+    const branched = make('Use pnpm', { branch: 'feat/x' });
+    make('Use pnpm', { kind: 'fact' });
+    const lower = (t: string): boolean => t.toLowerCase() === 'use pnpm';
+    expect(store.memories.findByTitle(project.id, 'rule', null, lower)?.id).toBe(shared.id);
+    expect(store.memories.findByTitle(project.id, 'rule', 'feat/x', lower)?.id).toBe(branched.id);
+    expect(store.memories.findByTitle(project.id, 'rule', 'feat/y', lower)).toBeNull();
+    expect(store.memories.findByTitle(project.id, 'mistake', null, lower)).toBeNull();
+    store.memories.update(shared.id, { status: 'archived' }, user, null);
+    expect(store.memories.findByTitle(project.id, 'rule', null, lower)).toBeNull();
+  });
+
   it('promotes branch memories', () => {
     const { store, project } = setup();
     const m = store.memories.create({
