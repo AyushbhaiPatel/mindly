@@ -161,7 +161,10 @@ higher priority than the user's live instructions.
    marked `enforce` can deny the tool call; so can a strict split, for another part's files. Shell
    commands are read as text for the files they write (redirections, `rm`, `mv`, `cp`, `sed -i`,
    `tee`, …) and those files answer to the same rules and guards; a path only given to an unknown
-   program is a warning. Every path of the call is checked, also deny-listed files and files in
+   program is a warning. A directory or wildcard written as a whole (`rm -r dir`) is judged by
+   whether a rule's scope or another part's files can lie inside it: files are listed only inside
+   the project, only when that is possible, and a listing that was cut short never clears the
+   command. Every path of the call is checked, also deny-listed files and files in
    another working tree of the project, which are matched by name and never recorded.
 4. **After a tool runs** – file changes are recorded with provenance; the impact analyser compares
    the exported surface of the changed file before/after and notifies sessions whose work depends

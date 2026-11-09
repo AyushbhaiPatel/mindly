@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Mindly, USER } from '../src/index.js';
 import { event, FakeClock, fakeGit, setup, shellTool, writeTool } from './helpers.js';
@@ -248,6 +248,182 @@ describe('hook flow', () => {
       event(gone, 'codex', 'cx', 'pre_tool', { tool: writeTool('src/generated/api.ts', 'x') }),
     );
     expect(relative.decision).toBeNull();
+  });
+
+  it('judges a directory or wildcard by what it can reach, not by a listing that was cut short', async () => {
+    const { root, mindly } = setup();
+    const ctx = await mindly.projects.resolve(root);
+    const rule = (title: string, scope: string) =>
+      mindly.memory.remember({
+        projectId: ctx.project.id,
+        projectRoot: root,
+        kind: 'rule',
+        title,
+        body: 'Ask first.',
+        scopePaths: [scope],
+        source: USER,
+        enforce: true,
+      });
+    rule('Applied migrations are never edited', 'packages/db/prisma/migrations/**');
+    // A big package is listed before the protected file is reached.
+    mkdirSync(join(root, 'packages', 'web', 'src'), { recursive: true });
+    for (let i = 0; i < 2500; i++)
+      writeFileSync(join(root, 'packages', 'web', 'src', `f${i}.ts`), '');
+    mkdirSync(join(root, 'packages', 'db', 'prisma', 'migrations'), { recursive: true });
+    writeFileSync(join(root, 'packages', 'db', 'prisma', 'migrations', '001.sql'), 'select 1;');
+    mkdirSync(join(root, 'dist'));
+    writeFileSync(join(root, 'dist', 'main.js'), '');
+    mkdirSync(join(root, 'node_modules', 'left-pad'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', 'left-pad', 'cert.pem'), '');
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    for (const command of [
+      'rm -rf packages',
+      'rm -rf packages/*',
+      'rm -rf packages/db/prisma',
+      'git checkout -- packages',
+      'cd packages && rm -rf db',
+      'rm packages/*/prisma/migrations/*.sql',
+      'rm -rf .',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision, command).toBe('deny');
+      expect(r.reason, command).toContain('Applied migrations are never edited');
+    }
+    // What the rule cannot reach is not held up, however large it is.
+    for (const command of ['rm -rf packages/web', 'rm -rf dist', 'rm packages/web/src/*.ts']) {
+      expect((await shell(command)).decision, command).toBeNull();
+    }
+
+    rule('Certificates are issued by hand', '**/*.pem');
+    // The rule can reach any folder: a complete listing settles it, a cut-off one does not.
+    expect((await shell('rm -rf dist')).decision).toBeNull();
+    expect((await shell('rm -rf not-there')).decision).toBeNull();
+    const big = await shell('rm -rf packages/web');
+    expect(big.decision).toBe('deny');
+    expect(big.reason).toContain('Certificates are issued by hand');
+    expect(big.reason).toContain('packages/web/**');
+    // Dependency folders are only a rule's business when the rule names them.
+    expect((await shell('rm -rf node_modules')).decision).toBeNull();
+    rule('Vendored patches stay', 'node_modules/left-pad/**');
+    expect((await shell('rm -rf node_modules')).decision).toBe('deny');
+    // A program that may only read a folder is told about the rule, not blocked.
+    const tool = await shell('mytool packages/db/');
+    expect(tool.decision).toBeNull();
+  });
+
+  it('finds other working trees once and refuses what it cannot place', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-')));
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-wt-')));
+    const far = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-far-')));
+    for (let i = 0; i < 40; i++) {
+      mkdirSync(join(other, `d${i}`));
+      mkdirSync(join(far, `d${i}`));
+    }
+    const asked: string[] = [];
+    const treeOf = (cwd: string) =>
+      [root, other].find((t) => cwd === t || cwd.startsWith(`${t}/`)) ?? null;
+    const mindly = Mindly.open({
+      inMemory: true,
+      clock: new FakeClock(),
+      ports: {
+        git: {
+          ...fakeGit,
+          findRepoRoot: async (cwd) => {
+            asked.push(cwd);
+            return treeOf(cwd);
+          },
+          projectRoot: async (cwd) => (treeOf(cwd) ? root : null),
+        },
+      },
+    });
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'src/generated is produced by codegen',
+      scopePaths: ['src/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const write = (paths: string[]) =>
+      mindly.hooks.handle(
+        event(root, 'codex', 'cx', 'pre_tool', {
+          tool: {
+            ...writeTool('x', 'x')!,
+            edits: paths.map((path) => ({
+              path,
+              addedText: 'x',
+              removedText: '',
+              wholeFile: true,
+            })),
+          },
+        }),
+      );
+    // Forty folders of one other working tree cost one lookup, and the last file is still checked.
+    asked.length = 0;
+    const inOther = await write([
+      ...Array.from({ length: 40 }, (_, i) => join(other, `d${i}`, 'a.ts')),
+      join(other, 'src/generated/api.ts'),
+    ]);
+    expect(inOther.decision).toBe('deny');
+    expect(inOther.reason).toContain('src/generated/api.ts');
+    expect(asked.filter((d) => d.startsWith(other))).toHaveLength(1);
+    // A handful of places outside the project are looked up and found to be none of its business.
+    const few = await write(Array.from({ length: 10 }, (_, i) => join(far, `d${i}`, 'a.ts')));
+    expect(few.decision).toBeNull();
+    // More places than are looked up at once: the call is refused, not waved through.
+    const many = await write([
+      ...Array.from({ length: 40 }, (_, i) => join(far, `d${i}`, 'a.ts')),
+      join(other, 'src/generated/api.ts'),
+    ]);
+    expect(many.decision).toBe('deny');
+    expect(many.reason).toContain('could not check');
+    expect(many.reason).toContain('smaller steps');
+  });
+
+  it('applies rules to paths written through the home directory', async () => {
+    const { root, mindly } = setup();
+    mkdirSync(join(root, 'src', 'generated'));
+    writeFileSync(join(root, 'src', 'generated', 'api.ts'), 'export const a = 1;\n');
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'src/generated is produced by codegen',
+      scopePaths: ['src/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    const home = process.env['HOME'];
+    const name = basename(root);
+    try {
+      process.env['HOME'] = dirname(root);
+      for (const command of [
+        `rm ~/${name}/src/generated/api.ts`,
+        `cd ~/${name} && sed -i 's/a/b/' src/generated/api.ts`,
+        `cd ~ && rm -rf ${name}/src`,
+        `echo x > ~/${name}/src/generated/new.ts`,
+        `(cd /tmp && ls); rm src/generated/api.ts`,
+      ]) {
+        expect((await shell(command)).decision, command).toBe('deny');
+      }
+      expect((await shell(`rm ~/${name}/src/auth.ts`)).decision).toBeNull();
+      expect((await shell('rm ~/elsewhere/src/generated/api.ts')).decision).toBeNull();
+      // Another user's home is taken to sit next to this one.
+      process.env['HOME'] = join(dirname(root), 'someone');
+      expect((await shell(`rm ~${name}/src/generated/api.ts`)).decision).toBe('deny');
+      expect((await shell(`cd ~${name} && rm -rf src`)).decision).toBe('deny');
+    } finally {
+      if (home === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = home;
+    }
   });
 
   it('ignores writes outside the project and to denied paths', async () => {
