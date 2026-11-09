@@ -322,7 +322,12 @@ export class MemoryService {
   ): Memory {
     const cur = this.k.store.memories.get(id);
     const clean: MemoryPatch = { ...patch };
-    if (patch.title !== undefined) clean.title = sanitizeLine(redactText(patch.title), MAX_TITLE);
+    if (patch.title !== undefined) {
+      clean.title = sanitizeLine(
+        redactText(patch.title, { extraPatterns: this.k.config.redaction.extraPatterns }),
+        MAX_TITLE,
+      );
+    }
     if (patch.body !== undefined) clean.body = this.clean(patch.body, MAX_BODY);
     if (patch.tags !== undefined) clean.tags = cleanTags(patch.tags);
     if (patch.scope?.paths !== undefined) {

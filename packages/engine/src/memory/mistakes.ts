@@ -1,4 +1,12 @@
-import { fingerprint, redactText, sanitizeLine, type Memory, type Session } from '@mindly/core';
+import {
+  fingerprint,
+  REDACTED,
+  redactText,
+  sanitizeLine,
+  type Memory,
+  type RedactOptions,
+  type Session,
+} from '@mindly/core';
 import type { Kernel } from '../kernel.js';
 import type { MemoryService } from './service.js';
 
@@ -11,16 +19,20 @@ import type { MemoryService } from './service.js';
 /**
  * Reduces a shell command to a comparable key: the program and its first subcommand, ignoring
  * env assignments, flags and values (`npm test -- --watch` and `npm test` share a key).
+ *
+ * The key ends up in memory titles and events, so the command is redacted first, while it still
+ * has its original case: provider token patterns are case-sensitive and would not match once the
+ * key is lower-cased.
  */
-export function commandKey(command: string): string {
+export function commandKey(command: string, redaction: RedactOptions = {}): string {
   const keep: string[] = [];
-  for (const t of command.trim().split(/\s+/).slice(0, 12)) {
+  for (const t of redactText(command.trim().slice(0, 4000), redaction).split(/\s+/).slice(0, 12)) {
     if (t === '|' || t === '&&' || t === ';' || t === '||') break;
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) || t.startsWith('-')) continue;
     keep.push(t);
     if (keep.length === 2) break;
   }
-  return keep.join(' ').toLowerCase().slice(0, 120);
+  return keep.join(' ').toLowerCase().split(REDACTED.toLowerCase()).join(REDACTED).slice(0, 120);
 }
 
 export class MistakeService {
@@ -36,9 +48,10 @@ export class MistakeService {
     command: string;
     output: string | null;
   }): Memory | null {
-    const key = commandKey(input.command);
+    const redaction = { extraPatterns: this.k.config.redaction.extraPatterns };
+    const key = commandKey(input.command, redaction);
     if (!key) return null;
-    const command = sanitizeLine(redactText(input.command), 200);
+    const command = sanitizeLine(redactText(input.command, redaction), 200);
     return this.memory.remember({
       projectId: input.projectId,
       projectRoot: input.projectRoot,
@@ -55,7 +68,7 @@ export class MistakeService {
 
   /** Mistakes relevant to a command an agent is about to run. */
   forCommand(projectId: string, command: string): Memory[] {
-    const key = commandKey(command);
+    const key = commandKey(command, { extraPatterns: this.k.config.redaction.extraPatterns });
     if (!key) return [];
     const tag = `cmd-${fingerprint(key).slice(0, 10)}`;
     return this.k.store.memories
