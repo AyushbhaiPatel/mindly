@@ -130,7 +130,9 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   project's merge checks. Bisects the sentinel starts are capped per project per day
   (`sentinel.maxBisectsPerDay`), and a step where nothing could run is retried with a growing
   back-off (15 minutes up to 6 hours), not on every tick. Agents cannot start a pass: there is no
-  MCP tool, and the daemon endpoint only reads.
+  MCP tool, and the daemon endpoint only reads. A mistake the sentinel records from its own bisect
+  has the system as its source, so it is only `proposed` (a user-run `mindly bisect` records an
+  approved one): nobody looked at the result before agents are warned with it.
 - Check output reaches agents only as a redacted, sanitized, length-capped tail inside the
   delivery of a break, rendered as reference data like every other delivery: a test that prints
   instructions cannot turn them into a rule, a memory or a command.

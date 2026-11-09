@@ -188,6 +188,21 @@ export class CheckpointRepo {
     ).map((r) => str(r, 'worktree'));
   }
 
+  /**
+   * Working trees of a project with a checkpoint at or after `since`, the most recently active
+   * first (the limit applies after that filter, so old trees never crowd out active ones).
+   */
+  activeWorktrees(projectId: string, since: number, limit = 50): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT worktree, MAX(created_at) AS last FROM checkpoints WHERE project_id = ?
+           GROUP BY worktree HAVING last >= ? ORDER BY last DESC, worktree LIMIT ?`,
+        )
+        .all(projectId, since, Math.max(1, Math.min(500, Math.trunc(limit)))) as Row[]
+    ).map((r) => str(r, 'worktree'));
+  }
+
   count(projectId: string): number {
     const r = this.db
       .prepare('SELECT COUNT(*) AS n FROM checkpoints WHERE project_id = ?')

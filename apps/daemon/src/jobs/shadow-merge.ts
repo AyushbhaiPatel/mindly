@@ -332,10 +332,31 @@ export async function shadowMergeTick(ctx: JobContext): Promise<void> {
       }
     }
     if (mergeCandidates(ctx, p.id).length < 2) continue;
-    const key = `shadow:${p.id}`;
-    if (ctx.scheduler.busy(key)) continue;
-    await ctx.scheduler.enqueue(key, async () => {
-      await executeShadowMerge(ctx, createShadowMergeRun(ctx, p.id, 'schedule'));
-    });
+    // Skipped only while a scheduled merge of this project is already waiting or running. Other
+    // work on the same key (sentinel passes, command contracts) runs for minutes back to back, so
+    // skipping whenever the key is busy would starve the merge checks; queueing behind it instead
+    // runs the merge right after the current task.
+    const pending = pendingMerges(ctx);
+    if (pending.has(p.id)) continue;
+    pending.add(p.id);
+    try {
+      await ctx.scheduler.enqueue(`shadow:${p.id}`, async () => {
+        await executeShadowMerge(ctx, createShadowMergeRun(ctx, p.id, 'schedule'));
+      });
+    } finally {
+      pending.delete(p.id);
+    }
   }
+}
+
+/** Projects with a scheduled shadow merge queued or running, per scheduler. */
+const pendingByScheduler = new WeakMap<object, Set<string>>();
+
+function pendingMerges(ctx: JobContext): Set<string> {
+  let set = pendingByScheduler.get(ctx.scheduler);
+  if (!set) {
+    set = new Set();
+    pendingByScheduler.set(ctx.scheduler, set);
+  }
+  return set;
 }

@@ -1,6 +1,14 @@
-import { mkdtempSync, readFileSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { processAlive, SENTINEL_LOCK_MAX_AGE_MS, tryProcessLock } from '../../src/index.js';
 
@@ -35,6 +43,24 @@ describe('sentinel lock', () => {
     const old = tryProcessLock(file, { alive: () => true, now: () => later })!;
     expect(old).not.toBeNull();
     old.release();
+  });
+
+  it('never takes over a lock another process took over first', () => {
+    const file = lockFile();
+    writeFileSync(file, '999999');
+    // While this call decides the old lock is stale, another process takes it over (a new file).
+    const r = tryProcessLock(file, {
+      alive: (pid) => {
+        if (pid === 999999) {
+          unlinkSync(file);
+          writeFileSync(file, '424242');
+        }
+        return false;
+      },
+    });
+    expect(r).toBeNull();
+    expect(readFileSync(file, 'utf8')).toBe('424242');
+    expect(readdirSync(dirname(file))).toEqual(['lock']);
   });
 
   it('treats a lock still being written (no PID yet) as held', () => {

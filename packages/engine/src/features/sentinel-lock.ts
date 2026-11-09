@@ -1,4 +1,14 @@
-import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import {
+  closeSync,
+  linkSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
 
 /*
  * The sentinel's per-checkout lock. A pass can run a test suite and a bisect for many minutes,
@@ -33,6 +43,28 @@ function holder(file: string): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Moves a stale lock out of the way, atomically: the file is renamed to a name only this call
+ * uses, and dropped only when it is still the stale one seen (`ino`). When another process took
+ * the lock over in between, its fresh lock is put back (unless yet another one exists) and this
+ * call gives up, so two processes never both believe they hold the lock.
+ */
+function takeOver(file: string, ino: number): boolean {
+  const aside = `${file}.stale-${process.pid}-${randomBytes(6).toString('hex')}`;
+  renameSync(file, aside);
+  if (statSync(aside).ino === ino) {
+    unlinkSync(aside);
+    return true;
+  }
+  try {
+    linkSync(aside, file);
+  } catch {
+    // a newer lock exists already: it wins
+  }
+  unlinkSync(aside);
+  return false;
 }
 
 /**
@@ -72,10 +104,11 @@ export function tryProcessLock(
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return null;
       try {
         const pid = holder(file);
-        const old = now() - statSync(file).mtimeMs > maxAge;
+        const st = statSync(file);
+        const old = now() - st.mtimeMs > maxAge;
         // A lock being written right now has no PID yet: treat it as held.
         if (!old && (pid === null || alive(pid))) return null;
-        unlinkSync(file);
+        if (!takeOver(file, st.ino)) return null;
       } catch {
         return null;
       }

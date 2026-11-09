@@ -14,7 +14,7 @@ import { MindlyError, isDeniedPath } from '@mindly/core';
 import { copyIndex } from './capture.js';
 import { driverOverrides, runGit } from './exec.js';
 import { assertValidRevision } from './refs.js';
-import { findRepoRoot, resolveCommit } from './repo.js';
+import { findRepoRoot, gitCommonDir, resolveCommit } from './repo.js';
 
 /*
  * Git operations behind `mindly bisect`: a scratch worktree that checks out one checkpoint after
@@ -29,6 +29,11 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 export interface BisectWorkspace {
   /** Absolute path of the scratch worktree. */
   path: string;
+  /**
+   * True when the tree was just created (a warm tree that was missing or broken is made again):
+   * nothing installed in it before is there.
+   */
+  fresh: boolean;
   /** Commit currently checked out. */
   current: string;
   /** Checks out `commit`, keeping untracked files (dependency folders) in place. */
@@ -50,6 +55,7 @@ function workspaceAt(
   current: string,
   overrides: readonly string[],
   timeoutMs: number,
+  fresh: boolean,
   onDispose: () => Promise<void>,
 ): ResettableWorkspace {
   let disposed = false;
@@ -67,12 +73,14 @@ function workspaceAt(
   const ws: ResettableWorkspace = {
     path,
     current,
+    fresh,
     async checkout(next) {
       assertValidRevision(next);
       if (disposed) throw new MindlyError('internal', 'bisect workspace was removed');
       const id = await resolveCommit(root, next);
       if (!id) throw new MindlyError('not_found', 'checkpoint commit not found');
-      if (id === ws.current) return;
+      // Reset even at the commit already checked out: a command that ran here before (another
+      // check, or the same one at the same step) may have written to the tree.
       await reset(id);
       ws.current = id;
     },
@@ -127,7 +135,7 @@ export async function createBisectWorkspace(
     await remove();
     throw err;
   }
-  return workspaceAt(root, path, resolved, overrides, timeoutMs, remove);
+  return workspaceAt(root, path, resolved, overrides, timeoutMs, true, remove);
 }
 
 /** Refuses a warm workspace path that is relative, or inside (or around) the repository. */
@@ -145,17 +153,7 @@ function assertWarmPath(root: string, path: string): void {
 
 /** The common git dir of the repository containing `cwd`, resolved, or null. */
 async function commonDir(cwd: string): Promise<string | null> {
-  const res = await runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], {
-    cwd,
-    okExitCodes: [128],
-    timeoutMs: 10_000,
-  }).catch(() => null);
-  if (!res || res.exitCode !== 0) return null;
-  try {
-    return realpathSync(res.stdout.trim());
-  } catch {
-    return null;
-  }
+  return gitCommonDir(cwd).catch(() => null);
 }
 
 /**
@@ -215,7 +213,15 @@ export async function openWarmWorkspace(
       throw err;
     }
   }
-  const ws = workspaceAt(root, path, head ?? resolved, overrides, timeoutMs, async () => undefined);
+  const ws = workspaceAt(
+    root,
+    path,
+    head ?? resolved,
+    overrides,
+    timeoutMs,
+    head === null,
+    async () => undefined,
+  );
   // A reused tree may hold what the last command wrote: reset it even at the same commit.
   if (head !== null) await ws.reset(resolved);
   return ws;

@@ -11,7 +11,7 @@ import {
 } from '@mindly/core';
 import { sessionLabel } from '../coordination/work.js';
 import type { Kernel } from '../kernel.js';
-import { USER, type MemoryService } from '../memory/service.js';
+import { SYSTEM, USER, type MemoryService } from '../memory/service.js';
 
 /*
  * `mindly bisect`: binary search over checkpoints for the first step where a command fails. The
@@ -367,16 +367,19 @@ export class BisectService {
   }
 
   /**
-   * Remembers a reliable result as a mistake in the project (source: the user, who ran the
-   * bisect), scoped to the step's paths, so agents are warned before they repeat it. Only agent
-   * steps are recorded: nobody is blamed for a change made outside any agent.
+   * Remembers a reliable result as a mistake in the project, scoped to the step's paths, so agents
+   * are warned before they repeat it. Found by the user (`mindly bisect`), it is approved; found by
+   * the sentinel on its own, nobody looked at it, so it is only proposed. Only agent steps are
+   * recorded: nobody is blamed for a change made outside any agent.
    */
   recordMistake(input: {
     projectId: string;
     projectRoot: string;
     step: StepInfo;
     command: string;
+    foundBy?: 'user' | 'sentinel';
   }): Memory | null {
+    const bySentinel = input.foundBy === 'sentinel';
     const { step } = input;
     // A gap step may hold more than one edit, so nobody is blamed for it.
     if (step.kind !== 'agent' || !step.agentKind || step.gap) return null;
@@ -387,7 +390,7 @@ export class BisectService {
       .join(' ');
     const body = [
       `${step.agentKind} step ${step.seq} (${what}${paths.length > 3 ? ` and ${paths.length - 3} more` : ''}) broke \`${command}\`.`,
-      `Found with mindly bisect. See the edit and its prompt with: mindly bisect show ${step.seq}; undo that edit alone with: mindly bisect revert ${step.seq}`,
+      `Found with ${bySentinel ? "Mindly's sentinel" : 'mindly bisect'}. See the edit and its prompt with: mindly bisect show ${step.seq}; undo that edit alone with: mindly bisect revert ${step.seq}`,
     ].join(' ');
     return this.memory.remember({
       projectId: input.projectId,
@@ -397,8 +400,8 @@ export class BisectService {
       body,
       tags: ['mistake', 'bisect'],
       scopePaths: paths,
-      source: USER,
-      reason: 'found by mindly bisect',
+      source: bySentinel ? SYSTEM : USER,
+      reason: bySentinel ? "found by Mindly's sentinel" : 'found by mindly bisect',
     });
   }
 }

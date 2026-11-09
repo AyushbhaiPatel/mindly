@@ -69,11 +69,13 @@ function fakeSteps(verdict: (check: string, commit: string, nth: number) => Verd
     scratch: () => Promise.reject(new Error('not used')),
     warm: async (_repo, path, commit) => {
       port.warmOpened.push(path);
+      const fresh = !existsSync(path);
       mkdirSync(path, { recursive: true });
       const state = { current: commit };
       where.set(path, state);
       const ws: StepWorkspace = {
         path,
+        fresh,
         get current() {
           return state.current;
         },
@@ -340,6 +342,9 @@ describe('sentinel pass', () => {
     expect((bisect.result?.['blame'] as { sessionId: string }).sessionId).toBe(w.cc);
     const mistake = w.mindly.store.memories.get(bisect.result?.['mistakeId'] as string);
     expect(mistake).toMatchObject({ kind: 'mistake', scope: { paths: ['src/step-7.ts'] } });
+    // Nobody looked at it: the sentinel's finding is only proposed, never the user's word.
+    expect(mistake.trust).toBe('proposed');
+    expect(mistake.source.type).toBe('system');
     const sentinelRun = w.mindly.store.runs.get(r.runId!);
     expect(sentinelRun).toMatchObject({ kind: 'sentinel', status: 'failed' });
     expect(sentinelRun.input).toMatchObject({ trigger: 'user', step: 10, checks: ['unit'] });
@@ -500,6 +505,54 @@ describe('sentinel pass', () => {
     expect(r.checks[0]?.note).toContain('daily bisect limit');
     expect(w.mindly.store.runs.list(w.pid, { kind: 'bisect' })).toEqual([]);
     expect(w.mindly.store.conflicts.get(r.checks[0]!.conflictId!).status).toBe('open');
+    // Nobody is blamed, but the agents in the checkout are told.
+    expect([...r.checks[0]!.told].sort()).toEqual([w.cc, w.cx].sort());
+  });
+
+  it('blames nobody when a check passed and fails at the very same step', async () => {
+    const w = await world((_check, _commit, nth) => (nth === 1 ? 'pass' : 'fail'));
+    w.addSteps(1, 3);
+    expect((await w.pass()).checks[0]?.transition).toBe('baseline_pass');
+    const r = await w.pass();
+    expect(r.checks[0]).toMatchObject({ outcome: 'fail', transition: 'flaky', conflictId: null });
+    expect(r.checks[0]?.note).toContain('same step');
+    expect(w.mindly.store.conflicts.list(w.pid)).toEqual([]);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checks['unit']?.state).toBe('passing');
+  });
+
+  it('does not search from a step that was never seen passing (the good one was pruned)', async () => {
+    const w = await world(breaksAt(5));
+    w.addSteps(1, 3);
+    await w.pass();
+    w.addSteps(4, 8);
+    const good = w.mindly.store.checkpoints.bySeq(w.pid, w.root, 3)!;
+    w.mindly.store.checkpoints.delete([good.id]);
+    const r = await w.pass();
+    expect(r.checks[0]).toMatchObject({ transition: 'broke', bisect: null });
+    expect(r.checks[0]?.note).toContain('no longer kept');
+    expect(w.mindly.store.runs.list(w.pid, { kind: 'bisect' })).toEqual([]);
+  });
+
+  it('tells an agent working from a subfolder of the checkout', async () => {
+    const w = await world(breaksAt(4));
+    const sub = join(w.root, 'src');
+    mkdirSync(sub);
+    // Fake git sees every folder as its own repository, so the session is recorded directly,
+    // as the hooks record one whose agent started in a subfolder.
+    const cu = w.mindly.store.sessions.upsert({
+      projectId: w.pid,
+      agentKind: 'cursor',
+      externalId: 'cu',
+      worktree: sub,
+      branch: null,
+      transcriptPath: null,
+    }).session.id;
+    w.addSteps(1, 3);
+    await w.pass();
+    w.addSteps(4, 5, (seq) => (seq === 4 ? 'cx' : 'cc'));
+    await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'session_end'));
+    const r = await w.pass();
+    expect([...r.checks[0]!.told].sort()).toEqual([w.cc, cu].sort());
   });
 
   it('records a check already failing as a baseline, without blame', async () => {
@@ -551,10 +604,19 @@ describe('sentinel pass', () => {
     await w.pass();
     expect(w.steps.ran.filter((x) => x.startsWith('setup@'))).toEqual(['setup@c3', 'setup@c8']);
     expect(w.mindly.store.sentinel.get(w.pid, w.root)?.setupCommit).toBe('c8');
+    // The scratch tree was made again (deleted, broken): nothing is installed in it any more.
+    rmSync(sentinelOf(w.mindly).warmPath(w.pid, w.root), { recursive: true, force: true });
+    w.addSteps(9, 9);
+    await w.pass();
+    expect(w.steps.ran.filter((x) => x.startsWith('setup@'))).toEqual([
+      'setup@c3',
+      'setup@c8',
+      'setup@c9',
+    ]);
 
     setupFails = true;
-    w.steps.changes.set('c9', ['package.json']);
-    w.addSteps(9, 9);
+    w.steps.changes.set('c10', ['package.json']);
+    w.addSteps(10, 10);
     const r = await w.pass();
     expect(r).toMatchObject({ status: 'checked', setupFailed: true });
     expect(r.checks.map((c) => [c.name, c.outcome, c.transition, c.note])).toEqual([
@@ -562,11 +624,22 @@ describe('sentinel pass', () => {
       ['lint', 'skip', 'skipped', 'the setup command failed'],
     ]);
     // Without dependencies the checks would fail for the wrong reason: neither ran.
-    expect(w.steps.ran.filter((x) => x.endsWith('@c9'))).toEqual(['setup@c9']);
+    expect(w.steps.ran.filter((x) => x.endsWith('@c10'))).toEqual(['setup@c10']);
     expect(w.mindly.store.conflicts.list(w.pid)).toEqual([]);
     expect(w.mindly.store.runs.get(r.runId!).status).toBe('error');
     // Nothing ran, so the step is checked again next time.
-    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checkedSeq).toBe(8);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checkedSeq).toBe(9);
+  });
+
+  it('records the checkout before making its scratch tree, so a cancelled first pass is cleaned up', async () => {
+    const w = await world(() => 'pass');
+    w.addSteps(1, 2);
+    const ac = new AbortController();
+    ac.abort();
+    expect((await w.pass({ signal: ac.signal })).status).toBe('cancelled');
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toMatchObject({ checkedSeq: null });
+    expect(await sentinelOf(w.mindly).forget(w.pid)).toMatchObject({ reset: 1 });
+    expect(w.steps.warmRemoved).toEqual([sentinelOf(w.mindly).warmPath(w.pid, w.root)]);
   });
 
   it('keeps what a check settled when the pass is cancelled before the next one', async () => {
@@ -792,14 +865,33 @@ describe('sentinel status and cleanup', () => {
     w.steps.keepOnRemove = true;
     expect(await svc.reset(w.pid, w.root)).toBe('failed');
     expect(w.mindly.store.sentinel.get(w.pid, w.root)).not.toBeNull();
-    expect(await svc.forget(w.pid)).toEqual({ reset: 0, left: [w.root] });
+    expect(await svc.forget(w.pid)).toEqual({ reset: 0, busy: [], failed: [w.root] });
     w.steps.keepOnRemove = false;
     expect(await svc.reset(w.pid, w.root)).toBe('reset');
     expect(w.mindly.store.sentinel.get(w.pid, w.root)).toBeNull();
     expect(await svc.reset(w.pid, w.root)).toBe('none');
     await w.pass();
-    expect(await svc.forget(w.pid)).toEqual({ reset: 1, left: [] });
+    expect(await svc.forget(w.pid)).toEqual({ reset: 1, busy: [], failed: [] });
     expect(w.mindly.store.sentinel.list(w.pid)).toEqual([]);
+    // A pass holding the checkout: reported as busy, its state kept.
+    await w.pass();
+    const holding = tryProcessLock(join(dirname(path), 'lock'))!;
+    expect(await svc.forget(w.pid)).toEqual({ reset: 0, busy: [w.root], failed: [] });
+    expect(w.mindly.store.sentinel.list(w.pid)).toHaveLength(1);
+    holding.release();
+  });
+
+  it('removes the temp folders an instance without a home made, when it closes', async () => {
+    const w = await world(() => 'pass');
+    w.addSteps(1, 2);
+    await w.pass();
+    const sentinelTmp = dirname(dirname(sentinelOf(w.mindly).warmPath(w.pid, w.root)));
+    const checkpointsTmp = dirname(w.mindly.checkpoints.privateDir(w.root));
+    expect(existsSync(sentinelTmp)).toBe(true);
+    expect(existsSync(checkpointsTmp)).toBe(true);
+    w.mindly.close();
+    expect(existsSync(sentinelTmp)).toBe(false);
+    expect(existsSync(checkpointsTmp)).toBe(false);
   });
 
   it('forgets a checkout that was removed, with its tree, and stops listing it', async () => {

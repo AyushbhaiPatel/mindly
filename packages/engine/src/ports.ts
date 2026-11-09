@@ -77,7 +77,12 @@ export interface StepWorkspace {
   readonly path: string;
   /** Commit currently checked out. */
   readonly current: string;
-  /** Checks out `commit`; ignored folders (installed dependencies) stay. */
+  /** True when the tree was just made, so nothing was installed in it yet. */
+  readonly fresh: boolean;
+  /**
+   * Checks out `commit`, discarding what an earlier command wrote even at the same commit;
+   * ignored folders (installed dependencies) stay.
+   */
   checkout(commit: string): Promise<void>;
   /** Removes a temporary workspace; leaves a warm one in place. Safe to call more than once. */
   dispose(): Promise<void>;

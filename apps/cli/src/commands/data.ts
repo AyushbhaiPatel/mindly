@@ -233,13 +233,18 @@ export async function forget(
       out.line('Nothing was deleted.');
       return 1;
     }
-    // Checkpoint refs and the sentinel's scratch trees live in the repositories: delete them
-    // before their rows go.
-    await mindly.checkpoints.forget(pid);
+    // The sentinel's scratch trees and the checkpoint refs live in the repositories: delete them
+    // before their rows go. A pass that started while the question was open keeps its tree, so
+    // nothing is deleted then (its rows are how the tree is found again).
     const sentinel = await sentinelOf(mindly).forget(pid);
-    for (const w of sentinel.left) {
+    if (sentinel.busy.length > 0) {
+      const { busyError } = await import('./sentinel.js');
+      throw busyError();
+    }
+    await mindly.checkpoints.forget(pid);
+    for (const w of sentinel.failed) {
       out.warn(
-        `The sentinel's scratch copy for ${clean(w, 300)} could not be removed; delete it from ${clean(sentinelOf(mindly).warmPath(pid, w), 300)}.`,
+        `The sentinel's scratch copy for ${clean(w, 300)} could not be removed: delete ${clean(sentinelOf(mindly).warmPath(pid, w), 300)}, then run \`git worktree prune\` in the repository.`,
       );
     }
     mindly.store.projects.delete(pid);

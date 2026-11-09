@@ -378,22 +378,30 @@ function supportsProject(adapter: AgentAdapter): boolean {
   return !(adapter instanceof McpClientAdapter) || adapter.supportsProjectScope;
 }
 
+/** What `checkpointRows` counted or removed. */
+interface CheckpointRemoval {
+  rows: number;
+  /** The sentinel's scratch trees that could not be removed (busy, or removal failed). */
+  left: string[];
+}
+
 /**
  * Counts or deletes the checkpoints (hidden `refs/mindly/steps/*` refs and their rows) of the
- * project at `projectRoot`, or of every project without one. Best effort: 0 when Mindly cannot
- * be opened.
+ * project at `projectRoot`, or of every project without one, and on removal the sentinel's
+ * scratch trees. Best effort: 0 when Mindly cannot be opened.
  */
 async function checkpointRows(
   io: CliIo,
   projectRoot: string | null,
   action: 'count' | 'remove',
-): Promise<number> {
-  if (!existsSync(mindlyHome(io.env))) return 0;
+): Promise<CheckpointRemoval> {
+  const none: CheckpointRemoval = { rows: 0, left: [] };
+  if (!existsSync(mindlyHome(io.env))) return none;
   let mindly: Mindly;
   try {
     mindly = openMindly({ env: io.env, disableNotify: true, disableLlm: true });
   } catch {
-    return 0;
+    return none;
   }
   try {
     const projects =
@@ -401,17 +409,22 @@ async function checkpointRows(
         ? mindly.store.projects.list().slice(0, 500)
         : [mindly.store.projects.findByRoot(realpathSync(projectRoot))].filter((p) => p !== null);
     let rows = 0;
+    const left: string[] = [];
     for (const p of projects) {
       rows +=
         action === 'count'
           ? mindly.store.checkpoints.count(p.id)
           : (await mindly.checkpoints.forget(p.id)).rowsDeleted;
       // The sentinel's scratch trees are worktrees of the same repositories.
-      if (action === 'remove') await sentinelOf(mindly).forget(p.id);
+      if (action === 'remove') {
+        const svc = sentinelOf(mindly);
+        const r = await svc.forget(p.id);
+        for (const w of [...r.busy, ...r.failed]) left.push(svc.warmPath(p.id, w));
+      }
     }
-    return rows;
+    return { rows, left };
   } catch {
-    return 0;
+    return none;
   } finally {
     mindly.close();
   }
@@ -447,7 +460,8 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
     }
   }
   // Checkpoints (copies of the code after agent edits) go only when every agent's hooks go.
-  const checkpoints = explicit === null ? await checkpointRows(out.io, projectRoot, 'count') : 0;
+  const checkpoints =
+    explicit === null ? (await checkpointRows(out.io, projectRoot, 'count')).rows : 0;
   if (checkpoints > 0) {
     out.line(out.style.bold('Checkpoints'));
     out.line(
@@ -484,7 +498,11 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
       }
     }
   }
-  const removed = checkpoints > 0 ? await checkpointRows(out.io, projectRoot, 'remove') : 0;
+  const removal =
+    checkpoints > 0
+      ? await checkpointRows(out.io, projectRoot, 'remove')
+      : { rows: 0, left: [] as string[] };
+  const removed = removal.rows;
   const sc = out.screen();
   const names = plans.filter((p) => p.steps.length > 0).map((p) => p.adapter.displayName);
   sc.blank();
@@ -499,6 +517,11 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
   if (removed > 0) {
     sc.text(
       `${sc.mark('ok')} Removed ${removed} checkpoints (copies of the code saved after agent edits) from your repositories.`,
+    );
+  }
+  for (const path of removal.left) {
+    out.warn(
+      `The sentinel's scratch copy at ${clean(path, 300)} could not be removed (a check may be running there). Delete that folder, then run \`git worktree prune\` in the repository.`,
     );
   }
   sc.note(`Your Mindly data in ${mindlyHome(env)} is kept.`, 2);

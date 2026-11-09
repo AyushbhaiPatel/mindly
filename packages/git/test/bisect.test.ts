@@ -334,6 +334,7 @@ describe('warm workspace (sentinel)', () => {
     const first = await openWarmWorkspace(root, path, steps[0] as string);
     expect(first.path).toBe(path);
     expect(first.current).toBe(steps[0]);
+    expect(first.fresh).toBe(true);
     expect(readFileSync(join(path, 'src/a.ts'), 'utf8')).toBe('export const a = 22;\n');
     // What a setup command installs (ignored) and what a test run leaves (untracked, modified).
     write(path, 'node_modules/dep/index.js', 'module.exports = 1;\n');
@@ -344,8 +345,16 @@ describe('warm workspace (sentinel)', () => {
 
     // Reopened at the same commit: reset anyway, dependencies kept.
     const again = await openWarmWorkspace(root, path, steps[0] as string);
+    expect(again.fresh).toBe(false);
     expect(readFileSync(join(path, 'src/a.ts'), 'utf8')).toBe('export const a = 22;\n');
     expect(existsSync(join(path, 'scratch.log'))).toBe(false);
+    expect(existsSync(join(path, 'node_modules/dep/index.js'))).toBe(true);
+    // A checkout of the commit already there still discards what a command wrote meanwhile.
+    write(path, 'src/a.ts', 'written by the first check\n');
+    write(path, 'out.txt', 'left by the first check\n');
+    await again.checkout(steps[0] as string);
+    expect(readFileSync(join(path, 'src/a.ts'), 'utf8')).toBe('export const a = 22;\n');
+    expect(existsSync(join(path, 'out.txt'))).toBe(false);
     expect(existsSync(join(path, 'node_modules/dep/index.js'))).toBe(true);
     await again.checkout(steps[3] as string);
     expect(again.current).toBe(steps[3]);
@@ -373,6 +382,7 @@ describe('warm workspace (sentinel)', () => {
     rmSync(path, { recursive: true, force: true });
     const recreated = await openWarmWorkspace(root, path, steps[2] as string);
     expect(recreated.current).toBe(steps[2]);
+    expect(recreated.fresh).toBe(true);
     expect(existsSync(join(path, 'README.md'))).toBe(false);
     await removeWarmWorkspace(root, ws.path);
   });

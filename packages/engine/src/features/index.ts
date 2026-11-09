@@ -104,17 +104,16 @@ export function bisectOf(mindly: Mindly): BisectService {
  * Its warm scratch trees live under `$MINDLY_HOME/sentinel` (a temp dir for in-memory instances).
  */
 export function sentinelOf(mindly: Mindly): SentinelService {
-  return serviceOf(
-    mindly,
-    'sentinel',
-    () =>
-      new SentinelService(
-        mindly.kernel,
-        mindly.projects,
-        bisectOf(mindly),
-        mindly.telepathy,
-        savesOf(mindly),
-        mindly.paths ? join(mindly.paths.home, 'sentinel') : null,
-      ),
-  );
+  return serviceOf(mindly, 'sentinel', () => {
+    const svc = new SentinelService(
+      mindly.kernel,
+      mindly.projects,
+      bisectOf(mindly),
+      mindly.telepathy,
+      savesOf(mindly),
+      mindly.paths ? join(mindly.paths.home, 'sentinel') : null,
+    );
+    mindly.onClose(() => svc.dispose());
+    return svc;
+  });
 }
