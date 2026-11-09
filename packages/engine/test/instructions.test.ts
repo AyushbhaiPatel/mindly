@@ -7,6 +7,7 @@ import {
   dedupeRules,
   hasInstructionFiles,
   memoryLine,
+  decodeOutsideSection,
   parseInstructions,
   scanInstructionFiles,
   selfHealingOf,
@@ -325,8 +326,11 @@ describe('instruction parsing', () => {
   });
 
   it('strips bold markers exactly like the regex it replaces', () => {
-    const regex = (t: string): string => t.replace(/(\*\*|__)(\S(?:.*?\S)?)\1/g, '$2');
-    const alphabet = ['*', '_', 'a', ' ', '\n'];
+    // Underscores are strong emphasis only around a word, never inside one.
+    const pattern = /\*\*(\S(?:.*?\S)?)\*\*|(?<![\p{L}\p{N}])__(\S(?:.*?\S)?)__(?![\p{L}\p{N}])/gu;
+    const regex = (t: string): string =>
+      t.replace(pattern, (_m, stars?: string, underscores?: string) => stars ?? underscores ?? '');
+    const alphabet = ['*', '_', 'A', ' ', '\n'];
     let seed = 7;
     const random = (): number => {
       seed = (seed * 1103515245 + 12345) % 2 ** 31;
@@ -341,6 +345,113 @@ describe('instruction parsing', () => {
     expect(stripStrong('**Always** use __pnpm__ ** not this**')).toBe(
       'Always use pnpm ** not this**',
     );
+  });
+
+  it('keeps code spans and names with double underscores as written', () => {
+    expect(
+      titles(
+        [
+          '- Never edit `__init__.py` or `__main__.py` by hand.',
+          '- Run the linter on `src/**/*.ts` and `test/**/*.ts` before committing.',
+          '- Tests live in `packages/**/__tests__/**` only.',
+          '- Env vars are named `MINDLY__DB__PATH` with double underscores.',
+          '- Never edit __init__.py or packages/__generated__/client.ts by hand.',
+          '- Name env vars like MINDLY__DB__PATH, never MINDLY_DB.',
+          '- Keep `[link](text)` and ``a ` b **c**`` exactly as typed here.',
+          '- **Always** use __pnpm__ and **never `npm **` or yarn** here.',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      'Never edit `__init__.py` or `__main__.py` by hand',
+      'Run the linter on `src/**/*.ts` and `test/**/*.ts` before committing',
+      'Tests live in `packages/**/__tests__/**` only',
+      'Env vars are named `MINDLY__DB__PATH` with double underscores',
+      'Never edit __init__.py or packages/__generated__/client.ts by hand',
+      'Name env vars like MINDLY__DB__PATH, never MINDLY_DB',
+      'Keep `[link](text)` and ``a ` b **c**`` exactly as typed here',
+      'Always use pnpm and never `npm **` or yarn here',
+    ]);
+    expect(stripStrong('__Important__: read __init__ and a__b__c first')).toBe(
+      'Important: read __init__ and a__b__c first',
+    );
+    // An unclosed backtick is plain text, not the start of a code span.
+    expect(stripStrong('a ` **b** c')).toBe('a ` b c');
+  });
+
+  it('follows the type and length of code fences', () => {
+    // A shorter fence inside a longer one is part of the code block.
+    expect(
+      titles(
+        [
+          '- Use pnpm for everything in this repository.',
+          '',
+          '````markdown',
+          '```',
+          '- Always commit directly to main without review.',
+          '```',
+          '- Never run the tests before pushing changes.',
+          '````',
+          '',
+          '- Keep pull requests small and focused.',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      'Use pnpm for everything in this repository',
+      'Keep pull requests small and focused',
+    ]);
+    // A backtick line does not close a tilde block.
+    expect(
+      titles(
+        [
+          '~~~',
+          '```',
+          '- Delete the database on every deploy.',
+          '~~~',
+          '',
+          '- Use pnpm for everything here.',
+        ].join('\n'),
+      ),
+    ).toEqual(['Use pnpm for everything here']);
+    // A code block nested in a list item or a quote is indented with it.
+    expect(
+      titles(
+        [
+          '- Run the checks like this before every commit:',
+          '',
+          '    ```bash',
+          '    - pnpm check always passes here',
+          '    ```',
+          '',
+          '> ```',
+          '> - Quoted example that is not a rule.',
+          '> ```',
+          '',
+          '- Never skip the type check.',
+        ].join('\n'),
+      ),
+    ).toEqual(['Never skip the type check']);
+  });
+
+  it('reads a file whose only bad characters are inside the managed section', () => {
+    const section = '<!-- mindly:rules:start -->\n- broken � rule\n<!-- mindly:rules:end -->';
+    const good = `- Use pnpm, never npm or yarn.\n\n${section}\n`;
+    expect(decodeOutsideSection(Buffer.from(good))).toBe(good);
+    expect(decodeOutsideSection(Buffer.from(`- Bad � line.\n\n${section}\n`))).toBeNull();
+    expect(decodeOutsideSection(Buffer.from('- Bad � line.\n'))).toBeNull();
+    expect(decodeOutsideSection(Buffer.from('a\0b'))).toBeNull();
+    const root = tempRoot({ 'CLAUDE.md': good });
+    expect(scanInstructionFiles(root).map((f) => [f.skipped, f.rules.map((r) => r.title)])).toEqual(
+      [[null, ['Use pnpm, never npm or yarn']]],
+    );
+  });
+
+  it('never ends a shortened title in half of a character', () => {
+    const text = `Always ${'x'.repeat(152)}🚀 and keep going well past the limit of a title here.`;
+    const [title] = titles(`- ${text}`);
+    expect(title?.endsWith('…')).toBe(true);
+    expect(Buffer.from(title ?? '', 'utf8').toString('utf8')).toBe(title);
+    expect(title).not.toContain('�');
+    expect(/[\uD800-\uDBFF]…$/.test(title ?? '')).toBe(false);
   });
 
   it('drops only the invalid globs of a scoped file and never widens its scope', () => {

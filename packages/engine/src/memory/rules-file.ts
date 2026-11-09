@@ -20,7 +20,7 @@ import {
   type Memory,
 } from '@mindly/core';
 import type { Kernel } from '../kernel.js';
-import { decodeText } from './instructions.js';
+import { decodeOutsideSection } from './instructions.js';
 import {
   eolOf,
   findSection,
@@ -542,5 +542,7 @@ function readText(abs: string): string | null | undefined {
   if ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff)) {
     return undefined;
   }
-  return decodeText(buf) ?? undefined;
+  // A bad character inside Mindly's own section does not make the file unreadable: the section is
+  // replaced or removed as a whole, which repairs it.
+  return decodeOutsideSection(buf) ?? undefined;
 }

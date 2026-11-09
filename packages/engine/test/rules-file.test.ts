@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { Memory } from '@mindly/core';
 import {
+  eolOf,
   findSection,
   parseInstructions,
   removeSection,
@@ -146,6 +147,14 @@ describe('managed section editing', () => {
       expect(removeSection(added, bounds as { start: number; end: number })).toBe(original);
     }
     expect(writeSection('no newline', sec, null)).toBe(`no newline\n\n${sec}\n`);
+  });
+
+  it('removes back to the original bytes when the file mixes line endings', () => {
+    for (const original of ['a\r\nb\n', 'a\nb\r\n', 'a\r\n\r\nb\n\n', 'a\rb\r\n', 'a\n\r\n']) {
+      const added = writeSection(original, renderRulesSection([], eolOf(original)), null);
+      const bounds = findSection(added) as { start: number; end: number };
+      expect(JSON.stringify(removeSection(added, bounds))).toBe(JSON.stringify(original));
+    }
   });
 
   it('replaces the section in place and keeps every byte around it', () => {
@@ -403,6 +412,84 @@ describe('rules file sync', () => {
     p.mindly.memory.approve(captured!.id);
     expect(section(p.read('AGENTS.md'))).toContain('linter before every commit');
     expect(p.files.awaitingApproval(p.pid)).toEqual([]);
+  });
+
+  it('keeps a rule picked up from a prompt out of the files after a snapshot restore', async () => {
+    const p = project();
+    writeFileSync(join(p.root, 'AGENTS.md'), '# Agents\n');
+    const explicit = p.add('Use pnpm, never npm');
+    p.files.sync(p.pid, p.root);
+    await p.mindly.hooks.handle(event(p.root, 'claude-code', 'cc', 'session_start'));
+    await p.mindly.hooks.handle(
+      event(p.root, 'claude-code', 'cc', 'prompt', {
+        prompt: 'From now on always run the linter before every commit.',
+      }),
+    );
+    const captured = p.mindly.memory
+      .list(p.pid, { kinds: ['rule'] })
+      .find((m) => m.tags.includes('say-it-once'));
+    const snaps = snapshotService(p.mindly);
+    const snap = await snaps.create(p.pid, 'before');
+    p.mindly.memory.update(captured!.id, { status: 'archived' }, USER, 'tidy');
+    p.mindly.memory.update(explicit.id, { status: 'archived' }, USER, 'tidy');
+    expect(section(p.read('AGENTS.md'))).toContain('No approved rules yet');
+
+    await snaps.restore(snap.id);
+    // Both rules are back for connected agents; only the one approved by hand is in the file.
+    expect(p.mindly.store.memories.get(captured!.id)).toMatchObject({
+      status: 'active',
+      trust: 'approved',
+    });
+    expect(p.files.rules(p.pid).map((m) => m.title)).toEqual(['Use pnpm, never npm']);
+    expect(p.files.awaitingApproval(p.pid).map((m) => m.id)).toEqual([captured?.id]);
+    expect(section(p.read('AGENTS.md'))).not.toContain('linter');
+    expect(section(p.read('AGENTS.md'))).toContain('Use pnpm, never npm');
+  });
+
+  it('keeps syncing a file after a long rule with an emoji at the cut', () => {
+    const p = project();
+    writeFileSync(join(p.root, 'CLAUDE.md'), '- Keep commits small and focused.\n');
+    const long = p.mindly.memory.remember({
+      projectId: p.pid,
+      projectRoot: p.root,
+      kind: 'rule',
+      title: `Emoji title ${'t'.repeat(147)}🚀 and more title text after the cut`,
+      body: `${'b'.repeat(278)}🚀 and more body text after the cut`,
+      source: USER,
+    });
+    expect(p.files.sync(p.pid, p.root).map((c) => c.skipped)).toEqual([null]);
+    expect(p.read('CLAUDE.md')).not.toContain('�');
+    p.add('Answer in British English');
+    expect(section(p.read('CLAUDE.md'))).toContain('British English');
+    p.mindly.memory.update(long.id, { status: 'archived' }, USER, 'done');
+    expect(section(p.read('CLAUDE.md'))).not.toContain('Emoji title');
+  });
+
+  it('repairs a section that already holds a bad character instead of giving the file up', () => {
+    const p = project();
+    writeFileSync(join(p.root, 'CLAUDE.md'), '- Keep commits small and focused.\n');
+    p.add('Use pnpm, never npm');
+    p.files.sync(p.pid, p.root);
+    // What an older version wrote when it cut a rule in the middle of an emoji.
+    writeFileSync(
+      join(p.root, 'CLAUDE.md'),
+      p.read('CLAUDE.md').replace('- Use pnpm, never npm', '- Use pnpm, never npm �…'),
+    );
+    expect(p.mindly.rules.planImport(p.pid, p.root).files.map((f) => f.skipped)).toEqual([null]);
+    p.add('Answer in British English');
+    expect(p.read('CLAUDE.md')).not.toContain('�');
+    expect(section(p.read('CLAUDE.md'))).toContain('British English');
+
+    writeFileSync(
+      join(p.root, 'CLAUDE.md'),
+      p.read('CLAUDE.md').replace('- Use pnpm, never npm', '- Use pnpm, never npm �…'),
+    );
+    expect(p.files.remove(p.pid, p.root).map((c) => c.skipped)).toEqual([null]);
+    expect(p.read('CLAUDE.md')).toBe('- Keep commits small and focused.\n');
+
+    // A bad character in the user's own text still means the file is not ours to rewrite.
+    writeFileSync(join(p.root, 'CLAUDE.md'), '- Keep commits � small.\n');
+    expect(p.files.sync(p.pid, p.root).map((c) => c.skipped)).toEqual(['unreadable']);
   });
 
   it('does not add a section that would only say every rule is already in the file', () => {

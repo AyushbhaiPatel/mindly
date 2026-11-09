@@ -19,6 +19,30 @@ const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 /** A fence closer: up to three spaces, a run of one fence character, trailing blanks only. */
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
+/** An open fenced code block: the fence character and the length of the run that opened it. */
+export interface Fence {
+  char: string;
+  length: number;
+}
+
+/**
+ * Follows fenced code blocks line by line, by the CommonMark rules: a fence is closed only by a
+ * run of the same character at least as long as the one that opened it, and a backtick fence's
+ * info string cannot contain a backtick (that line is inline code). Returns the fence `line`
+ * leaves open (null outside a code block); a line belongs to a code block when either the fence
+ * passed in or the one returned is set.
+ */
+export function nextFence(fence: Fence | null, line: string): Fence | null {
+  if (fence) {
+    const close = FENCE_CLOSE.exec(line)?.[1];
+    return close && close.charAt(0) === fence.char && close.length >= fence.length ? null : fence;
+  }
+  const open = FENCE_OPEN.exec(line);
+  const run = open?.[1];
+  if (!run || (run.startsWith('`') && (open?.[2] ?? '').includes('`'))) return null;
+  return { char: run.charAt(0), length: run.length };
+}
+
 /**
  * A marker line: the marker with at most three spaces before it. A line indented further is an
  * indented code block (or nested list content), never a marker.
@@ -42,22 +66,16 @@ function isMarker(line: string, marker: string): boolean {
 export function findSection(text: string): SectionBounds | null | 'damaged' {
   const starts: SectionBounds[] = [];
   const ends: SectionBounds[] = [];
-  let fence: { char: string; length: number } | null = null;
+  let fence: Fence | null = null;
   let at = 0;
   for (;;) {
     const nl = text.indexOf('\n', at);
     const line = text.slice(at, nl < 0 ? text.length : nl).replace(/\r$/, '');
     const bounds = { start: at, end: at + line.length };
-    if (fence) {
-      const close = FENCE_CLOSE.exec(line)?.[1];
-      if (close && close.charAt(0) === fence.char && close.length >= fence.length) fence = null;
-    } else {
-      const open = FENCE_OPEN.exec(line);
-      const run = open?.[1];
-      // A backtick fence's info string cannot contain a backtick (that line is inline code).
-      if (run && !(run.startsWith('`') && (open?.[2] ?? '').includes('`'))) {
-        fence = { char: run.charAt(0), length: run.length };
-      } else if (isMarker(line, RULES_START)) starts.push(bounds);
+    const inside = fence !== null;
+    fence = nextFence(fence, line);
+    if (!inside && fence === null) {
+      if (isMarker(line, RULES_START)) starts.push(bounds);
       else if (isMarker(line, RULES_END)) ends.push(bounds);
     }
     if (nl < 0) break;
@@ -91,15 +109,30 @@ export function writeSection(text: string, section: string, bounds: SectionBound
   return base + eol + section + eol;
 }
 
-/** Removes the managed section and the blank line {@link writeSection} added before it. */
+/** Length of the line break `text` ends with (CRLF, LF or CR); 0 when it ends with none. */
+function trailingBreak(text: string): number {
+  if (text.endsWith('\r\n')) return 2;
+  return text.endsWith('\n') || text.endsWith('\r') ? 1 : 0;
+}
+
+/** Length of the line break `text` starts with; 0 when it starts with none. */
+function leadingBreak(text: string): number {
+  if (text.startsWith('\r\n')) return 2;
+  return text.startsWith('\n') || text.startsWith('\r') ? 1 : 0;
+}
+
+/**
+ * Removes the managed section and the blank line {@link writeSection} added before it. Line breaks
+ * are recognised one at a time, so a file that mixes CRLF, LF and CR gets its own bytes back.
+ */
 export function removeSection(text: string, bounds: SectionBounds): string {
-  const eol = eolOf(text);
   let before = text.slice(0, bounds.start);
   let after = text.slice(bounds.end);
-  if (after.startsWith(eol)) after = after.slice(eol.length);
-  const blankBefore = before === '' || before.endsWith(eol + eol);
-  if (after === '' && before.endsWith(eol + eol)) before = before.slice(0, -eol.length);
-  else if (blankBefore && after.startsWith(eol)) after = after.slice(eol.length);
+  after = after.slice(leadingBreak(after));
+  const last = trailingBreak(before);
+  const blankLine = last > 0 && trailingBreak(before.slice(0, before.length - last)) > 0;
+  if (after === '' && blankLine) before = before.slice(0, before.length - last);
+  else if (before === '' || blankLine) after = after.slice(leadingBreak(after));
   return before + after;
 }
 
