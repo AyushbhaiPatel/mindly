@@ -35,6 +35,11 @@ memory, which is then injected into every other agent.
   user authority.
 - Only user-sourced or user-approved rules are phrased as conventions; `enforce` rules can only be
   created by the user through the CLI or dashboard.
+- An `enforce` rule is applied to every path a tool call reports, and to the files a shell
+  command's text shows it writes. Files on the deny-list can be protected this way too: their
+  names are matched against the rule, but they are still never read and nothing about them is
+  stored. Reading a command is best effort, not a sandbox: a program can write a file its command
+  line never names.
 - Rendered memory text is sanitised: control characters stripped, fence/delimiter sequences
   neutralised, length capped.
 

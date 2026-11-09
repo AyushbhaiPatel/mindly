@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -443,6 +443,90 @@ describe('split through hook events', () => {
     }
     const own = await shell('echo x > src/api/new.ts');
     expect(own.context ?? '').not.toContain('owned by part');
+  });
+
+  it("in strict mode blocks shell writes to another part's files and lets reads through", async () => {
+    const { mindly, svc, pid } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      strict: true,
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const pageWt = created.parts[1]!.worktree;
+    mkdirSync(join(pageWt, 'src', 'api'), { recursive: true });
+    writeFileSync(join(pageWt, 'src', 'api', 'billing.ts'), 'export const plan = 1;\n');
+    await mindly.hooks.handle(event(pageWt, 'claude-code', 'page-1', 'session_start'));
+    const shell = (command: string) =>
+      mindly.hooks.handle(
+        event(pageWt, 'claude-code', 'page-1', 'pre_tool', { tool: shellTool(command) }),
+      );
+    for (const command of [
+      'cat src/api/billing.ts',
+      'cat src/api/billing.ts 2>/dev/null',
+      'cat src/api/billing.ts || true',
+      'sed -n 1,40p src/api/billing.ts',
+      'grep -n plan src/api/billing.ts | sort | uniq',
+      'npx vitest run src/api/billing.test.ts',
+      'npx tsc --noEmit -p src/api/tsconfig.json',
+      'git diff main -- src/api/billing.ts > /tmp/api.diff',
+      'echo x > src/app/page.ts',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision ?? null, command).toBeNull();
+      expect(r.context ?? '', command).not.toContain('owned by part');
+    }
+    for (const command of [
+      'echo x>src/api/billing.ts',
+      'cd src/api && sed -i s/a/b/ billing.ts',
+      'rm -rf src/api',
+      'rm src/api/*.ts',
+      'mv src/api/billing.ts src/app/billing.ts',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision, command).toBe('deny');
+      expect(r.reason, command).toContain('src/api/billing.ts (part "Part api", claude-code)');
+    }
+    // A program Mindly does not know is warned about the file, not blocked.
+    const unknown = await shell('node scripts/codemod.js src/api/billing.ts');
+    expect(unknown.decision ?? null).toBeNull();
+    expect(unknown.context).toContain('src/api/billing.ts is owned by part "Part api"');
+  });
+
+  it("guards writes that reach into another part's worktree or the main checkout", async () => {
+    const { mindly, svc, pid, root } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      strict: true,
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const [apiWt, pageWt] = created.parts.map((p) => p.worktree) as [string, string];
+    await mindly.hooks.handle(event(apiWt, 'claude-code', 'api-1', 'session_start'));
+    const pre = (tool: ReturnType<typeof writeTool>) =>
+      mindly.hooks.handle(event(apiWt, 'claude-code', 'api-1', 'pre_tool', { tool }));
+    for (const path of [
+      join(pageWt, 'src/app/page.ts'),
+      join(root, 'src/app/page.ts'),
+      `../${basename(pageWt)}/src/app/page.ts`,
+    ]) {
+      const r = await pre(writeTool(path, 'x'));
+      expect(r.decision, path).toBe('deny');
+      expect(r.reason, path).toContain('src/app/page.ts (part "Part page", claude-code)');
+    }
+    const shell = await pre(shellTool(`echo x > ../${basename(pageWt)}/src/app/page.ts`));
+    expect(shell.decision).toBe('deny');
+    // Its own files stay writable wherever they are; nothing about the other tree is recorded.
+    const own = await pre(writeTool(join(root, 'src/api/billing.ts'), 'x'));
+    expect(own.decision ?? null).toBeNull();
+    expect(JSON.stringify(mindly.store.intents.active(pid))).not.toContain('src/app/page.ts');
+    // A path outside every tree of the project is still none of Mindly's business.
+    const elsewhere = await pre(writeTool(join(tmpdir(), 'elsewhere', 'src/app/page.ts'), 'x'));
+    expect(elsewhere.decision ?? null).toBeNull();
   });
 
   it('keeps other decisions untouched, shows the contract as it is now and archives it on abort', async () => {

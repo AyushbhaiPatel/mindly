@@ -1,9 +1,9 @@
-import { symlinkSync } from 'node:fs';
+import { rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { isMindlyError, type ContractKind } from '@mindly/core';
 import { describe, expect, it, vi } from 'vitest';
 import { checkSafePattern, commandHash, contractsOf, USER } from '../../src/index.js';
-import { event, writeTool } from '../helpers.js';
+import { event, shellTool, writeTool } from '../helpers.js';
 import { agentSource, AUTH_V1, featureSetup } from './fixtures.js';
 
 async function withDecision() {
@@ -69,6 +69,41 @@ describe('executable memory', () => {
     expect(mindly.store.contracts.get(c.id).state).toBe('passing');
     const results = mindly.store.events.query(pid, { types: ['contract.result'] });
     expect(results.map((e) => e.payload['state'])).toEqual(['passing', 'failing', 'passing']);
+  });
+
+  it('checks contracts again after a shell command changed their file', async () => {
+    const { root, mindly, pid, write, memory, contracts } = await withDecision();
+    const pattern = contracts.create(
+      memory.id,
+      'pattern_present',
+      { path: 'src/auth.ts', pattern: 'role:' },
+      USER,
+    );
+    const exists = contracts.create(memory.id, 'file_exists', { path: 'src/dashboard.ts' }, USER);
+    expect([pattern.state, exists.state]).toEqual(['passing', 'passing']);
+    const ran = (command: string) =>
+      mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: shellTool(command) }),
+      );
+
+    // Reading a file checks nothing and changes nothing.
+    await ran('cat src/auth.ts');
+    expect(mindly.store.events.query(pid, { types: ['contract.result'] })).toHaveLength(2);
+
+    write('src/auth.ts', AUTH_V1.replace('{ role: "admin" }', '{ ok: true }'));
+    await ran('sed -i \'s/role: "admin"/ok: true/\' src/auth.ts');
+    expect(mindly.store.contracts.get(pattern.id).state).toBe('failing');
+    rmSync(join(root, 'src', 'dashboard.ts'));
+    await ran('cd src && rm dashboard.ts');
+    expect(mindly.store.contracts.get(exists.id).state).toBe('failing');
+    const open = mindly.store.conflicts.list(pid).filter((x) => x.kind === 'contract_broken');
+    expect(open).toHaveLength(2);
+
+    write('src/auth.ts', AUTH_V1);
+    await ran('git checkout -- src/auth.ts');
+    expect(mindly.store.contracts.get(pattern.id).state).toBe('passing');
+    // A shell command is not recorded as an agent edit.
+    expect(mindly.store.fileChanges.forPath(pid, 'src/auth.ts')).toHaveLength(0);
   });
 
   it('evaluates every declarative kind', async () => {

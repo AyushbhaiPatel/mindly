@@ -158,11 +158,16 @@ higher priority than the user's live instructions.
    scope) together with any undelivered telepathy messages.
 3. **Before a tool runs** – for file-writing tools the intent ledger records the target, checks it
    against other sessions' active intents and path-scoped rules/mistakes, and returns advice. A rule
-   marked `enforce` can deny the tool call; nothing else blocks.
+   marked `enforce` can deny the tool call; so can a strict split, for another part's files. Shell
+   commands are read as text for the files they write (redirections, `rm`, `mv`, `cp`, `sed -i`,
+   `tee`, …) and those files answer to the same rules and guards; a path only given to an unknown
+   program is a warning. Every path of the call is checked, also deny-listed files and files in
+   another working tree of the project, which are matched by name and never recorded.
 4. **After a tool runs** – file changes are recorded with provenance; the impact analyser compares
    the exported surface of the changed file before/after and notifies sessions whose work depends
    on it; memories whose evidence covers the file are re-verified (self-healing); contracts bound to
-   the file are re-run.
+   the file are re-run. The files a shell command wrote go through the same checks, without being
+   recorded as an agent edit.
 5. **Stop** – the turn is summarised, the session goes idle, rate-limit signatures are detected and
    trigger the failover flow.
 
