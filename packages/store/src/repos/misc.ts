@@ -324,7 +324,38 @@ export class ContractRepo {
     this.db
       .prepare('UPDATE contracts SET state = ?, last_message = ?, last_run_at = ? WHERE id = ?')
       .run(state, message, this.clock.now(), id);
+    if (state === 'passing' || state === 'failing') this.setLastConclusive(id, state);
     return this.get(id);
+  }
+
+  /**
+   * The last result of a contract that was passing or failing, kept apart from `state` so a later
+   * `error` does not hide it. 'none': known to have had neither. Undefined: nothing recorded yet
+   * (a contract last run before this was kept).
+   */
+  lastConclusive(id: string): ContractConclusive | undefined {
+    const r = this.db.prepare('SELECT value FROM kv WHERE key = ?').get(conclusiveKey(id)) as
+      Row | undefined;
+    const v = r ? json<unknown>(r, 'value', null) : null;
+    return v === 'passing' || v === 'failing' || v === 'none' ? v : undefined;
+  }
+
+  setLastConclusive(id: string, value: ContractConclusive): void {
+    this.db
+      .prepare(
+        `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(conclusiveKey(id), toJson(value), this.clock.now());
+  }
+
+  /** Drops what is remembered for contracts that no longer exist (deleted with their memory). */
+  pruneConclusive(): void {
+    this.db
+      .prepare(
+        `DELETE FROM kv WHERE key LIKE ? AND substr(key, ?) NOT IN (SELECT id FROM contracts)`,
+      )
+      .run(`${CONCLUSIVE_PREFIX}%`, CONCLUSIVE_PREFIX.length + 1);
   }
 
   approve(id: string, hash: string | null): void {
@@ -333,8 +364,15 @@ export class ContractRepo {
 
   delete(id: string): void {
     this.db.prepare('DELETE FROM contracts WHERE id = ?').run(id);
+    this.db.prepare('DELETE FROM kv WHERE key = ?').run(conclusiveKey(id));
   }
 }
+
+/** A contract's last passing/failing result, or 'none' when it never had one. */
+export type ContractConclusive = 'passing' | 'failing' | 'none';
+
+const CONCLUSIVE_PREFIX = 'contract:conclusive:';
+const conclusiveKey = (id: string): string => `${CONCLUSIVE_PREFIX}${id}`;
 
 // ---------------------------------------------------------------------------------------------
 // Snapshots (time machine)

@@ -56,8 +56,8 @@ const MATCH_WINDOW_CHARS = 200;
 /** How far consecutive windows of a long line overlap: a match up to about this long is found. */
 const MATCH_WINDOW_OVERLAP = 100;
 const PATTERN_BUDGET_MS = 100;
-/** How many recent contract results are searched for a contract's last passing/failing one. */
-const CONCLUSIVE_LOOKBACK = 2000;
+/** Recent contract results read, once, for a contract whose last pass/fail was never kept. */
+const LEGACY_LOOKBACK = 2000;
 const MAX_UNBOUNDED_QUANTIFIERS = 2;
 /** Every quantifier (including `?` and `{n,m}`) counts toward this cap. */
 const MAX_QUANTIFIERS = 8;
@@ -318,6 +318,7 @@ export class ContractService {
       }
       clean.path = resolved.rel;
     }
+    this.k.store.contracts.pruneConclusive();
     const contract = this.k.store.contracts.create({
       projectId: memory.projectId,
       memoryId,
@@ -428,8 +429,8 @@ export class ContractService {
    * result opened (or reopened) the conflict.
    *
    * A result of `error` (a timeout, a file too large to read) says nothing about the contract, so
-   * a transition is judged against the last result that did: passing, error, failing is a break,
-   * and failing, error, passing is a fix.
+   * a transition is judged against the last result that did (the store remembers it per
+   * contract): passing, error, failing is a break, and failing, error, passing is a fix.
    */
   record(
     contract: Contract,
@@ -451,23 +452,35 @@ export class ContractService {
   }
 
   /**
-   * The last state of `contract` that was passing or failing, read from the event log when the
-   * stored state is neither. Null when the contract never had one (or it is no longer in the
-   * log): then nothing can be said to have changed.
+   * The last state of `contract` that was passing or failing: its stored state, or, when that is
+   * `error` or `unknown`, the one the store remembers for it. Null when it never had one: then
+   * nothing can be said to have changed.
+   *
+   * A contract last run before the store kept this has nothing remembered; its last result is
+   * then looked up once in the recent event log and written back, so the log is read at most once
+   * per contract.
    */
   private lastConclusive(contract: Contract): 'passing' | 'failing' | null {
     if (contract.state === 'passing' || contract.state === 'failing') return contract.state;
-    const results = this.k.store.events.query(contract.projectId, {
-      types: ['contract.result'],
-      order: 'desc',
-      limit: CONCLUSIVE_LOOKBACK,
-    });
-    for (const e of results) {
-      if (e.payload['contractId'] !== contract.id) continue;
-      const state = e.payload['state'];
-      if (state === 'passing' || state === 'failing') return state;
+    const contracts = this.k.store.contracts;
+    let known = contracts.lastConclusive(contract.id);
+    if (known === undefined) {
+      known = 'none';
+      const results = this.k.store.events.query(contract.projectId, {
+        types: ['contract.result'],
+        order: 'desc',
+        limit: LEGACY_LOOKBACK,
+      });
+      for (const e of results) {
+        if (e.payload['contractId'] !== contract.id) continue;
+        const state = e.payload['state'];
+        if (state !== 'passing' && state !== 'failing') continue;
+        known = state;
+        break;
+      }
+      contracts.setLastConclusive(contract.id, known);
     }
-    return null;
+    return known === 'none' ? null : known;
   }
 
   /** Runs every declarative contract reading `path`. */
