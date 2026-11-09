@@ -258,7 +258,9 @@ export function createGitPort(): GitPort {
     },
     dependentsOf: async (repoRoot, file) => {
       const graph = await graphFor(repoRoot);
-      return graph ? graph.dependentsOf(file).slice(0, 500) : [];
+      // A consumer that imports through a barrel (`export * from './file'`) depends on the file
+      // as much as a direct importer does.
+      return graph ? graph.dependentsOf(file, { throughReexports: true }).slice(0, 500) : [];
     },
     createSnapshotRef: (repoRoot, worktree, id) =>
       safe(async () => {

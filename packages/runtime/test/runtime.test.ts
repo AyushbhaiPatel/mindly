@@ -39,6 +39,15 @@ describe('git port', () => {
     expect(await git.isMerged?.(dir, 'main', 'main')).toBe(true);
   });
 
+  it('counts files that import through a barrel as dependents', async () => {
+    const dir = repo();
+    writeFileSync(join(dir, 'index.ts'), "export * from './auth';\n");
+    writeFileSync(join(dir, 'page.ts'), "import { login } from './index';\n");
+    writeFileSync(join(dir, 'other.ts'), "import { x } from './app';\n");
+    const git = createGitPort();
+    expect(await git.dependentsOf(dir, 'auth.ts')).toEqual(['app.ts', 'index.ts', 'page.ts']);
+  });
+
   it('fails soft outside a repository', async () => {
     const git = createGitPort();
     const dir = mkdtempSync(join(tmpdir(), 'mindly-norepo-'));
