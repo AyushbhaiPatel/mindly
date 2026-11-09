@@ -88,12 +88,12 @@ function printRun(out: Out, run: Run, json: boolean | undefined): void {
     sc.rows(
       agents.map((a) => ({
         marker:
-          a.status === 'passed'
+          a.status === 'completed'
             ? 'ok'
-            : a.status === 'failed' || a.status === 'error'
+            : a.status === 'failed' || a.status === 'error' || a.status === 'timeout'
               ? 'fail'
               : 'item',
-        text: `${agentName(clean(a.agent ?? 'agent', 32))}: ${a.status ? runStatusWord(a.status as Run['status']) : 'unknown'}, changed ${a.filesChanged ?? 0} files (+${a.addedLines ?? 0} -${a.removedLines ?? 0} lines)${a.summary ? `. ${clean(a.summary, 120)}` : ''}`,
+        text: `${agentName(clean(a.agent ?? 'agent', 32))}: ${agentRunWord(a.status)}, changed ${a.filesChanged ?? 0} files (+${a.addedLines ?? 0} -${a.removedLines ?? 0} lines)${a.summary ? `. ${clean(a.summary, 120)}` : ''}`,
       })),
     );
   }
@@ -102,8 +102,22 @@ function printRun(out: Out, run: Run, json: boolean | undefined): void {
   }
 }
 
+/** Plain words for how one agent's run ended (the statuses of `@mindly/runners`). */
+const AGENT_RUN_WORDS: Readonly<Record<string, string>> = {
+  completed: 'finished',
+  failed: 'failed',
+  timeout: 'ran out of time',
+  aborted: 'cancelled',
+  error: 'could not run',
+  unavailable: 'not installed',
+};
+
+export function agentRunWord(status: string | undefined): string {
+  return (status !== undefined ? AGENT_RUN_WORDS[status] : undefined) ?? 'unknown';
+}
+
 /** Runs a review/replay in this process with the real agent runners (no daemon). */
-async function runDirect(scope: ProjectScope, run: Run): Promise<Run> {
+async function runDirect(scope: ProjectScope, run: Run, env: NodeJS.ProcessEnv): Promise<Run> {
   const [{ executeReplay, executeReview, Scheduler }, { createRunners }] = await Promise.all([
     import('@mindly/daemon'),
     import('@mindly/runners'),
@@ -113,7 +127,8 @@ async function runDirect(scope: ProjectScope, run: Run): Promise<Run> {
     mindly: scope.mindly,
     logger,
     scheduler: new Scheduler(logger),
-    runners: createRunners(),
+    // The command's environment, not the process's: it decides which agent programs are found.
+    runners: createRunners({ env }),
   };
   return run.kind === 'review' ? executeReview(ctx, run) : executeReplay(ctx, run);
 }
@@ -160,7 +175,7 @@ export async function review(out: Out, raw: unknown): Promise<number> {
       title: `Review of ${session.agentKind} by ${o.reviewer}`,
       input: { sessionId: session.id, reviewer: o.reviewer },
     });
-    const done = await runDirect(scope, run);
+    const done = await runDirect(scope, run, out.io.env);
     printRun(out, done, o.json);
     return done.status === 'error' ? 1 : 0;
   });
@@ -205,7 +220,7 @@ export async function replay(
       title: `Replay with ${o.agents.join(', ')}`,
       input: { prompt: o.prompt, baseCommit: o.base ?? 'HEAD', agents: o.agents },
     });
-    const done = await runDirect(scope, run);
+    const done = await runDirect(scope, run, out.io.env);
     printRun(out, done, o.json);
     return done.status === 'passed' ? 0 : 1;
   });
