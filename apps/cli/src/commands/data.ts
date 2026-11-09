@@ -122,8 +122,12 @@ export async function trust(
   });
 }
 
-/** Tables exported for a project, each selected by an allow-listed query. */
-const EXPORT_QUERIES: readonly (readonly [string, string])[] = [
+/**
+ * Tables exported for a project, each selected by an allow-listed query. Every table that holds
+ * project data must be listed here (a test compares this list with the schema); `kv` holds
+ * bookkeeping under keys that carry the project id.
+ */
+export const EXPORT_QUERIES: readonly (readonly [string, string])[] = [
   ['sessions', 'SELECT * FROM sessions WHERE project_id = ? ORDER BY started_at'],
   ['memories', 'SELECT * FROM memories WHERE project_id = ? ORDER BY created_at'],
   [
@@ -150,6 +154,17 @@ const EXPORT_QUERIES: readonly (readonly [string, string])[] = [
   ['snapshots', 'SELECT * FROM snapshots WHERE project_id = ? ORDER BY created_at'],
   ['runs', 'SELECT * FROM runs WHERE project_id = ? ORDER BY created_at'],
   ['events', 'SELECT * FROM events WHERE project_id = ? ORDER BY seq'],
+  [
+    'fileChangeLines',
+    'SELECT * FROM file_change_lines WHERE change_id IN (SELECT id FROM file_changes WHERE project_id = ?)',
+  ],
+  ['lineSurvival', 'SELECT * FROM line_survival WHERE project_id = ? ORDER BY checked_at'],
+  ['saves', 'SELECT * FROM saves WHERE project_id = ? ORDER BY created_at'],
+  ['splits', 'SELECT * FROM splits WHERE project_id = ? ORDER BY created_at'],
+  ['splitParts', 'SELECT * FROM split_parts WHERE project_id = ? ORDER BY split_id, position'],
+  ['checkpoints', 'SELECT * FROM checkpoints WHERE project_id = ? ORDER BY worktree, seq'],
+  ['sentinelWatches', 'SELECT * FROM sentinel_watches WHERE project_id = ? ORDER BY worktree'],
+  ['state', 'SELECT * FROM kv WHERE instr(key, ?) > 0 ORDER BY key'],
 ];
 
 /** Every stored row of one project, as stored (JSON columns stay JSON text). */
@@ -247,7 +262,11 @@ export async function forget(
         `The sentinel's scratch copy for ${clean(w, 300)} could not be removed: delete ${clean(sentinelOf(mindly).warmPath(pid, w), 300)}, then run \`git worktree prune\` in the repository.`,
       );
     }
-    mindly.store.projects.delete(pid);
+    mindly.store.transaction(() => {
+      mindly.store.projects.delete(pid);
+      // Bookkeeping rows are not tied to the project by a foreign key: their keys carry its id.
+      mindly.store.db.prepare('DELETE FROM kv WHERE instr(key, ?) > 0').run(pid);
+    });
     mindly.store.vacuum();
     out.line(`Forgotten: Mindly no longer has any data for ${clean(project.project.name, 80)}.`);
     return 0;

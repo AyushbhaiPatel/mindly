@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { codename, shortId } from '@mindly/core';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary, runHook, styleFor } from '../src/index.js';
+import { EXPORT_QUERIES } from '../src/commands/data.js';
 import { cli, fixture, sandbox, tempDir, testIo, write, type Sandbox } from './helpers.js';
 
 function json<T = Record<string, unknown>>(text: string): T {
@@ -791,6 +792,55 @@ describe('doctor, config, export, misc', () => {
     expect(data.memories.map((m) => m.title)).toEqual(['Exported fact']);
     expect((await cli(sb, ['export', '--out', 'mindly-export.json'])).code).toBe(1);
     expect((await cli(sb, ['export', '--out', 'mindly-export.json', '--force'])).code).toBe(0);
+  });
+
+  it('export covers every table that holds project data', async () => {
+    const sb = sandbox();
+    const mindly = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
+    let pid: string;
+    try {
+      const db = mindly.store.db;
+      const tables = (
+        db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'memories_fts%'",
+          )
+          .all() as { name: string }[]
+      ).map((t) => t.name);
+      const exported = new Set(
+        EXPORT_QUERIES.map(([, sql]) => /^SELECT \* FROM (\w+) /.exec(sql)?.[1] ?? ''),
+      );
+      // `projects` is exported as the `project` object.
+      expect(tables.filter((t) => t !== 'projects' && !exported.has(t))).toEqual([]);
+
+      pid = mindly.store.projects.upsertByRoot(sb.repo, 'repo').id;
+      db.prepare(
+        `INSERT INTO saves (id, project_id, kind, status, title, session_ids, paths, evidence, fingerprint, refs, created_at)
+         VALUES ('s1', ?, 'rule_enforced', 'caught', 'SAVE-MARKER', '[]', '[]', '[]', 'f', '{}', 1)`,
+      ).run(pid);
+      mindly.store.kv.set(`standup:last:${pid}`, 123);
+      mindly.store.kv.set('other:state', 1);
+    } finally {
+      mindly.close();
+    }
+    const data = json<{ saves: { title: string }[]; state: { key: string }[] }>(
+      (await cli(sb, ['export'])).stdout,
+    );
+    expect(data.saves.map((r) => r.title)).toEqual(['SAVE-MARKER']);
+    expect(data.state.map((r) => r.key)).toEqual([`standup:last:${pid}`]);
+
+    // Forgetting the project removes its bookkeeping rows too, and nobody else's.
+    expect((await cli(sb, ['forget', '--project', '--yes'])).code).toBe(0);
+    const after = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
+    try {
+      const keys = after.store.db.prepare('SELECT key FROM kv ORDER BY key').all() as {
+        key: string;
+      }[];
+      expect(keys.filter((k) => k.key.includes(pid))).toEqual([]);
+      expect(keys.map((k) => k.key)).toContain('other:state');
+    } finally {
+      after.close();
+    }
   });
 
   it('forget --project deletes the project data after confirmation', async () => {
