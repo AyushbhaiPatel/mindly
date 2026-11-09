@@ -75,6 +75,38 @@ const SECRET_WORDS =
 /** A secret-bearing name: a secret word with up to 60 name characters on either side. */
 const SECRET_NAME = `[A-Za-z0-9_.-]{0,60}(?:${SECRET_WORDS})[A-Za-z0-9_.-]{0,60}`;
 
+/**
+ * Last words of a name that say it holds display text or metadata about a secret, not the secret
+ * (`passwordPlaceholder`, `token_type`, `passwordError`).
+ */
+const DISPLAY_WORDS = new Set(
+  (
+    'placeholder label hint help helper message msg error err title text description desc prompt ' +
+    'type name field input pattern policy rule rules regex format length len min max strength ' +
+    'tooltip caption heading legend warning info note validation requirement requirements ' +
+    'instructions summary question reminder'
+  ).split(' '),
+);
+
+/** True when the name in an assignment prefix (`passwordLabel: '`) ends in a display word. */
+function isDisplayName(prefix: string): boolean {
+  const name = /([A-Za-z0-9_.-]{1,200})["']?\s{0,5}[:=]\s{0,5}["']?$/.exec(prefix)?.[1] ?? '';
+  const words = name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[\s_.-]+/)
+    .filter((w) => w !== '');
+  return DISPLAY_WORDS.has((words[words.length - 1] ?? '').toLowerCase());
+}
+
+/**
+ * A quoted value with spaces in it is prose more often than a passphrase. It is redacted when the
+ * name really names a secret (`"password": "correct horse battery staple"`), and left alone when
+ * the name says it is UI text or metadata (`passwordPlaceholder="Enter your password"`).
+ */
+function isDisplayText(prefix: string, value: string): boolean {
+  return /\s/.test(value) && isDisplayName(prefix);
+}
+
 const RULES: Rule[] = [
   {
     kind: 'private_key',
@@ -122,10 +154,12 @@ const RULES: Rule[] = [
   },
   {
     kind: 'cli_credentials',
-    // `-u user:password` / `--user user:password` (curl, wget). A numeric value is a uid:gid.
-    re: /((?:^|\s)(?:-u|--user)\s{1,5}["']?[^\s:"'`]{1,200}:)([^\s"'`]{3,200})/g,
+    // `curl -u user:password` / `wget --user user:password`. Only for HTTP clients, where the
+    // flag means credentials: for docker, sudo or chown-style arguments it is a user:group pair,
+    // and a stored command has to stay runnable.
+    re: /\b((?:curl|wget)\s[^\n|;&]{0,300}?(?:-u|--user)\s{1,5}["']?[^\s:"'`]{1,200}:)([^\s"'`]{3,200})/g,
     replace: `$1${REDACTED}`,
-    skip: (g) => /^\d+$/.test(g[2] ?? '') || (g[2] ?? '').startsWith('$'),
+    skip: (g) => (g[2] ?? '').startsWith('$'),
   },
   {
     kind: 'cli_credentials',
@@ -152,20 +186,23 @@ const RULES: Rule[] = [
     // included, up to its closing quote.
     re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}")([^"\\n]{6,4000})(?=")`, 'gi'),
     replace: `$1${REDACTED}`,
-    skip: (g) => isNonSecretValue(g[1] ?? '', g[2] ?? ''),
+    skip: (g) => isDisplayText(g[1] ?? '', g[2] ?? '') || isNonSecretValue(g[1] ?? '', g[2] ?? ''),
   },
   {
     kind: 'assignment',
     re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}')([^'\\n]{6,4000})(?=')`, 'gi'),
     replace: `$1${REDACTED}`,
-    skip: (g) => isNonSecretValue(g[1] ?? '', g[2] ?? ''),
+    skip: (g) => isDisplayText(g[1] ?? '', g[2] ?? '') || isNonSecretValue(g[1] ?? '', g[2] ?? ''),
   },
   {
     kind: 'assignment',
     // NAME=value / name: value where NAME looks secret-bearing.
     re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}["']?)([^\\s"'\`,;]{6,4000})`, 'gi'),
     replace: `$1${REDACTED}`,
-    skip: (g, after) => isNonSecretValue(g[1] ?? '', g[2] ?? '', after),
+    // The first word of a quoted display string is not a secret either.
+    skip: (g, after) =>
+      (/["']$/.test(g[1] ?? '') && /^[ \t]/.test(after) && isDisplayName(g[1] ?? '')) ||
+      isNonSecretValue(g[1] ?? '', g[2] ?? '', after),
   },
 ];
 

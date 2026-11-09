@@ -77,12 +77,35 @@ describe('redact', () => {
   });
 
   it.each([
+    'passwordPlaceholder="Enter your password"',
+    'token_type: "Bearer access"',
+    "passwordLabel: 'Your password'",
+    'passwordError = "Passwords do not match"',
+    '"password_hint": "At least twelve characters"',
+    "apiKeyDescription: 'Shown once after you create the key'",
+  ])('leaves quoted display text next to a secret-like name alone: %s', (code) => {
+    expect(redact(code)).toEqual({ text: code, count: 0, kinds: [] });
+  });
+
+  it('still redacts single-word quoted values whatever the name ends in', () => {
+    // Without a space in it the value is treated as before, display name or not.
+    expect(redact('token_type: "abc123def456"').text).toBe(`token_type: "${REDACTED}"`);
+    expect(redact("passwordHint = 'Summerwind'").text).toBe(`passwordHint = '${REDACTED}'`);
+    expect(redact('"db.password": "correct horse battery staple"').text).toBe(
+      `"db.password": "${REDACTED}"`,
+    );
+    expect(redact("clientSecret = 'two words'").text).toBe(`clientSecret = '${REDACTED}'`);
+  });
+
+  it.each([
     ['vercel deploy --prod --token Zx81kQ0pLm3nB7vC9tY2uR5w', 'Zx81kQ0pLm3nB7vC9tY2uR5w'],
     ['mysql --password hunter2SecretValue9 -e "select 1"', 'hunter2SecretValue9'],
     ['tool --db-password "hunter2SecretValue9"', 'hunter2SecretValue9'],
     ['docker login -u bob -p hunter2SecretValue9 registry.test', 'hunter2SecretValue9'],
     ['curl -u admin:hunter2SecretValue9 https://x.test', 'hunter2SecretValue9'],
     ['curl --user "admin:hunter2SecretValue9" https://x.test', 'hunter2SecretValue9'],
+    ['curl -sS -X POST -u admin:12345678 https://x.test', '12345678'],
+    ['wget --user admin:hunter2SecretValue9 https://x.test', 'hunter2SecretValue9'],
   ])('redacts a secret passed as a command-line argument: %s', (command, secret) => {
     const out = redact(command);
     expect(out.text).not.toContain(secret);
@@ -93,6 +116,11 @@ describe('redact', () => {
   it.each([
     'docker login --password-stdin registry.example.com',
     'docker run -u 1000:1000 -p 8080:80 image',
+    'docker run -u node:node image',
+    'podman run --user www-data:www-data image',
+    'kubectl exec -u deploy:deploy pod -- ls',
+    'sudo -u postgres:postgres psql',
+    'sometool --user alice:staff run',
     'tool --token-file ./token.txt',
     'tool --token "$API_TOKEN" --password $DB_PASSWORD',
     'curl -u "$USER:$PASS" https://x.test',
@@ -147,7 +175,7 @@ describe('redact', () => {
     redact('password'.repeat(50_000));
     redact('--token '.repeat(100_000));
     redact('docker login '.repeat(60_000));
-    redact(' -u a'.repeat(150_000));
+    redact('curl -u a'.repeat(100_000));
     redact('password="'.repeat(80_000));
     expect(Date.now() - start).toBeLessThan(2000);
   });

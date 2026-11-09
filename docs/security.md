@@ -57,9 +57,10 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   stored or sent: private keys, common provider tokens (AWS, GitHub, Slack, Stripe, OpenAI,
   Anthropic, Google, npm, JWTs), credentials in URLs, and values next to secret-like names:
   `.env`-style assignments (a quoted value is removed whole), command-line flags such as
-  `--token <value>` and `--password <value>`, `docker login -p <value>` and `-u user:<value>`.
-  Task titles, plan steps and blockers go through the same pass. Type annotations and references
-  such as `process.env.X` or `$TOKEN` are left alone, since they hold no secret.
+  `--token <value>` and `--password <value>`, `docker login -p <value>` and `curl -u user:<value>`.
+  Task titles, plan steps and blockers go through the same pass. Type annotations, references
+  such as `process.env.X` or `$TOKEN`, and quoted UI text next to a name like `passwordLabel` or
+  `token_type` are left alone, since they hold no secret.
 - Paths matching the default deny-list are never read for evidence and their content is never
   captured: `.env`, `.env.*`, `.env-*`, `.env_*`, `.envrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
   `*.keystore`, `*.kdbx`, SSH private keys (`id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`),
