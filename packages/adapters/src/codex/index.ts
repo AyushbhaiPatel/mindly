@@ -139,7 +139,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): AgentAdapter
       (config) => {
         if (!install && !isRecord(config['hooks'])) return;
         const h = hooksObject(config, paths.hooks);
-        removeGroupedHooks(h, KIND);
+        removeGroupedHooks(h, KIND, options.command);
         if (install) addGroupedHooks(h, hookSpecs(options.command), paths.hooks);
         dropIfEmpty(config, 'hooks');
       },

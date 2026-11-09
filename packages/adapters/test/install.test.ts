@@ -127,6 +127,50 @@ describe('claude-code install', () => {
     expect(await claude.planUninstall(opts(home))).toEqual([]);
   });
 
+  it("keeps another tool's hook whose command ends like Mindly's", async () => {
+    const home = tempDir();
+    const settings = join(home, '.claude', 'settings.json');
+    const other = {
+      hooks: [{ type: 'command', command: '/usr/local/bin/othertool hook claude-code Stop' }],
+    };
+    write(settings, JSON.stringify({ hooks: { Stop: [other], PreToolUse: [USER_HOOK] } }));
+
+    await install(claude, opts(home));
+    let hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(hooks['Stop']?.[0]).toEqual(other);
+    expect(hooks['Stop']).toHaveLength(2);
+    // Installing again replaces Mindly's own entries and nothing else.
+    await install(claude, opts(home));
+    hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(hooks['Stop']).toHaveLength(2);
+
+    applyInstallSteps(await claude.planUninstall(opts(home)));
+    expect(readJson(settings)['hooks']).toEqual({ Stop: [other], PreToolUse: [USER_HOOK] });
+
+    // The same for Cursor's flat hook lists.
+    const cursorHooks = join(home, '.cursor', 'hooks.json');
+    const flat = { command: 'othertool hook cursor stop' };
+    write(cursorHooks, JSON.stringify({ version: 1, hooks: { stop: [flat] } }));
+    await install(cursor, opts(home));
+    await install(cursor, opts(home));
+    applyInstallSteps(await cursor.planUninstall(opts(home)));
+    expect(readJson(cursorHooks)).toEqual({ version: 1, hooks: { stop: [flat] } });
+  });
+
+  it('replaces hooks written with a launcher Mindly no longer uses', async () => {
+    const home = tempDir();
+    const settings = join(home, '.claude', 'settings.json');
+    await install(claude, { ...opts(home), command: ['/usr/bin/node', '/x/main.js'] });
+    // Same launcher: replaced in place. A named Mindly launcher: also replaced.
+    await install(claude, { ...opts(home), command: ['/usr/bin/node', '/x/main.js'] });
+    let hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(hooks['Stop']).toHaveLength(1);
+    await install(claude, { ...opts(home), command: ['/old/bin/mindly'] });
+    await install(claude, opts(home));
+    hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(JSON.stringify(hooks['Stop'])).not.toContain('/old/bin/mindly');
+  });
+
   it('keeps user hooks that share a matcher group with Mindly', async () => {
     const home = tempDir();
     const settings = join(home, '.claude', 'settings.json');

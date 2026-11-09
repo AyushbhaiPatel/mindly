@@ -50,6 +50,42 @@ describe('shell quoting', () => {
     expect(isMindlyHookCommand('./notify.sh', 'codex')).toBe(false);
     expect(isMindlyHookCommand(42, 'codex')).toBe(false);
   });
+
+  it('recognises the launchers Mindly writes, now and before', () => {
+    const yes = [
+      'mindly hook codex Stop',
+      'C:/tools/mindly.cmd hook codex Stop',
+      "'/opt/my tools/mindly' --profile 'it'\\''s' hook codex Stop",
+      '/usr/bin/node /usr/lib/node_modules/mindly-cli/dist/main.js hook codex Stop',
+      'node /src/mindly/apps/cli/dist/main.js hook codex Stop',
+      'npx mindly-cli hook codex Stop',
+      'npx -y mindly-cli hook codex Stop',
+    ];
+    for (const command of yes) expect(isMindlyHookCommand(command, 'codex'), command).toBe(true);
+    // A launcher Mindly cannot know by name is its own only when it is the one in use.
+    const custom = ['/usr/bin/node', '/x/main.js'];
+    expect(isMindlyHookCommand('/usr/bin/node /x/main.js hook codex Stop', 'codex')).toBe(false);
+    expect(isMindlyHookCommand('/usr/bin/node /x/main.js hook codex Stop', 'codex', custom)).toBe(
+      true,
+    );
+  });
+
+  it("leaves other tools' hook commands alone", () => {
+    const no = [
+      '/usr/local/bin/othertool hook codex Stop',
+      'othertool --flag hook codex Stop',
+      'node /opt/other/dist/main.js hook codex Stop',
+      'git hook codex run',
+      // The user's own wrappers around Mindly's command are theirs.
+      'mindly hook codex Stop || true',
+      'mindly hook codex Stop | tee /tmp/log',
+      'mindly hook codex Stop extra',
+      'mindly hook codex',
+      'hook codex Stop',
+      'echo mindly; othertool hook codex Stop',
+    ];
+    for (const command of no) expect(isMindlyHookCommand(command, 'codex'), command).toBe(false);
+  });
 });
 
 describe('classifyTool', () => {

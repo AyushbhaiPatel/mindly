@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { z } from 'zod';
-import { shellJoin } from '../shared/command.js';
+import { shellJoin, shellWords } from '../shared/command.js';
 import { parseJsonConfig, readConfigText } from '../shared/config-files.js';
 import { isRecord, MAX_PATH_CHARS } from '../shared/payload.js';
 
@@ -20,33 +20,6 @@ export function statusLineSetting(command: readonly string[]): Record<string, un
     command: shellJoin([...command, 'statusline']),
     refreshInterval: STATUS_LINE_REFRESH_SEC,
   };
-}
-
-/**
- * Splits a command into words when it uses only the quoting {@link shellJoin} produces (bare safe
- * characters and single-quoted segments). Returns null for anything else: pipes, redirections,
- * variables, other quoting.
- */
-function shellWords(command: string): string[] | null {
-  const words: string[] = [];
-  const re = /\s+|[A-Za-z0-9_@%+=:,./-]+|'[^']*'|\\'/gy;
-  let word: string | null = null;
-  let consumed = 0;
-  for (const m of command.matchAll(re)) {
-    if (m.index !== consumed) return null;
-    consumed += m[0].length;
-    const token = m[0];
-    if (/^\s/.test(token)) {
-      if (word !== null) words.push(word);
-      word = null;
-    } else {
-      const text = token === "\\'" ? "'" : token.startsWith("'") ? token.slice(1, -1) : token;
-      word = (word ?? '') + text;
-    }
-  }
-  if (consumed !== command.length) return null;
-  if (word !== null) words.push(word);
-  return words;
 }
 
 /**
