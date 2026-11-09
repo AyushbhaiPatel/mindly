@@ -28,7 +28,15 @@ function fakeCheckpointGit(root: string) {
   const captures: CheckpointCaptureInput[] = [];
   const deleted: { worktree: string; refs: string[] }[] = [];
   const refs: CheckpointRefEntry[] = [];
-  const state = { commits: 0, busy: false, failing: false, rescanChanges: [] as string[], now: 0 };
+  const state = {
+    commits: 0,
+    busy: false,
+    failing: false,
+    /** The next capture by path finds the tree already equal to the previous step. */
+    alreadyTaken: false,
+    rescanChanges: [] as string[],
+    now: 0,
+  };
   const parseRef = (ref: string) => {
     const [worktreeId, seq] = ref.slice('refs/mindly/steps/'.length).split('/');
     return { worktreeId: worktreeId as string, seq: Number(seq) };
@@ -40,8 +48,10 @@ function fakeCheckpointGit(root: string) {
     capture: async (input) => {
       captures.push(input);
       if (state.failing) throw new Error('git index locked');
-      const changedPaths = input.paths ? [...input.paths] : state.rescanChanges;
-      state.rescanChanges = [];
+      const taken = state.alreadyTaken && input.paths !== null;
+      state.alreadyTaken = false;
+      const changedPaths = taken ? [] : input.paths ? [...input.paths] : state.rescanChanges;
+      if (!input.paths) state.rescanChanges = [];
       const changed = input.parent === null || changedPaths.length > 0;
       if (!changed && !input.always) {
         return {
@@ -263,9 +273,9 @@ describe('checkpoints through hooks', () => {
   it('skips a step when the lock is busy or git fails, and marks the next one as a gap', async () => {
     const { root, mindly, fake, rows } = make();
     await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
-    const edit = (text: string) =>
+    const edit = (text: string, path = 'src/auth.ts') =>
       mindly.hooks.handle(
-        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', text) }),
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool(path, text) }),
       );
 
     fake.state.busy = true;
@@ -273,23 +283,62 @@ describe('checkpoints through hooks', () => {
     expect(fake.captures).toHaveLength(1);
     expect(rows()).toHaveLength(1);
     fake.state.busy = false;
-    await edit('after busy');
-    expect(rows().map((c) => [c.seq, c.gap])).toEqual([
-      [1, false],
-      [2, true],
+    // The step after a skipped one scans the whole tree, so it holds the edit that was missed.
+    fake.state.rescanChanges = ['src/auth.ts', 'src/other.ts'];
+    await edit('after busy', 'src/other.ts');
+    expect(fake.captures.at(-1)).toMatchObject({ paths: null });
+    expect(rows().map((c) => [c.seq, c.kind, c.gap, c.paths])).toEqual([
+      [1, 'baseline', false, []],
+      [2, 'agent', true, ['src/auth.ts', 'src/other.ts']],
     ]);
+    // Nothing is left over for a later rescan to pin on nobody.
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'go on' }));
+    expect(rows()).toHaveLength(2);
     await edit('plain');
+    expect(fake.captures.at(-1)).toMatchObject({ paths: ['src/auth.ts'] });
     expect(rows().at(-1)).toMatchObject({ seq: 3, gap: false });
 
     fake.state.failing = true;
     await expect(edit('failing')).resolves.toEqual(EMPTY_HOOK_RESULT);
-    expect(fake.captures).toHaveLength(4);
     expect(rows()).toHaveLength(3);
     fake.state.failing = false;
+    fake.state.rescanChanges = ['src/auth.ts'];
     await edit('after failure');
+    expect(fake.captures.at(-1)).toMatchObject({ paths: null });
     expect(rows().at(-1)).toMatchObject({ seq: 4, gap: true, paths: ['src/auth.ts'] });
     await edit('plain again');
     expect(rows().at(-1)).toMatchObject({ seq: 5, gap: false });
+  });
+
+  it('credits a step a rescan took first to the agent, as a gap when it holds more', async () => {
+    const { root, mindly, fake, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const prompt = () =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'something else' }));
+    const lateEdit = () => {
+      fake.state.alreadyTaken = true;
+      return mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'a') }),
+      );
+    };
+    // Another session's prompt rescans between the write and its hook: the step is the edit.
+    fake.state.rescanChanges = ['src/auth.ts'];
+    await prompt();
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', gap: false });
+    await lateEdit();
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'agent', tool: 'Edit', gap: false });
+    // The same race, but the rescan also picked up a file nobody's edit explains.
+    fake.state.rescanChanges = ['src/auth.ts', 'src/other.ts'];
+    await prompt();
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside', gap: false });
+    await lateEdit();
+    expect(rows().at(-1)).toMatchObject({
+      seq: 3,
+      kind: 'agent',
+      gap: true,
+      paths: ['src/auth.ts', 'src/other.ts'],
+    });
+    expect(rows()).toHaveLength(3);
   });
 
   it('records nothing when checkpoints are disabled', async () => {
@@ -347,6 +396,26 @@ describe('checkpoints through hooks', () => {
       },
     ]);
     expect(rows()).toEqual([]);
+  });
+
+  it('leaves a ref without a row alone until it is an hour old', async () => {
+    const { root, clock, mindly, fake, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    // A capture in another process has created the ref of step 2; its row is still to come.
+    const ref = `refs/mindly/steps/${basename(root)}/2`;
+    fake.refs.push({
+      worktreeId: basename(root),
+      seq: 2,
+      ref,
+      commit: 'commit-x',
+      createdAt: clock.now(),
+    });
+    clock.advance(60_000);
+    expect(await mindly.checkpoints.prune(pid())).toEqual({ refsDeleted: 0, rowsDeleted: 0 });
+    expect(fake.refs.map((r) => r.seq)).toEqual([1, 2]);
+    clock.advance(3_600_000);
+    expect(await mindly.checkpoints.prune(pid())).toEqual({ refsDeleted: 1, rowsDeleted: 0 });
+    expect(fake.deleted).toEqual([{ worktree: root, refs: [ref] }]);
   });
 
   it('keeps only the newest maxPerWorktree checkpoints', async () => {

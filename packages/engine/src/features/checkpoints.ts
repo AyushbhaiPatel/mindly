@@ -149,12 +149,15 @@ export class CheckpointService {
       const latest = this.k.store.checkpoints.latest(pid, worktree);
       const gap = this.hasGap(pid, worktree);
       const edit = step.kind === 'agent' ? step.edit : null;
+      // After a skipped checkpoint the tree holds an edit no step has: the whole tree is scanned,
+      // so that edit lands in this step (marked as a gap) and not in a later one nobody made.
+      const editPaths = edit && !gap ? edit.paths.slice(0, 50) : null;
       const capture = async (seq: number) =>
         git.capture({
           worktree,
           indexFile: join(dir, 'index'),
           parent: latest ? { commit: latest.commit } : null,
-          paths: edit ? edit.paths.slice(0, 50) : null,
+          paths: editPaths,
           always: false,
           ref: git.refName(worktree, seq),
           message: `mindly step ${seq}`,
@@ -179,12 +182,15 @@ export class CheckpointService {
       if (result.commit === null) {
         // The edit was already taken by a rescan that ran between the write and this hook.
         if (edit && latest && latest.kind === 'outside' && this.covers(latest, edit)) {
+          const own = new Set(edit.paths);
           return this.k.store.checkpoints.attribute(latest.id, {
             kind: 'agent',
             sessionId: step.kind === 'agent' ? step.session.id : null,
             fileChangeId: edit.fileChangeId,
             promptEventId: edit.promptEventId,
             tool: sanitizeLine(edit.tool, 40),
+            // The rescan may have picked up more than this edit: the step is then not the agent's alone.
+            gap: latest.gap || latest.paths.some((p) => !own.has(p)),
           });
         }
         return null;
@@ -199,7 +205,7 @@ export class CheckpointService {
             // A fresh index means the whole tree was scanned: the step may hold more than this edit.
             gap: gap || result.fresh,
           }
-        : this.attributeRescan(pid, latest, result.changedPaths, gap);
+        : await this.attributeRescan(pid, worktree, latest, result.changedPaths, gap);
       const checkpoint = this.k.store.checkpoints.create({
         projectId: pid,
         worktree,
@@ -229,27 +235,38 @@ export class CheckpointService {
   /**
    * Who a rescan's changes belong to: the agent whose recorded edits since the last step cover
    * them (its own checkpoint was skipped), else nobody. Changes from several agents, or an agent
-   * step that may hold more, are marked as a gap.
+   * step that may hold more, are marked as a gap. Recorded edits carry paths relative to the
+   * working tree their agent runs in, so only edits made in this working tree count: the same
+   * path edited in another linked worktree of the project explains nothing here.
    */
-  private attributeRescan(
+  private async attributeRescan(
     projectId: string,
+    worktree: string,
     latest: Checkpoint | null,
     changedPaths: readonly string[],
     gap: boolean,
-  ): {
+  ): Promise<{
     kind: CheckpointKind;
     sessionId: string | null;
     fileChangeId: string | null;
     promptEventId: string | null;
     tool: string | null;
     gap: boolean;
-  } {
+  }> {
     const nobody = { sessionId: null, fileChangeId: null, promptEventId: null, tool: null };
     if (!latest) return { kind: 'baseline', ...nobody, gap };
     const changed = new Set(changedPaths);
-    const matches: FileChange[] = this.k.store.fileChanges
-      .since(projectId, latest.createdAt)
-      .filter((c) => changed.has(c.path));
+    const here = new Map<string, boolean>();
+    const matches: FileChange[] = [];
+    for (const c of this.k.store.fileChanges.since(projectId, latest.createdAt)) {
+      if (!changed.has(c.path)) continue;
+      let inTree = here.get(c.sessionId);
+      if (inTree === undefined) {
+        inTree = await this.sessionInWorktree(c.sessionId, worktree);
+        here.set(c.sessionId, inTree);
+      }
+      if (inTree) matches.push(c);
+    }
     const sessions = new Set(matches.map((c) => c.sessionId));
     if (sessions.size !== 1) return { kind: 'outside', ...nobody, gap: gap || sessions.size > 1 };
     const newest = matches[0] as FileChange;
@@ -262,6 +279,13 @@ export class CheckpointService {
       tool: sanitizeLine(newest.tool, 40),
       gap: gap || changedPaths.some((p) => !explained.has(p)),
     };
+  }
+
+  /** True when the session's agent runs in `worktree` (false when that cannot be told). */
+  private async sessionInWorktree(sessionId: string, worktree: string): Promise<boolean> {
+    const session = this.k.store.sessions.find(sessionId);
+    if (!session) return false;
+    return (await this.worktreeOf(session.worktree)) === worktree;
   }
 
   private kvKey(what: string, projectId: string, worktree: string): string {

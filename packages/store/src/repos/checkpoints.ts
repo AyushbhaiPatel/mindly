@@ -104,6 +104,8 @@ export class CheckpointRepo {
       fileChangeId: string | null;
       promptEventId: string | null;
       tool: string | null;
+      /** Sets the gap mark as well; left as it is when omitted. */
+      gap?: boolean;
     },
   ): Checkpoint {
     this.db
@@ -112,6 +114,9 @@ export class CheckpointRepo {
          WHERE id = ?`,
       )
       .run(input.kind, input.sessionId, input.fileChangeId, input.promptEventId, input.tool, id);
+    if (input.gap !== undefined) {
+      this.db.prepare('UPDATE checkpoints SET gap = ? WHERE id = ?').run(input.gap ? 1 : 0, id);
+    }
     return this.get(id);
   }
 
