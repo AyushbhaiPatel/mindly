@@ -45,16 +45,24 @@ function holder(file: string): number | null {
   }
 }
 
+/** What identifies one lock file: inode numbers alone are reused at once on Linux. */
+interface LockSeen {
+  ino: number;
+  mtimeMs: number;
+  pid: number | null;
+}
+
 /**
  * Moves a stale lock out of the way, atomically: the file is renamed to a name only this call
- * uses, and dropped only when it is still the stale one seen (`ino`). When another process took
- * the lock over in between, its fresh lock is put back (unless yet another one exists) and this
- * call gives up, so two processes never both believe they hold the lock.
+ * uses, and dropped only when it is still the stale one seen (same inode, time and PID). When
+ * another process took the lock over in between, its fresh lock is put back (unless yet another
+ * one exists) and this call gives up, so two processes never both believe they hold the lock.
  */
-function takeOver(file: string, ino: number): boolean {
+function takeOver(file: string, seen: LockSeen): boolean {
   const aside = `${file}.stale-${process.pid}-${randomBytes(6).toString('hex')}`;
   renameSync(file, aside);
-  if (statSync(aside).ino === ino) {
+  const now = statSync(aside);
+  if (now.ino === seen.ino && now.mtimeMs === seen.mtimeMs && holder(aside) === seen.pid) {
     unlinkSync(aside);
     return true;
   }
@@ -108,7 +116,7 @@ export function tryProcessLock(
         const old = now() - st.mtimeMs > maxAge;
         // A lock being written right now has no PID yet: treat it as held.
         if (!old && (pid === null || alive(pid))) return null;
-        if (!takeOver(file, st.ino)) return null;
+        if (!takeOver(file, { ino: st.ino, mtimeMs: st.mtimeMs, pid })) return null;
       } catch {
         return null;
       }
