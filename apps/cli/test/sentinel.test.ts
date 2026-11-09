@@ -134,6 +134,66 @@ describe('mindly sentinel', () => {
     });
   });
 
+  it('does not call checks that could not run passing', async () => {
+    const sb = sandbox();
+    mkdirSync(join(sb.repo, 'src'), { recursive: true });
+    write(sb.repo, 'test.cjs', TEST_SCRIPT);
+    write(sb.repo, 'src/calc.js', calcSource(0, false));
+    write(
+      sb.repo,
+      '.mindly/config.json',
+      JSON.stringify({
+        checks: [
+          { name: 'unit', argv: [node, 'test.cjs'], timeoutSec: 60 },
+          { name: 'lint', argv: [node, '-e', '1'], timeoutSec: 60 },
+        ],
+        sentinel: { setup: [node, '-e', 'process.exit(3)'] },
+      }),
+    );
+    git(sb.repo, 'add', '-A');
+    git(sb.repo, 'commit', '-q', '-m', 'calc');
+    expect((await cli(sb, ['config', 'set', 'hooks.timeoutMs', '10000'])).code).toBe(0);
+    await hook(sb, 'claude-code', 'SessionStart', { source: 'startup' });
+    expect((await cli(sb, ['trust', '-y'])).code).toBe(0);
+    await edit(sb, 'claude-code', calcSource(1, false));
+
+    // The setup command fails, so neither check runs.
+    const none = await cli(sb, ['sentinel', 'run']);
+    expect(none.code).toBe(1);
+    expect(none.stdout).toContain('2 checks');
+    expect(none.stdout).toContain('none could run');
+    expect(none.stdout).not.toContain('all passing');
+    expect(none.stdout).not.toContain('[ok]');
+    expect(none.stdout).toContain('The setup command failed');
+
+    // One check exits 125 ("cannot run here"), the other passes.
+    write(
+      sb.repo,
+      '.mindly/config.json',
+      JSON.stringify({
+        checks: [
+          { name: 'unit', argv: [node, 'test.cjs'], timeoutSec: 60 },
+          { name: 'lint', argv: [node, '-e', 'process.exit(125)'], timeoutSec: 60 },
+        ],
+      }),
+    );
+    expect((await cli(sb, ['trust', '-y'])).code).toBe(0);
+    const some = await cli(sb, ['sentinel', 'run']);
+    expect(some.code).toBe(1);
+    expect(some.stdout).toContain('1 did not run');
+    expect(some.stdout).not.toContain('all passing');
+
+    write(
+      sb.repo,
+      '.mindly/config.json',
+      JSON.stringify({ checks: [{ name: 'unit', argv: [node, 'test.cjs'], timeoutSec: 60 }] }),
+    );
+    expect((await cli(sb, ['trust', '-y'])).code).toBe(0);
+    const all = await cli(sb, ['sentinel', 'run']);
+    expect(all.code).toBe(0);
+    expect(all.stdout).toContain('1 check, all passing');
+  });
+
   it('finds the edit that broke the check and tells the agent that made it', async () => {
     const sb = sandbox();
     const setupLog = join(sb.home, 'setup.log');

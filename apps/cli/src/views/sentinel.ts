@@ -254,8 +254,15 @@ export function renderSentinelPass(sc: Screen, r: SentinelPassResult, current: s
       break;
   }
   const failing = r.checks.filter((c) => c.outcome === 'fail').length;
+  // A check that did not run (setup failed, timeout, exit 125) says nothing: it is not passing.
+  const skipped = r.checks.filter((c) => c.outcome === 'skip').length;
+  const mark = failing ? sc.mark('fail') : skipped ? sc.mark('warn') : sc.mark('ok');
+  const parts = [
+    ...(failing ? [`${failing} failing`] : []),
+    ...(skipped ? [skipped === r.checks.length ? 'none could run' : `${skipped} did not run`] : []),
+  ];
   sc.summary(
-    `${failing ? sc.mark('fail') : sc.mark('ok')} Step ${r.step} ${sc.sym.dot} ${count(r.checks.length, 'check')}${failing ? ` ${sc.sym.dot} ${failing} failing` : ', all passing'}`,
+    `${mark} Step ${r.step} ${sc.sym.dot} ${count(r.checks.length, 'check')}${parts.length ? ` ${sc.sym.dot} ${parts.join(` ${sc.sym.dot} `)}` : ', all passing'}`,
   );
   if (r.setupFailed) sc.note('The setup command failed, so the checks could not run.', 2);
   sc.rows(r.checks.map((c) => reportRow(sc, c)));
