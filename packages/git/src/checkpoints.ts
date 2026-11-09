@@ -1,6 +1,7 @@
 import {
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   renameSync,
@@ -9,12 +10,12 @@ import {
   unlinkSync,
   writeSync,
 } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { MindlyError, isDeniedPath, sha256 } from '@mindly/core';
 import { commitTree, copyIndex } from './capture.js';
 import { driverOverrides, runGit } from './exec.js';
 import { assertSafeRelativePath } from './refs.js';
-import { findRepoRoot, headCommit } from './repo.js';
+import { findRepoRoot, gitCommonDir, headCommit } from './repo.js';
 
 /*
  * Checkpoints: a commit object holding the whole working tree as it was after one agent edit,
@@ -100,6 +101,19 @@ function cachedOverrides(root: string): Promise<string[]> {
 
 function splitNul(out: string): string[] {
   return out.split('\0').filter((p) => p !== '');
+}
+
+/**
+ * True when something is at `path`, a symlink whose target is missing included (`existsSync`
+ * follows links, so it would report such a link as deleted).
+ */
+export function entryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function assertIndexFile(indexFile: string, root: string): void {
@@ -220,10 +234,11 @@ export async function captureCheckpoint(
   let full = input.paths === null || fresh;
   if (!full) {
     candidates = [...new Set((input.paths ?? []).map((p) => assertSafeRelativePath(p)))];
-    // A folder would be added whole, denied files inside it included: rescan instead.
+    // A folder would be added whole, denied files inside it included: rescan instead. A link to
+    // a folder is stored as a link, so it is not followed.
     full = candidates.some((p) => {
       try {
-        return statSync(resolve(root, p)).isDirectory();
+        return lstatSync(resolve(root, p)).isDirectory();
       } catch {
         return false;
       }
@@ -245,8 +260,8 @@ export async function captureCheckpoint(
     else refresh.push(p);
   }
 
-  const present = refresh.filter((p) => existsSync(resolve(root, p)));
-  const missing = refresh.filter((p) => !existsSync(resolve(root, p)));
+  const present = refresh.filter((p) => entryExists(resolve(root, p)));
+  const missing = refresh.filter((p) => !entryExists(resolve(root, p)));
   if (present.length > 0) {
     // `add` honours .gitignore (exit 1 lists the ignored paths, the rest are added).
     await runGit(
@@ -312,8 +327,20 @@ export interface CheckpointRefEntry {
   seq: number;
   ref: string;
   commit: string;
-  /** When the checkpoint commit was made (ms since the epoch). */
+  /**
+   * When the ref was created (ms since the epoch), or 0 when that cannot be told. Checkpoint
+   * commits carry a fixed date, so this comes from the ref's file.
+   */
   createdAt: number;
+}
+
+/** Modification time of `path` (ms since the epoch), or 0 when it cannot be read. */
+function writtenAt(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -327,23 +354,28 @@ export async function listCheckpointRefs(
 ): Promise<CheckpointRefEntry[]> {
   const root = await findRepoRoot(repoDir);
   const res = await runGit(
-    [
-      'for-each-ref',
-      '--format=%(refname)%00%(objectname)%00%(committerdate:unix)',
-      CHECKPOINT_REF_PREFIX,
-    ],
+    ['for-each-ref', '--format=%(refname)%00%(objectname)', CHECKPOINT_REF_PREFIX],
     { cwd: root, timeoutMs: 10_000 },
   );
+  const commonDir = await gitCommonDir(root);
+  // A ref is its own file until git packs it; `packed-refs` is never older than a ref it holds.
+  const packedAt = writtenAt(join(commonDir, 'packed-refs'));
   const out: CheckpointRefEntry[] = [];
   for (const line of res.stdout.split('\n')) {
     if (line === '') continue;
-    const [ref, commit, date] = line.split('\0');
+    const [ref, commit] = line.split('\0');
     if (!ref || !commit || !ref.startsWith(CHECKPOINT_REF_PREFIX)) continue;
     const [id, seqText] = ref.slice(CHECKPOINT_REF_PREFIX.length).split('/');
     const seq = Number(seqText);
     if (!id || !Number.isInteger(seq)) continue;
     if (onlyWorktreeId !== undefined && id !== onlyWorktreeId) continue;
-    out.push({ worktreeId: id, seq, ref, commit, createdAt: Number(date ?? 0) * 1000 });
+    out.push({
+      worktreeId: id,
+      seq,
+      ref,
+      commit,
+      createdAt: writtenAt(join(commonDir, ref)) || packedAt,
+    });
   }
   return out.sort((a, b) => a.worktreeId.localeCompare(b.worktreeId) || a.seq - b.seq);
 }
