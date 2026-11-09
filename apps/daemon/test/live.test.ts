@@ -1,10 +1,11 @@
 import { once } from 'node:events';
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { createServer, type AddressInfo } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer, type AddressInfo, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
-import { MAX_LIVE_SOCKETS, startDaemon, type Daemon } from '../src/index.js';
+import { MAX_LIVE_SOCKETS, probeDaemonPort, startDaemon, type Daemon } from '../src/index.js';
 import { fakeRunners, repo, seedSession, tempDir } from './helpers.js';
 
 let daemon: Daemon | null = null;
@@ -109,9 +110,52 @@ describe('daemon lifecycle', () => {
       statePath,
       JSON.stringify({ pid: process.pid, port: deadPort, startedAt: 1, version: '0.0.1' }),
     );
+    expect(await probeDaemonPort(deadPort)).toBe('absent');
     const d = await start(home);
     expect(JSON.parse(readFileSync(statePath, 'utf8'))).toMatchObject({ port: d.port });
     expect((await fetch(`${d.url}/api/health`)).status).toBe(200);
+  });
+
+  it('does not start next to a daemon that holds its port without answering', async () => {
+    const home = tempDir('mindly-live-home-');
+    const statePath = join(home, 'daemon.json');
+    // Accepts connections and never answers, like a daemon blocked in a long job.
+    const held: Socket[] = [];
+    const busy = createServer((socket) => held.push(socket)).listen(0, '127.0.0.1');
+    await once(busy, 'listening');
+    const port = (busy.address() as AddressInfo).port;
+    const state = JSON.stringify({ pid: process.pid, port, startedAt: 1, version: '0.0.1' });
+    writeFileSync(statePath, state);
+    try {
+      expect(await probeDaemonPort(port, 300)).toBe('silent');
+      // An ephemeral port would let a second daemon listen: it must not get that far.
+      await expect(start(home)).rejects.toThrow(/not answering/);
+      expect(readFileSync(statePath, 'utf8')).toBe(state);
+    } finally {
+      for (const socket of held) socket.destroy();
+      busy.close();
+      await once(busy, 'close');
+    }
+  });
+
+  it('takes a port answered by another program for a stale daemon.json', async () => {
+    const home = tempDir('mindly-live-home-');
+    const other = createHttpServer((_req, res) => {
+      res.writeHead(404, { 'content-type': 'text/plain' }).end('not here');
+    }).listen(0, '127.0.0.1');
+    await once(other, 'listening');
+    const port = (other.address() as AddressInfo).port;
+    try {
+      expect(await probeDaemonPort(port)).toBe('absent');
+      writeFileSync(
+        join(home, 'daemon.json'),
+        JSON.stringify({ pid: process.pid, port, startedAt: 1, version: '0.0.1' }),
+      );
+      const d = await start(home);
+      expect(await probeDaemonPort(d.port)).toBe('daemon');
+    } finally {
+      other.close();
+    }
   });
 
   it('a daemon that loses the port leaves the running daemon and its runs alone', async () => {

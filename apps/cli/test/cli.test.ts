@@ -11,6 +11,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { once } from 'node:events';
+import { createServer, type AddressInfo, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { codename, shortId } from '@mindly/core';
@@ -930,19 +932,57 @@ describe('doctor, config, export, misc', () => {
   it('daemon status and stop point to start when daemon.json outlived its daemon', async () => {
     const sb = sandbox();
     // A live process that is not a Mindly daemon, and a port nothing listens on.
+    const probe = createServer().listen(0, '127.0.0.1');
+    await once(probe, 'listening');
+    const port = (probe.address() as AddressInfo).port;
+    probe.close();
+    await once(probe, 'close');
     mkdirSync(sb.mindlyHome, { recursive: true });
     writeFileSync(
       join(sb.mindlyHome, 'daemon.json'),
-      JSON.stringify({ pid: process.pid, port: 9, startedAt: 1, version: '0.0.1' }),
+      JSON.stringify({ pid: process.pid, port, startedAt: 1, version: '0.0.1' }),
     );
     const status = await cli(sb, ['daemon', 'status']);
     expect(status.code).toBe(0);
-    expect(status.stdout).toContain('is not answering on port 9');
+    expect(status.stdout).toContain("Mindly's background service is not running.");
+    expect(status.stdout).toContain('left over from an earlier run');
     expect(status.stdout).toContain('mindly daemon start');
     expect(status.stdout).not.toContain('mindly daemon stop');
     const stop = await cli(sb, ['daemon', 'stop']);
-    expect(stop.code).toBe(1);
-    expect(stop.stderr).toContain('mindly daemon start replaces the leftover file');
+    expect(stop.code).toBe(0);
+    expect(stop.stdout).toContain('nothing to stop');
+    expect(stop.stdout).toContain('mindly daemon start replaces it');
+  });
+
+  it('a service that holds its port without answering is busy, not gone', async () => {
+    const sb = sandbox();
+    // Accepts connections and never answers, like a daemon stuck in a long job.
+    const held: Socket[] = [];
+    const server = createServer((socket) => held.push(socket)).listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+    try {
+      mkdirSync(sb.mindlyHome, { recursive: true });
+      const stateFile = join(sb.mindlyHome, 'daemon.json');
+      const state = JSON.stringify({ pid: process.pid, port, startedAt: 1, version: '0.0.1' });
+      writeFileSync(stateFile, state);
+      const status = await cli(sb, ['daemon', 'status']);
+      expect(status.code).toBe(0);
+      expect(status.stdout).toContain(`holds port ${port} but is not answering`);
+      expect(status.stdout).toContain('It may be busy');
+      expect(status.stdout).not.toContain('left over');
+      // Neither stopped (the PID is not provably ours) nor replaced by a second service.
+      const stop = await cli(sb, ['daemon', 'stop']);
+      expect(stop.code).toBe(1);
+      expect(stop.stderr).toContain('it may be busy');
+      const start = await cli(sb, ['daemon', 'start']);
+      expect(start.code).toBe(1);
+      expect(start.stderr).toContain('it may be busy');
+      expect(readFileSync(stateFile, 'utf8')).toBe(state);
+    } finally {
+      for (const socket of held) socket.destroy();
+      server.close();
+    }
   });
 
   it('exit codes: usage 2, help 0', async () => {
