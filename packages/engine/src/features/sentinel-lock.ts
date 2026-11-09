@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   closeSync,
+  existsSync,
   linkSync,
   openSync,
   readFileSync,
@@ -138,7 +139,7 @@ function unlinkQuiet(file: string): void {
  * so a lock that is not the stale one (its holder outlived `maxAgeMs` and let go just now) is
  * put back, not deleted.
  */
-function takeOver(file: string, seen: LockSeen, now: () => number): boolean {
+function takeOver(file: string, seen: LockSeen, now: () => number, link: Link): boolean {
   const guard = `${file}.takeover`;
   try {
     closeSync(openSync(guard, 'wx', 0o600));
@@ -161,9 +162,13 @@ function takeOver(file: string, seen: LockSeen, now: () => number): boolean {
     try {
       if (sameLock(seenAt(aside), seen)) return true;
       try {
-        linkSync(aside, file);
-      } catch {
-        // a newer lock exists already: it wins
+        link(aside, file);
+      } catch (err) {
+        // EEXIST: a newer lock exists already, and it wins. Anything else: no hard links here,
+        // so the lock is moved back instead, unless a newer one took its place.
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' && !existsSync(file)) {
+          renameSync(aside, file);
+        }
       }
       return false;
     } finally {
@@ -180,12 +185,12 @@ function takeOver(file: string, seen: LockSeen, now: () => number): boolean {
  * Creates the lock file with its content already in it, so no other process ever reads a lock
  * without a holder. False when a lock exists.
  */
-function create(file: string, content: string): boolean {
+function create(file: string, content: string, link: Link): boolean {
   const tmp = `${file}.new-${process.pid}-${randomBytes(6).toString('hex')}`;
   try {
     writeFileSync(tmp, content, { flag: 'wx', mode: 0o600 });
     try {
-      linkSync(tmp, file);
+      link(tmp, file);
       return true;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
@@ -194,7 +199,14 @@ function create(file: string, content: string): boolean {
   } finally {
     unlinkQuiet(tmp);
   }
-  const fd = openSync(file, 'wx', 0o600);
+  let fd: number;
+  try {
+    fd = openSync(file, 'wx', 0o600);
+  } catch (err) {
+    // A lock exists: the caller looks at whether it is stale, as on any other file system.
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw err;
+  }
   try {
     writeSync(fd, content);
   } finally {
@@ -203,10 +215,15 @@ function create(file: string, content: string): boolean {
   return true;
 }
 
+/** Makes a hard link (`linkSync`); fails on file systems that have none. */
+type Link = (existing: string, path: string) => void;
+
 export interface ProcessLockOptions {
   maxAgeMs?: number;
   alive?: (pid: number) => boolean;
   identity?: (pid: number) => string | null;
+  /** Makes a hard link; the default is `linkSync`. */
+  link?: (existing: string, path: string) => void;
   now?: () => number;
 }
 
@@ -220,6 +237,7 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
   const alive = opts.alive ?? processAlive;
   const identity = opts.identity ?? processIdentity;
   const now = opts.now ?? Date.now;
+  const link = opts.link ?? linkSync;
   const held = heldIds();
 
   const stillHeld = (h: Holder): boolean => {
@@ -236,7 +254,7 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
     const id = randomBytes(12).toString('hex');
     try {
       held.add(id);
-      if (create(file, [process.pid, id, identity(process.pid) ?? ''].join('\n'))) {
+      if (create(file, [process.pid, id, identity(process.pid) ?? ''].join('\n'), link)) {
         let released = false;
         return {
           release: () => {
@@ -259,7 +277,7 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
       const age = now() - seen.mtimeMs;
       const h = parseHolder(seen.raw);
       const stale = age > maxAge || (h === null ? age > UNREADABLE_MAX_AGE_MS : !stillHeld(h));
-      if (!stale || !takeOver(file, seen, now)) return null;
+      if (!stale || !takeOver(file, seen, now, link)) return null;
     } catch (err) {
       // Released between the two looks: try once more.
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;

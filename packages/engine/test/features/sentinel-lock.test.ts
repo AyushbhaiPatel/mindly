@@ -133,6 +133,33 @@ describe('sentinel lock', () => {
     if (process.platform === 'linux') expect(mine).toMatch(/^[0-9a-f-]+:\d+$/);
   });
 
+  it('works the same on a file system without hard links', () => {
+    const file = lockFile();
+    const link = (): never => {
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    };
+    const a = tryProcessLock(file, { link })!;
+    expect(a).not.toBeNull();
+    expect(pidIn(file)).toBe(String(process.pid));
+    // Held: a second attempt is refused, not an error.
+    expect(tryProcessLock(file, { link })).toBeNull();
+    a.release();
+    expect(existsSync(file)).toBe(false);
+
+    // A lock whose holder is gone is taken over there too, not left busy for good.
+    writeFileSync(file, '999999');
+    const dead = tryProcessLock(file, { link, alive: () => false })!;
+    expect(dead).not.toBeNull();
+    expect(pidIn(file)).toBe(String(process.pid));
+    expect(readdirSync(dirname(file))).toEqual(['lock']);
+    dead.release();
+
+    // A live holder's lock is still held.
+    writeFileSync(file, '424242');
+    expect(tryProcessLock(file, { link, alive: () => true })).toBeNull();
+    expect(readFileSync(file, 'utf8')).toBe('424242');
+  });
+
   it('leaves a takeover to the process already doing it', () => {
     const file = lockFile();
     writeFileSync(file, '999999');
