@@ -116,9 +116,40 @@ export function readDaemonState(path: string): DaemonState | null {
   }
 }
 
+const HEALTH_ATTEMPTS = 2;
+const HEALTH_TIMEOUT_MS = 1500;
+
+/**
+ * True when a Mindly daemon answers `GET /api/health` on `port`. Asked twice, so a daemon that
+ * is busy for a moment is not taken for a dead one.
+ */
+export async function daemonAnswers(port: number): Promise<boolean> {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return false;
+  for (let attempt = 1; attempt <= HEALTH_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(`http://${DAEMON_HOST}:${port}/api/health`, {
+        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { ok?: unknown; version?: unknown };
+        return body.ok === true && typeof body.version === 'string';
+      }
+      return false;
+    } catch (err) {
+      // Nothing listens there: no need to ask again.
+      const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+      if (code === 'ECONNREFUSED') return false;
+    }
+  }
+  return false;
+}
+
 /**
  * Builds a daemon without listening: opens Mindly, loads or creates the token, builds the HTTP
- * app. Refuses to proceed when another live daemon owns `daemon.json`.
+ * app. Refuses to proceed when another live daemon owns `daemon.json`: its process exists and
+ * answers on the recorded port. A file left by a daemon that crashed (or by a machine that
+ * restarted) can name a PID that belongs to another program by now; that file is stale and is
+ * replaced when this daemon listens.
  */
 export async function createDaemon(options: DaemonOptions = {}): Promise<Daemon> {
   if (options.host !== undefined && options.host !== DAEMON_HOST) {
@@ -135,10 +166,16 @@ export async function createDaemon(options: DaemonOptions = {}): Promise<Daemon>
     paths = mindly.paths ?? homePaths(options.home ?? '');
     const existing = readDaemonState(paths.daemonState);
     if (existing && pidAlive(existing.pid)) {
-      throw new MindlyError(
-        'conflict',
-        `a Mindly daemon is already running (pid ${existing.pid}, port ${existing.port})`,
-      );
+      if (await daemonAnswers(existing.port)) {
+        throw new MindlyError(
+          'conflict',
+          `a Mindly daemon is already running (pid ${existing.pid}, port ${existing.port})`,
+        );
+      }
+      mindly.kernel.logger.warn('ignoring a stale daemon.json', {
+        pid: existing.pid,
+        port: existing.port,
+      });
     }
   } catch (err) {
     mindly.close();
@@ -170,7 +207,6 @@ export async function createDaemon(options: DaemonOptions = {}): Promise<Daemon>
     live,
     dashboardDir: options.dashboardDir === undefined ? defaultDashboardDir() : options.dashboardDir,
   });
-  cancelStaleRuns(jobs);
 
   let listening = false;
   let stopping: Promise<void> | null = null;
@@ -202,6 +238,9 @@ export async function createDaemon(options: DaemonOptions = {}): Promise<Daemon>
         throw err;
       }
       listening = true;
+      // Only now is this the one daemon: a second one that lost the port never gets here, so it
+      // cannot cancel the runs of the daemon that holds it.
+      cancelStaleRuns(jobs);
       const addr = app.server.address();
       if (addr && typeof addr === 'object') listener.port = addr.port;
       writeJsonFile(paths.daemonState, {

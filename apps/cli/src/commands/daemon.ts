@@ -217,10 +217,12 @@ export async function daemonStop(out: Out): Promise<number> {
     return 0;
   }
   if (!(await healthy(state.port))) {
+    // The file outlived its daemon (a crash, a restart) and the PID belongs to something else
+    // by now, or the service hangs. Either way it is not ours to signal.
     throw new HintedError(
       'conflict',
       `Process ${state.pid}, named in ${paths(env).daemonState}, does not answer as Mindly's background service on port ${state.port}, so Mindly did not stop it`,
-      `If you are sure it is not running, delete ${paths(env).daemonState}`,
+      `If the service is not running, there is nothing to stop: mindly daemon start replaces the leftover file. If it hangs, stop the process yourself: kill ${state.pid}`,
     );
   }
   process.kill(state.pid, 'SIGTERM');
@@ -261,11 +263,14 @@ export async function daemonStatus(out: Out, o: { json?: boolean }): Promise<num
     sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
   } else if (alive && state) {
     sc.summary(
-      `${sc.mark('warn')} Process ${state.pid} should be Mindly's background service, but nothing answers on port ${state.port}`,
+      `${sc.mark('warn')} Mindly's background service is not answering on port ${state.port}.`,
+    );
+    sc.note(
+      `Its state file names process ${state.pid}, which is running. The file is probably left over from a crash or a restart and the process is another program.`,
+      2,
     );
     sc.next([
-      { cmd: 'mindly daemon stop', why: 'stop it' },
-      { cmd: 'mindly daemon start', why: 'then start it again' },
+      { cmd: 'mindly daemon start', why: 'start the service (replaces the leftover file)' },
     ]);
   } else {
     sc.summary("Mindly's background service is not running.");

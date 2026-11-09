@@ -877,6 +877,24 @@ describe('doctor, config, export, misc', () => {
     expect((await cli(sb, ['handoff', '--summary', 'continue'])).code).toBe(1);
   });
 
+  it('daemon status and stop point to start when daemon.json outlived its daemon', async () => {
+    const sb = sandbox();
+    // A live process that is not a Mindly daemon, and a port nothing listens on.
+    mkdirSync(sb.mindlyHome, { recursive: true });
+    writeFileSync(
+      join(sb.mindlyHome, 'daemon.json'),
+      JSON.stringify({ pid: process.pid, port: 9, startedAt: 1, version: '0.0.1' }),
+    );
+    const status = await cli(sb, ['daemon', 'status']);
+    expect(status.code).toBe(0);
+    expect(status.stdout).toContain('is not answering on port 9');
+    expect(status.stdout).toContain('mindly daemon start');
+    expect(status.stdout).not.toContain('mindly daemon stop');
+    const stop = await cli(sb, ['daemon', 'stop']);
+    expect(stop.code).toBe(1);
+    expect(stop.stderr).toContain('mindly daemon start replaces the leftover file');
+  });
+
   it('exit codes: usage 2, help 0', async () => {
     const sb = sandbox();
     expect((await cli(sb, ['no-such-command'])).code).toBe(2);

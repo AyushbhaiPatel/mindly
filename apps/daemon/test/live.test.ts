@@ -1,4 +1,6 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { once } from 'node:events';
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
@@ -91,6 +93,55 @@ describe('daemon lifecycle', () => {
     await d.stop();
     daemon = null;
     expect(existsSync(statePath)).toBe(false);
+  });
+
+  it('starts over a daemon.json whose PID now belongs to another program', async () => {
+    const home = tempDir('mindly-live-home-');
+    const statePath = join(home, 'daemon.json');
+    // A closed port: nothing answers there.
+    const probe = createServer().listen(0, '127.0.0.1');
+    await once(probe, 'listening');
+    const deadPort = (probe.address() as AddressInfo).port;
+    probe.close();
+    await once(probe, 'close');
+    // This test process stands in for the unrelated program that got the old daemon's PID.
+    writeFileSync(
+      statePath,
+      JSON.stringify({ pid: process.pid, port: deadPort, startedAt: 1, version: '0.0.1' }),
+    );
+    const d = await start(home);
+    expect(JSON.parse(readFileSync(statePath, 'utf8'))).toMatchObject({ port: d.port });
+    expect((await fetch(`${d.url}/api/health`)).status).toBe(200);
+  });
+
+  it('a daemon that loses the port leaves the running daemon and its runs alone', async () => {
+    const home = tempDir('mindly-live-home-');
+    const d = await start(home);
+    const statePath = join(home, 'daemon.json');
+    const s = seedSession(d, repo());
+    const run = d.mindly.store.runs.create({
+      projectId: s.projectId,
+      kind: 'shadow_merge',
+      title: 'merge check',
+      input: {},
+    });
+    const state = readFileSync(statePath, 'utf8');
+    // With the state file gone, only the port tells the second daemon it is not alone.
+    rmSync(statePath);
+    await expect(
+      startDaemon({
+        home,
+        env: { MINDLY_HOME: home },
+        port: d.port,
+        dashboardDir: null,
+        jobs: false,
+        runners: fakeRunners(),
+        runtime: { disableNotify: true, disableLlm: true },
+      }),
+    ).rejects.toThrow(/already in use/);
+    expect(d.mindly.store.runs.get(run.id).status).toBe('queued');
+    expect(existsSync(statePath)).toBe(false);
+    writeFileSync(statePath, state);
   });
 });
 
