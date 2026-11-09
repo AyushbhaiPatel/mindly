@@ -20,6 +20,7 @@ import { sessionLabel } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { memoryLine, relativeTime, renderSections, type Section } from './render.js';
 import { contractLines, liveContract } from '../features/split-contract.js';
+import { RATE_LIMIT_HANDOFF_MAX_AGE_MS } from '../features/failover.js';
 
 interface Candidate {
   item: ContextItem;
@@ -341,12 +342,16 @@ export class ContextBuilder {
       session.agentKind,
       session.id,
       safeRealpath(session.worktree),
+      RATE_LIMIT_HANDOFF_MAX_AGE_MS,
     )) {
       // A brief of a split that is no longer active is not for anyone.
       if (h.packet.split) {
         const split = this.k.store.splits.find(h.packet.split.splitId);
         if (!split || split.status !== 'active') continue;
       }
+      // The agent that hit its limit took a new prompt and is working again: its work is not up
+      // for grabs. The handoff is settled when that turn ends, one way or the other.
+      if (h.reason === 'rate_limit' && this.resumedSince(h)) continue;
       if (this.k.store.handoffs.claim(h.id, session.id)) {
         this.k.store.events.append({
           projectId: session.projectId,
@@ -354,17 +359,32 @@ export class ContextBuilder {
           type: 'handoff.claimed',
           payload: { handoffId: h.id, from: h.fromSessionId, reason: h.reason },
         });
-        if (h.taskId) {
-          this.k.store.tasks.update(h.taskId, {
+        // A task that was finished or dropped in the meantime stays that way.
+        const task = h.taskId ? this.k.store.tasks.find(h.taskId) : null;
+        if (task && task.status !== 'done' && task.status !== 'abandoned') {
+          this.k.store.tasks.update(task.id, {
             ownerSessionId: session.id,
             status: 'in_progress',
           });
-          this.k.store.sessions.setCurrentTask(session.id, h.taskId);
+          this.k.store.sessions.setCurrentTask(session.id, task.id);
         }
         return h;
       }
     }
     return null;
+  }
+
+  /** True while the session that made `h` is in a turn it started after making it. */
+  private resumedSince(h: Handoff): boolean {
+    const from = this.k.store.sessions.find(h.fromSessionId);
+    if (from?.status !== 'active') return false;
+    const [lastPrompt] = this.k.store.events.query(h.projectId, {
+      sessionId: from.id,
+      types: ['prompt.submitted'],
+      order: 'desc',
+      limit: 1,
+    });
+    return lastPrompt !== undefined && lastPrompt.createdAt > h.createdAt;
   }
 
   private handoffCandidates(h: Handoff): Candidate[] {
@@ -380,6 +400,10 @@ export class ContextBuilder {
       `You are continuing work handed off by ${who} (${h.reason === 'rate_limit' ? 'it hit its usage limit' : h.reason}).`,
       `Goal: ${sanitizeLine(p.goal || h.summary, 400)}`,
     ];
+    // The goal of a manual handoff is the sender's task when it has one; what the sender wrote
+    // about the state of the work is then only in the summary.
+    if (h.reason === 'manual' && h.summary && h.summary !== p.goal)
+      lines.push(`Summary from ${who}: ${sanitizeLine(h.summary, 400)}`);
     if (p.plan.length)
       lines.push(
         `Plan: ${p.plan.map((s) => `${s.done ? '[x]' : '[ ]'} ${sanitizeLine(s.text, 120)}`).join('; ')}`,

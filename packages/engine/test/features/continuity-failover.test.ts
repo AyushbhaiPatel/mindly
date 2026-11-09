@@ -6,7 +6,10 @@ import {
   detectRateLimit,
   failoverService,
   MAX_TRANSCRIPT_TAIL_BYTES,
+  parseTranscriptTail,
+  RATE_LIMIT_HANDOFF_MAX_AGE_MS,
   readTranscriptTail,
+  recentAgentTexts,
   type Mindly,
 } from '../../src/index.js';
 import { event, writeTool } from '../helpers.js';
@@ -235,6 +238,343 @@ describe('rate-limit failover', () => {
     expect(detectRateLimit('codex', ['Fixed the bug on line 429 of parser.ts'])).toBeNull();
     expect(detectRateLimit('codex', ['Added rate limit middleware to the API'])).toBeNull();
   });
+
+  it('does not take an agent writing about limits for an agent hitting one', () => {
+    const prose = [
+      'Done. The /login endpoint is now rate limited to 5 attempts per minute per IP.',
+      'I added a handler that returns HTTP 429 with a Retry-After header.',
+      'The client now retries when the server responds with "Too Many Requests".',
+      'Fixed: the test expected rate_limit_error but the mock returned overloaded_error.',
+      'The docs say the free tier limit will reset monthly; I updated the README.',
+      'Added a quota exceeded banner to the billing page.',
+      'Summary:\n- Rate limit exceeded handling added to the client\n- Rate limited the export job',
+      '- 429 responses are now retried with backoff',
+      'Usage limit reached is now a typed error (`UsageLimitError`).',
+      'The run failed with:\n```\nError: rate limit exceeded\nHTTP 429 Too Many Requests\n```\nI added a retry.',
+      `Usage limit reached. ${'x'.repeat(400)}`,
+    ];
+    for (const kind of ['claude-code', 'codex', 'gemini', 'cursor']) {
+      for (const text of prose) {
+        expect([kind, text, detectRateLimit(kind, [text])]).toEqual([kind, text, null]);
+      }
+    }
+  });
+
+  it('still recognises the notices agents print', () => {
+    const notices: [string, string, string][] = [
+      [
+        'claude-code',
+        'Claude usage limit reached. Your limit will reset at 3pm.',
+        'claude.usage_limit_reached',
+      ],
+      ['claude-code', 'Your limit will reset at 3pm (Europe/Berlin).', 'claude.limit_will_reset'],
+      ['claude-code', '\u23bf  5-hour limit reached \u2219 resets 5pm', 'claude.five_hour_limit'],
+      [
+        'claude-code',
+        'You\u2019ve hit your session limit \u00b7 resets 3pm',
+        'claude.limit_reached',
+      ],
+      ['claude-code', 'Weekly limit reached \u2219 resets Mon 9am', 'claude.limit_reached'],
+      ['claude-code', 'Session limit reached \u2219 resets 5pm', 'claude.limit_reached'],
+      ['claude-code', "You've reached your usage limit", 'generic.usage_limit'],
+      [
+        'claude-code',
+        'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}',
+        'claude.rate_limit_error',
+      ],
+      ['claude-code', 'Working on it.\n\nAPI Error: 429 Too Many Requests', 'claude.http_429'],
+      [
+        'codex',
+        "You've hit your usage limit. Upgrade to Pro or try again later.",
+        'codex.usage_limit',
+      ],
+      ['codex', 'stream error: rate limit reached, retry in 30s', 'codex.rate_limit'],
+      ['codex', 'Rate limited. Please try again in 20s.', 'codex.rate_limit'],
+      ['gemini', 'Resource has been exhausted (e.g. check quota).', 'gemini.resource_exhausted'],
+      ['gemini', '[API Error: got status: RESOURCE_EXHAUSTED]', 'gemini.resource_exhausted_status'],
+      ['gemini', 'You have exhausted your daily quota on this model.', 'gemini.quota_exhausted'],
+      ['cursor', "You've hit your usage limit", 'generic.usage_limit'],
+      ['cursor', 'Error: Rate limit exceeded. Try again in 5 minutes.', 'generic.rate_limit'],
+      ['cursor', 'Quota exceeded. Check your plan and billing details.', 'generic.quota_exceeded'],
+      ['cursor', 'HTTP 429 Too Many Requests', 'generic.too_many_requests'],
+    ];
+    for (const [kind, text, id] of notices) {
+      expect([text, detectRateLimit(kind, [text])]).toEqual([text, id]);
+    }
+  });
+
+  it('reads only what the agent said from a transcript', () => {
+    const at = new Date(1_750_000_000_000).toISOString();
+    const notice = 'Usage limit reached.';
+    const quoted = [
+      // A tool call whose input holds the words, and the agent's private reasoning.
+      {
+        type: 'assistant',
+        timestamp: at,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', name: 'Write', input: { content: notice } }],
+        },
+      },
+      {
+        type: 'assistant',
+        timestamp: at,
+        message: { role: 'assistant', content: [{ type: 'thinking', thinking: notice }] },
+      },
+      // Context injected into the session and other bookkeeping.
+      {
+        type: 'attachment',
+        timestamp: at,
+        attachment: { type: 'hook_additional_context', content: notice },
+      },
+      { type: 'system', timestamp: at, subtype: 'informational', content: notice },
+      // Tool output.
+      {
+        type: 'user',
+        timestamp: at,
+        message: { role: 'user', content: [{ type: 'tool_result', content: notice }] },
+      },
+      {
+        type: 'response_item',
+        timestamp: at,
+        payload: { type: 'function_call_output', output: notice },
+      },
+      {
+        type: 'response_item',
+        timestamp: at,
+        payload: { type: 'function_call', arguments: notice },
+      },
+    ];
+    const quotedEntries = parseTranscriptTail(jsonl(quoted));
+    expect(quotedEntries.map((e) => e.agent)).toEqual(quoted.map(() => false));
+    expect(recentAgentTexts(quotedEntries, 0)).toEqual([]);
+
+    const said = [
+      assistant(notice, 1_750_000_000_000),
+      { type: 'system', timestamp: at, subtype: 'api_error', level: 'error', content: notice },
+      {
+        type: 'response_item',
+        timestamp: at,
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: notice }],
+        },
+      },
+      { type: 'event_msg', timestamp: at, payload: { type: 'agent_message', message: notice } },
+      { type: 'event_msg', timestamp: at, payload: { type: 'error', message: notice } },
+      { role: 'assistant', timestamp: at, content: notice },
+    ];
+    expect(recentAgentTexts(parseTranscriptTail(jsonl(said)), 0)).toEqual(said.map(() => notice));
+    expect(recentAgentTexts(parseTranscriptTail(`${notice}\n`), 0)).toEqual([notice]);
+  });
+
+  it('keeps a session that only talked about rate limiting', async () => {
+    const { root, clock, mindly, sent } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const transcript = join(root, 'healthy.jsonl');
+    writeFileSync(
+      transcript,
+      jsonl([
+        {
+          type: 'assistant',
+          timestamp: new Date(clock.t).toISOString(),
+          message: {
+            role: 'assistant',
+            content: [
+              { type: 'tool_use', name: 'Bash', input: { command: 'echo "Usage limit reached."' } },
+            ],
+          },
+        },
+        {
+          type: 'user',
+          timestamp: new Date(clock.t).toISOString(),
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', content: 'HTTP 429 Too Many Requests' }],
+          },
+        },
+      ]),
+    );
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'stop', {
+        transcriptPath: transcript,
+        lastMessage:
+          'Done. The /login endpoint is now rate limited to 5 attempts per minute per IP.',
+      }),
+    );
+    const pid = mindly.store.projects.list()[0]!.id;
+    expect(mindly.store.sessions.findByExternal(pid, 'claude-code', 'cc')!.status).toBe('idle');
+    expect(mindly.store.handoffs.list(pid)).toHaveLength(0);
+    expect(sent).toHaveLength(0);
+  });
+
+  async function hitLimit(mindly: Mindly, root: string): Promise<void> {
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'stop', { lastMessage: 'Claude usage limit reached.' }),
+    );
+  }
+
+  it('withdraws the handoff when the limited session carries on', async () => {
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    const cc = mindly.store.sessions.findByExternal(pid, 'claude-code', 'cc')!;
+    const task = mindly.tasks.create({
+      projectId: pid,
+      title: 'Migrate auth',
+      owner: cc,
+      plan: ['a', 'b'],
+    });
+    await hitLimit(mindly, root);
+    const [h] = mindly.store.handoffs.list(pid);
+    expect(h?.status).toBe('pending');
+
+    // The limit resets and the same session is asked to go on.
+    clock.advance(5 * 3_600_000);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'continue' }));
+    // While it is working, its task is not offered to anyone else.
+    const early = await mindly.hooks.handle(event(root, 'codex', 'early', 'session_start'));
+    expect(early.context ?? '').not.toContain('Handoff for you');
+    expect(mindly.store.handoffs.get(h!.id).status).toBe('pending');
+
+    mindly.tasks.update(
+      task.id,
+      {
+        status: 'done',
+        plan: [
+          { text: 'a', done: true },
+          { text: 'b', done: true },
+        ],
+      },
+      cc,
+    );
+    clock.advance(60_000);
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'stop', { lastMessage: 'All done.' }),
+    );
+    expect(mindly.store.handoffs.get(h!.id).status).toBe('cancelled');
+    expect(failoverService(mindly).pendingLaunch(pid)).toHaveLength(0);
+
+    clock.advance(86_400_000);
+    const cx = await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    expect(cx.context ?? '').not.toContain('Handoff for you');
+    expect(mindly.store.tasks.get(task.id).status).toBe('done');
+  });
+
+  it('keeps the handoff when the resumed session hits the limit again', async () => {
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    await hitLimit(mindly, root);
+    clock.advance(60_000);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'continue' }));
+    clock.advance(1000);
+    await hitLimit(mindly, root);
+    const handoffs = mindly.store.handoffs.list(pid);
+    expect(handoffs.map((h) => h.status)).toEqual(['pending']);
+    const cx = await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    expect(cx.context).toContain('Handoff for you');
+  });
+
+  it('stops offering a usage-limit handoff after a week', async () => {
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    await hitLimit(mindly, root);
+    expect(failoverService(mindly).pendingLaunch(pid)).toHaveLength(1);
+    clock.advance(RATE_LIMIT_HANDOFF_MAX_AGE_MS + 1000);
+    expect(failoverService(mindly).pendingLaunch(pid)).toHaveLength(0);
+    const cx = await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    expect(cx.context ?? '').not.toContain('Handoff for you');
+    expect(mindly.store.handoffs.list(pid)[0]!.status).toBe('pending');
+  });
+
+  it('takes the goal from the latest request when the last task is finished', async () => {
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    const cc = mindly.store.sessions.findByExternal(pid, 'claude-code', 'cc')!;
+    const task = mindly.tasks.create({
+      projectId: pid,
+      title: 'Fix the login bug',
+      owner: cc,
+      plan: ['repro', 'fix'],
+    });
+    mindly.tasks.update(
+      task.id,
+      {
+        status: 'done',
+        plan: [
+          { text: 'repro', done: true },
+          { text: 'fix', done: true },
+        ],
+      },
+      cc,
+    );
+    clock.advance(1000);
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'prompt', {
+        prompt: 'now rewrite the billing exporter to stream CSV',
+      }),
+    );
+    clock.advance(1000);
+    await hitLimit(mindly, root);
+    const [h] = mindly.store.handoffs.list(pid);
+    expect(h!.packet.goal).toBe('now rewrite the billing exporter to stream CSV');
+    expect(h!.packet.plan).toEqual([]);
+    expect(h!.taskId).toBeNull();
+
+    const cx = await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    expect(cx.context).toContain('Goal: now rewrite the billing exporter to stream CSV');
+    expect(cx.context).not.toContain('Goal: Fix the login bug');
+    expect(mindly.store.tasks.get(task.id).status).toBe('done');
+  });
+
+  it('does not reopen a task that was finished after the handoff was made', async () => {
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    const cc = mindly.store.sessions.findByExternal(pid, 'claude-code', 'cc')!;
+    const task = mindly.tasks.create({ projectId: pid, title: 'Migrate auth', owner: cc });
+    await hitLimit(mindly, root);
+    mindly.tasks.update(task.id, { status: 'done' }, null);
+    const cx = await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    expect(cx.context).toContain('Handoff for you');
+    const after = mindly.store.tasks.get(task.id);
+    expect(after.status).toBe('done');
+    expect(after.ownerSessionId).toBe(cc.id);
+  });
+
+  it('hands on to the agent after the limited one, past agents that are limited too', async () => {
+    const { root, clock, mindly } = setupFailover({
+      config: (c) => {
+        c.failover.order = ['claude-code', 'codex', 'gemini'];
+      },
+    });
+    const svc = failoverService(mindly);
+    expect(svc.nextAgent('claude-code')).toBe('codex');
+    expect(svc.nextAgent('codex')).toBe('gemini');
+    expect(svc.nextAgent('gemini')).toBe('claude-code');
+    expect(svc.nextAgent('cursor')).toBe('claude-code');
+
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    await hitLimit(mindly, root);
+    expect(mindly.store.handoffs.list(pid)[0]!.toAgentKind).toBe('codex');
+
+    // Codex picks the work up and runs into its own limit: Claude Code is still limited.
+    clock.advance(60_000);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'carry on' }));
+    clock.advance(1000);
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'stop', { lastMessage: "You've hit your usage limit." }),
+    );
+    const fromCodex = mindly.store.handoffs.list(pid).find((h) => h.status === 'pending');
+    expect(fromCodex?.toAgentKind).toBe('gemini');
+    expect(svc.nextAgent('gemini', pid)).toBe('claude-code');
+  });
 });
 
 describe('manual handoffs', () => {
@@ -261,5 +601,31 @@ describe('manual handoffs', () => {
     expect(() => svc.cancel(h.id)).toThrow(/cancelled/);
     const cu = await mindly.hooks.handle(event(root, 'cursor', 'cu', 'session_start'));
     expect(cu.context ?? '').not.toContain('Handoff for you');
+  });
+
+  it('shows the summary to the receiving agent when the goal is the task of the sender', async () => {
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    const cc = mindly.store.sessions.findByExternal(pid, 'claude-code', 'cc')!;
+    mindly.tasks.create({ projectId: pid, title: 'Migrate auth', owner: cc });
+    const svc = failoverService(mindly).handoffs;
+    await svc.create(cc, {
+      toAgentKind: 'codex',
+      summary: 'Half done: token refresh works, logout still broken on Safari',
+    });
+    const cx = await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    expect(cx.context).toContain('Goal: Migrate auth');
+    expect(cx.context).toContain('Half done: token refresh works, logout still broken on Safari');
+
+    // Without a task the summary is the goal and is shown once.
+    await mindly.hooks.handle(event(root, 'gemini', 'gm', 'session_start'));
+    const other = await svc.create(mindly.store.sessions.findByExternal(pid, 'gemini', 'gm')!, {
+      toAgentKind: 'cursor',
+      summary: 'Finish the login page',
+    });
+    expect(other.packet.goal).toBe('Finish the login page');
+    const cu = await mindly.hooks.handle(event(root, 'cursor', 'cu', 'session_start'));
+    expect(cu.context!.match(/Finish the login page/g)).toHaveLength(1);
   });
 });

@@ -19,6 +19,7 @@ import {
   type HandoffPacket,
   type HandoffStatus,
   type Session,
+  type Task,
   type MindlyEvent,
 } from '@mindly/core';
 import type { BusEvents, Kernel } from '../kernel.js';
@@ -43,38 +44,113 @@ export interface RateLimitSignature {
   re: RegExp;
 }
 
-// "429" alone matches line numbers and ids, so it must appear next to an HTTP/rate-limit word.
-const HTTP_429 =
-  /\b(?:status|code|error|http)\b\D{0,16}\b429\b|\b429\b\D{0,24}\b(?:too many requests|rate)/i;
+/** A pending usage-limit handoff older than this is no longer offered to anyone. */
+export const RATE_LIMIT_HANDOFF_MAX_AGE_MS = 7 * DAY_MS;
+
+/** Longest handoff summary kept; the CLI and the MCP tool accept exactly this much. */
+export const HANDOFF_SUMMARY_MAX_CHARS = 300;
+
+/** A limit notice is one short line; longer lines are prose or tool output. */
+const MAX_NOTICE_LINE_CHARS = 300;
+
+const APOS = "(?:'|\\u2019)";
+// The label an agent or API client puts in front of an error: "Error:", "API Error: 429",
+// "stream error:", "[API Error: ...".
+const LABEL =
+  '(?:\\[?(?:(?:api|stream|http|request|provider|server|unexpected) )?error\\b\\]?\\s*[:\\-]?\\s*(?:\\(?\\d{3}\\)?\\s*[:\\-]?\\s*)?)';
+// What may follow the phrase in a notice: the end of the line, punctuation, or when to retry.
+// "Rate limit exceeded handling added" is a sentence about code, not a notice.
+const TAIL =
+  '(?=\\s*(?:$|[.,:;!(\\[{|\\u00b7\\u2219\\u2022]|[-\\u2013\\u2014]\\s|(?:please )?(?:try again|retry|retrying|wait|resets?|upgrade)\\b))';
+
+/** A signature that must open the line (after an optional error label). */
+function notice(body: string): RegExp {
+  return new RegExp(`^${LABEL}?(?:${body})${TAIL}`, 'i');
+}
+
+const HTTP = '(?:http(?:/\\d(?:\\.\\d)?)? )?';
+// "429" alone matches line numbers and ids, so it must open the line as a status.
+const HTTP_429 = new RegExp(
+  `^${LABEL}?${HTTP}(?:status(?: code)?\\s*:?\\s*)?429\\b${TAIL}|^${LABEL}?${HTTP}429 too many requests\\b`,
+  'i',
+);
+const RATE_LIMITED = `(?:you are being |you${APOS}re being |requests? (?:was|were|is|are) )?rate[ -]?limited`;
 
 /**
  * Per-agent rate-limit signatures. These are heuristics based on the messages each agent prints
  * today; they will drift as agents change their wording and are meant to become user-configurable.
- * Generic signatures apply to every agent. Bare phrases such as "rate limit" are deliberately
- * anchored ("rate limit reached", "hit the rate limit", ...) so an assistant talking *about* rate
- * limiting in the user's code does not trigger a failover.
+ * Generic signatures apply to every agent.
+ *
+ * A signature is matched against one line at a time and has to open that line the way a notice
+ * does ("Usage limit reached.", "API Error: 429 ...", "You've hit your usage limit"). An assistant
+ * writing *about* rate limiting in the user's code ("the endpoint is now rate limited to 5
+ * attempts", "returns HTTP 429") does not trigger a failover, and neither does a log quoted in a
+ * code block. Missing an unusual wording is the cheaper mistake: a false match takes the work
+ * away from a healthy session.
  */
 export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSignature[]>> = {
   'claude-code': [
-    { id: 'claude.usage_limit_reached', re: /usage limit reached/i },
-    { id: 'claude.five_hour_limit', re: /\b5-hour limit\b/i },
-    { id: 'claude.limit_will_reset', re: /limit will reset/i },
-    { id: 'claude.rate_limit_error', re: /\brate_limit_error\b/ },
+    { id: 'claude.usage_limit_reached', re: notice('(?:claude(?: ai)? )?usage limit reached') },
+    {
+      id: 'claude.five_hour_limit',
+      re: notice(`(?:you${APOS}ve (?:hit|reached) your )?5-hour limit(?: reached)?`),
+    },
+    {
+      id: 'claude.limit_reached',
+      re: notice(
+        `(?:session|weekly|daily|opus|sonnet) limit reached|you${APOS}ve (?:hit|reached) your (?:session|weekly|daily) limit`,
+      ),
+    },
+    { id: 'claude.limit_will_reset', re: /^(?:your )?limit will reset (?:at|in|on)\b/i },
+    // The API error type only counts behind an error label: on its own it is a name in code.
+    {
+      id: 'claude.rate_limit_error',
+      re: new RegExp(`^${LABEL}.{0,80}\\brate_limit_error\\b`, 'i'),
+    },
     { id: 'claude.http_429', re: HTTP_429 },
   ],
   codex: [
-    { id: 'codex.usage_limit', re: /you(?:'|\u2019)ve hit your usage limit/i },
+    { id: 'codex.usage_limit', re: notice(`you${APOS}ve hit your usage limit`) },
     {
       id: 'codex.rate_limit',
-      re: /\brate limit(?:ed| (?:reached|exceeded|hit))\b|\bhit (?:a|the|your) rate limit\b|\brate limit\b.{0,40}\b(?:try again|retry|resets?)\b/i,
+      re: notice(
+        `rate limit (?:reached|exceeded|hit)|you${APOS}ve hit (?:a|the|your) rate limit|${RATE_LIMITED}`,
+      ),
     },
     { id: 'codex.http_429', re: HTTP_429 },
   ],
+  gemini: [
+    { id: 'gemini.resource_exhausted', re: notice('resource has been exhausted') },
+    {
+      id: 'gemini.resource_exhausted_status',
+      re: /^\[?(?:(?:API|api|stream|http|request) )?[Ee]rror\b.{0,80}\bRESOURCE_EXHAUSTED\b|^RESOURCE_EXHAUSTED\b\s*(?:$|[.:])/,
+    },
+    {
+      id: 'gemini.quota_exhausted',
+      re: new RegExp(
+        `^${LABEL}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?quota\\b`,
+        'i',
+      ),
+    },
+  ],
   generic: [
-    { id: 'generic.usage_limit', re: /\busage limit (?:reached|exceeded|hit)\b/i },
-    { id: 'generic.rate_limit', re: /\brate[ _-]?limit(?:ed|[ _](?:exceeded|reached|error))\b/i },
-    { id: 'generic.too_many_requests', re: /\btoo many requests\b/i },
-    { id: 'generic.quota_exceeded', re: /\bquota (?:exceeded|exhausted)\b/i },
+    {
+      id: 'generic.usage_limit',
+      re: notice(
+        `usage limit (?:reached|exceeded|hit)|you${APOS}ve (?:hit|reached) (?:your|the) usage limit`,
+      ),
+    },
+    {
+      id: 'generic.rate_limit',
+      re: notice(`rate[ _-]?limit[ _](?:exceeded|reached|error)|${RATE_LIMITED}`),
+    },
+    { id: 'generic.too_many_requests', re: notice(`${HTTP}(?:429 )?too many requests`) },
+    {
+      id: 'generic.quota_exceeded',
+      re: notice(
+        `quota (?:exceeded|exhausted)|(?:you have|you${APOS}ve) exceeded your (?:(?:current|daily|monthly) )?quota`,
+      ),
+    },
     { id: 'generic.http_429', re: HTTP_429 },
   ],
 };
@@ -87,12 +163,37 @@ export function signaturesFor(agentKind: string): RateLimitSignature[] {
   return [...own, ...(RATE_LIMIT_SIGNATURES.generic ?? [])];
 }
 
+const FENCE = /^\s*(?:```|~~~)/;
+// List bullets, quote marks and the gutters agents draw in front of a status line.
+const LEAD = /^[\s>*#|•·∙⎿│└├-]+/;
+
+/**
+ * The lines of `text` that could be a notice: outside code fences, without their bullet or
+ * gutter, and short. Agents quote failing logs in fences; a limit notice is never fenced.
+ */
+export function noticeLines(text: string): string[] {
+  const out: string[] = [];
+  let fenced = false;
+  for (const raw of text.split(/\r?\n/)) {
+    if (FENCE.test(raw)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const line = raw.replace(LEAD, '').trimEnd();
+    if (line.length === 0 || line.length > MAX_NOTICE_LINE_CHARS) continue;
+    out.push(line);
+  }
+  return out;
+}
+
 /** Returns the id of the first matching signature, or null. Input is treated as untrusted text. */
 export function detectRateLimit(agentKind: string, texts: readonly string[]): string | null {
   const sigs = signaturesFor(agentKind);
   for (const raw of texts.slice(-MAX_ENTRIES)) {
-    const text = raw.slice(0, MAX_TEXT_PER_ENTRY);
-    for (const s of sigs) if (s.re.test(text)) return s.id;
+    for (const line of noticeLines(raw.slice(0, MAX_TEXT_PER_ENTRY))) {
+      for (const s of sigs) if (s.re.test(line)) return s.id;
+    }
   }
   return null;
 }
@@ -159,24 +260,12 @@ export interface TranscriptEntry {
   ts: number | null;
   /** True for entries authored on the user side (prompts, tool results). */
   user: boolean;
+  /**
+   * True when `text` is something the agent itself said or an error its client reported. Tool
+   * calls, tool output, attachments and injected context are not: they quote the project.
+   */
+  agent: boolean;
   text: string;
-}
-
-function collectText(value: unknown, out: string[], budget: { left: number }, depth: number): void {
-  if (budget.left <= 0 || depth > 8) return;
-  if (typeof value === 'string') {
-    const s = value.slice(0, budget.left);
-    budget.left -= s.length;
-    out.push(s);
-  } else if (Array.isArray(value)) {
-    for (const v of value.slice(0, 50)) collectText(v, out, budget, depth + 1);
-  } else if (value !== null && typeof value === 'object') {
-    for (const [key, v] of Object.entries(value).slice(0, 50)) {
-      // Skip opaque blobs and metadata that cannot carry a rate-limit message.
-      if (key === 'signature' || key === 'data' || key === 'uuid' || key === 'parentUuid') continue;
-      collectText(v, out, budget, depth + 1);
-    }
-  }
 }
 
 function field(obj: unknown, key: string): unknown {
@@ -194,6 +283,73 @@ function isUserSide(obj: unknown): boolean {
     field(field(obj, 'payload'), 'role'),
   ];
   return markers.some((m) => m === 'user' || m === 'user_message');
+}
+
+const TEXT_PARTS = new Set(['text', 'output_text']);
+
+/** The plain text of a message body: a string, or the text parts of a content array. */
+function messageText(content: unknown): string | null {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return null;
+  const parts: string[] = [];
+  for (const part of content.slice(0, 50)) {
+    if (typeof part === 'string') parts.push(part);
+    else {
+      const type = field(part, 'type');
+      const text = field(part, 'text');
+      // Tool calls, tool results and thinking are skipped: only what the agent said counts.
+      if (typeof type === 'string' && TEXT_PARTS.has(type) && typeof text === 'string') {
+        parts.push(text);
+      }
+    }
+  }
+  return parts.length > 0 ? parts.join('\n') : null;
+}
+
+function errorText(obj: unknown): string | null {
+  for (const v of [
+    field(obj, 'message'),
+    field(obj, 'content'),
+    field(field(obj, 'error'), 'message'),
+    field(obj, 'error'),
+  ]) {
+    const text = messageText(v);
+    if (text) return text;
+  }
+  return null;
+}
+
+const CODEX_AGENT_EVENTS = new Set(['agent_message', 'error', 'stream_error']);
+
+/**
+ * What the agent said in one transcript entry, or null when the entry is anything else. Known
+ * shapes: Claude Code (`type: "assistant"` with a content array, `type: "system"` error lines),
+ * Codex rollouts (`payload.type: "message"` with `role: "assistant"`, `agent_message`, `error`)
+ * and plain `{ role: "assistant", content }` logs.
+ */
+function agentText(obj: unknown): string | null {
+  if (isUserSide(obj)) return null;
+  const type = field(obj, 'type');
+  const payload = field(obj, 'payload');
+  if (payload !== null && typeof payload === 'object') {
+    const kind = field(payload, 'type');
+    if (kind === 'message' && field(payload, 'role') === 'assistant') {
+      return messageText(field(payload, 'content'));
+    }
+    if (typeof kind === 'string' && CODEX_AGENT_EVENTS.has(kind)) return errorText(payload);
+    return null;
+  }
+  const message = field(obj, 'message');
+  const role = field(message, 'role') ?? field(obj, 'role');
+  if (type === 'assistant' || role === 'assistant') {
+    return messageText(field(message, 'content') ?? field(obj, 'content') ?? message);
+  }
+  const subtype = field(obj, 'subtype');
+  const isError =
+    type === 'error' ||
+    (type === 'system' &&
+      (field(obj, 'level') === 'error' || (typeof subtype === 'string' && /error/i.test(subtype))));
+  return isError ? errorText(obj) : null;
 }
 
 function parseTs(v: unknown): number | null {
@@ -215,22 +371,27 @@ export function parseTranscriptTail(tail: string): TranscriptEntry[] {
     try {
       obj = JSON.parse(trimmed);
     } catch {
-      out.push({ ts: null, user: false, text: trimmed.slice(0, MAX_TEXT_PER_ENTRY) });
+      out.push({
+        ts: null,
+        user: false,
+        agent: true,
+        text: trimmed.slice(0, MAX_TEXT_PER_ENTRY),
+      });
       continue;
     }
-    const parts: string[] = [];
-    collectText(obj, parts, { left: MAX_TEXT_PER_ENTRY }, 0);
+    const text = agentText(obj);
     out.push({
       ts: parseTs(field(obj, 'timestamp')),
       user: isUserSide(obj),
-      text: parts.join('\n'),
+      agent: text !== null,
+      text: (text ?? '').slice(0, MAX_TEXT_PER_ENTRY),
     });
   }
   return out;
 }
 
 /**
- * Agent-side texts newer than `since`. Entries with timestamps are compared directly; when the
+ * What the agent said after `since`. Entries with timestamps are compared directly; when the
  * transcript has no timestamps, only entries after the last user-side entry are considered.
  */
 export function recentAgentTexts(entries: readonly TranscriptEntry[], since: number): string[] {
@@ -240,7 +401,7 @@ export function recentAgentTexts(entries: readonly TranscriptEntry[], since: num
     if (e.user) lastUser = i;
   });
   return entries
-    .filter((e, i) => !e.user && (anyTs ? e.ts !== null && e.ts >= since : i > lastUser))
+    .filter((e, i) => e.agent && (anyTs ? e.ts !== null && e.ts >= since : i > lastUser))
     .map((e) => e.text);
 }
 
@@ -257,6 +418,10 @@ function promptSummaries(events: readonly MindlyEvent[]): string[] {
     .map((e) => (typeof e.payload.summary === 'string' ? sanitizeLine(e.payload.summary, 200) : ''))
     .filter((s) => s.length > 0)
     .reverse();
+}
+
+function isUnfinished(task: Task): boolean {
+  return task.status !== 'done' && task.status !== 'abandoned';
 }
 
 /** Extra content a caller can add to a handoff packet (already-untrusted input is cleaned). */
@@ -277,8 +442,11 @@ export async function buildHandoffPacket(
   extras: HandoffExtras = {},
 ): Promise<{ packet: HandoffPacket; taskId: string | null }> {
   const now = k.clock.now();
+  // A task the session already finished is not what it was doing when it stopped: the goal then
+  // comes from the latest request, and the finished task is left alone.
+  const current = session.currentTaskId ? k.store.tasks.find(session.currentTaskId) : null;
   const task =
-    (session.currentTaskId ? k.store.tasks.find(session.currentTaskId) : null) ??
+    (current && isUnfinished(current) ? current : null) ??
     k.store.tasks.ownedBy(session.id)[0] ??
     null;
   const prompts = k.store.events.query(session.projectId, {
@@ -344,7 +512,7 @@ export class HandoffService {
   async create(session: Session, input: ManualHandoffInput): Promise<Handoff> {
     const to = input.toAgentKind ?? null;
     if (to !== null && !AGENT_KIND_RE.test(to)) throw invalidInput('invalid agent kind');
-    const summary = this.clean(input.summary, 300);
+    const summary = this.clean(input.summary, HANDOFF_SUMMARY_MAX_CHARS);
     if (!summary) throw invalidInput('handoff summary is empty');
     const cleanList = (items: readonly string[] | undefined): string[] | undefined =>
       items
@@ -427,9 +595,50 @@ export class FailoverService {
     this.homeDir = options.homeDir ?? homedir();
   }
 
-  /** The agent that should continue after `limited`, per `config.failover.order`. */
-  nextAgent(limited: string): string | null {
-    return this.k.config.failover.order.find((a) => a !== limited) ?? null;
+  /**
+   * The agent that should continue after `limited`: the one after it in `config.failover.order`,
+   * wrapping round. With `projectId`, agents that hit their own limit in that project within the
+   * last day are passed over while another one is left, so work is not handed back to an agent
+   * that just handed it on.
+   */
+  nextAgent(limited: string, projectId?: string): string | null {
+    const order = this.k.config.failover.order;
+    const at = order.indexOf(limited);
+    const others = [...order.slice(at + 1), ...order.slice(0, Math.max(at, 0))].filter(
+      (a) => a !== limited,
+    );
+    if (others.length === 0) return null;
+    const alsoLimited = new Set(
+      projectId
+        ? this.k.store.sessions
+            .listLive(projectId, DAY_MS)
+            .filter((s) => s.status === 'rate_limited')
+            .map((s) => s.agentKind)
+        : [],
+    );
+    return others.find((a) => !alsoLimited.has(a)) ?? others[0] ?? null;
+  }
+
+  /** This session's usage-limit handoff that nobody picked up yet. */
+  private pendingRateLimitHandoff(projectId: string, sessionId: string): Handoff | null {
+    return (
+      this.k.store.handoffs
+        .list(projectId, 100)
+        .find(
+          (h) =>
+            h.fromSessionId === sessionId && h.reason === 'rate_limit' && h.status === 'pending',
+        ) ?? null
+    );
+  }
+
+  /**
+   * A session that finishes a turn without a limit notice is working again, so the handoff it
+   * left when it hit the limit is withdrawn: nobody else should be told to take the work over.
+   */
+  private withdrawStaleHandoff(projectId: string, session: Session, since: number): void {
+    const stale = this.pendingRateLimitHandoff(projectId, session.id);
+    if (!stale || stale.createdAt >= since) return;
+    this.k.store.handoffs.setStatus(stale.id, 'cancelled');
   }
 
   /**
@@ -458,7 +667,10 @@ export class FailoverService {
       if (tail) texts.push(...recentAgentTexts(parseTranscriptTail(tail), since));
     }
     const signature = detectRateLimit(session.agentKind, texts);
-    if (!signature) return null;
+    if (!signature) {
+      this.withdrawStaleHandoff(p.projectId, session, since);
+      return null;
+    }
     this.k.store.kv.set(guardKey, epoch);
     return this.handleRateLimit(p.projectId, session, signature);
   }
@@ -469,13 +681,8 @@ export class FailoverService {
     signature: string,
   ): Promise<Handoff | null> {
     this.k.store.sessions.setStatus(session.id, 'rate_limited');
-    const existing = this.k.store.handoffs
-      .list(projectId, 100)
-      .find(
-        (h) =>
-          h.fromSessionId === session.id && h.reason === 'rate_limit' && h.status === 'pending',
-      );
-    const to = this.nextAgent(session.agentKind);
+    const existing = this.pendingRateLimitHandoff(projectId, session.id);
+    const to = this.nextAgent(session.agentKind, projectId);
     this.k.store.events.append({
       projectId,
       sessionId: session.id,
@@ -546,6 +753,7 @@ export class FailoverService {
     for (const project of projects) {
       for (const h of this.k.store.handoffs.list(project.id, 50)) {
         if (h.status !== 'pending' || h.reason !== 'rate_limit') continue;
+        if (h.createdAt < this.k.clock.now() - RATE_LIMIT_HANDOFF_MAX_AGE_MS) continue;
         const from = this.k.store.sessions.find(h.fromSessionId);
         out.push({
           handoffId: h.id,
