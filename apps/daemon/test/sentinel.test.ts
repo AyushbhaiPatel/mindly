@@ -224,6 +224,20 @@ describe('sentinel job', () => {
     expect(svc.warmPath(s.pid, s.root)).not.toBe(svc.warmPath(s.pid, wt));
   });
 
+  it('waits for the merge checks of the same project instead of running beside them', async () => {
+    const s = await setup();
+    await s.edit('claude-code', false, 1);
+    let release!: () => void;
+    const merging = new Promise<void>((r) => (release = r));
+    void s.d.jobs.scheduler.enqueue(`shadow:${s.pid}`, () => merging);
+    const tick = sentinelTick(s.d.jobs);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(s.d.mindly.store.runs.list(s.pid, { kind: 'sentinel' })).toHaveLength(0);
+    release();
+    expect(await tick).toBe(1);
+    expect(s.d.mindly.store.runs.list(s.pid, { kind: 'sentinel' })).toHaveLength(1);
+  });
+
   it('leaves its conflicts alone when a shadow merge finds checks passing', async () => {
     const s = await setup();
     const wt = linkedWorktree(s.root, 'feature');

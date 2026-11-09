@@ -21,6 +21,7 @@ export * from './saves.js';
 export * from './saves-card.js';
 export * from './self-healing.js';
 export * from './sentinel.js';
+export * from './sentinel-lock.js';
 export * from './split.js';
 export * from './step-runner.js';
 export * from './track.js';

@@ -1,6 +1,14 @@
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   defaultUserConfig,
@@ -9,11 +17,15 @@ import {
   type UserConfig,
 } from '@mindly/core';
 import {
+  bisectOf,
   installDefaultModules,
   Mindly,
   savesOf,
   sentinelOf,
+  SentinelService,
   SENTINEL_FINGERPRINT_PREFIX,
+  SKIP_RETRY_MS,
+  tryProcessLock,
   trackOf,
   type CheckpointGitPort,
   type CommandRunResult,
@@ -39,6 +51,8 @@ interface FakeSteps extends StepGitPort {
   ran: string[];
   warmOpened: string[];
   warmRemoved: string[];
+  /** When set, removing a warm tree leaves it in place (it could not be removed). */
+  keepOnRemove: boolean;
   /** Paths each commit changed (for the setup reruns). */
   changes: Map<string, string[]>;
 }
@@ -50,10 +64,12 @@ function fakeSteps(verdict: (check: string, commit: string, nth: number) => Verd
     ran: [],
     warmOpened: [],
     warmRemoved: [],
+    keepOnRemove: false,
     changes: new Map(),
     scratch: () => Promise.reject(new Error('not used')),
     warm: async (_repo, path, commit) => {
       port.warmOpened.push(path);
+      mkdirSync(path, { recursive: true });
       const state = { current: commit };
       where.set(path, state);
       const ws: StepWorkspace = {
@@ -70,6 +86,7 @@ function fakeSteps(verdict: (check: string, commit: string, nth: number) => Verd
     },
     removeWarm: async (_repo, path) => {
       port.warmRemoved.push(path);
+      if (!port.keepOnRemove) rmSync(path, { recursive: true, force: true });
     },
     changedPaths: async (_dir, from, to) => {
       const a = Number(from.replace('c', ''));
@@ -103,7 +120,7 @@ function fakeSteps(verdict: (check: string, commit: string, nth: number) => Verd
   return port;
 }
 
-function fakeCheckpoints(busy: () => boolean = () => false): CheckpointGitPort {
+function fakeCheckpoints(): CheckpointGitPort {
   const no = (): never => {
     throw new Error('not used');
   };
@@ -115,7 +132,7 @@ function fakeCheckpoints(busy: () => boolean = () => false): CheckpointGitPort {
     listRefs: async () => [],
     deleteRefs: async () => 0,
     diskUsage: async () => null,
-    tryLock: () => (busy() ? null : { release: () => undefined }),
+    tryLock: () => ({ release: () => undefined }),
   };
 }
 
@@ -138,7 +155,6 @@ async function world(
     config?: (c: UserConfig) => void;
     project?: Record<string, unknown>;
     trust?: boolean;
-    busy?: () => boolean;
   } = {},
 ): Promise<World> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-sentinel-')));
@@ -160,7 +176,7 @@ async function world(
     inMemory: true,
     clock,
     config,
-    ports: { git: { ...fakeGit, checkpoints: fakeCheckpoints(opts.busy), steps } },
+    ports: { git: { ...fakeGit, checkpoints: fakeCheckpoints(), steps } },
   });
   installDefaultModules(mindly);
   await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
@@ -553,12 +569,82 @@ describe('sentinel pass', () => {
     expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checkedSeq).toBe(8);
   });
 
-  it('does not run twice at once, and stops when cancelled', async () => {
-    let busy = true;
-    const w = await world(() => 'pass', { busy: () => busy });
+  it('keeps what a check settled when the pass is cancelled before the next one', async () => {
+    const ac = new AbortController();
+    const w = await world(
+      (check, commit, nth) => {
+        // Both checks break; the pass is cancelled during the second one's bisect, after the
+        // first one (broken at step 4) settled.
+        if (check === 'lint' && nth >= 2 && w0.armed) ac.abort();
+        if (check === 'unit') return seqOf(commit) >= 4 ? 'fail' : 'pass';
+        return seqOf(commit) >= 5 ? 'fail' : 'pass';
+      },
+      {
+        project: {
+          checks: [
+            { name: 'unit', argv: ['npm', 'test'] },
+            { name: 'lint', argv: ['npm', 'run', 'lint'] },
+          ],
+        },
+      },
+    );
+    const w0 = { armed: false };
+    w.addSteps(1, 3);
+    await w.pass();
+    w.addSteps(4, 6);
+    w0.armed = true;
+    const cancelled = await w.pass({ signal: ac.signal });
+    expect(cancelled.status).toBe('cancelled');
+    w0.armed = false;
+    const unitBisects = (): number =>
+      w.mindly.store.runs
+        .list(w.pid, { kind: 'bisect' })
+        .filter((r) => (r.input as { check?: string }).check === 'unit').length;
+    expect(unitBisects()).toBe(1);
+    const mistakes = w.mindly.store.memories.list(w.pid, { kinds: ['mistake'] }).length;
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checks['unit']?.state).toBe('failing');
+    const again = await w.pass();
+    expect(again.checks.find((c) => c.name === 'unit')?.transition).toBe('still_failing');
+    // The settled check is not searched again (the cancelled one is).
+    expect(unitBisects()).toBe(1);
+    expect(again.checks.find((c) => c.name === 'lint')?.transition).toBe('broke');
+    // One new mistake: lint's. Unit's is not recorded twice.
+    expect(w.mindly.store.memories.list(w.pid, { kinds: ['mistake'] })).toHaveLength(mistakes + 1);
+  });
+
+  it("refuses to run when Mindly's home is inside the repository", async () => {
+    const w = await world(() => 'pass');
+    const svc = new SentinelService(
+      w.mindly.kernel,
+      w.mindly.projects,
+      bisectOf(w.mindly),
+      w.mindly.telepathy,
+      null,
+      join(w.root, '.mindly-dev', 'sentinel'),
+    );
     w.addSteps(1, 2);
+    expect(svc.readiness(w.mindly.projects.byId(w.pid)).reason).toBe('scratch_inside_repo');
+    expect((await svc.pass(w.pid, w.root, { trigger: 'user', force: true })).status).toBe(
+      'not_ready',
+    );
+    expect(w.steps.ran).toEqual([]);
+  });
+
+  it('does not run twice at once, however long a pass takes, and stops when cancelled', async () => {
+    const w = await world(() => 'pass');
+    w.addSteps(1, 2);
+    const svc = sentinelOf(w.mindly);
+    // Another process (here: this one) holds the checkout, and has for an hour.
+    const file = join(dirname(svc.warmPath(w.pid, w.root)), 'lock');
+    mkdirSync(dirname(file), { recursive: true });
+    const held = tryProcessLock(file)!;
+    const hourAgo = new Date(Date.now() - 60 * 60_000);
+    utimesSync(file, hourAgo, hourAgo);
     expect((await w.pass()).status).toBe('busy');
-    busy = false;
+    expect(await svc.reset(w.pid, w.root)).toBe('busy');
+    expect(svc.busy(w.pid)).toBe(false); // no watch yet: nothing of this project is listed
+    held.release();
+    expect(existsSync(file)).toBe(false);
     const ac = new AbortController();
     ac.abort();
     const r = await w.pass({ signal: ac.signal });
@@ -568,6 +654,62 @@ describe('sentinel pass', () => {
 });
 
 describe('sentinel schedule', () => {
+  it('backs off a step where nothing could run instead of retrying it every tick', async () => {
+    let timeout = true;
+    const w = await world((c) => (c === 'unit' && timeout ? 'timeout' : 'pass'), {
+      config: (c) => (c.sentinel.quietSec = 10),
+    });
+    const svc = sentinelOf(w.mindly);
+    w.addSteps(1, 3);
+    w.clock.advance(60_000);
+    const tick = async (): Promise<number> => {
+      w.clock.advance(15_000);
+      if (svc.dueWorktrees(w.pid).length === 0) return 0;
+      await svc.pass(w.pid, w.root, { trigger: 'schedule' });
+      return 1;
+    };
+    let passes = 0;
+    for (let i = 0; i < 20; i++) passes += await tick(); // 5 minutes of ticks
+    expect(passes).toBe(1);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toMatchObject({
+      checkedSeq: null,
+      skips: 1,
+      skippedSeq: 3,
+    });
+    expect(svc.status(w.pid).watches[0]?.retryAt).toBe(
+      w.mindly.store.sentinel.get(w.pid, w.root)?.retryAt,
+    );
+
+    // After the back-off it is tried again, and the next one waits twice as long.
+    w.clock.advance(SKIP_RETRY_MS);
+    expect(await tick()).toBe(1);
+    const second = w.mindly.store.sentinel.get(w.pid, w.root)!;
+    expect(second.skips).toBe(2);
+    expect(second.retryAt).toBe(w.clock.now() + 2 * SKIP_RETRY_MS);
+    expect(SentinelService.retryDelayMs(10)).toBe(6 * 60 * 60_000);
+
+    // A new step is tried at once; once something runs, the back-off is cleared.
+    timeout = false;
+    w.addSteps(4, 4);
+    w.clock.advance(60_000);
+    expect(await tick()).toBe(1);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toMatchObject({
+      checkedSeq: 4,
+      skips: 0,
+      skippedSeq: null,
+      retryAt: null,
+    });
+  });
+
+  it('looks at a new checkout once enough steps piled up, even without a pause', async () => {
+    const w = await world(() => 'pass', { config: (c) => (c.sentinel.everySteps = 3) });
+    const svc = sentinelOf(w.mindly);
+    w.addSteps(1, 2);
+    expect(svc.dueWorktrees(w.pid)).toEqual([]);
+    w.addSteps(3, 3);
+    expect(svc.dueWorktrees(w.pid)).toEqual([w.root]);
+  });
+
   it('is due after enough steps, or once the agents paused', async () => {
     const w = await world(() => 'pass', {
       config: (c) => {
@@ -625,25 +767,67 @@ describe('sentinel status and cleanup', () => {
     expect(s.recent.map((r) => r.kind)).toEqual(['sentinel', 'sentinel']);
   });
 
-  it('removes warm trees on reset, forget and when idle', async () => {
+  it('removes warm trees on reset, forget and when idle, never one in use', async () => {
     const w = await world(() => 'pass');
     const svc = sentinelOf(w.mindly);
     w.addSteps(1, 2);
     await w.pass();
     const path = svc.warmPath(w.pid, w.root);
     expect(w.steps.warmOpened).toEqual([path]);
-    // Not idle yet; once idle, only an existing tree is removed.
+    // Not idle yet.
     expect(await svc.pruneWarm()).toBe(0);
     w.clock.advance(4 * 24 * 60 * 60_000);
+    // Idle, but a pass holds the checkout right now: left alone.
+    const held = tryProcessLock(join(dirname(path), 'lock'))!;
     expect(await svc.pruneWarm()).toBe(0);
-    mkdirSync(path, { recursive: true });
+    expect(svc.busy(w.pid)).toBe(true);
+    held.release();
     expect(await svc.pruneWarm()).toBe(1);
-    expect(w.steps.warmRemoved).toEqual([path]);
-    expect(await svc.reset(w.pid, w.root)).toBe(true);
-    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toBeNull();
+    expect(existsSync(path)).toBe(false);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.setupCommit).toBeNull();
+    expect(await svc.pruneWarm()).toBe(0);
+
+    // A tree that cannot be removed keeps its state, so cleanup tries again.
     await w.pass();
-    expect(await svc.forget(w.pid)).toBe(1);
+    w.steps.keepOnRemove = true;
+    expect(await svc.reset(w.pid, w.root)).toBe('failed');
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).not.toBeNull();
+    expect(await svc.forget(w.pid)).toEqual({ reset: 0, left: [w.root] });
+    w.steps.keepOnRemove = false;
+    expect(await svc.reset(w.pid, w.root)).toBe('reset');
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toBeNull();
+    expect(await svc.reset(w.pid, w.root)).toBe('none');
+    await w.pass();
+    expect(await svc.forget(w.pid)).toEqual({ reset: 1, left: [] });
     expect(w.mindly.store.sentinel.list(w.pid)).toEqual([]);
+  });
+
+  it('forgets a checkout that was removed, with its tree, and stops listing it', async () => {
+    const w = await world(() => 'pass');
+    const svc = sentinelOf(w.mindly);
+    const part = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-part-')));
+    w.mindly.store.checkpoints.create({
+      projectId: w.pid,
+      worktree: part,
+      seq: 1,
+      commit: 'c1',
+      parentCommit: null,
+      kind: 'baseline',
+      sessionId: null,
+      fileChangeId: null,
+      promptEventId: null,
+      tool: null,
+      paths: [],
+      gap: false,
+    });
+    await svc.pass(w.pid, part, { trigger: 'user', force: true });
+    expect(svc.status(w.pid).watches.map((x) => x.worktree)).toContain(part);
+    rmSync(part, { recursive: true, force: true });
+    // Gone from the status at once; its tree and state go at the next cleanup.
+    expect(svc.status(w.pid).watches.map((x) => x.worktree)).not.toContain(part);
+    expect(await svc.pruneWarm()).toBe(1);
+    expect(w.steps.warmRemoved).toEqual([svc.warmPath(w.pid, part)]);
+    expect(w.mindly.store.sentinel.get(w.pid, part)).toBeNull();
   });
 });
 

@@ -573,6 +573,13 @@ export interface SentinelWatch {
   setupCommit: string | null;
   /** Per check name. */
   checks: Record<string, SentinelCheck>;
+  /**
+   * Passes in a row where nothing could run (setup failed, every check timed out or exited 125),
+   * and the step they were at. Such a step is retried only after `retryAt` or a newer step.
+   */
+  skips: number;
+  skippedSeq: number | null;
+  retryAt: number | null;
   updatedAt: number;
 }
 

@@ -1,5 +1,5 @@
 import { describeError, loadUserConfig } from '@mindly/core';
-import { sentinelOf } from '@mindly/engine';
+import { sentinelOf, type SentinelPassResult } from '@mindly/engine';
 import type { JobContext } from './context.js';
 
 const MAX_PROJECTS = 200;
@@ -21,7 +21,7 @@ function refreshSentinelConfig(ctx: JobContext): void {
 
 /**
  * Runs the sentinel over every working tree that is due (enough new steps, or the agents paused),
- * one pass at a time across all projects so checks never compete for the machine. Passes stop
+ * one pass at a time across all projects, each queued behind that project's merge checks. Passes stop
  * when the daemon stops: their commands are killed and the run is recorded as cancelled.
  */
 export async function sentinelTick(ctx: JobContext): Promise<number> {
@@ -40,10 +40,17 @@ export async function sentinelTick(ctx: JobContext): Promise<number> {
     }
     for (const worktree of due) {
       if (ctx.scheduler.signal.aborted) return passes;
-      const r = await svc.pass(p.id, worktree, {
-        trigger: 'schedule',
-        signal: ctx.scheduler.signal,
+      // Queued behind the project's merge checks and command contracts (same key), so the
+      // sentinel never runs the test suite at the same time as they do.
+      const done: { result: SentinelPassResult | null } = { result: null };
+      await ctx.scheduler.enqueue(`shadow:${p.id}`, async () => {
+        done.result = await svc.pass(p.id, worktree, {
+          trigger: 'schedule',
+          signal: ctx.scheduler.signal,
+        });
       });
+      const r = done.result;
+      if (r === null) continue;
       if (r.status === 'checked') passes++;
       const broke = r.checks.filter((c) => c.transition === 'broke').map((c) => c.name);
       if (r.status === 'checked' || r.status === 'error') {

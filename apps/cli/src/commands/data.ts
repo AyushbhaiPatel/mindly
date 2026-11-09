@@ -224,6 +224,11 @@ export async function forget(
         'Your code and git history are not touched. Run `mindly export` first to keep a copy.',
       ),
     );
+    // A pass running now would recreate what is being deleted: refuse before asking.
+    if (sentinelOf(mindly).busy(pid)) {
+      const { busyError } = await import('./sentinel.js');
+      throw busyError();
+    }
     if (!(await confirm(out.io, 'Forget this project?', o.yes === true))) {
       out.line('Nothing was deleted.');
       return 1;
@@ -231,7 +236,12 @@ export async function forget(
     // Checkpoint refs and the sentinel's scratch trees live in the repositories: delete them
     // before their rows go.
     await mindly.checkpoints.forget(pid);
-    await sentinelOf(mindly).forget(pid);
+    const sentinel = await sentinelOf(mindly).forget(pid);
+    for (const w of sentinel.left) {
+      out.warn(
+        `The sentinel's scratch copy for ${clean(w, 300)} could not be removed; delete it from ${clean(sentinelOf(mindly).warmPath(pid, w), 300)}.`,
+      );
+    }
     mindly.store.projects.delete(pid);
     mindly.store.vacuum();
     out.line(`Forgotten: Mindly no longer has any data for ${clean(project.project.name, 80)}.`);

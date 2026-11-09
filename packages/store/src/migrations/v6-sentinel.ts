@@ -24,7 +24,8 @@ const V6_RUN_KINDS = [
  * - `runs` is rebuilt so its kind check accepts `sentinel` (SQLite cannot alter a check).
  * - `sentinel_watches`: one row per watched working tree: the newest step the checks ran at, the
  *   commit the warm scratch tree last ran its setup at, and per check what is known (passing since
- *   a step, or failing since a step and which step broke it), as JSON. No command output and no
+ *   a step, or failing since a step and which step broke it) as JSON, and the back-off of a step
+ *   where nothing could run. No command output and no
  *   file content is stored here; that lives in the run records.
  */
 export const MIGRATION_V6_SENTINEL = `
@@ -53,6 +54,9 @@ CREATE TABLE sentinel_watches (
   checked_at    INTEGER,
   setup_commit  TEXT,
   checks        TEXT NOT NULL DEFAULT '{}',
+  skips         INTEGER NOT NULL DEFAULT 0,
+  skipped_seq   INTEGER,
+  retry_at      INTEGER,
   updated_at    INTEGER NOT NULL,
   PRIMARY KEY (project_id, worktree)
 );

@@ -33,6 +33,15 @@ async function worktreeOf(scope: ProjectScope, cwd: string, override?: string): 
   return worktree;
 }
 
+/** The sentinel holds a checkout's lock: a pass (or a cleanup) is running there now. */
+export function busyError(): HintedError {
+  return new HintedError(
+    'conflict',
+    'the sentinel is checking this checkout right now',
+    'Wait for it to finish (mindly sentinel shows when it last checked), or stop the daemon: mindly daemon stop',
+  );
+}
+
 /** `mindly sentinel [--json]`. */
 export async function sentinelStatus(out: Out, raw: unknown): Promise<number> {
   const o = parseOptions(Options.pick({ json: true }), raw);
@@ -130,14 +139,23 @@ export async function sentinelReset(out: Out, raw: unknown): Promise<number> {
       out.line('Nothing changed.');
       return 1;
     }
-    const had = await sentinelOf(scope.mindly).reset(scope.project.project.id, worktree);
-    if (o.json) out.json({ worktree, reset: had });
-    else
+    const r = await sentinelOf(scope.mindly).reset(scope.project.project.id, worktree);
+    if (r === 'busy') throw busyError();
+    if (r === 'failed') {
+      throw new HintedError(
+        'internal',
+        "the sentinel's scratch copy of this checkout could not be removed",
+        'See the log in ~/.mindly/logs, then try again',
+      );
+    }
+    if (o.json) out.json({ worktree, reset: r === 'reset' });
+    else {
       out.line(
-        had
+        r === 'reset'
           ? 'Reset: the next run checks this checkout from scratch.'
           : 'There was nothing to reset.',
       );
+    }
     return 0;
   });
 }

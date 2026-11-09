@@ -6,7 +6,14 @@ import type {
   SentinelStatus,
   SentinelWatchStatus,
 } from '@mindly/engine';
-import { count, relativeTime, type Row, type Screen, type Step } from '../present/index.js';
+import {
+  count,
+  relativeTime,
+  spanWords,
+  type Row,
+  type Screen,
+  type Step,
+} from '../present/index.js';
 import { clean } from '../util.js';
 import { stepWhat, stepWho } from './bisect.js';
 
@@ -44,6 +51,13 @@ export function notReadyWords(reason: SentinelNotReady): { why: string; step: St
       return {
         why: "this project's checks are not trusted yet, so nothing runs",
         step: { cmd: 'mindly trust', why: 'review the commands and allow them' },
+      };
+    case 'scratch_inside_repo':
+      return {
+        why: "Mindly's home (MINDLY_HOME) is inside this repository, so the sentinel's scratch copies would be too",
+        step: {
+          why: 'Point MINDLY_HOME outside the repository (for development, e.g. a folder in /tmp)',
+        },
       };
   }
 }
@@ -87,11 +101,16 @@ function checkLine(sc: Screen, c: SentinelCheckStatus): Row {
 
 function watchHeader(sc: Screen, w: SentinelWatchStatus, root: string): string {
   const where = w.worktree === root ? 'this checkout' : clean(w.worktree, 200);
+  // Nothing could run at the newest step (setup failed, checks timed out): when it is retried.
+  const retry =
+    w.retryAt !== null
+      ? ` ${sc.sym.dot} nothing could run at step ${w.latestSeq ?? '?'}; ${w.retryAt > sc.now ? `tried again in ${spanWords(w.retryAt - sc.now)} or at a new step` : 'tried again soon'}`
+      : '';
   if (w.checkedSeq === null) {
-    return `${where} ${sc.sym.dot} not checked yet${w.latestSeq !== null ? ` (${count(w.latestSeq, 'step')})` : ''}`;
+    return `${where} ${sc.sym.dot} not checked yet${w.latestSeq !== null ? ` (${count(w.latestSeq, 'step')})` : ''}${retry}`;
   }
   const behind = w.pending > 0 ? ` ${sc.sym.dot} ${count(w.pending, 'new step')} since` : '';
-  return `${where} ${sc.sym.dot} checked step ${w.checkedSeq} ${relativeTime(w.checkedAt, sc.now)}${behind}`;
+  return `${where} ${sc.sym.dot} checked step ${w.checkedSeq} ${relativeTime(w.checkedAt, sc.now)}${behind}${retry}`;
 }
 
 /** `mindly sentinel`: whether it runs, what it watches and what broke. */

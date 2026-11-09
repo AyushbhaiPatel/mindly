@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import {
   describeError,
   fingerprint,
@@ -17,7 +17,7 @@ import {
 } from '@mindly/core';
 import { sessionLabel } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
-import type { Kernel } from '../kernel.js';
+import { LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
 import type { CommandSpec, StepGitPort, StepWorkspace } from '../ports.js';
 import type { ProjectContext, ProjectService } from '../projects.js';
 import {
@@ -30,6 +30,7 @@ import {
 } from './bisect.js';
 import type { SavesService } from './saves.js';
 import { SENTINEL_FINGERPRINT_PREFIX } from './shared.js';
+import { tryProcessLock, type ProcessLock } from './sentinel-lock.js';
 import { outputTail, StepCommandRunner } from './step-runner.js';
 
 export { SENTINEL_FINGERPRINT_PREFIX } from './shared.js';
@@ -49,13 +50,23 @@ const DAY = 24 * HOUR;
 export const SENTINEL_ACTIVE_WINDOW_MS = DAY;
 /** Warm scratch trees unused this long are removed (made again on the next pass). */
 export const SENTINEL_WARM_IDLE_MS = 3 * DAY;
+/** First back-off after a pass where nothing could run, doubled each time up to the maximum. */
+export const SKIP_RETRY_MS = 15 * MIN;
+const SKIP_RETRY_MAX_MS = 6 * HOUR;
 /** Lines of failing output an agent is shown. */
 const DELIVERY_OUTPUT_LINES = 12;
 const MAX_STEPS = 100_000;
 
 /** Why the sentinel cannot run in a project. */
 export type SentinelNotReady =
-  'no_git' | 'checkpoints_off' | 'config_error' | 'no_checks' | 'unknown_checks' | 'untrusted';
+  | 'no_git'
+  | 'checkpoints_off'
+  | 'config_error'
+  | 'no_checks'
+  | 'unknown_checks'
+  | 'untrusted'
+  /** `$MINDLY_HOME` is inside the repository, so its scratch trees would be too. */
+  | 'scratch_inside_repo';
 
 /** What the sentinel would run in a project, or why it cannot. */
 export interface SentinelReadiness {
@@ -152,6 +163,8 @@ export interface SentinelWatchStatus {
   checkedAt: number | null;
   /** Steps since the last check. */
   pending: number;
+  /** When nothing could run at the newest step: when it is tried again. */
+  retryAt: number | null;
   checks: SentinelCheckStatus[];
 }
 
@@ -217,6 +230,7 @@ export class SentinelService {
     if (project.configError) return no('config_error');
     if (checks.length === 0) return no(unknown.length ? 'unknown_checks' : 'no_checks');
     if (!project.trusted) return no('untrusted');
+    if (this.dir !== null && isInside(this.dir, project.root)) return no('scratch_inside_repo');
     return { ready: true, reason: null, checks, setup, unknown };
   }
 
@@ -241,14 +255,50 @@ export class SentinelService {
   private isDue(watch: SentinelWatch | null, latest: Checkpoint, now: number): boolean {
     const checked = watch?.checkedSeq ?? null;
     if (checked !== null && latest.seq <= checked) return false;
+    // A step where nothing could run (setup failed, checks timed out) is tried again only after
+    // its back-off, unless a newer step came since.
+    if (
+      watch?.skippedSeq !== null &&
+      watch?.skippedSeq !== undefined &&
+      latest.seq <= watch.skippedSeq &&
+      now < (watch.retryAt ?? 0)
+    ) {
+      return false;
+    }
     const cfg = this.k.config.sentinel;
     if (now - latest.createdAt >= cfg.quietSec * 1000) return true;
-    if (checked === null) return false;
+    // Steps since the last check; before the first check, the steps of the active window.
     const pending = this.k.store.checkpoints.list(latest.projectId, latest.worktree, {
-      fromSeq: checked + 1,
+      ...(checked !== null ? { fromSeq: checked + 1 } : { since: now - SENTINEL_ACTIVE_WINDOW_MS }),
       limit: cfg.everySteps,
     });
     return pending.length >= cfg.everySteps;
+  }
+
+  /** Back-off before a step where nothing could run is tried again: 15 min, doubling, 6 h at most. */
+  static retryDelayMs(skips: number): number {
+    return Math.min(SKIP_RETRY_MAX_MS, SKIP_RETRY_MS * 2 ** Math.max(0, skips - 1));
+  }
+
+  /** The lock of a watched checkout, or null while another pass (or cleanup) holds it. */
+  private lock(projectId: string, worktree: string): ProcessLock | null {
+    try {
+      const dir = this.watchDir(projectId, worktree);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      return tryProcessLock(join(dir, 'lock'));
+    } catch {
+      return null;
+    }
+  }
+
+  /** True while a pass (or a cleanup) holds the lock of one of the project's checkouts. */
+  busy(projectId: string): boolean {
+    for (const w of this.k.store.sentinel.list(projectId)) {
+      const lock = this.lock(projectId, w.worktree);
+      if (!lock) return true;
+      lock.release();
+    }
+    return false;
   }
 
   /** The private directory of a watched working tree. */
@@ -289,8 +339,7 @@ export class SentinelService {
     const project = this.projects.byId(projectId);
     const ready = this.readiness(project);
     const steps = this.steps;
-    const lockPort = this.k.ports.git.checkpoints;
-    if (!ready.ready || !steps || !lockPort) {
+    if (!ready.ready || !steps) {
       return result('not_ready', { reason: ready.reason ?? 'no_git' });
     }
     const latest = this.k.store.checkpoints.latest(projectId, worktree);
@@ -303,14 +352,7 @@ export class SentinelService {
       }
       if (!this.isDue(watch, latest, now)) return result('not_due', { step: latest.seq });
     }
-    const dir = this.watchDir(projectId, worktree);
-    let lock: { release(): void } | null;
-    try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      lock = lockPort.tryLock(join(dir, 'lock'));
-    } catch {
-      lock = null;
-    }
+    const lock = this.lock(projectId, worktree);
     if (!lock) return result('busy', { step: latest.seq });
 
     const signal = opts.signal ?? new AbortController().signal;
@@ -375,14 +417,29 @@ export class SentinelService {
           },
         });
         reports.push(report);
+        // Saved as each check settles, so a pass cancelled later never redoes this one's bisect
+        // (or records its mistake twice).
+        this.k.store.sentinel.save(projectId, worktree, {
+          checkedSeq: watch?.checkedSeq ?? null,
+          checkedAt: watch?.checkedAt ?? null,
+          setupCommit,
+          checks,
+          skips: watch?.skips ?? 0,
+          skippedSeq: watch?.skippedSeq ?? null,
+          retryAt: watch?.retryAt ?? null,
+        });
       }
       const ran = reports.some((r) => r.outcome !== 'skip');
+      // A pass where nothing could run leaves the step unchecked, retried after a back-off.
+      const skips = ran ? 0 : (watch?.skippedSeq === latest.seq ? watch.skips : 0) + 1;
       this.k.store.sentinel.save(projectId, worktree, {
-        // A pass where nothing could run (setup failed, every check timed out) checks again.
         checkedSeq: ran ? latest.seq : (watch?.checkedSeq ?? null),
         checkedAt: now,
         setupCommit,
         checks,
+        skips,
+        skippedSeq: ran ? null : latest.seq,
+        retryAt: ran ? null : now + SentinelService.retryDelayMs(skips),
       });
       const failing = reports.some((r) => r.outcome === 'fail');
       this.finishRun(run, setupFailed || !ran ? 'error' : failing ? 'failed' : 'passed', {
@@ -795,7 +852,7 @@ export class SentinelService {
     const { check, firstBad, culprit } = input;
     const pid = input.project.project.id;
     const live = this.k.store.sessions
-      .listLive(pid, DAY)
+      .listLive(pid, LIVE_WINDOW_MS)
       .filter((s) => s.status !== 'ended' && s.worktree === input.worktree);
     const own = culprit !== null && culprit.status !== 'ended';
     const to = own ? [culprit.id] : live.map((s) => s.id);
@@ -903,6 +960,8 @@ export class SentinelService {
     }
     const out: SentinelWatchStatus[] = [];
     for (const worktree of [...trees].sort()) {
+      // A checkout removed since (a finished split part) is cleaned up by `pruneWarm`.
+      if (!existsSync(worktree)) continue;
       const watch = watches.get(worktree) ?? null;
       const latest = this.k.store.checkpoints.latest(projectId, worktree);
       const pending =
@@ -918,6 +977,8 @@ export class SentinelService {
         checkedSeq: watch?.checkedSeq ?? null,
         checkedAt: watch?.checkedAt ?? null,
         pending,
+        retryAt:
+          watch?.skippedSeq !== null && watch?.skippedSeq !== undefined ? watch.retryAt : null,
         checks: Object.entries(watch?.checks ?? {}).map(([name, c]) => {
           const s = c.culpritSessionId ? this.k.store.sessions.find(c.culpritSessionId) : null;
           return {
@@ -936,31 +997,61 @@ export class SentinelService {
     };
   }
 
-  /** Forgets one working tree: its state and its warm scratch tree. */
-  async reset(projectId: string, worktree: string): Promise<boolean> {
-    await this.removeWarm(projectId, worktree);
-    return this.k.store.sentinel.delete(projectId, worktree);
-  }
-
-  /** Removes every warm scratch tree of a project (`forget --project`, `uninstall`). */
-  async forget(projectId: string): Promise<number> {
-    let n = 0;
-    for (const w of this.k.store.sentinel.list(projectId)) {
-      if (await this.reset(projectId, w.worktree)) n++;
+  /**
+   * Forgets one working tree: its state and its warm scratch tree. `busy` while a pass holds it;
+   * `failed` (state kept, so cleanup tries again) when the tree could not be removed.
+   */
+  async reset(projectId: string, worktree: string): Promise<'reset' | 'none' | 'busy' | 'failed'> {
+    const lock = this.lock(projectId, worktree);
+    if (!lock) return 'busy';
+    try {
+      if (!(await this.removeWarm(projectId, worktree))) return 'failed';
+      return this.k.store.sentinel.delete(projectId, worktree) ? 'reset' : 'none';
+    } finally {
+      lock.release();
     }
-    return n;
   }
 
-  /** Removes warm scratch trees not used for `SENTINEL_WARM_IDLE_MS` (made again when needed). */
+  /**
+   * Removes every warm scratch tree of a project (`forget --project`, `uninstall`). Returns how
+   * many checkouts were reset and those it could not (busy, or the tree could not be removed).
+   */
+  async forget(projectId: string): Promise<{ reset: number; left: string[] }> {
+    const out = { reset: 0, left: [] as string[] };
+    for (const w of this.k.store.sentinel.list(projectId)) {
+      const r = await this.reset(projectId, w.worktree);
+      if (r === 'reset') out.reset++;
+      else if (r !== 'none') out.left.push(w.worktree);
+    }
+    return out;
+  }
+
+  /**
+   * Removes warm scratch trees not used for `SENTINEL_WARM_IDLE_MS` (made again when needed), and
+   * forgets checkouts that no longer exist (a finished split part) with their trees. Trees in use
+   * are left alone.
+   */
   async pruneWarm(): Promise<number> {
     const before = this.k.clock.now() - SENTINEL_WARM_IDLE_MS;
     let n = 0;
     for (const p of this.k.store.projects.list().slice(0, 200)) {
       for (const w of this.k.store.sentinel.list(p.id)) {
+        if (!existsSync(w.worktree)) {
+          if ((await this.reset(p.id, w.worktree)) === 'reset') n++;
+          continue;
+        }
         const path = this.warmPath(p.id, w.worktree);
         if (w.updatedAt >= before || !existsSync(path)) continue;
-        if (await this.removeWarm(p.id, w.worktree)) n++;
-        this.k.store.sentinel.clearSetup(p.id, w.worktree);
+        const lock = this.lock(p.id, w.worktree);
+        if (!lock) continue;
+        try {
+          if (await this.removeWarm(p.id, w.worktree)) {
+            n++;
+            this.k.store.sentinel.clearSetup(p.id, w.worktree);
+          }
+        } finally {
+          lock.release();
+        }
       }
     }
     return n;
@@ -969,14 +1060,21 @@ export class SentinelService {
   private async removeWarm(projectId: string, worktree: string): Promise<boolean> {
     const steps = this.steps;
     if (!steps) return false;
+    const path = this.warmPath(projectId, worktree);
     try {
-      await steps.removeWarm(worktree, this.warmPath(projectId, worktree));
-      return true;
+      await steps.removeWarm(worktree, path);
+      return !existsSync(path);
     } catch (err) {
       this.k.logger.warn('sentinel: scratch tree not removed', { error: describeError(err) });
       return false;
     }
   }
+}
+
+/** True when `path` is `root` or inside it. */
+function isInside(path: string, root: string): boolean {
+  const rel = relative(root, path);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 /** Stable hash of a check's command, so editing it starts its state over. */

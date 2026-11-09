@@ -1,6 +1,15 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { MindlyError, isDeniedPath } from '@mindly/core';
 import { copyIndex } from './capture.js';
 import { driverOverrides, runGit } from './exec.js';
@@ -214,18 +223,52 @@ export async function openWarmWorkspace(
 
 /**
  * Deletes the warm scratch worktree at `path` and its administrative files in the repository.
- * Missing ones are ignored.
+ * Missing ones are ignored. When the checkout `repoRoot` itself is gone (a removed linked
+ * worktree), the scratch tree is found through its own `.git` file instead: it is deleted if it
+ * is a linked worktree, and its repository forgets it.
  */
 export async function removeWarmWorkspace(repoRoot: string, path: string): Promise<void> {
-  const root = await findRepoRoot(repoRoot);
-  assertWarmPath(root, path);
-  await runGit(['worktree', 'remove', '--force', '--force', path], {
-    cwd: root,
-    okExitCodes: [128],
-    timeoutMs: 60_000,
-  }).catch(() => undefined);
+  if (typeof path !== 'string' || !isAbsolute(path) || path.includes('\0')) {
+    throw new MindlyError('invalid_input', 'the scratch tree path must be absolute');
+  }
+  const root = await findRepoRoot(repoRoot).catch(() => null);
+  if (root !== null) {
+    assertWarmPath(root, path);
+    await runGit(['worktree', 'remove', '--force', '--force', path], {
+      cwd: root,
+      okExitCodes: [128],
+      timeoutMs: 60_000,
+    }).catch(() => undefined);
+    rmSync(path, { recursive: true, force: true });
+    await runGit(['worktree', 'prune'], { cwd: root, timeoutMs: 60_000 }).catch(() => undefined);
+    return;
+  }
+  if (!existsSync(path)) return;
+  // Only a linked worktree is deleted this way: its `.git` is a file naming its admin dir.
+  const admin = linkedAdminDir(path);
+  if (admin === null) {
+    throw new MindlyError('invalid_input', 'the scratch tree is not a linked git worktree');
+  }
   rmSync(path, { recursive: true, force: true });
-  await runGit(['worktree', 'prune'], { cwd: root, timeoutMs: 60_000 }).catch(() => undefined);
+  // `<repo>/.git/worktrees/<name>`: prune from the repository's git dir so it forgets the tree.
+  const gitDir = dirname(dirname(admin));
+  if (existsSync(gitDir)) {
+    await runGit(['worktree', 'prune'], { cwd: gitDir, timeoutMs: 60_000 }).catch(() => undefined);
+  }
+}
+
+/** The admin dir a linked worktree's `.git` file points at, or null when it is not one. */
+function linkedAdminDir(path: string): string | null {
+  try {
+    const dotGit = join(path, '.git');
+    if (!lstatSync(dotGit).isFile()) return null;
+    const m = /^gitdir: (.+)$/m.exec(readFileSync(dotGit, 'utf8'));
+    if (!m) return null;
+    const dir = resolve(path, (m[1] as string).trim());
+    return basename(dirname(dir)) === 'worktrees' ? dir : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Status of one path between two checkpoints. */

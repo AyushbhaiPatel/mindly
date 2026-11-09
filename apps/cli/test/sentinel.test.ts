@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tryProcessLock } from '@mindly/engine';
 import { describe, expect, it } from 'vitest';
 import { cli, git, sandbox, write, type Sandbox } from './helpers.js';
 
@@ -201,6 +202,16 @@ describe('mindly sentinel', () => {
       checks: { name: string; status: string; detail: string }[];
     };
     expect(doctor.checks.find((c) => c.name === 'sentinel')).toMatchObject({ status: 'info' });
+
+    // While a pass holds the checkout (here: this test process), reset and forget refuse.
+    const [watchDir] = readdirSync(join(sb.mindlyHome, 'sentinel'));
+    const held = tryProcessLock(join(sb.mindlyHome, 'sentinel', watchDir as string, 'lock'))!;
+    const busy = await cli(sb, ['sentinel', 'reset', '-y']);
+    expect(busy.code).not.toBe(0);
+    expect(busy.stderr).toContain('The sentinel is checking this checkout right now');
+    expect((await cli(sb, ['forget', '--project', '-y'])).code).not.toBe(0);
+    expect(git(sb.repo, 'worktree', 'list')).toContain(join(sb.mindlyHome, 'sentinel'));
+    held.release();
 
     // Reset, then forget the project: the warm tree leaves the repository.
     expect((await cli(sb, ['sentinel', 'reset', '-y'])).code).toBe(0);

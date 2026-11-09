@@ -58,6 +58,9 @@ function toWatch(r: Row): SentinelWatch {
     checkedAt: numOrNull(r, 'checked_at'),
     setupCommit: strOrNull(r, 'setup_commit'),
     checks: checksOf(json<unknown>(r, 'checks', {})),
+    skips: num(r, 'skips'),
+    skippedSeq: numOrNull(r, 'skipped_seq'),
+    retryAt: numOrNull(r, 'retry_at'),
     updatedAt: num(r, 'updated_at'),
   };
 }
@@ -68,6 +71,10 @@ export interface SentinelWatchUpdate {
   checkedAt: number | null;
   setupCommit: string | null;
   checks: Record<string, SentinelCheck>;
+  /** Back-off after a pass where nothing could run (all three default to none). */
+  skips?: number;
+  skippedSeq?: number | null;
+  retryAt?: number | null;
 }
 
 export class SentinelRepo {
@@ -99,12 +106,14 @@ export class SentinelRepo {
     const checks = Object.fromEntries(Object.entries(update.checks).slice(0, MAX_CHECKS));
     this.db
       .prepare(
-        `INSERT INTO sentinel_watches (project_id, worktree, checked_seq, checked_at, setup_commit, checks, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO sentinel_watches (project_id, worktree, checked_seq, checked_at, setup_commit,
+           checks, skips, skipped_seq, retry_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (project_id, worktree) DO UPDATE SET
            checked_seq = excluded.checked_seq, checked_at = excluded.checked_at,
            setup_commit = excluded.setup_commit, checks = excluded.checks,
-           updated_at = excluded.updated_at`,
+           skips = excluded.skips, skipped_seq = excluded.skipped_seq,
+           retry_at = excluded.retry_at, updated_at = excluded.updated_at`,
       )
       .run(
         projectId,
@@ -113,6 +122,9 @@ export class SentinelRepo {
         update.checkedAt,
         update.setupCommit,
         toJson(checks),
+        Math.max(0, Math.trunc(update.skips ?? 0)),
+        update.skippedSeq ?? null,
+        update.retryAt ?? null,
         now,
       );
     return this.get(projectId, worktree) as SentinelWatch;

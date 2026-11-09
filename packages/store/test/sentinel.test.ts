@@ -102,6 +102,9 @@ describe('SentinelRepo', () => {
       checkedSeq: 7,
       setupCommit: 'abc',
       updatedAt: clock.now(),
+      skips: 0,
+      skippedSeq: null,
+      retryAt: null,
     });
     expect(saved.checks['unit']).toEqual(check());
     expect(saved.checks['lint']?.state).toBe('failing');
@@ -116,6 +119,21 @@ describe('SentinelRepo', () => {
     });
     expect(store.sentinel.get(project.id, '/repo')?.checkedSeq).toBe(9);
     expect(store.sentinel.list(project.id).map((w) => w.worktree)).toEqual(['/repo', '/repo-part']);
+
+    // The back-off of a step where nothing could run is kept, and cleared by a save without it.
+    const backoff = store.sentinel.save(project.id, '/repo', {
+      ...saved,
+      checkedSeq: 9,
+      skips: 3,
+      skippedSeq: 11,
+      retryAt: clock.now() + 60_000,
+    });
+    expect(backoff).toMatchObject({ skips: 3, skippedSeq: 11, retryAt: clock.now() + 60_000 });
+    expect(store.sentinel.save(project.id, '/repo', { ...saved, checkedSeq: 9 })).toMatchObject({
+      skips: 0,
+      skippedSeq: null,
+      retryAt: null,
+    });
 
     store.sentinel.clearSetup(project.id, '/repo');
     expect(store.sentinel.get(project.id, '/repo')?.setupCommit).toBeNull();

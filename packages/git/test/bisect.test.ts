@@ -377,6 +377,25 @@ describe('warm workspace (sentinel)', () => {
     await removeWarmWorkspace(root, ws.path);
   });
 
+  it('is removed even when the checkout it was made for is gone', async () => {
+    const { root, steps } = await chainRepo();
+    const linked = join(tempDir(), 'part');
+    git(root, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+    const path = join(tempDir(), 'sentinel', 'tree');
+    await openWarmWorkspace(linked, path, steps[1] as string);
+    write(path, 'node_modules/dep/index.js', 'x\n');
+    git(root, 'worktree', 'remove', '--force', linked);
+    expect(existsSync(linked)).toBe(false);
+    await removeWarmWorkspace(linked, path);
+    expect(existsSync(path)).toBe(false);
+    expect(worktreePaths(root)).not.toContain(path);
+    // A folder that is not a linked worktree is never deleted this way.
+    const plain = join(tempDir(), 'plain');
+    write(plain, 'keep.txt', 'mine\n');
+    await expect(removeWarmWorkspace(linked, plain)).rejects.toThrow(/not a linked git worktree/);
+    expect(existsSync(join(plain, 'keep.txt'))).toBe(true);
+  });
+
   it('refuses a path inside or around the repository', async () => {
     const { root, steps } = await chainRepo();
     for (const bad of [join(root, 'tree'), root, resolve(root, '..'), 'relative/tree']) {
