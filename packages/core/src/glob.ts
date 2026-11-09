@@ -4,6 +4,10 @@
  * Supported syntax: `**` (any number of path segments), `*` (anything except `/`), `?` (one
  * character except `/`) and `{a,b}` alternation (not nested). Everything else is literal; regex
  * metacharacters are escaped, so a glob can never become an arbitrary regular expression.
+ *
+ * A pattern can also name a folder, the way a `.gitignore` line does: a pattern without wildcards
+ * (`infra`, `src/api`) matches that path and everything below it, and a pattern ending in `/`
+ * (`deploy/`, `src/api/`) matches only what is below it.
  */
 
 const cache = new Map<string, RegExp>();
@@ -19,10 +23,15 @@ function escapeRegex(ch: string): string {
 }
 
 export function globToRegExp(glob: string, options: GlobOptions = {}): RegExp {
+  if (glob.length > MAX_GLOB_LENGTH) throw new Error('glob too long');
+  return compile(glob, options);
+}
+
+/** `globToRegExp` without the length limit, for the patterns `expandGlob` derives from a checked one. */
+function compile(glob: string, options: GlobOptions): RegExp {
   const key = `${options.nocase ? 'i' : 's'}:${glob}`;
   const cached = cache.get(key);
   if (cached) return cached;
-  if (glob.length > MAX_GLOB_LENGTH) throw new Error('glob too long');
 
   let re = '';
   let inGroup = false;
@@ -69,15 +78,32 @@ export function globToRegExp(glob: string, options: GlobOptions = {}): RegExp {
   return compiled;
 }
 
+const HAS_WILDCARD = /[*?{]/;
+
+/**
+ * The plain patterns (matched against the whole path) that `glob` stands for.
+ *
+ * - A pattern without a slash matches at any depth, like `.gitignore`.
+ * - A pattern ending in `/` names a folder and matches only what is below it.
+ * - A pattern without wildcards names a file or a folder: it matches the path itself and
+ *   everything below it, so `src/api` covers `src/api/billing.ts`.
+ */
+function expandGlob(glob: string): string[] {
+  const folderOnly = glob.endsWith('/');
+  const trimmed = glob.replace(/\/+$/, '');
+  if (trimmed === '' || trimmed === '.') return [];
+  const self = trimmed.includes('/') ? trimmed.replace(/^\.\//, '') : `**/${trimmed}`;
+  if (self === '') return [];
+  const below = `${self}/**`;
+  if (folderOnly) return [below];
+  return HAS_WILDCARD.test(trimmed) ? [self] : [self, below];
+}
+
 /** True when `path` (project-relative, POSIX separators) matches `glob`. */
 export function matchesGlob(path: string, glob: string, options: GlobOptions = {}): boolean {
+  if (glob.length > MAX_GLOB_LENGTH) throw new Error('glob too long');
   const normalized = path.replace(/^\.\//, '');
-  // A pattern without a slash matches the basename anywhere, like .gitignore.
-  if (!glob.includes('/')) {
-    const base = normalized.slice(normalized.lastIndexOf('/') + 1);
-    return globToRegExp(glob, options).test(base);
-  }
-  return globToRegExp(glob.replace(/^\.\//, ''), options).test(normalized);
+  return expandGlob(glob).some((g) => compile(g, options).test(normalized));
 }
 
 export function matchesAnyGlob(
@@ -90,10 +116,9 @@ export function matchesAnyGlob(
 
 const WILDCARD = /[*?[{]/;
 
-/** Segments of a glob as `matchesGlob` reads it: a pattern without a slash matches a basename anywhere. */
-function globSegments(glob: string): string[] {
-  const g = glob.includes('/') ? glob.replace(/^\.\//, '') : `**/${glob}`;
-  return g.split('/').filter((s) => s !== '' && s !== '.');
+/** Segments of a plain pattern, as `expandGlob` returns them. */
+function globSegments(plain: string): string[] {
+  return plain.split('/').filter((s) => s !== '' && s !== '.');
 }
 
 /** A file-name pattern without `**`, groups or classes: its literal head (before the first wildcard) and tail (after the last). */
@@ -113,11 +138,18 @@ function headTail(segment: string): { head: string; tail: string } | null {
  * have literal heads or tails that cannot both fit one name (`*.ts` and `*.css`). Anything
  * involving `**`, groups or classes at the point of comparison counts as a possible overlap.
  * With `nocase`, literal text is compared ignoring letter case.
+ *
+ * Patterns are read the way `matchesGlob` reads them, so a folder (`src/api`, `src/api/`)
+ * overlaps anything below it.
  */
 export function globsMayOverlap(a: string, b: string, options: GlobOptions = {}): boolean {
   const fold = (s: string): string => (options.nocase ? s.toLowerCase() : s);
-  const A = globSegments(fold(a));
-  const B = globSegments(fold(b));
+  const as = expandGlob(fold(a));
+  const bs = expandGlob(fold(b));
+  return as.some((x) => bs.some((y) => plainMayOverlap(globSegments(x), globSegments(y))));
+}
+
+function plainMayOverlap(A: string[], B: string[]): boolean {
   const literal = (s: string | undefined): s is string => s !== undefined && !WILDCARD.test(s);
   let i = 0;
   while (literal(A[i]) && literal(B[i])) {
