@@ -1,22 +1,7 @@
-import {
-  fingerprint,
-  sanitizeLine,
-  shortId,
-  type Contract,
-  type ContractState,
-  type Run,
-} from '@mindly/core';
-import { commandHash } from '@mindly/engine';
+import { sanitizeLine, shortId, type Contract, type ContractState, type Run } from '@mindly/core';
+import { commandHash, contractsOf } from '@mindly/engine';
 import { captureWorktreeCommit, materializeTree, runChecks } from '@mindly/git';
-import {
-  failRun,
-  finishRun,
-  notify,
-  outputTail,
-  reportConflict,
-  startRun,
-  type JobContext,
-} from './context.js';
+import { failRun, finishRun, notify, outputTail, startRun, type JobContext } from './context.js';
 
 const DEFAULT_TIMEOUT_SEC = 120;
 const MAX_CONTRACTS_PER_RUN = 50;
@@ -42,8 +27,8 @@ export function runnableCommandContracts(ctx: JobContext, projectId: string): Co
 /**
  * Runs the project's approved command contracts in a temporary tree built from HEAD plus the
  * project root's working-tree changes. Only for trusted projects. Records each result, opens a
- * critical `contract_broken` conflict on passing to failing and resolves it when fixed. Returns
- * the recorded run, or null when there was nothing to do.
+ * critical `contract_broken` conflict when a passing contract fails and resolves it when fixed.
+ * Returns the recorded run, or null when there was nothing to do.
  */
 export async function runCommandContracts(ctx: JobContext, projectId: string): Promise<Run | null> {
   const { mindly } = ctx;
@@ -102,6 +87,13 @@ export async function runCommandContracts(ctx: JobContext, projectId: string): P
   }
 }
 
+/**
+ * Records one result through the engine's contract service, which opens the `contract_broken`
+ * conflict, tells the live agents and resolves it again exactly as it does for declarative
+ * contracts. A result of `error` (timeout, could not start) is stored but is not a transition:
+ * the next pass or fail is compared with the last one before it. Pages the user when a contract
+ * breaks.
+ */
 async function recordContractResult(
   ctx: JobContext,
   c: Contract,
@@ -109,60 +101,19 @@ async function recordContractResult(
   message: string,
 ): Promise<void> {
   const store = ctx.mindly.store;
-  const saved = store.contracts.recordResult(c.id, state, message);
-  store.events.append({
-    projectId: c.projectId,
-    sessionId: null,
-    type: 'contract.result',
-    payload: {
-      contractId: c.id,
-      memoryId: c.memoryId,
-      kind: c.kind,
-      state,
-      previous: c.state,
-      message,
-    },
+  const { contract: saved, broke } = contractsOf(ctx.mindly).record(c, { state, message }, null);
+  if (!broke) return;
+  const memory = store.memories.find(c.memoryId);
+  const title = sanitizeLine(memory?.title ?? 'a recorded decision', 120);
+  const project = store.projects.get(c.projectId);
+  await notify(ctx, {
+    trigger: 'check_failed',
+    title: 'A command contract started failing',
+    body: `Contract on '${title}' fails in ${sanitizeLine(project.name, 80)}.`,
+    projectName: sanitizeLine(project.name, 80),
+    priority: 'high',
+    dedupeKey: `contract:${c.id}:${saved.lastRunAt ?? 0}`,
   });
-  // Same fingerprint the engine's contract service uses, so both resolve each other's reports.
-  const fp = fingerprint('contract_broken', c.id);
-  if (c.state === 'passing' && state === 'failing') {
-    const memory = store.memories.find(c.memoryId);
-    const title = sanitizeLine(memory?.title ?? 'a recorded decision', 120);
-    const { isNew } = reportConflict(ctx, {
-      projectId: c.projectId,
-      kind: 'contract_broken',
-      severity: 'critical',
-      title: `${memory?.kind === 'decision' ? 'Decision' : 'Memory'} '${title}' no longer holds: ${message}`,
-      detail: 'An approved command contract started failing.',
-      sessionIds: [],
-      paths: [],
-      fingerprint: fp,
-    });
-    if (isNew) {
-      const project = store.projects.get(c.projectId);
-      await notify(ctx, {
-        trigger: 'check_failed',
-        title: 'A command contract started failing',
-        body: `Contract on '${title}' fails in ${sanitizeLine(project.name, 80)}.`,
-        projectName: sanitizeLine(project.name, 80),
-        priority: 'high',
-        dedupeKey: `contract:${c.id}:${saved.lastRunAt ?? 0}`,
-      });
-    }
-  } else if (c.state === 'failing' && state === 'passing') {
-    const open = store.conflicts
-      .list(c.projectId, { statuses: ['open', 'acknowledged'], limit: 500 })
-      .filter((x) => x.kind === 'contract_broken' && x.fingerprint === fp);
-    for (const x of open) {
-      store.conflicts.setStatus(x.id, 'resolved');
-      store.events.append({
-        projectId: c.projectId,
-        sessionId: null,
-        type: 'conflict.updated',
-        payload: { conflictId: x.id, kind: x.kind, status: 'resolved' },
-      });
-    }
-  }
 }
 
 /** Scheduler entry: runs command contracts for every trusted project. */

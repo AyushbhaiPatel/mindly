@@ -88,6 +88,132 @@ describe('executable memory', () => {
     }
   });
 
+  it('checks a line past its 200th character', async () => {
+    const { write, memory, contracts } = await withDecision();
+    const pad = 'const data = [' + '"aaaaaaaa", '.repeat(30);
+    write('src/long.ts', `${pad}eval("x")];\n`);
+    write(
+      'data.json',
+      `{"pad":"${'x'.repeat(5000)}","apiVersion":"v2","tail":"${'y'.repeat(900)}"}`,
+    );
+    const cases: [ContractKind, object, string][] = [
+      ['pattern_absent', { path: 'src/long.ts', pattern: 'eval\\(' }, 'failing'],
+      ['pattern_present', { path: 'data.json', pattern: '"apiVersion":"v2"' }, 'passing'],
+      ['pattern_present', { path: 'data.json', pattern: '"apiVersion":"v3"' }, 'failing'],
+      ['pattern_present', { path: 'data.json', pattern: '^\\{"pad"' }, 'passing'],
+      ['pattern_present', { path: 'data.json', pattern: 'y"\\}$' }, 'passing'],
+    ];
+    for (const [kind, spec, state] of cases) {
+      expect(contracts.create(memory.id, kind, spec, USER).state, JSON.stringify(spec)).toBe(state);
+    }
+  });
+
+  it('keeps anchors and word boundaries exact inside a long line', async () => {
+    const { write, memory, contracts } = await withDecision();
+    // Windows of a long line start every 100 characters and are 200 long: put text on those edges.
+    const line =
+      '-'.repeat(100) + 'import x' + '-'.repeat(89) + 'foobar' + '-'.repeat(97) + 'import y;';
+    expect(line.indexOf('foobar')).toBe(197);
+    write('src/edges.ts', `${line}\n`);
+    const cases: [string, string][] = [
+      ['^import', 'failing'],
+      ['\\bfoo\\b', 'failing'],
+      ['foo$', 'failing'],
+      ['\\bfoobar\\b', 'passing'],
+      ['import y;$', 'passing'],
+      ['^-+import x', 'passing'],
+    ];
+    for (const [pattern, state] of cases) {
+      const spec = { path: 'src/edges.ts', pattern };
+      expect(contracts.create(memory.id, 'pattern_present', spec, USER).state, pattern).toBe(state);
+    }
+  });
+
+  it('matches line anchors in a file with CRLF line endings', async () => {
+    const { write, memory, contracts } = await withDecision();
+    write('src/crlf.ts', 'export const a = 1;\r\nexport const b = 2;\r\n');
+    const spec = { path: 'src/crlf.ts', pattern: '^export const a = 1;$' };
+    expect(contracts.create(memory.id, 'pattern_present', spec, USER).state).toBe('passing');
+    const absent = { path: 'src/crlf.ts', pattern: '^export const c = 3;$' };
+    expect(contracts.create(memory.id, 'pattern_absent', absent, USER).state).toBe('passing');
+  });
+
+  it('reads JSON with comments and trailing commas', async () => {
+    const { write, memory, contracts } = await withDecision();
+    write(
+      'tsconfig.json',
+      [
+        '﻿// Shared compiler options.',
+        '{',
+        '  "compilerOptions": {',
+        '    /* keep strict on */ "strict": true,',
+        '    "types": ["node", ], // trailing comma',
+        '    "note": "not a // comment, and not a trailing comma: ,}",',
+        '  },',
+        '}',
+      ].join('\n'),
+    );
+    write('broken.json', '{ "a": 1,, }');
+    const cases: [object, string, string][] = [
+      [{ path: 'tsconfig.json', key: 'compilerOptions.strict' }, 'passing', 'present'],
+      [{ path: 'tsconfig.json', key: 'compilerOptions.types' }, 'passing', 'present'],
+      [{ path: 'tsconfig.json', key: 'compilerOptions.note' }, 'passing', 'present'],
+      [{ path: 'tsconfig.json', key: 'compilerOptions.noEmit' }, 'failing', 'missing'],
+      [{ path: 'broken.json', key: 'a' }, 'failing', 'not valid JSON'],
+    ];
+    for (const [spec, state, message] of cases) {
+      const c = contracts.create(memory.id, 'json_key', spec, USER);
+      expect(c.state, JSON.stringify(spec)).toBe(state);
+      expect(c.lastMessage).toContain(message);
+    }
+  });
+
+  it('judges a result after an inconclusive one against the last pass or fail', async () => {
+    const { root, mindly, pid, cc, cx, write, memory, contracts } = await withDecision();
+    const broken = () =>
+      mindly.store.conflicts
+        .list(pid, { statuses: ['open', 'acknowledged'] })
+        .filter((x) => x.kind === 'contract_broken');
+    const spec = { path: 'src/auth.ts', pattern: 'role:' };
+    const c = contracts.create(memory.id, 'pattern_present', spec, USER);
+    const step = (content: string) => {
+      write('src/auth.ts', content);
+      return contracts.run(mindly.store.contracts.get(c.id), root, cc).state;
+    };
+    const tooLarge = `// ${'x'.repeat(600 * 1024)}\n`;
+
+    // Passing, then unreadable, then failing: the break is reported once it shows.
+    expect(step(tooLarge)).toBe('error');
+    expect(broken()).toHaveLength(0);
+    expect(step('export const nothing = 1;\n')).toBe('failing');
+    expect(broken()).toHaveLength(1);
+    expect(
+      mindly.store.deliveries
+        .list(pid)
+        .filter((d) => d.kind === 'conflict' && d.targetSessionId === cx.id),
+    ).toHaveLength(1);
+
+    // Failing, then unreadable, then passing: the conflict is closed.
+    expect(step(tooLarge)).toBe('error');
+    expect(broken()).toHaveLength(1);
+    expect(step(AUTH_V1)).toBe('passing');
+    expect(broken()).toHaveLength(0);
+
+    // A contract that never passed is not a break when it fails again after an error.
+    const never = contracts.create(
+      memory.id,
+      'pattern_present',
+      { path: 'src/auth.ts', pattern: 'never-there' },
+      USER,
+    );
+    expect(never.state).toBe('failing');
+    write('src/auth.ts', tooLarge);
+    expect(contracts.run(mindly.store.contracts.get(never.id), root, cc).state).toBe('error');
+    write('src/auth.ts', AUTH_V1);
+    expect(contracts.run(mindly.store.contracts.get(never.id), root, cc).state).toBe('failing');
+    expect(broken()).toHaveLength(0);
+  });
+
   it('never runs command contracts and only lets the user create them', async () => {
     const { memory, contracts, cc } = await withDecision();
     const argv = ['pnpm', 'test'];
@@ -143,6 +269,10 @@ describe('safe regex subset', () => {
     'https?://(?:www\\.)?(?:staging|dev)\\.[a-z]+\\.com/.*',
     '\\b(?:describe|it|test)\\.only\\(',
     '<(?<tag>script|iframe)\\b[^>]*>',
+    '(?:ab){3}',
+    '(\\d{2}-){2}\\d{4}',
+    '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}',
+    '(a?b){3}',
   ])('accepts %s', (p) => expect(checkSafePattern(p)).toBeNull());
 
   it.each([
@@ -174,6 +304,13 @@ describe('safe regex subset', () => {
     ['(?:a|a)'.repeat(20) + 'x', 'backtracking'],
     ['(?:a|ab|abc)'.repeat(3) + '.*.*x', 'backtracking'],
     ['((a|b))+x', 'nested'],
+    ['(a+){16}b', 'nested'],
+    ['(a+){12}b', 'nested'],
+    ['(\\w+\\s?){12}=', 'nested'],
+    ['(a|aa){16}b', 'nested'],
+    ['(a*){2}b', 'nested'],
+    ['(a?a?)+c', 'backtracking'],
+    ['(a?a?){16}c', 'backtracking'],
     ['[', 'compile'],
   ])('rejects %s', (p, why) => expect(checkSafePattern(p)).toMatch(why));
 });
@@ -201,6 +338,19 @@ describe('regex budget', () => {
     // Doubling the line costs about 8x for a cubic matcher; exponential backtracking would be
     // billions of times slower. The ratio is load-independent, unlike an absolute budget.
     expect(longMs / Math.max(shortMs, 0.01)).toBeLessThan(32);
+  });
+
+  it('stays within the budget on one very long line', async () => {
+    const { write, memory, contracts } = await withDecision();
+    write('src/min.js', 'a'.repeat(400 * 1024));
+    const spec = { path: 'src/min.js', pattern: 'a?a?a?.*a.*x' };
+    const start = performance.now();
+    const c = contracts.create(memory.id, 'pattern_absent', spec, USER);
+    expect(performance.now() - start).toBeLessThan(5000);
+    expect(c.state).toBe('error');
+    // A cheap pattern gets through the same line well inside the budget.
+    const cheap = { path: 'src/min.js', pattern: 'eval\\(' };
+    expect(contracts.create(memory.id, 'pattern_absent', cheap, USER).state).toBe('passing');
   });
 
   it('explains why an existing contract with a now-rejected pattern cannot run', async () => {

@@ -28,18 +28,22 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
  * Regex safety: JavaScript regexes cannot be interrupted once running, so a time check alone
  * cannot stop catastrophic backtracking. Patterns are therefore restricted to a conservative safe
  * subset at creation time (see `checkSafePattern`): at most 300 characters, no backreferences, no
- * lookaround, no quantified group that itself contains a quantifier or alternation (the classic
- * `(a+)+` / `(a|aa)*` shapes), at most two unbounded quantifiers (a `{n,m}` with m > 16 counts as
- * unbounded) and at most eight quantifiers in total. Without nested quantifiers, the paths a
- * backtracking matcher can try per start position are bounded by counting them: a sequence
- * multiplies the paths of its parts, an alternation adds the paths of its branches (or counts
- * once when its branches are distinct literals, none a prefix of another, since only one can
- * match), and a quantifier multiplies by its number of repeat counts. That count is capped at
- * `MAX_PATHS` (two unbounded quantifiers over a full line, with a little room for optional
- * tokens). That bounds the cost of a single line to roughly cubic in the
- * line length, so matching line by line over at most 512 KB of content with lines capped at 200
- * characters keeps each line within a few milliseconds to a few tens of milliseconds and lets the
- * 100 ms budget (checked after every line) take effect.
+ * lookaround, no repeated group that itself contains a quantifier or alternation (the classic
+ * `(a+)+` / `(a|aa)*` shapes; a counted repeat such as `(a+){12}` is the same thing written out),
+ * at most two unbounded quantifiers (a `{n,m}` with m > 16 counts as unbounded) and at most eight
+ * quantifiers in total. Without nested quantifiers, the paths a backtracking matcher can try per
+ * start position are bounded by counting them: a sequence multiplies the paths of its parts, an
+ * alternation adds the paths of its branches (or counts once when its branches are distinct
+ * literals, none a prefix of another, since only one can match), and a quantifier multiplies by
+ * its number of repeat counts, with every repeat of an atom that has several paths of its own
+ * (a group holding an optional part, `(a?a?)+`) multiplying them again. That count is capped at
+ * `MAX_PATHS` (two unbounded quantifiers over a full window, with a little room for optional
+ * tokens). That bounds the cost of one match attempt to roughly cubic in the length of the text
+ * it runs over, so that text is never longer than `MATCH_WINDOW_CHARS`: a line that fits is
+ * matched whole, a longer one (minified code, one-line JSON) in overlapping windows of that size
+ * (see `matchLine`). Each window stays within a few milliseconds to a few tens of milliseconds,
+ * which lets the 100 ms budget (checked after every window) take effect over at most 512 KB of
+ * content.
  *
  * `command` contracts are never executed here: only the user may create them, their argv hash is
  * pinned at creation, and the daemon runs them later through a trusted runner.
@@ -47,15 +51,20 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
 
 export const MAX_PATTERN_LENGTH = 300;
 const MAX_CONTRACT_FILE_BYTES = 512 * 1024;
-const MAX_LINE_CHARS = 200;
+/** The longest text a pattern is run against in one go; longer lines are matched in windows. */
+const MATCH_WINDOW_CHARS = 200;
+/** How far consecutive windows of a long line overlap: a match up to about this long is found. */
+const MATCH_WINDOW_OVERLAP = 100;
 const PATTERN_BUDGET_MS = 100;
+/** How many recent contract results are searched for a contract's last passing/failing one. */
+const CONCLUSIVE_LOOKBACK = 2000;
 const MAX_UNBOUNDED_QUANTIFIERS = 2;
 /** Every quantifier (including `?` and `{n,m}`) counts toward this cap. */
 const MAX_QUANTIFIERS = 8;
 /** A bounded repeat with an upper bound above this counts as unbounded. */
 const MAX_BOUNDED_REPEAT = 16;
 /** Cap on the match paths a backtracking matcher can try per start position (see above). */
-const MAX_PATHS = 8 * (MAX_LINE_CHARS + 1) ** 2;
+const MAX_PATHS = 8 * (MATCH_WINDOW_CHARS + 1) ** 2;
 
 /** Result of evaluating a contract once. */
 export interface ContractEvaluation {
@@ -177,17 +186,21 @@ export function checkSafePattern(pattern: string): string | null {
         /^\{\d+,\}$/.test(tok) ||
         (upper !== undefined && Number(upper) > MAX_BOUNDED_REPEAT);
       quantifiers++;
-      const repeats = isUnbounded || (/^\{\d+,\d+\}$/.test(tok) && !/^\{[01],1\}$/.test(tok));
-      if (lastClosed && repeats && (lastClosed.quantified || lastClosed.alternation)) {
+      const lower = Number(/^\{(\d+)/.exec(tok)?.[1] ?? (tok === '+' ? 1 : 0));
+      const most = isUnbounded ? MATCH_WINDOW_CHARS : tok === '?' ? 1 : Number(upper ?? lower);
+      // Anything that can match its atom more than once repeats it: `*`, `+`, `{n,}`, `{n,m}` and
+      // the counted `{n}` alike.
+      if (lastClosed && most > 1 && (lastClosed.quantified || lastClosed.alternation)) {
         return 'nested quantifiers are not allowed';
       }
       if (isUnbounded) unbounded++;
-      const lower = Number(/^\{(\d+)/.exec(tok)?.[1] ?? (tok === '+' ? 1 : 0));
-      const most = isUnbounded ? MAX_LINE_CHARS : tok === '?' ? 1 : Number(upper ?? lower);
       const f = top();
       if (most <= 1) f.atom += lower === 0 ? 1 : 0;
-      else f.atom *= most - Math.min(lower, most) + 1;
-      if (tok !== '?') f.quantified = true;
+      // Each repeat walks the atom's own paths again (1 for a plain character or class).
+      else f.atom = (most - Math.min(lower, most) + 1) * f.atom ** most;
+      // `?` and an exact count leave only one way through, so a group holding nothing else may
+      // still be repeated (`(\d{2}-){2}`).
+      if (tok !== '?' && !/^\{\d+\}$/.test(tok)) f.quantified = true;
       i += tok.length;
       // Skip a lazy/possessive marker.
       if (pattern[i] === '?') i++;
@@ -373,12 +386,8 @@ export class ContractService {
           : { state: 'passing', message: `pattern absent from ${rel}` };
       }
       case 'json_key': {
-        let doc: unknown;
-        try {
-          doc = JSON.parse(content);
-        } catch {
-          return { state: 'failing', message: `${rel} is not valid JSON` };
-        }
+        const doc = parseJsonLenient(content);
+        if (doc === INVALID_JSON) return { state: 'failing', message: `${rel} is not valid JSON` };
         const key = spec.key ?? '';
         return hasDotPath(doc, key)
           ? { state: 'passing', message: `${key} present in ${rel}` }
@@ -409,16 +418,56 @@ export class ContractService {
     actor: Session | null,
     opts: { actorInRoot?: boolean } = {},
   ): Contract {
-    const result = this.evaluate(contract, projectRoot);
+    return this.record(contract, this.evaluate(contract, projectRoot), actor, opts).contract;
+  }
+
+  /**
+   * Stores one result of `contract` (the contract as it was before this result) and handles the
+   * transition. The daemon records the results of command contracts through this too, so both
+   * kinds open, announce and resolve a broken contract the same way. `broke` is true when this
+   * result opened (or reopened) the conflict.
+   *
+   * A result of `error` (a timeout, a file too large to read) says nothing about the contract, so
+   * a transition is judged against the last result that did: passing, error, failing is a break,
+   * and failing, error, passing is a fix.
+   */
+  record(
+    contract: Contract,
+    result: ContractEvaluation,
+    actor: Session | null,
+    opts: { actorInRoot?: boolean } = {},
+  ): { contract: Contract; broke: boolean } {
+    const before = this.lastConclusive(contract);
     const saved = this.k.store.contracts.recordResult(contract.id, result.state, result.message);
     this.recordEvent(saved, result, actor?.id ?? null, contract.state);
     const fp = fingerprint('contract_broken', contract.id);
-    if (contract.state === 'passing' && result.state === 'failing') {
-      this.reportBroken(saved, result, fp, actor, opts.actorInRoot === true);
-    } else if (contract.state === 'failing' && result.state === 'passing') {
+    let broke = false;
+    if (before === 'passing' && result.state === 'failing') {
+      broke = this.reportBroken(saved, result, fp, actor, opts.actorInRoot === true);
+    } else if (before === 'failing' && result.state === 'passing') {
       this.resolveBroken(saved, fp, actor);
     }
-    return saved;
+    return { contract: saved, broke };
+  }
+
+  /**
+   * The last state of `contract` that was passing or failing, read from the event log when the
+   * stored state is neither. Null when the contract never had one (or it is no longer in the
+   * log): then nothing can be said to have changed.
+   */
+  private lastConclusive(contract: Contract): 'passing' | 'failing' | null {
+    if (contract.state === 'passing' || contract.state === 'failing') return contract.state;
+    const results = this.k.store.events.query(contract.projectId, {
+      types: ['contract.result'],
+      order: 'desc',
+      limit: CONCLUSIVE_LOOKBACK,
+    });
+    for (const e of results) {
+      if (e.payload['contractId'] !== contract.id) continue;
+      const state = e.payload['state'];
+      if (state === 'passing' || state === 'failing') return state;
+    }
+    return null;
   }
 
   /** Runs every declarative contract reading `path`. */
@@ -476,7 +525,7 @@ export class ContractService {
     fp: string,
     actor: Session | null,
     actorInRoot: boolean,
-  ): void {
+  ): boolean {
     const memory = this.k.store.memories.find(c.memoryId);
     const title = sanitizeLine(memory?.title ?? 'a recorded decision', 120);
     const headline = `${memory?.kind === 'decision' ? 'Decision' : 'Memory'} '${title}' no longer holds: ${r.message}`;
@@ -485,12 +534,15 @@ export class ContractService {
       kind: 'contract_broken',
       severity: 'critical',
       title: headline,
-      detail: `Contract ${c.kind} on ${c.spec.path ?? 'the project'} started failing.`,
+      detail:
+        c.kind === 'command'
+          ? 'An approved command contract started failing.'
+          : `Contract ${c.kind} on ${c.spec.path ?? 'the project'} started failing.`,
       sessionIds: actor ? [actor.id] : [],
       paths: c.spec.path ? [c.spec.path] : [],
       fingerprint: fp,
     });
-    if (!isNew) return;
+    if (!isNew) return false;
     this.k.store.events.append({
       projectId: c.projectId,
       sessionId: actor?.id ?? null,
@@ -507,7 +559,7 @@ export class ContractService {
     });
     const recipients = liveSessions(this.k, c.projectId).map((s) => s.id);
     if (actor && !recipients.includes(actor.id)) recipients.push(actor.id);
-    if (recipients.length === 0) return;
+    if (recipients.length === 0) return true;
     this.telepathy.send({
       projectId: c.projectId,
       from: null,
@@ -515,9 +567,13 @@ export class ContractService {
       kind: 'conflict',
       priority: 8,
       title: headline,
-      body: `A recorded project decision is checked automatically and the latest change to ${c.spec.path ?? 'the project'} broke it. Restore it, or ask the user whether the decision should change.`,
+      body:
+        c.kind === 'command'
+          ? 'A recorded project decision is checked by a command the user approved, and that command now fails on the current working tree. Restore what it checks, or ask the user whether the decision should change.'
+          : `A recorded project decision is checked automatically and the latest change to ${c.spec.path ?? 'the project'} broke it. Restore it, or ask the user whether the decision should change.`,
       dedupeKey: `contract:${c.id}:${conflict.updatedAt}`,
     });
+    return true;
   }
 
   private resolveBroken(c: Contract, fp: string, actor: Session | null): void {
@@ -538,18 +594,102 @@ export class ContractService {
 
 /**
  * Line-by-line match of a pattern that passed `checkSafePattern`, with a time budget. Returns
- * 'error' if the budget is exceeded.
+ * 'error' if the budget is exceeded. Lines end at LF or CRLF, so `$` works in either kind of file.
  */
 function matchLines(pattern: string, content: string): boolean | 'error' {
-  const re = new RegExp(pattern);
+  const whole = new RegExp(pattern, 'g');
+  // A window that stops short of the line's end must leave its last character unmatched: that
+  // keeps `$` from matching there and gives `\b` the real next character.
+  const open = new RegExp(`(?:${pattern})(?=[^])`, 'g');
   const start = performance.now();
-  const lines = content.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = (lines[i] as string).slice(0, MAX_LINE_CHARS);
-    if (re.test(line)) return true;
-    if (performance.now() - start > PATTERN_BUDGET_MS) return 'error';
+  let lineStart = 0;
+  while (lineStart <= content.length) {
+    let lineEnd = content.indexOf('\n', lineStart);
+    if (lineEnd === -1) lineEnd = content.length;
+    const end = lineEnd > lineStart && content[lineEnd - 1] === '\r' ? lineEnd - 1 : lineEnd;
+    const found = matchLine(whole, open, content.slice(lineStart, end), start);
+    if (found !== false) return found;
+    lineStart = lineEnd + 1;
   }
   return false;
+}
+
+/**
+ * Matches one line. A line of up to `MATCH_WINDOW_CHARS` is matched whole. A longer one is matched
+ * in windows of that size, each overlapping the one before by `MATCH_WINDOW_OVERLAP`, so the cost
+ * stays bounded however long the line is. A window that does not start at the line's start only
+ * accepts a match from its second character on, and one that does not reach the line's end must
+ * leave its last character unmatched: every match found this way is a match in the full line
+ * (`^`, `$` and `\b` see the real neighbours), and every match of the full line up to about
+ * `MATCH_WINDOW_OVERLAP` characters long is found.
+ */
+function matchLine(whole: RegExp, open: RegExp, line: string, start: number): boolean | 'error' {
+  const step = MATCH_WINDOW_CHARS - MATCH_WINDOW_OVERLAP;
+  for (let at = 0; ; at += step) {
+    const last = at + MATCH_WINDOW_CHARS >= line.length;
+    const re = last ? whole : open;
+    re.lastIndex = at === 0 ? 0 : 1;
+    const text = at === 0 && last ? line : line.slice(at, at + MATCH_WINDOW_CHARS);
+    if (re.test(text)) return true;
+    if (performance.now() - start > PATTERN_BUDGET_MS) return 'error';
+    if (last) return false;
+  }
+}
+
+const INVALID_JSON = Symbol('invalid JSON');
+
+/**
+ * Parses JSON, also accepting what editors and compilers accept in files such as `tsconfig.json`:
+ * a byte order mark, `//` and block comments, and a trailing comma before `}` or `]`.
+ */
+function parseJsonLenient(content: string): unknown {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    // Not strict JSON: try it as JSON with comments.
+  }
+  try {
+    return JSON.parse(stripJsonComments(text)) as unknown;
+  } catch {
+    return INVALID_JSON;
+  }
+}
+
+/** Removes comments and trailing commas that are outside strings; everything else is kept. */
+function stripJsonComments(text: string): string {
+  let out = '';
+  /** Index in `out` of a comma that so far is followed only by whitespace and comments. */
+  let comma = -1;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i] as string;
+    if (ch === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      const close = text.indexOf('*/', i + 2);
+      i = close === -1 ? text.length : close + 2;
+      out += ' ';
+      continue;
+    }
+    if (ch === '"') {
+      const from = i++;
+      while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
+      out += text.slice(from, ++i);
+      comma = -1;
+      continue;
+    }
+    if ((ch === '}' || ch === ']') && comma !== -1) {
+      out = out.slice(0, comma) + out.slice(comma + 1);
+    }
+    if (ch === ',') comma = out.length;
+    else if (!/\s/.test(ch)) comma = -1;
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 function hasDotPath(doc: unknown, key: string): boolean {
