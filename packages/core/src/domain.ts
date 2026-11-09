@@ -91,7 +91,14 @@ export type ContractKind = (typeof CONTRACT_KINDS)[number];
 export const CONTRACT_STATES = ['unknown', 'passing', 'failing', 'error'] as const;
 export type ContractState = (typeof CONTRACT_STATES)[number];
 
-export const RUN_KINDS = ['shadow_merge', 'replay', 'review', 'contract_sweep', 'bisect'] as const;
+export const RUN_KINDS = [
+  'shadow_merge',
+  'replay',
+  'review',
+  'contract_sweep',
+  'bisect',
+  'sentinel',
+] as const;
 export type RunKind = (typeof RUN_KINDS)[number];
 
 export const RUN_STATUSES = [
@@ -521,6 +528,52 @@ export interface Checkpoint {
   /** True when at least one checkpoint before this one was skipped, so it may hold several edits. */
   gap: boolean;
   createdAt: number;
+}
+
+/**
+ * What the sentinel knows about one check in one working tree: `passing` since the newest step it
+ * passed at, or `failing` since the first step it was seen failing (and, once `mindly bisect`
+ * found it, the step that broke it).
+ */
+export const SENTINEL_CHECK_STATES = ['passing', 'failing'] as const;
+export type SentinelCheckState = (typeof SENTINEL_CHECK_STATES)[number];
+
+export interface SentinelCheck {
+  /** sha256 of the check's argv; when the command changes, what was known about it is dropped. */
+  argvHash: string;
+  state: SentinelCheckState;
+  /** Newest step the check passed at, or null when it never passed while watched. */
+  goodSeq: number | null;
+  /** Step the sentinel first saw failing (the newest step of that pass). */
+  failingSeq: number | null;
+  /** The step the bisect blamed, when it found one. */
+  brokeAt: number | null;
+  /** The agent session that made the blamed step, when it was one agent edit. */
+  culpritSessionId: string | null;
+  /** The `check_failed` conflict opened for this break, if any. */
+  conflictId: string | null;
+  /** Why nobody is blamed while failing, when that is the case. */
+  note: string | null;
+  /** When the check last changed state. */
+  since: number;
+}
+
+/**
+ * The sentinel's watch over one working tree: the newest step it checked and, per check, what it
+ * knows. One row per (project, working tree).
+ */
+export interface SentinelWatch {
+  projectId: string;
+  /** Absolute, symlink-resolved path of the working tree (as in its checkpoints). */
+  worktree: string;
+  /** Newest step the checks ran at, or null before the first pass. */
+  checkedSeq: number | null;
+  checkedAt: number | null;
+  /** Commit the warm scratch tree last ran the setup command at, or null. */
+  setupCommit: string | null;
+  /** Per check name. */
+  checks: Record<string, SentinelCheck>;
+  updatedAt: number;
 }
 
 export interface Run {

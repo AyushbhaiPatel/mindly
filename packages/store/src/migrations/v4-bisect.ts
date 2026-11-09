@@ -1,4 +1,4 @@
-import { CHECKPOINT_KINDS, RUN_KINDS, RUN_STATUSES } from '@mindly/core';
+import { CHECKPOINT_KINDS, RUN_STATUSES } from '@mindly/core';
 
 /** `col IN ('a','b')` from a closed enum tuple (values are compile-time constants, not input). */
 function oneOf(col: string, values: readonly string[]): string {
@@ -9,6 +9,12 @@ function oneOf(col: string, values: readonly string[]): string {
 }
 
 /**
+ * Run kinds as of v4. Frozen here so this migration's SQL never changes when a later version adds
+ * a kind (v6 rebuilds the table again for `sentinel`).
+ */
+const V4_RUN_KINDS = ['shadow_merge', 'replay', 'review', 'contract_sweep', 'bisect'] as const;
+
+/**
  * v4: checkpoints (`mindly bisect`). One row per copy of a working tree stored under
  * `refs/mindly/steps/<worktree id>/<seq>`; `seq` increases per working tree. The `runs` table is
  * rebuilt so its kind check accepts the new `bisect` run kind (SQLite cannot alter a check).
@@ -17,7 +23,7 @@ export const MIGRATION_V4_BISECT = `
 CREATE TABLE runs_v4 (
   id           TEXT PRIMARY KEY,
   project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  kind         TEXT NOT NULL ${oneOf('kind', RUN_KINDS)},
+  kind         TEXT NOT NULL ${oneOf('kind', V4_RUN_KINDS)},
   status       TEXT NOT NULL ${oneOf('status', RUN_STATUSES)},
   title        TEXT NOT NULL,
   input        TEXT NOT NULL,

@@ -5,6 +5,7 @@ import { EventRepo, ProjectRepo, SessionRepo } from './repos/core.js';
 import { IdRepo } from './repos/ids.js';
 import { MemoryRepo } from './repos/memories.js';
 import { SaveRepo } from './repos/saves.js';
+import { SentinelRepo } from './repos/sentinel.js';
 import {
   ContextPacketRepo,
   ContractRepo,
@@ -26,6 +27,7 @@ export * from './repos/ids.js';
 export * from './repos/memories.js';
 export * from './repos/misc.js';
 export * from './repos/saves.js';
+export * from './repos/sentinel.js';
 export * from './repos/splits.js';
 export * from './repos/track.js';
 export * from './repos/work.js';
@@ -55,6 +57,8 @@ export class Store {
   readonly checkpoints: CheckpointRepo;
   /** Read models of `mindly track` and the line survival table. */
   readonly track: TrackRepo;
+  /** The sentinel's watched working trees (`mindly sentinel`). */
+  readonly sentinel: SentinelRepo;
   /** Resolves full, short and prefix ids typed by people (CLI, dashboard search). */
   readonly ids: IdRepo;
 
@@ -81,6 +85,7 @@ export class Store {
     this.splits = new SplitRepo(db, clock);
     this.checkpoints = new CheckpointRepo(db, clock);
     this.track = new TrackRepo(db, clock);
+    this.sentinel = new SentinelRepo(db, clock);
     this.ids = new IdRepo(db);
   }
 
