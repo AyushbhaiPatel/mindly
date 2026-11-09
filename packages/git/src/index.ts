@@ -122,6 +122,8 @@ export {
   createBisectWorkspace,
   isManifestPath,
   lockfileIn,
+  openWarmWorkspace,
+  removeWarmWorkspace,
   revertStep,
   stepChanges,
   stepDiff,

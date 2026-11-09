@@ -1,6 +1,6 @@
-import { existsSync, mkdtempSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { MindlyError, isDeniedPath } from '@mindly/core';
 import { copyIndex } from './capture.js';
 import { driverOverrides, runGit } from './exec.js';
@@ -16,7 +16,7 @@ import { findRepoRoot, resolveCommit } from './repo.js';
 /** The empty tree, parent of a step that has none. */
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
-/** A detached scratch worktree in a temp dir that checks out one checkpoint at a time. */
+/** A detached scratch worktree that checks out one checkpoint at a time. */
 export interface BisectWorkspace {
   /** Absolute path of the scratch worktree. */
   path: string;
@@ -24,8 +24,60 @@ export interface BisectWorkspace {
   current: string;
   /** Checks out `commit`, keeping untracked files (dependency folders) in place. */
   checkout(commit: string): Promise<void>;
-  /** Removes the worktree and its administrative files. Safe to call more than once. */
+  /**
+   * Removes a temporary worktree and its administrative files; leaves a warm one in place (see
+   * `removeWarmWorkspace`). Safe to call more than once.
+   */
   dispose(): Promise<void>;
+}
+
+/** A workspace that can also be reset to a commit it may already be at. */
+type ResettableWorkspace = BisectWorkspace & { reset(id: string): Promise<void> };
+
+/** The workspace object around an existing scratch worktree at `path`. */
+function workspaceAt(
+  root: string,
+  path: string,
+  current: string,
+  overrides: readonly string[],
+  timeoutMs: number,
+  onDispose: () => Promise<void>,
+): ResettableWorkspace {
+  let disposed = false;
+  const reset = async (id: string): Promise<void> => {
+    // `--force` discards what the command under test wrote to tracked files and `clean`
+    // removes what it created; ignored files (node_modules, .venv, build output) stay, so a
+    // setup step runs only when a manifest changed.
+    await runGit(['checkout', '--quiet', '--force', '--detach', id], {
+      cwd: path,
+      config: overrides,
+      timeoutMs,
+    });
+    await runGit(['clean', '-fd', '--quiet'], { cwd: path, config: overrides, timeoutMs });
+  };
+  const ws: ResettableWorkspace = {
+    path,
+    current,
+    async checkout(next) {
+      assertValidRevision(next);
+      if (disposed) throw new MindlyError('internal', 'bisect workspace was removed');
+      const id = await resolveCommit(root, next);
+      if (!id) throw new MindlyError('not_found', 'checkpoint commit not found');
+      if (id === ws.current) return;
+      await reset(id);
+      ws.current = id;
+    },
+    async reset(id) {
+      await reset(id);
+      ws.current = id;
+    },
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      await onDispose();
+    },
+  };
+  return ws;
 }
 
 /**
@@ -66,35 +118,114 @@ export async function createBisectWorkspace(
     await remove();
     throw err;
   }
+  return workspaceAt(root, path, resolved, overrides, timeoutMs, remove);
+}
 
-  let disposed = false;
-  const ws: BisectWorkspace = {
-    path,
-    current: resolved,
-    async checkout(next) {
-      assertValidRevision(next);
-      if (disposed) throw new MindlyError('internal', 'bisect workspace was removed');
-      const id = await resolveCommit(root, next);
-      if (!id) throw new MindlyError('not_found', 'checkpoint commit not found');
-      if (id === ws.current) return;
-      // `--force` discards what the command under test wrote to tracked files and `clean`
-      // removes what it created; ignored files (node_modules, .venv, build output) stay, so a
-      // setup step runs only when a manifest changed.
-      await runGit(['checkout', '--quiet', '--force', '--detach', id], {
-        cwd: path,
+/** Refuses a warm workspace path that is relative, or inside (or around) the repository. */
+function assertWarmPath(root: string, path: string): void {
+  if (typeof path !== 'string' || !isAbsolute(path) || path.includes('\0')) {
+    throw new MindlyError('invalid_input', 'the scratch tree path must be absolute');
+  }
+  const rel = relative(root, path);
+  const inside = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  const around = !relative(path, root).startsWith('..');
+  if (inside || around) {
+    throw new MindlyError('invalid_input', 'the scratch tree must be outside the repository');
+  }
+}
+
+/** The common git dir of the repository containing `cwd`, resolved, or null. */
+async function commonDir(cwd: string): Promise<string | null> {
+  const res = await runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    cwd,
+    okExitCodes: [128],
+    timeoutMs: 10_000,
+  }).catch(() => null);
+  if (!res || res.exitCode !== 0) return null;
+  try {
+    return realpathSync(res.stdout.trim());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The commit checked out in the warm worktree at `path`, or null when `path` is not a linked
+ * worktree of the repository at `root` (missing, foreign, or broken).
+ */
+async function warmHead(root: string, path: string): Promise<string | null> {
+  if (!existsSync(join(path, '.git'))) return null;
+  const [mine, theirs] = await Promise.all([commonDir(root), commonDir(path)]);
+  if (mine === null || theirs === null || mine !== theirs) return null;
+  const top = await runGit(['rev-parse', '--show-toplevel', 'HEAD'], {
+    cwd: path,
+    okExitCodes: [128],
+    timeoutMs: 10_000,
+  }).catch(() => null);
+  if (!top || top.exitCode !== 0) return null;
+  const [dir, head] = top.stdout.trim().split('\n');
+  try {
+    if (realpathSync(dir ?? '') !== realpathSync(path)) return null;
+  } catch {
+    return null;
+  }
+  return head && /^[0-9a-f]{40,64}$/.test(head) ? head : null;
+}
+
+/**
+ * Opens the warm scratch worktree kept at `path` (outside the repository) at `commit`: reuses it
+ * when it is a worktree of this repository, so ignored dependency folders survive between runs,
+ * and creates it otherwise. Tracked files are reset and untracked ones removed either way.
+ * `dispose()` leaves it in place; `removeWarmWorkspace` deletes it.
+ */
+export async function openWarmWorkspace(
+  repoRoot: string,
+  path: string,
+  commit: string,
+  options: { timeoutMs?: number } = {},
+): Promise<BisectWorkspace> {
+  assertValidRevision(commit);
+  const root = await findRepoRoot(repoRoot);
+  assertWarmPath(root, path);
+  const timeoutMs = options.timeoutMs ?? 300_000;
+  const resolved = await resolveCommit(root, commit);
+  if (!resolved) throw new MindlyError('not_found', 'checkpoint commit not found');
+  const overrides = await driverOverrides(root);
+  const head = await warmHead(root, path);
+  if (head === null) {
+    await removeWarmWorkspace(root, path);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    try {
+      await runGit(['worktree', 'add', '--detach', '--quiet', path, resolved], {
+        cwd: root,
         config: overrides,
         timeoutMs,
       });
-      await runGit(['clean', '-fd', '--quiet'], { cwd: path, config: overrides, timeoutMs });
-      ws.current = id;
-    },
-    async dispose() {
-      if (disposed) return;
-      disposed = true;
-      await remove();
-    },
-  };
+    } catch (err) {
+      await removeWarmWorkspace(root, path);
+      throw err;
+    }
+  }
+  const ws = workspaceAt(root, path, head ?? resolved, overrides, timeoutMs, async () => undefined);
+  // A reused tree may hold what the last command wrote: reset it even at the same commit.
+  if (head !== null) await ws.reset(resolved);
   return ws;
+}
+
+/**
+ * Deletes the warm scratch worktree at `path` and its administrative files in the repository.
+ * Missing ones are ignored.
+ */
+export async function removeWarmWorkspace(repoRoot: string, path: string): Promise<void> {
+  const root = await findRepoRoot(repoRoot);
+  assertWarmPath(root, path);
+  await runGit(['worktree', 'remove', '--force', '--force', path], {
+    cwd: root,
+    okExitCodes: [128],
+    timeoutMs: 60_000,
+  }).catch(() => undefined);
+  rmSync(path, { recursive: true, force: true });
+  await runGit(['worktree', 'prune'], { cwd: root, timeoutMs: 60_000 }).catch(() => undefined);
 }
 
 /** Status of one path between two checkpoints. */
