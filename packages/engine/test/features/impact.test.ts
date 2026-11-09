@@ -240,4 +240,40 @@ describe('impact radar', () => {
       .map((d) => d.title);
     expect(told.some((t) => /restored the exports of src\/auth\.ts/.test(t))).toBe(true);
   });
+
+  it('does not compare against a surface stored in an older signature format', async () => {
+    const { root, mindly, pid, write } = await featureSetup();
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+    );
+    // Left behind by an earlier version: same exports, signatures written differently, and no
+    // record of the format.
+    mindly.store.kv.set(surfaceKey(pid, 'src/auth.ts'), {
+      login: 'function:(user: string)',
+      VERSION: 'variable:',
+    });
+
+    // A body-only edit: compared with HEAD, not with the old surface, so nothing changed.
+    write('src/auth.ts', AUTH_V1.replace('"admin"', '"owner"'));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'owner') }),
+    );
+    expect(mindly.store.conflicts.list(pid).filter((c) => c.kind === 'impact')).toHaveLength(0);
+    expect(mindly.store.deliveries.list(pid).filter((d) => d.kind === 'impact')).toHaveLength(0);
+    // The surface is rewritten in the current format and used from here on.
+    expect(mindly.store.kv.get(surfaceKey(pid, 'src/auth.ts'))).toEqual({
+      login: 'function(user:string){',
+      VERSION: 'const',
+    });
+    write(
+      'src/auth.ts',
+      AUTH_V1.replace('login(user: string)', 'login(user: string, otp: string)'),
+    );
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'otp') }),
+    );
+    const impact = mindly.store.conflicts.list(pid).filter((c) => c.kind === 'impact');
+    expect(impact).toHaveLength(1);
+    expect(impact[0]!.detail).toContain('Changed signature: login');
+  });
 });

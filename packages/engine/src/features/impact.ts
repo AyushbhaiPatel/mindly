@@ -16,6 +16,12 @@ const SYMBOL_RE = /^[\w$.]{1,80}$/;
 /** Open impact conflicts remembered per file, so they can be closed when the exports come back. */
 const MAX_OPEN_PER_FILE = 20;
 const MAX_BASELINE_BYTES = 512 * 1024;
+/**
+ * Version of the signature format the export analysis produces. Bump it whenever a change to the
+ * analysis alters the signature of unchanged code (how a class is hashed, how a signature is
+ * normalised): surfaces stored by another version are not comparable with a fresh one.
+ */
+export const SURFACE_FORMAT = 2;
 
 /** Result of analysing one changed file. */
 export interface ImpactReport {
@@ -39,6 +45,8 @@ export function surfaceKey(projectId: string, path: string, worktree?: string): 
 
 /** What is remembered next to a stored surface. */
 interface SurfaceState {
+  /** `SURFACE_FORMAT` the surface was written with (0 when stored before formats were recorded). */
+  format: number;
   /** HEAD of the checkout when the surface was stored (null when unknown). */
   head: string | null;
   /** Conflicts this file's changes opened, with the exports as they were before. */
@@ -61,7 +69,11 @@ function readState(value: unknown): SurfaceState {
           o.before !== null,
       )
     : [];
-  return { head: typeof v.head === 'string' ? v.head : null, open };
+  return {
+    format: typeof v.format === 'number' ? v.format : 0,
+    head: typeof v.head === 'string' ? v.head : null,
+    open,
+  };
 }
 
 /** Root of the checkout `file` lives in: the actor's worktree, which may not be the project root. */
@@ -140,7 +152,9 @@ export class ImpactService {
     const state = readState(this.k.store.kv.get<unknown>(stateKey(key)));
     const head = await git.headCommit(tree);
     let before: Map<string, string> | null;
-    if (stored && typeof stored === 'object') {
+    // A surface written in another format would differ from a fresh one for code nobody touched,
+    // so it is not a baseline: the file is treated as seen for the first time.
+    if (stored && typeof stored === 'object' && state.format === SURFACE_FORMAT) {
       before = new Map(Object.entries(stored).filter(([, v]) => typeof v === 'string'));
       if (head !== null && state.head !== null && head !== state.head) {
         before = (await this.committedSurface(tree, file.path, state.head, head)) ?? before;
@@ -151,7 +165,11 @@ export class ImpactService {
     }
     this.k.store.kv.set(key, Object.fromEntries(after));
     const saveState = (): void => {
-      this.k.store.kv.set(stateKey(key), { head, open: state.open.slice(-MAX_OPEN_PER_FILE) });
+      this.k.store.kv.set(stateKey(key), {
+        format: SURFACE_FORMAT,
+        head,
+        open: state.open.slice(-MAX_OPEN_PER_FILE),
+      });
     };
     if (!before) {
       saveState();
