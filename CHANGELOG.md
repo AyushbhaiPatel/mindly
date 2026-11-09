@@ -3,6 +3,54 @@
 All notable changes to `mindly-cli` are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0, breaking changes bump the minor version.
 
+## Unreleased
+
+### Added
+
+- The sentinel: Mindly runs your trusted checks in the background as agents edit, and when one
+  that was passing fails, finds the edit that broke it and tells the agent that made it, before
+  it builds more on top. Off by default; turn it on with
+  `mindly config set sentinel.enabled true` (the daemon picks the change up without a restart).
+  - The daemon checks the newest checkpoint of each checkout that had an agent edit in the last
+    24 hours, once `sentinel.everySteps` (10) new steps piled up or no new step came for
+    `sentinel.quietSec` (60). Checkouts are checked one at a time across all projects. It runs the
+    project's `checks` from `.mindly/config.json`, only while that file is trusted; an optional
+    `sentinel` section picks some of them (`checks`) and adds a `setup` command (installing
+    dependencies), run again only when a lockfile or manifest changed. `mindly trust` now lists
+    the setup command.
+  - Checks run in a warm scratch worktree under `$MINDLY_HOME/sentinel/`, one per checkout,
+    outside the repository and never in your checkout; ignored folders (`node_modules`, `.venv`)
+    survive between passes, so dependencies are not installed every time. Trees unused for 3 days
+    are removed by the daemon.
+  - A check going from passing to failing starts a `mindly bisect` over the steps in between,
+    in the same tree (at most `sentinel.maxBisectsPerDay`, 20, per project). When one agent edit
+    broke it: a critical `check_failed` conflict names the step, the session and the paths; that
+    session gets a delivery with the step, its prompt and the failing output tail (or, when it
+    has ended, the agents working in that checkout do); the lesson is recorded as a mistake memory
+    as with a manual bisect; and a `check_broken_early` save is caught, confirmed when the check
+    passes again while that session is still working. A flaky failure (one that passes when run
+    again) blames nobody and tells nobody. A break that is an outside change, a gap step, or also
+    fails at the last good step now is reported without blame. When the check passes again, the
+    conflict is closed.
+  - The bisect is a normal `bisect` run (`input.trigger: "sentinel"`), so `mindly track` counts
+    it like one you ran.
+- `mindly sentinel [--json]` shows whether it runs, what it would run (or why it cannot) and, per
+  checkout, each check's state and the edit that broke it. `mindly sentinel run` checks the
+  newest step now in the foreground, even while the sentinel is off, and exits 1 when a check
+  fails. `mindly sentinel reset` forgets a checkout's state and deletes its scratch tree.
+- `GET /api/projects/:projectId/sentinel` on the daemon (read-only). `mindly doctor` reports the
+  sentinel, and suggests a setup command when a lockfile is present without one.
+- Database schema v6: a `sentinel_watches` table, and the `runs` table rebuilt so it accepts the
+  `sentinel` run kind. Applied automatically; upgrades from v1 to v5 keep every row.
+
+### Changed
+
+- `mindly bisect` runs its steps through the same runner as the sentinel (moved from the CLI into
+  the engine behind a new `StepGitPort`); its behaviour and `--json` output are unchanged.
+- `mindly forget --project` and `mindly uninstall` also remove the sentinel's scratch trees.
+- Once a Mindly with schema v6 has upgraded your database, an older Mindly cannot open it any more.
+  Upgrade every Mindly install on the machine together.
+
 ## 0.5.0 — 2026-11-07
 
 ### Changed

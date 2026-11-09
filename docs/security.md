@@ -118,6 +118,18 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   they gave), as an argument list without a shell, in a scratch worktree in a temp directory with
   a minimal environment and a time limit; nothing from the repository, memory or agent output
   chooses what runs. Agents cannot start a bisect: there is no MCP tool or daemon endpoint for it.
+- The sentinel (off by default, `sentinel.enabled`) runs only the project's `checks` and its
+  `sentinel.setup` command, from the `.mindly/config.json` the user trusted at that exact hash
+  (`mindly trust` lists the setup command too; any change to the file stops it until trusted
+  again). It runs them the same way as the merge checks: argument list, no shell, minimal
+  environment, time limit, own process group, killed when the daemon stops. They run in a warm
+  scratch worktree under `$MINDLY_HOME/sentinel/` (mode `0700`), outside the repository, never in
+  the user's checkout; the path is refused if it is inside or around the repository. Bisects the
+  sentinel starts are capped per project per day (`sentinel.maxBisectsPerDay`). Agents cannot
+  start a pass: there is no MCP tool, and the daemon endpoint only reads.
+- Check output reaches agents only as a redacted, sanitized, length-capped tail inside the
+  delivery of a break, rendered as reference data like every other delivery: a test that prints
+  instructions cannot turn them into a rule, a memory or a command.
 
 ### T7. Denial of service against agents
 
@@ -201,8 +213,9 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 ## Data retention and deletion
 
 - `mindly export` writes everything for a project as JSON.
-- `mindly forget --project` hard-deletes a project's rows, deletes its checkpoint refs from the
-  repositories and vacuums the database.
+- `mindly forget --project` hard-deletes a project's rows, deletes its checkpoint refs and the
+  sentinel's scratch worktrees from the repositories and vacuums the database. Scratch worktrees
+  unused for 3 days are removed by the daemon (and made again when needed).
 - `mindly forget --memory <id>` hard-deletes one memory and its history.
 - Raw prompts are kept for 30 days by default (`retention.promptsDays`), then reduced to their
   redacted summary.

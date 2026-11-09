@@ -69,6 +69,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 | POST   | `/api/saves/:id/reject`                                                          | "not a save": removes it from every total → `Save`; 404 if unknown                                                |
 | GET    | `/api/projects/:projectId/saves/card.svg?since&details`                          | the share card as `image/svg+xml` (below)                                                                         |
 | GET    | `/api/projects/:projectId/track?since&area&agent&minEdits`                       | `TrackReport` (below); read-only                                                                                  |
+| GET    | `/api/projects/:projectId/sentinel`                                              | `SentinelStatus` (below); read-only                                                                               |
 | GET    | `/api/projects/:projectId/snapshots`                                             | `Snapshot[]`                                                                                                      |
 | POST   | `/api/projects/:projectId/snapshots`                                             | `{ label }` → `Snapshot`                                                                                          |
 | GET    | `/api/snapshots/:id/diff`                                                        | snapshot diff                                                                                                     |
@@ -166,6 +167,22 @@ These are the shapes the dashboard (`apps/dashboard/src/format.ts`, `views/Insig
 }
 // contract_sweep (approved command contracts of trusted projects)
 { contracts: { contractId: string; memoryId: string; state: string; exitCode: number | null; durationMs: number; outputTail: string }[] }
+// bisect: passed (found) | failed (anything else) | cancelled | error. `input.trigger` is
+// 'sentinel' (with `input.check`) for the bisects the sentinel starts.
+{
+  status: 'found' | 'unreliable' | 'inconclusive' | 'good_fails' | 'bad_passes' | 'good_skipped' | 'bad_skipped' | 'cancelled';
+  checks: StepCheck[]; firstBad: number | null; lastGood: number | null;
+  blame: { checkpointId: string; kind: string; gap: boolean; sessionId: string | null; paths: string[]; at: number } | null;
+  flaky: boolean; skipped: number[]; output: string | null; runs: number; durationMs: number; mistakeId: string | null;
+}
+// sentinel: passed (every check passes) | failed (one fails) | error (setup failed, nothing could
+// run, or an internal error) | cancelled. Input: { trigger: 'schedule' | 'user', worktree, step, checks: string[] }
+{
+  step: number;
+  setupFailed?: boolean;
+  error?: string;
+  checks: SentinelCheckReport[]; // as in SentinelStatus below
+}
 ```
 
 Provenance (`GET …/provenance`): `{ file, line, text, found, sessionId, agentKind, createdAt, tool,
@@ -303,6 +320,86 @@ Outcomes are counted in the window by when they happened: a bisect blame at the 
 blamed edit, a conflict at each time it opened, with the sessions recorded then. Dismissed
 conflicts do not count. Outcomes naming several sessions, `outside` steps and gap steps count for
 nobody, and failing checks are not counted (a merge check cannot tell whose change made one fail).
+
+### Sentinel
+
+`GET …/sentinel` is what `mindly sentinel` shows: whether it is on, what it would run, and per
+watched checkout what is known about each check. It only reads; passes run in the daemon's job or
+with `mindly sentinel run`.
+
+```ts
+interface SentinelStatus {
+  enabled: boolean; // sentinel.enabled
+  readiness: {
+    ready: boolean;
+    reason:
+      | 'no_git'
+      | 'checkpoints_off'
+      | 'config_error'
+      | 'no_checks'
+      | 'unknown_checks'
+      | 'untrusted'
+      | null;
+    checks: { name: string; argv: string[]; timeoutSec: number }[];
+    setup: { name: 'setup'; argv: string[]; timeoutSec: number } | null;
+    unknown: string[]; // names in sentinel.checks that are not checks of the project
+  };
+  watches: {
+    worktree: string;
+    latestSeq: number | null; // newest step of the checkout
+    checkedSeq: number | null; // newest step the checks ran at
+    checkedAt: number | null;
+    pending: number; // steps since
+    checks: {
+      name: string;
+      state: 'passing' | 'failing';
+      goodSeq: number | null; // newest step it passed at
+      failingSeq: number | null; // step it was first seen failing
+      brokeAt: number | null; // the step the bisect blamed
+      culpritSessionId: string | null;
+      culprit: { sessionId: string; label: string; agentKind: string } | null;
+      conflictId: string | null; // the `check_failed` conflict of this break
+      note: string | null; // why nobody is blamed, when nobody is
+      since: number;
+      argvHash: string;
+    }[];
+  }[];
+  recent: Run[]; // the last 10 sentinel runs
+}
+
+interface SentinelCheckReport {
+  name: string;
+  outcome: 'pass' | 'fail' | 'skip'; // at the step checked
+  exitCode: number | null;
+  durationMs: number;
+  transition:
+    | 'baseline_pass'
+    | 'baseline_fail'
+    | 'still_passing'
+    | 'still_failing'
+    | 'broke'
+    | 'fixed'
+    | 'flaky'
+    | 'skipped';
+  output: string | null; // failing output tail, redacted
+  bisect: {
+    runId: string | null; // the `bisect` run, null when none was started
+    status: BisectStatus | 'cancelled' | 'over_budget';
+    runs: number;
+    firstBad: StepInfo | null; // as `mindly bisect show --json` prints a step
+    lastGood: StepInfo | null;
+  } | null;
+  conflictId: string | null;
+  told: string[]; // sessions sent the break
+  note: string | null;
+}
+```
+
+The conflicts the sentinel opens are `check_failed` conflicts whose fingerprint starts with
+`sentinel:`; it closes them itself when the check passes again (a shadow merge leaves them alone).
+`mindly sentinel --json` prints `SentinelStatus` plus `daemon: boolean`, and `mindly sentinel run
+--json` prints one pass: `{ status, worktree, step, runId, checks: SentinelCheckReport[], reason,
+setupFailed }`.
 
 ## CLI `--json`
 
