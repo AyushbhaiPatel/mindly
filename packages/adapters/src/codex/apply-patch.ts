@@ -10,6 +10,8 @@ const MOVE_RE = /^\*\*\* Move to:\s*(.*)$/;
 
 interface Section {
   path: string;
+  /** Where an `Update File` section moves the file to (`*** Move to:`), when it does. */
+  movedTo: string | null;
   kind: 'Add' | 'Update' | 'Delete';
   added: string[];
   removed: string[];
@@ -33,7 +35,8 @@ function push(lines: string[], len: number, line: string): number {
  * Parses a Codex `apply_patch` envelope into per-file edits.
  *
  * Format (`*** Begin Patch` ... `*** End Patch`): sections start with `*** Add File: <path>`,
- * `*** Update File: <path>` (optionally followed by `*** Move to: <path>`) or
+ * `*** Update File: <path>` (optionally followed by `*** Move to: <path>`, reported as an edit of
+ * the new path plus the removal of the old one) or
  * `*** Delete File: <path>`. Inside sections, `@@` lines introduce hunks, `+` lines are added,
  * `-` lines removed and ` ` lines are context. The parser is lenient and bounded: input is capped
  * at 2 MB, text per file at 200 KB, sections with an invalid path are skipped, and unknown lines
@@ -53,6 +56,7 @@ export function parseApplyPatch(input: string): FileEdit[] {
       if (path !== null && sections.length < MAX_EDITS) {
         current = {
           path,
+          movedTo: null,
           kind: header[1] as Section['kind'],
           added: [],
           removed: [],
@@ -64,8 +68,12 @@ export function parseApplyPatch(input: string): FileEdit[] {
       continue;
     }
     if (line.startsWith('*** ')) {
-      // Move targets keep the section open; Begin/End Patch/End of File markers are structural.
-      if (MOVE_RE.test(line)) continue;
+      // A move target keeps the section open; Begin/End Patch/End of File markers are structural.
+      const move = MOVE_RE.exec(line);
+      if (move) {
+        if (current?.kind === 'Update') current.movedTo = validPath(move[1] ?? '');
+        continue;
+      }
       if (line.startsWith('*** End Patch')) current = null;
       continue;
     }
@@ -78,12 +86,19 @@ export function parseApplyPatch(input: string): FileEdit[] {
     }
   }
 
-  return sections.map((s) => ({
-    path: s.path,
-    addedText: capText(s.added.join('\n')),
-    removedText: capText(s.removed.join('\n')),
-    wholeFile: s.kind !== 'Update',
-  }));
+  const edits: FileEdit[] = [];
+  for (const s of sections) {
+    const addedText = capText(s.added.join('\n'));
+    const removedText = capText(s.removed.join('\n'));
+    if (s.movedTo !== null && s.movedTo !== s.path) {
+      // A move writes the new path and removes the old one: both are files the patch changes.
+      edits.push({ path: s.movedTo, addedText, removedText, wholeFile: false });
+      edits.push({ path: s.path, addedText: '', removedText: '', wholeFile: true });
+      continue;
+    }
+    edits.push({ path: s.path, addedText, removedText, wholeFile: s.kind !== 'Update' });
+  }
+  return edits.slice(0, MAX_EDITS);
 }
 
 /**

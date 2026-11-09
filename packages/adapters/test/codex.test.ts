@@ -81,8 +81,25 @@ describe('apply_patch parser', () => {
       '*** Begin Patch\r\n*** Update File: a.ts\r\n*** Move to: b.ts\r\n@@\r\n ctx\r\n-old\r\n+new\r\n*** End of File\r\n*** End Patch',
     );
     expect(edits).toEqual([
-      { path: 'a.ts', addedText: 'new', removedText: 'old', wholeFile: false },
+      { path: 'b.ts', addedText: 'new', removedText: 'old', wholeFile: false },
+      { path: 'a.ts', addedText: '', removedText: '', wholeFile: true },
     ]);
+  });
+
+  it('reports both sides of a move, and only the file when it moves onto itself', () => {
+    const moved = parseApplyPatch(
+      '*** Begin Patch\n*** Update File: src/auth.ts\n*** Move to: src/generated/api.ts\n-x\n+y\n*** End Patch',
+    );
+    expect(moved.map((e) => e.path)).toEqual(['src/generated/api.ts', 'src/auth.ts']);
+    const same = parseApplyPatch(
+      '*** Begin Patch\n*** Update File: a.ts\n*** Move to: a.ts\n-x\n+y\n*** End Patch',
+    );
+    expect(same).toEqual([{ path: 'a.ts', addedText: 'y', removedText: 'x', wholeFile: false }]);
+    // A move line without a usable path, or outside an update section, changes nothing.
+    const stray = parseApplyPatch(
+      '*** Begin Patch\n*** Add File: n.ts\n*** Move to: elsewhere.ts\n+z\n*** Update File: u.ts\n*** Move to:   \n+w\n*** End Patch',
+    );
+    expect(stray.map((e) => e.path)).toEqual(['n.ts', 'u.ts']);
   });
 
   it('ignores malformed sections and junk', () => {

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -134,6 +134,33 @@ describe('checkpoints through hooks', () => {
       always: false,
     });
     expect(rows()).toHaveLength(1);
+  });
+
+  it('captures both paths of a file an agent moved', async () => {
+    const { root, mindly, fake, rows } = make();
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    // What the Codex adapter reports for `Update File: src/auth.ts` + `Move to: src/login.ts`.
+    const moved = {
+      ...writeTool('src/login.ts', 'export function login() {}')!,
+      name: 'apply_patch',
+      edits: [
+        {
+          path: 'src/login.ts',
+          addedText: 'export function login() {}',
+          removedText: '',
+          wholeFile: false,
+        },
+        { path: 'src/auth.ts', addedText: '', removedText: '', wholeFile: true },
+      ],
+    };
+    renameSync(join(root, 'src', 'auth.ts'), join(root, 'src', 'login.ts'));
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'post_tool', { tool: moved }));
+    expect(fake.captures.at(-1)?.paths).toEqual(['src/login.ts', 'src/auth.ts']);
+    expect(rows().at(-1)).toMatchObject({
+      kind: 'agent',
+      tool: 'apply_patch',
+      paths: ['src/login.ts', 'src/auth.ts'],
+    });
   });
 
   it('records an agent step for every edit, linked to its change and prompt', async () => {
