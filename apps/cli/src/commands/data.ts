@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { MINDLY_VERSION, writeJsonFile } from '@mindly/core';
-import type { Mindly } from '@mindly/engine';
+import { sentinelOf, type Mindly } from '@mindly/engine';
 import { withProject } from '../context.js';
 import { confirm } from '../io.js';
 import { argvWords } from '../present/index.js';
@@ -29,6 +29,13 @@ export async function trust(
         argv: c.argv,
         timeoutSec: c.timeoutSec,
       })),
+      sentinel: project.config.sentinel
+        ? {
+            checks: project.config.sentinel.checks ?? null,
+            setup: project.config.sentinel.setup ?? null,
+            setupTimeoutSec: project.config.sentinel.setupTimeoutSec,
+          }
+        : null,
     };
     if (o.json && o.show) {
       out.json(status);
@@ -60,7 +67,7 @@ export async function trust(
     sc.blank();
     if (status.checks.length) {
       sc.text(
-        `Trusting it lets Mindly run ${status.checks.length === 1 ? 'this command' : `these ${status.checks.length} commands`} on your machine (without a shell) when it checks merges and replays of agents' work:`,
+        `Trusting it lets Mindly run ${status.checks.length === 1 ? 'this command' : `these ${status.checks.length} commands`} on your machine (without a shell) when it checks merges and replays of agents' work, and after agent edits when the sentinel is on:`,
       );
       sc.rows(
         status.checks.map((c) => ({
@@ -69,7 +76,21 @@ export async function trust(
           details: [`argv ${JSON.stringify(c.argv)}`],
         })),
       );
-    } else {
+    }
+    const setup = status.sentinel?.setup ?? null;
+    if (setup) {
+      sc.text(
+        `${status.checks.length ? 'And' : 'Trusting it lets Mindly run'} this setup command in the sentinel's scratch copy of the code before those checks, and again when a lockfile changes:`,
+      );
+      sc.rows([
+        {
+          marker: 'item',
+          text: `${clean(argvWords(setup), 300)} (stopped after ${status.sentinel?.setupTimeoutSec ?? 600}s)`,
+          details: [`argv ${JSON.stringify(setup)}`],
+        },
+      ]);
+    }
+    if (!status.checks.length && !setup) {
       sc.text('It lists no commands, so trusting it lets nothing run.');
     }
     if (project.config.ignore.length) {
@@ -196,7 +217,7 @@ export async function forget(
     const counts = mindly.store.memories.count(pid);
     const memories = Object.values(counts).reduce((a, b) => a + b, 0);
     out.line(
-      `This permanently deletes everything Mindly stored for ${clean(project.project.name, 80)} (${clean(project.root, 300)}): ${plural(memories, 'memory', 'memories')}, sessions, events, tasks, snapshots, checkpoints and runs.`,
+      `This permanently deletes everything Mindly stored for ${clean(project.project.name, 80)} (${clean(project.root, 300)}): ${plural(memories, 'memory', 'memories')}, sessions, events, tasks, snapshots, checkpoints, the sentinel's scratch copies and runs.`,
     );
     out.line(
       out.style.dim(
@@ -207,8 +228,10 @@ export async function forget(
       out.line('Nothing was deleted.');
       return 1;
     }
-    // Checkpoint refs live in the repositories: delete them before their rows go.
+    // Checkpoint refs and the sentinel's scratch trees live in the repositories: delete them
+    // before their rows go.
     await mindly.checkpoints.forget(pid);
+    await sentinelOf(mindly).forget(pid);
     mindly.store.projects.delete(pid);
     mindly.store.vacuum();
     out.line(`Forgotten: Mindly no longer has any data for ${clean(project.project.name, 80)}.`);

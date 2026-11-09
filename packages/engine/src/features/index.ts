@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import type { Mindly, MindlyModule } from '../mindly.js';
 import { BisectService } from './bisect.js';
 import { contractsModule, ContractService } from './contracts.js';
@@ -5,6 +6,7 @@ import { impactModule, ImpactService } from './impact.js';
 import { provenanceModule, ProvenanceService } from './provenance.js';
 import { savesModule, SavesService } from './saves.js';
 import { selfHealingModule, SelfHealingService } from './self-healing.js';
+import { SentinelService } from './sentinel.js';
 import { serviceOf } from './shared.js';
 import { splitModule } from './split.js';
 import { xrayModule, XRayService } from './xray.js';
@@ -18,6 +20,7 @@ export * from './provenance.js';
 export * from './saves.js';
 export * from './saves-card.js';
 export * from './self-healing.js';
+export * from './sentinel.js';
 export * from './split.js';
 export * from './step-runner.js';
 export * from './track.js';
@@ -93,4 +96,24 @@ export function xrayOf(mindly: Mindly): XRayService {
 /** The bisect service of `mindly` (explains steps, records runs and lessons). */
 export function bisectOf(mindly: Mindly): BisectService {
   return serviceOf(mindly, 'bisect', () => new BisectService(mindly.kernel, mindly.memory));
+}
+
+/**
+ * The sentinel of `mindly` (background checks after agent edits, and the bisect when one breaks).
+ * Its warm scratch trees live under `$MINDLY_HOME/sentinel` (a temp dir for in-memory instances).
+ */
+export function sentinelOf(mindly: Mindly): SentinelService {
+  return serviceOf(
+    mindly,
+    'sentinel',
+    () =>
+      new SentinelService(
+        mindly.kernel,
+        mindly.projects,
+        bisectOf(mindly),
+        mindly.telepathy,
+        savesOf(mindly),
+        mindly.paths ? join(mindly.paths.home, 'sentinel') : null,
+      ),
+  );
 }

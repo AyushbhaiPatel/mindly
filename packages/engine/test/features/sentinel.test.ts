@@ -1,0 +1,669 @@
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  defaultUserConfig,
+  loadProjectConfig,
+  type CheckpointKind,
+  type UserConfig,
+} from '@mindly/core';
+import {
+  installDefaultModules,
+  Mindly,
+  savesOf,
+  sentinelOf,
+  SENTINEL_FINGERPRINT_PREFIX,
+  trackOf,
+  type CheckpointGitPort,
+  type CommandRunResult,
+  type CommandSpec,
+  type SentinelPassOptions,
+  type SentinelPassResult,
+  type SentinelProgress,
+  type StepGitPort,
+  type StepWorkspace,
+} from '../../src/index.js';
+import { event, FakeClock, fakeGit } from '../helpers.js';
+
+/*
+ * The sentinel against fake git: steps are rows with fake commits, and a check "passes" or
+ * "fails" at a commit as `verdict` says. Everything else (state, bisect, conflicts, deliveries,
+ * saves, mistakes, runs) is the real engine.
+ */
+
+type Verdict = 'pass' | 'fail' | 'timeout';
+
+interface FakeSteps extends StepGitPort {
+  /** Commands run, as `name@commit`. */
+  ran: string[];
+  warmOpened: string[];
+  warmRemoved: string[];
+  /** Paths each commit changed (for the setup reruns). */
+  changes: Map<string, string[]>;
+}
+
+function fakeSteps(verdict: (check: string, commit: string, nth: number) => Verdict): FakeSteps {
+  const where = new Map<string, { current: string }>();
+  const asked = new Map<string, number>();
+  const port: FakeSteps = {
+    ran: [],
+    warmOpened: [],
+    warmRemoved: [],
+    changes: new Map(),
+    scratch: () => Promise.reject(new Error('not used')),
+    warm: async (_repo, path, commit) => {
+      port.warmOpened.push(path);
+      const state = { current: commit };
+      where.set(path, state);
+      const ws: StepWorkspace = {
+        path,
+        get current() {
+          return state.current;
+        },
+        checkout: async (c) => {
+          state.current = c;
+        },
+        dispose: async () => undefined,
+      };
+      return ws;
+    },
+    removeWarm: async (_repo, path) => {
+      port.warmRemoved.push(path);
+    },
+    changedPaths: async (_dir, from, to) => {
+      const a = Number(from.replace('c', ''));
+      const b = Number(to.replace('c', ''));
+      const out: string[] = [];
+      for (let i = Math.min(a, b) + 1; i <= Math.max(a, b); i++) {
+        out.push(...(port.changes.get(`c${i}`) ?? []));
+      }
+      return out;
+    },
+    isManifestPath: (p) => p.endsWith('package.json'),
+    run: async (dir, command: CommandSpec): Promise<CommandRunResult> => {
+      const commit = where.get(dir)?.current ?? '?';
+      port.ran.push(`${command.name}@${commit}`);
+      const key = `${command.name}@${commit}`;
+      const nth = (asked.get(key) ?? 0) + 1;
+      asked.set(key, nth);
+      const v = verdict(command.name, commit, nth);
+      return {
+        name: command.name,
+        status: v,
+        exitCode: v === 'pass' ? 0 : v === 'fail' ? 1 : null,
+        durationMs: 5,
+        output:
+          v === 'fail'
+            ? `\u001b[31mFAIL\u001b[0m ${command.name} at ${commit}\nexpected 4, got 5`
+            : 'ok',
+      };
+    },
+  };
+  return port;
+}
+
+function fakeCheckpoints(busy: () => boolean = () => false): CheckpointGitPort {
+  const no = (): never => {
+    throw new Error('not used');
+  };
+  return {
+    worktreeRoot: async (cwd) => cwd,
+    worktreeId: () => 'w',
+    refName: () => 'refs/mindly/steps/w/1',
+    capture: no,
+    listRefs: async () => [],
+    deleteRefs: async () => 0,
+    diskUsage: async () => null,
+    tryLock: () => (busy() ? null : { release: () => undefined }),
+  };
+}
+
+interface World {
+  root: string;
+  clock: FakeClock;
+  mindly: Mindly;
+  pid: string;
+  steps: FakeSteps;
+  cc: string;
+  cx: string;
+  /** Adds steps `from..to` (commits `c<n>`), made by `who(seq)`. */
+  addSteps(from: number, to: number, who?: (seq: number) => 'cc' | 'cx' | 'outside'): void;
+  pass(opts?: Partial<SentinelPassOptions>): Promise<SentinelPassResult>;
+}
+
+async function world(
+  verdict: (check: string, commit: string, nth: number) => Verdict,
+  opts: {
+    config?: (c: UserConfig) => void;
+    project?: Record<string, unknown>;
+    trust?: boolean;
+    busy?: () => boolean;
+  } = {},
+): Promise<World> {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-sentinel-')));
+  mkdirSync(join(root, '.mindly'));
+  writeFileSync(
+    join(root, '.mindly', 'config.json'),
+    JSON.stringify(
+      opts.project ?? {
+        checks: [{ name: 'unit', argv: ['npm', 'test'], timeoutSec: 60 }],
+      },
+    ),
+  );
+  const config = defaultUserConfig();
+  config.sentinel.enabled = true;
+  opts.config?.(config);
+  const steps = fakeSteps(verdict);
+  const clock = new FakeClock();
+  const mindly = Mindly.open({
+    inMemory: true,
+    clock,
+    config,
+    ports: { git: { ...fakeGit, checkpoints: fakeCheckpoints(opts.busy), steps } },
+  });
+  installDefaultModules(mindly);
+  await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+  await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+  const pid = mindly.store.projects.list()[0]!.id;
+  if (opts.trust !== false) {
+    const hash = loadProjectConfig(join(root, '.mindly', 'config.json')).hash as string;
+    mindly.projects.trust(pid, hash);
+  }
+  const cc = mindly.store.sessions.findByExternal(pid, 'claude-code', 'cc')!.id;
+  const cx = mindly.store.sessions.findByExternal(pid, 'codex', 'cx')!.id;
+  const w: World = {
+    root,
+    clock,
+    mindly,
+    pid,
+    steps,
+    cc,
+    cx,
+    addSteps(from, to, who = (seq) => (seq % 2 === 0 ? 'cx' : 'cc')) {
+      for (let seq = from; seq <= to; seq++) {
+        const by = seq === 1 ? 'outside' : who(seq);
+        const kind: CheckpointKind =
+          seq === 1 ? 'baseline' : by === 'outside' ? 'outside' : 'agent';
+        mindly.store.checkpoints.create({
+          projectId: pid,
+          worktree: root,
+          seq,
+          commit: `c${seq}`,
+          parentCommit: seq === 1 ? null : `c${seq - 1}`,
+          kind,
+          sessionId: by === 'cc' ? cc : by === 'cx' ? cx : null,
+          fileChangeId: null,
+          promptEventId: null,
+          tool: kind === 'agent' ? 'Edit' : null,
+          paths: kind === 'agent' ? [`src/step-${seq}.ts`] : [],
+          gap: false,
+        });
+        clock.advance(1000);
+      }
+    },
+    pass: (o = {}) => sentinelOf(mindly).pass(pid, root, { trigger: 'user', force: true, ...o }),
+  };
+  return w;
+}
+
+/** Step number of a fake commit. */
+const seqOf = (commit: string): number => Number(commit.replace('c', ''));
+/** A check that passes before `broke` and fails from it. */
+const breaksAt =
+  (broke: number) =>
+  (_check: string, commit: string): Verdict =>
+    seqOf(commit) >= broke ? 'fail' : 'pass';
+
+describe('sentinel readiness', () => {
+  it('needs trusted checks, and names the checks and setup it runs', async () => {
+    const w = await world(() => 'pass', { trust: false });
+    const svc = sentinelOf(w.mindly);
+    expect(svc.readiness(w.mindly.projects.byId(w.pid))).toMatchObject({
+      ready: false,
+      reason: 'untrusted',
+    });
+    w.addSteps(1, 2);
+    expect(await w.pass()).toMatchObject({ status: 'not_ready', reason: 'untrusted' });
+    expect(w.steps.ran).toEqual([]);
+
+    const none = await world(() => 'pass', { project: {} });
+    expect(sentinelOf(none.mindly).readiness(none.mindly.projects.byId(none.pid)).reason).toBe(
+      'no_checks',
+    );
+
+    const subset = await world(() => 'pass', {
+      project: {
+        checks: [
+          { name: 'unit', argv: ['npm', 'test'] },
+          { name: 'e2e', argv: ['npm', 'run', 'e2e'] },
+        ],
+        sentinel: { checks: ['unit', 'lint'], setup: ['npm', 'ci'] },
+      },
+    });
+    const r = sentinelOf(subset.mindly).readiness(subset.mindly.projects.byId(subset.pid));
+    expect(r).toMatchObject({ ready: true, unknown: ['lint'] });
+    expect(r.checks.map((c) => c.name)).toEqual(['unit']);
+    expect(r.setup).toEqual({ name: 'setup', argv: ['npm', 'ci'], timeoutSec: 600 });
+
+    const unknown = await world(() => 'pass', {
+      project: { checks: [{ name: 'unit', argv: ['x'] }], sentinel: { checks: ['lint'] } },
+    });
+    expect(
+      sentinelOf(unknown.mindly).readiness(unknown.mindly.projects.byId(unknown.pid)).reason,
+    ).toBe('unknown_checks');
+
+    const off = await world(() => 'pass', { config: (c) => (c.checkpoints.enabled = false) });
+    expect(sentinelOf(off.mindly).readiness(off.mindly.projects.byId(off.pid)).reason).toBe(
+      'checkpoints_off',
+    );
+  });
+});
+
+describe('sentinel pass', () => {
+  it('finds the edit that broke a check, tells its agent and opens a conflict', async () => {
+    const w = await world(breaksAt(7));
+    w.addSteps(1, 3);
+    const first = await w.pass();
+    expect(first).toMatchObject({ status: 'checked', step: 3 });
+    expect(first.checks[0]).toMatchObject({
+      name: 'unit',
+      outcome: 'pass',
+      transition: 'baseline_pass',
+    });
+
+    w.addSteps(4, 10);
+    const progress: SentinelProgress[] = [];
+    const r = await w.pass({ onProgress: (p) => progress.push(p) });
+    const unit = r.checks[0]!;
+    expect(unit).toMatchObject({ outcome: 'fail', transition: 'broke', note: null });
+    expect(unit.bisect).toMatchObject({ status: 'found' });
+    expect(unit.bisect?.firstBad).toMatchObject({ seq: 7, agentKind: 'claude-code' });
+    expect(unit.bisect?.lastGood?.seq).toBe(6);
+    // Escape sequences are dropped from the output kept.
+    expect(unit.output).toContain('FAIL unit at c7');
+    expect(unit.output).not.toContain('\u001b');
+
+    // The conflict names the session and the step.
+    const conflict = w.mindly.store.conflicts.get(unit.conflictId!);
+    expect(conflict).toMatchObject({ kind: 'check_failed', severity: 'critical', status: 'open' });
+    expect(conflict.fingerprint.startsWith(SENTINEL_FINGERPRINT_PREFIX)).toBe(true);
+    expect(conflict.sessionIds).toEqual([w.cc]);
+    expect(conflict.paths).toEqual(['src/step-7.ts']);
+    expect(conflict.title).toContain('Check "unit" broke at step 7');
+    expect(conflict.detail).toContain('mindly bisect revert 7');
+
+    // Only the agent that broke it is told, with the failing output.
+    expect(unit.told).toEqual([w.cc]);
+    const [d] = w.mindly.store.deliveries.list(w.pid, { limit: 10 });
+    expect(d).toMatchObject({ targetSessionId: w.cc, kind: 'conflict', priority: 9 });
+    expect(d?.title).toBe('Your edit broke check "unit"');
+    expect(d?.body).toContain(
+      'It passed at step 6 and fails from step 7, your Edit of src/step-7.ts',
+    );
+    expect(d?.body).toContain(
+      'Failing output (last lines): "FAIL unit at c7 | expected 4, got 5".',
+    );
+    expect(d?.body).toContain('mindly bisect revert 7');
+
+    // State, the bisect run (counted by mindly track), the mistake and the caught save.
+    const watch = w.mindly.store.sentinel.get(w.pid, w.root)!;
+    expect(watch.checkedSeq).toBe(10);
+    expect(watch.checks['unit']).toMatchObject({
+      state: 'failing',
+      goodSeq: 3,
+      failingSeq: 10,
+      brokeAt: 7,
+      culpritSessionId: w.cc,
+      conflictId: conflict.id,
+    });
+    const bisect = w.mindly.store.runs.get(unit.bisect!.runId!);
+    expect(bisect).toMatchObject({ kind: 'bisect', status: 'passed' });
+    expect(bisect.input).toMatchObject({ trigger: 'sentinel', check: 'unit' });
+    expect(bisect.result).toMatchObject({ status: 'found', firstBad: 7, lastGood: 6 });
+    expect((bisect.result?.['blame'] as { sessionId: string }).sessionId).toBe(w.cc);
+    const mistake = w.mindly.store.memories.get(bisect.result?.['mistakeId'] as string);
+    expect(mistake).toMatchObject({ kind: 'mistake', scope: { paths: ['src/step-7.ts'] } });
+    const sentinelRun = w.mindly.store.runs.get(r.runId!);
+    expect(sentinelRun).toMatchObject({ kind: 'sentinel', status: 'failed' });
+    expect(sentinelRun.input).toMatchObject({ trigger: 'user', step: 10, checks: ['unit'] });
+    const saves = w.mindly.store.saves.list(w.pid, { limit: 10 });
+    expect(saves).toHaveLength(1);
+    expect(saves[0]).toMatchObject({ kind: 'check_broken_early', status: 'caught' });
+    expect(progress.some((p) => p.phase === 'bisect')).toBe(true);
+
+    // Bisect only searched between the last good step and the newest.
+    expect(w.steps.ran.filter((x) => x === 'unit@c1' || x === 'unit@c2')).toEqual([]);
+
+    // Still failing at the next pass: nobody is told again.
+    w.addSteps(11, 11);
+    const again = await w.pass();
+    expect(again.checks[0]).toMatchObject({ transition: 'still_failing', conflictId: conflict.id });
+    expect(w.mindly.store.deliveries.list(w.pid, { limit: 10 })).toHaveLength(1);
+  });
+
+  it('closes the conflict and confirms the save when the check passes again', async () => {
+    let fixedFrom = Infinity;
+    const w = await world((_c, commit) =>
+      seqOf(commit) >= 5 && seqOf(commit) < fixedFrom ? 'fail' : 'pass',
+    );
+    w.addSteps(1, 2);
+    await w.pass();
+    w.addSteps(3, 6);
+    const broke = await w.pass();
+    const conflictId = broke.checks[0]!.conflictId!;
+    expect(broke.checks[0]?.bisect?.firstBad?.seq).toBe(5);
+    fixedFrom = 7;
+    w.addSteps(7, 7);
+    const fixed = await w.pass();
+    expect(fixed.checks[0]).toMatchObject({ transition: 'fixed', conflictId });
+    expect(w.mindly.store.conflicts.get(conflictId).status).toBe('resolved');
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checks['unit']).toMatchObject({
+      state: 'passing',
+      goodSeq: 7,
+      brokeAt: null,
+      conflictId: null,
+    });
+    const [save] = w.mindly.store.saves.list(w.pid, { limit: 10 });
+    expect(save).toMatchObject({ kind: 'check_broken_early', status: 'confirmed' });
+    expect(savesOf(w.mindly).summary(w.pid, 0).total).toBe(1);
+
+    // Breaking again later opens a new conflict.
+    fixedFrom = Infinity;
+    w.addSteps(8, 9);
+    const again = await w.pass();
+    expect(again.checks[0]?.transition).toBe('broke');
+    expect(again.checks[0]?.conflictId).not.toBe(conflictId);
+  });
+
+  it('tells the agents in the checkout when the session that broke it has ended', async () => {
+    const w = await world(breaksAt(4));
+    w.addSteps(1, 3);
+    await w.pass();
+    w.addSteps(4, 5, (seq) => (seq === 4 ? 'cx' : 'cc'));
+    await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'session_end'));
+    const r = await w.pass();
+    expect(r.checks[0]?.bisect?.firstBad?.agentKind).toBe('codex');
+    expect(r.checks[0]?.told).toEqual([w.cc]);
+    const [d] = w.mindly.store.deliveries.list(w.pid, { limit: 10 });
+    expect(d?.title).toBe('Check "unit" broke in this checkout');
+    expect(d?.body).toContain('Check whether your work depends on it');
+    // The break is still pinned on Codex, but nobody is left to be helped: no save.
+    expect(w.mindly.store.conflicts.get(r.checks[0]!.conflictId!).sessionIds).toEqual([w.cx]);
+    expect(w.mindly.store.saves.list(w.pid, { limit: 10 })).toEqual([]);
+  });
+
+  it('drops the save when the session that broke the check ends with it still failing', async () => {
+    const w = await world(breaksAt(4));
+    w.addSteps(1, 3);
+    await w.pass();
+    w.addSteps(4, 4, () => 'cx');
+    await w.pass();
+    expect(w.mindly.store.saves.list(w.pid, { limit: 10 })[0]?.status).toBe('caught');
+    await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'session_end'));
+    expect(w.mindly.store.saves.list(w.pid, { statuses: ['rejected'], limit: 10 })).toHaveLength(1);
+  });
+
+  it('blames nobody for a flaky failure', async () => {
+    // Fails the first time it runs at step 6 only.
+    const w = await world((_c, commit, nth) => (commit === 'c6' && nth === 1 ? 'fail' : 'pass'));
+    w.addSteps(1, 2);
+    await w.pass();
+    w.addSteps(3, 6);
+    const r = await w.pass();
+    expect(r.checks[0]).toMatchObject({ outcome: 'fail', transition: 'flaky', conflictId: null });
+    expect(r.checks[0]?.bisect?.status).toBe('bad_passes');
+    expect(r.checks[0]?.note).toContain('flaky');
+    expect(w.mindly.store.conflicts.list(w.pid)).toEqual([]);
+    expect(w.mindly.store.deliveries.list(w.pid, { limit: 10 })).toEqual([]);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checks['unit']).toMatchObject({
+      state: 'passing',
+      goodSeq: 2,
+    });
+    expect(w.mindly.store.memories.list(w.pid, { kinds: ['mistake'] })).toEqual([]);
+  });
+
+  it('looks again later when the failing step cannot run a second time', async () => {
+    // Fails at step 5, then times out when the bisect checks step 5 again.
+    const w = await world((_c, commit, nth) =>
+      commit === 'c5' ? (nth === 1 ? 'fail' : 'timeout') : 'pass',
+    );
+    w.addSteps(1, 2);
+    await w.pass();
+    w.addSteps(3, 5);
+    const r = await w.pass();
+    expect(r.checks[0]).toMatchObject({ outcome: 'fail', transition: 'skipped', conflictId: null });
+    expect(r.checks[0]?.bisect?.status).toBe('bad_skipped');
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checks['unit']).toMatchObject({
+      state: 'passing',
+      goodSeq: 2,
+    });
+    expect(w.mindly.store.conflicts.list(w.pid)).toEqual([]);
+  });
+
+  it('blames nobody when the last good step fails too, or the break is outside any agent', async () => {
+    let everything = false;
+    const w = await world((_c, commit) => (everything || seqOf(commit) >= 5 ? 'fail' : 'pass'));
+    w.addSteps(1, 3);
+    await w.pass();
+    everything = true;
+    w.addSteps(4, 6);
+    const r = await w.pass();
+    expect(r.checks[0]).toMatchObject({ transition: 'broke' });
+    expect(r.checks[0]?.bisect?.status).toBe('good_fails');
+    expect(r.checks[0]?.note).toContain('outside the checkpoints changed');
+    const c = w.mindly.store.conflicts.get(r.checks[0]!.conflictId!);
+    expect(c.sessionIds).toEqual([]);
+    expect(c.title).toBe('Check "unit" fails from step 6');
+    expect(
+      w.mindly.store.deliveries
+        .list(w.pid, { limit: 10 })
+        .map((d) => d.targetSessionId)
+        .sort(),
+    ).toEqual([w.cc, w.cx].sort());
+
+    const o = await world(breaksAt(5));
+    o.addSteps(1, 4);
+    await o.pass();
+    o.addSteps(5, 6, (seq) => (seq === 5 ? 'outside' : 'cc'));
+    const out = await o.pass();
+    expect(out.checks[0]?.bisect?.firstBad?.kind).toBe('outside');
+    expect(out.checks[0]?.note).toContain('outside any agent');
+    expect(o.mindly.store.conflicts.get(out.checks[0]!.conflictId!).sessionIds).toEqual([]);
+    expect(o.mindly.store.memories.list(o.pid, { kinds: ['mistake'] })).toEqual([]);
+  });
+
+  it('reports a break without searching once the daily bisect limit is reached', async () => {
+    const w = await world(breaksAt(4), { config: (c) => (c.sentinel.maxBisectsPerDay = 0) });
+    w.addSteps(1, 3);
+    await w.pass();
+    w.addSteps(4, 5);
+    const r = await w.pass();
+    expect(r.checks[0]).toMatchObject({ transition: 'broke' });
+    expect(r.checks[0]?.bisect).toMatchObject({ status: 'over_budget', runId: null });
+    expect(r.checks[0]?.note).toContain('daily bisect limit');
+    expect(w.mindly.store.runs.list(w.pid, { kind: 'bisect' })).toEqual([]);
+    expect(w.mindly.store.conflicts.get(r.checks[0]!.conflictId!).status).toBe('open');
+  });
+
+  it('records a check already failing as a baseline, without blame', async () => {
+    const w = await world(() => 'fail');
+    w.addSteps(1, 4);
+    const r = await w.pass();
+    expect(r.checks[0]).toMatchObject({ transition: 'baseline_fail', conflictId: null });
+    expect(w.mindly.store.conflicts.list(w.pid)).toEqual([]);
+    expect(w.mindly.store.runs.list(w.pid, { kind: 'bisect' })).toEqual([]);
+  });
+
+  it('starts over for a check whose command changed', async () => {
+    const w = await world(breaksAt(3));
+    w.addSteps(1, 2);
+    await w.pass();
+    writeFileSync(
+      join(w.root, '.mindly', 'config.json'),
+      JSON.stringify({ checks: [{ name: 'unit', argv: ['npm', 'run', 'test:unit'] }] }),
+    );
+    const hash = loadProjectConfig(join(w.root, '.mindly', 'config.json')).hash as string;
+    w.mindly.projects.trust(w.pid, hash);
+    w.addSteps(3, 4);
+    const r = await w.pass();
+    expect(r.checks[0]?.transition).toBe('baseline_fail');
+  });
+
+  it('runs the setup command once, again on a manifest change, and skips when it fails', async () => {
+    let setupFails = false;
+    const w = await world(
+      (check, commit) =>
+        check === 'setup' ? (setupFails ? 'fail' : 'pass') : breaksAt(99)(check, commit),
+      {
+        project: {
+          checks: [
+            { name: 'unit', argv: ['npm', 'test'] },
+            { name: 'lint', argv: ['npm', 'run', 'lint'] },
+          ],
+          sentinel: { setup: ['npm', 'ci'] },
+        },
+      },
+    );
+    w.addSteps(1, 3);
+    await w.pass();
+    w.addSteps(4, 5);
+    await w.pass();
+    expect(w.steps.ran.filter((x) => x.startsWith('setup@'))).toEqual(['setup@c3']);
+    w.steps.changes.set('c7', ['package.json']);
+    w.addSteps(6, 8);
+    await w.pass();
+    expect(w.steps.ran.filter((x) => x.startsWith('setup@'))).toEqual(['setup@c3', 'setup@c8']);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.setupCommit).toBe('c8');
+
+    setupFails = true;
+    w.steps.changes.set('c9', ['package.json']);
+    w.addSteps(9, 9);
+    const r = await w.pass();
+    expect(r).toMatchObject({ status: 'checked', setupFailed: true });
+    expect(r.checks.map((c) => [c.name, c.outcome, c.transition, c.note])).toEqual([
+      ['unit', 'skip', 'skipped', 'the setup command failed'],
+      ['lint', 'skip', 'skipped', 'the setup command failed'],
+    ]);
+    // Without dependencies the checks would fail for the wrong reason: neither ran.
+    expect(w.steps.ran.filter((x) => x.endsWith('@c9'))).toEqual(['setup@c9']);
+    expect(w.mindly.store.conflicts.list(w.pid)).toEqual([]);
+    expect(w.mindly.store.runs.get(r.runId!).status).toBe('error');
+    // Nothing ran, so the step is checked again next time.
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)?.checkedSeq).toBe(8);
+  });
+
+  it('does not run twice at once, and stops when cancelled', async () => {
+    let busy = true;
+    const w = await world(() => 'pass', { busy: () => busy });
+    w.addSteps(1, 2);
+    expect((await w.pass()).status).toBe('busy');
+    busy = false;
+    const ac = new AbortController();
+    ac.abort();
+    const r = await w.pass({ signal: ac.signal });
+    expect(r.status).toBe('cancelled');
+    expect(w.mindly.store.runs.get(r.runId!).status).toBe('cancelled');
+  });
+});
+
+describe('sentinel schedule', () => {
+  it('is due after enough steps, or once the agents paused', async () => {
+    const w = await world(() => 'pass', {
+      config: (c) => {
+        c.sentinel.everySteps = 3;
+        c.sentinel.quietSec = 60;
+      },
+    });
+    const svc = sentinelOf(w.mindly);
+    expect(svc.dueWorktrees(w.pid)).toEqual([]);
+    w.addSteps(1, 2);
+    // A first look waits for a pause.
+    expect(svc.dueWorktrees(w.pid)).toEqual([]);
+    w.clock.advance(60_000);
+    expect(svc.dueWorktrees(w.pid)).toEqual([w.root]);
+    const auto = (): ReturnType<typeof svc.pass> =>
+      svc.pass(w.pid, w.root, { trigger: 'schedule' });
+    expect((await auto()).status).toBe('checked');
+    expect((await auto()).status).toBe('up_to_date');
+    w.addSteps(3, 4);
+    expect(svc.dueWorktrees(w.pid)).toEqual([]);
+    expect((await auto()).status).toBe('not_due');
+    w.addSteps(5, 5);
+    expect(svc.dueWorktrees(w.pid)).toEqual([w.root]);
+    expect((await auto()).status).toBe('checked');
+    // Not looked at once its newest step is a day old.
+    w.addSteps(6, 6);
+    w.clock.advance(25 * 60 * 60_000);
+    expect(svc.dueWorktrees(w.pid)).toEqual([]);
+  });
+});
+
+describe('sentinel status and cleanup', () => {
+  it('shows each watched checkout with its checks and who broke them', async () => {
+    const w = await world(breaksAt(4));
+    w.addSteps(1, 3);
+    await w.pass();
+    w.addSteps(4, 6);
+    await w.pass();
+    w.addSteps(7, 8);
+    const s = sentinelOf(w.mindly).status(w.pid);
+    expect(s).toMatchObject({ enabled: true, readiness: { ready: true } });
+    expect(s.watches).toHaveLength(1);
+    expect(s.watches[0]).toMatchObject({
+      worktree: w.root,
+      latestSeq: 8,
+      checkedSeq: 6,
+      pending: 2,
+    });
+    expect(s.watches[0]?.checks[0]).toMatchObject({
+      name: 'unit',
+      state: 'failing',
+      brokeAt: 4,
+      culprit: { sessionId: w.cx, agentKind: 'codex' },
+    });
+    expect(s.recent.map((r) => r.kind)).toEqual(['sentinel', 'sentinel']);
+  });
+
+  it('removes warm trees on reset, forget and when idle', async () => {
+    const w = await world(() => 'pass');
+    const svc = sentinelOf(w.mindly);
+    w.addSteps(1, 2);
+    await w.pass();
+    const path = svc.warmPath(w.pid, w.root);
+    expect(w.steps.warmOpened).toEqual([path]);
+    // Not idle yet; once idle, only an existing tree is removed.
+    expect(await svc.pruneWarm()).toBe(0);
+    w.clock.advance(4 * 24 * 60 * 60_000);
+    expect(await svc.pruneWarm()).toBe(0);
+    mkdirSync(path, { recursive: true });
+    expect(await svc.pruneWarm()).toBe(1);
+    expect(w.steps.warmRemoved).toEqual([path]);
+    expect(await svc.reset(w.pid, w.root)).toBe(true);
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toBeNull();
+    await w.pass();
+    expect(await svc.forget(w.pid)).toBe(1);
+    expect(w.mindly.store.sentinel.list(w.pid)).toEqual([]);
+  });
+});
+
+describe('sentinel and the track record', () => {
+  it("counts the sentinel's bisect against the agent whose edit broke the check", async () => {
+    const w = await world(breaksAt(8));
+    w.addSteps(1, 2);
+    await w.pass();
+    w.addSteps(3, 9);
+    await w.pass();
+    const report = trackOf(w.mindly).report(w.pid, {
+      windowMs: 30 * 24 * 60 * 60_000,
+      since: '30d',
+      minEdits: 1,
+      minSessions: 1,
+    });
+    const rows = report.areas.flatMap((a) => a.agents);
+    const bisects = (agent: string): number =>
+      rows.filter((r) => r.agent === agent).reduce((n, r) => n + r.bisect.count, 0);
+    expect(bisects('codex')).toBe(1);
+    expect(bisects('claude-code')).toBe(0);
+  });
+});

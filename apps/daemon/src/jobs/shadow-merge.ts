@@ -2,6 +2,7 @@ import { fingerprint, sanitizeLine, shortId, type Run, type Session } from '@min
 import {
   LIVE_WINDOW_MS,
   savesOf,
+  SENTINEL_FINGERPRINT_PREFIX,
   sessionLabel,
   SPLIT_FINGERPRINT_PREFIX,
   splitOf,
@@ -284,9 +285,17 @@ export async function executeShadowMerge(ctx: JobContext, run: Run): Promise<Run
       }
       fixed = mindly.store.conflicts
         .list(projectId, { statuses: ['open', 'acknowledged'], limit: 500 })
-        .filter((c) => c.kind === 'check_failed' && !failing.includes(c.fingerprint))
+        .filter(
+          (c) =>
+            c.kind === 'check_failed' &&
+            !failing.includes(c.fingerprint) &&
+            // The sentinel's breaks are about one checkout's steps; it closes them itself.
+            !c.fingerprint.startsWith(SENTINEL_FINGERPRINT_PREFIX),
+        )
         .map((c) => c.id);
-      mindly.store.conflicts.resolveMissing(projectId, 'check_failed', failing);
+      mindly.store.conflicts.resolveMissing(projectId, 'check_failed', failing, {
+        exceptPrefix: SENTINEL_FINGERPRINT_PREFIX,
+      });
     }
     const finished = finishRun(ctx, run, failed ? 'failed' : 'passed', result);
     if (fixed.length > 0) {

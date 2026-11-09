@@ -1,8 +1,8 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describeError, homePaths, mindlyHome, shortId, type HomePaths } from '@mindly/core';
-import { checkSafePattern, type Mindly, type ProjectContext } from '@mindly/engine';
-import { gitVersion, mirrorRemotes, versionAtLeast } from '@mindly/git';
+import { checkSafePattern, sentinelOf, type Mindly, type ProjectContext } from '@mindly/engine';
+import { gitVersion, lockfileIn, mirrorRemotes, versionAtLeast } from '@mindly/git';
 import { MIGRATIONS, schemaVersion, Store } from '@mindly/store';
 import { withProject } from '../context.js';
 import { clean, type Out } from '../util.js';
@@ -11,6 +11,7 @@ import { inspectClaudeCodeStatusLine, McpClientAdapter } from '@mindly/adapters'
 import { adapterOf, adaptersFor, installCommand, SUPPORTED_AGENTS, userHome } from './setup.js';
 import { count, type Step } from '../present/index.js';
 import { renderDoctor, type DoctorItem } from '../views/doctor.js';
+import { notReadyWords } from '../views/sentinel.js';
 
 /** Result of one doctor check (the `--json` shape; keep it stable). */
 export interface Check {
@@ -303,6 +304,60 @@ async function checkpointItems(
   return items;
 }
 
+/** Whether the sentinel is on, what it runs, and what keeps it from running. */
+function sentinelItems(mindly: Mindly, project: ProjectContext, daemon: boolean): DoctorItem[] {
+  const svc = sentinelOf(mindly);
+  const ready = svc.readiness(project);
+  if (!mindly.config.sentinel.enabled) {
+    return [
+      item(
+        { name: 'sentinel', status: 'info', detail: 'off (sentinel.enabled is false)' },
+        'Optional',
+        'The sentinel is off; when on, it runs your trusted checks after agent edits and finds the edit that broke one',
+        { cmd: 'mindly config set sentinel.enabled true', why: 'turn it on' },
+      ),
+    ];
+  }
+  if (!ready.ready) {
+    const w = notReadyWords(ready.reason ?? 'no_checks');
+    return [
+      item(
+        { name: 'sentinel', status: 'warn', detail: `on, but ${w.why}` },
+        'Setup',
+        `The sentinel is on, but ${w.why}`,
+        w.step,
+      ),
+    ];
+  }
+  const names = ready.checks.map((c) => clean(c.name, 64)).join(', ');
+  const items = [
+    item(
+      {
+        name: 'sentinel',
+        status: daemon ? 'ok' : 'info',
+        detail: `on: runs ${names}${daemon ? '' : ' (daemon not running)'}`,
+      },
+      'Optional',
+      daemon
+        ? `The sentinel runs ${names} after agent edits`
+        : `The sentinel would run ${names} after agent edits, but it runs in the background service, which is not running`,
+      daemon ? null : { cmd: 'mindly daemon start', why: 'start the background service' },
+    ),
+  ];
+  const lockfile = ready.setup === null ? lockfileIn(project.root) : null;
+  if (lockfile !== null) {
+    items.push(
+      item(
+        { name: 'sentinel-setup', status: 'info', detail: `${lockfile} found, no sentinel.setup` },
+        'Optional',
+        `The sentinel checks a scratch copy of the code without installing dependencies (${clean(lockfile, 60)} found)`,
+        'Add an install command as sentinel.setup in .mindly/config.json, e.g. "setup": ["pnpm", "install", "--frozen-lockfile"], then run mindly trust',
+      ),
+    );
+  }
+  return items;
+}
+
 /** Pattern contracts whose pattern no longer passes the safety check, so they cannot run. */
 function rejectedPatternItems(mindly: Mindly, project: ProjectContext): DoctorItem[] {
   const rejected = mindly.store.contracts
@@ -571,6 +626,7 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
           projectItem(project),
           ...rejectedPatternItems(mindly, project),
           ...(await checkpointItems(mindly, project, out.io.cwd)),
+          ...sentinelItems(mindly, project, daemon !== null),
         ])),
       );
     } catch (err) {

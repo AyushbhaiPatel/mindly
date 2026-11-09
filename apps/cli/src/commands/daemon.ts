@@ -58,6 +58,12 @@ export function readState(env: NodeJS.ProcessEnv): DaemonState | null {
   }
 }
 
+/** True when `daemon.json` names a live process (no request is made). */
+export function daemonAlive(env: NodeJS.ProcessEnv): boolean {
+  const state = readState(env);
+  return state !== null && pidAlive(state.pid);
+}
+
 /** True when a Mindly daemon answers `GET /api/health` on `port`. */
 export async function healthy(port: number): Promise<boolean> {
   try {

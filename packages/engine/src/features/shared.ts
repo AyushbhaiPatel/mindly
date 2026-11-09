@@ -6,6 +6,9 @@ import type { Mindly } from '../mindly.js';
  * Small helpers shared by the feature modules. Not exported from the package index.
  */
 
+/** Fingerprints of the `check_failed` conflicts the sentinel opens start with this. */
+export const SENTINEL_FINGERPRINT_PREFIX = 'sentinel:';
+
 /** Maximum changed files a single bus handler processes per event. */
 export const MAX_FILES_PER_EVENT = 20;
 

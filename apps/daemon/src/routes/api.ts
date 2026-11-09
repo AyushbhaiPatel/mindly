@@ -12,6 +12,7 @@ import {
   provenanceOf,
   renderSavesCard,
   savesOf,
+  sentinelOf,
   snapshotService,
   splitOf,
   standupService,
@@ -432,6 +433,12 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
         agent: q.agent ?? null,
         ...(q.minEdits !== undefined ? { minEdits: q.minEdits } : {}),
       });
+    });
+
+    // ---- sentinel (read-only; passes run in the daemon's job or `mindly sentinel run`) -----
+    api.get('/api/projects/:projectId/sentinel', async (req) => {
+      const pid = projectOf(req).id;
+      return sentinelOf(mindly).status(pid);
     });
 
     // ---- saves (read and reject only; nothing here creates or confirms a save) -----------

@@ -400,6 +400,8 @@ export function runKindWords(kind: RunKind | string | null | undefined): string 
       return 'checks run';
     case 'bisect':
       return 'bisect';
+    case 'sentinel':
+      return 'sentinel check';
     default:
       return 'run';
   }
@@ -1276,6 +1278,10 @@ export const GUIDE: readonly { term: string; text: string }[] = [
   {
     term: 'Bisect',
     text: 'Finds the exact agent edit that broke a command, who made it and from which prompt. Run it with mindly bisect -- <command>.',
+  },
+  {
+    term: 'Sentinel',
+    text: 'Runs your trusted checks in the background as agents edit. When one breaks, it finds the edit that did it and tells that agent. Turn it on with mindly config set sentinel.enabled true.',
   },
   {
     term: 'Split',

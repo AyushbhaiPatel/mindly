@@ -12,7 +12,7 @@ import {
 } from '@mindly/core';
 import type { Kernel } from '../kernel.js';
 import type { Mindly } from '../mindly.js';
-import { attachService } from './shared.js';
+import { attachService, SENTINEL_FINGERPRINT_PREFIX } from './shared.js';
 
 /*
  * Saves: every time Mindly demonstrably helped, with the events that prove it. Saves are a
@@ -380,9 +380,19 @@ export class SavesService {
   private onSessionEnded(e: MindlyEvent): void {
     if (!e.sessionId) return;
     for (const s of this.caughtOf(e.projectId, 'check_broken_early', e.sessionId)) {
-      if (!s.refs.contractId) continue;
-      const state = this.contractState(s.refs.contractId);
-      if (state === 'failing') this.reject(s, 'problem_occurred', [e.id]);
+      if (s.refs.contractId) {
+        const state = this.contractState(s.refs.contractId);
+        if (state === 'failing') this.reject(s, 'problem_occurred', [e.id]);
+        continue;
+      }
+      // A break the sentinel pinned on this session, still open when it ended.
+      const conflict = s.refs.conflictId ? this.k.store.conflicts.find(s.refs.conflictId) : null;
+      if (
+        conflict?.fingerprint.startsWith(SENTINEL_FINGERPRINT_PREFIX) &&
+        (conflict.status === 'open' || conflict.status === 'acknowledged')
+      ) {
+        this.reject(s, 'problem_occurred', [e.id]);
+      }
     }
   }
 
@@ -503,6 +513,30 @@ export class SavesService {
    * pass again before anything was merged.
    */
   mergeChecksPassed(projectId: string, conflictIds: readonly string[], eventId: string): void {
+    this.brokenChecksFixed(projectId, conflictIds, eventId);
+  }
+
+  /**
+   * The sentinel found the agent edit that broke a check (a new `check_failed` conflict naming
+   * that session). Confirmed when the check passes again while the session is still working;
+   * dropped when the session ends with the check still failing.
+   */
+  sentinelCaught(conflict: Conflict, eventId: string, culprit: Session): Save | null {
+    return this.recordWith(conflict.projectId, eventId, {
+      kind: 'check_broken_early',
+      title: `A check ${this.name(culprit)} broke was found right after the edit and fixed`,
+      sessionIds: [culprit.id],
+      paths: conflict.paths.slice(0, 20),
+      fingerprint: fingerprint('check_broken_early', 'sentinel', conflict.id, culprit.id),
+      refs: { conflictId: conflict.id },
+    });
+  }
+
+  /**
+   * Failing checks whose `check_failed` conflicts were resolved because the checks pass again
+   * (shadow merge, sentinel): their saves are confirmed while every session involved still works.
+   */
+  brokenChecksFixed(projectId: string, conflictIds: readonly string[], eventId: string): void {
     const ids = new Set(conflictIds);
     for (const s of this.caughtOf(projectId, 'check_broken_early', null)) {
       if (!s.refs.conflictId || !ids.has(s.refs.conflictId)) continue;

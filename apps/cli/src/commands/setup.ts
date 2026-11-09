@@ -26,7 +26,7 @@ import {
   type AgentAdapter,
   type InstallStep,
 } from '@mindly/core';
-import type { Mindly } from '@mindly/engine';
+import { sentinelOf, type Mindly } from '@mindly/engine';
 import { findRepoRoot } from '@mindly/git';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary } from '../diff.js';
@@ -406,6 +406,8 @@ async function checkpointRows(
         action === 'count'
           ? mindly.store.checkpoints.count(p.id)
           : (await mindly.checkpoints.forget(p.id)).rowsDeleted;
+      // The sentinel's scratch trees are worktrees of the same repositories.
+      if (action === 'remove') await sentinelOf(mindly).forget(p.id);
     }
     return rows;
   } catch {
