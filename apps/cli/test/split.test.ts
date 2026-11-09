@@ -586,7 +586,7 @@ describe('split status, merge and abort (acceptance 4)', () => {
 
     // The page's file is only in its worktree: status says so and does not suggest removing it.
     const after = await cli(sb, ['split', 'status']);
-    expect(after.stdout).toMatch(/1 not\s+committed/);
+    expect(after.stdout).toMatch(/1\s+not\s+committed/);
     expect(after.stdout).not.toContain('mindly split abort');
     expect(after.stdout).toContain(`cd ${partDir(sb, 'page')}`);
     // Cleaning up would delete it: -y alone refuses, --discard is the way to say so.
