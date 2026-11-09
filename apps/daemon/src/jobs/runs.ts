@@ -1,3 +1,5 @@
+import { statSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { describeError, sanitizeLine, shortId, type Run } from '@mindly/core';
 import { failoverService, sessionLabel } from '@mindly/engine';
 import { runGit } from '@mindly/git';
@@ -203,6 +205,16 @@ export function resumePrompt(handoffId: string, fromAgent: string | null): strin
   ].join('\n');
 }
 
+/** The folder a resumed agent starts in: the previous session's worktree while it exists. */
+export function launchDir(worktree: string | null, projectRoot: string): string {
+  if (!worktree || !isAbsolute(worktree)) return projectRoot;
+  try {
+    return statSync(worktree).isDirectory() ? worktree : projectRoot;
+  } catch {
+    return projectRoot;
+  }
+}
+
 /**
  * Failover auto-launch (only when `config.failover.autoLaunch` is true): launches the target agent
  * for each pending rate-limit handoff, at most once per handoff.
@@ -218,11 +230,14 @@ export async function failoverTick(ctx: JobContext): Promise<void> {
     // Mark before launching so a crash or restart never launches twice.
     mindly.store.kv.set(key, mindly.kernel.clock.now());
     const agent = p.toAgentKind;
+    // Continue where the limited session worked: a linked worktree (a split part) has its own
+    // branch and uncommitted files. The main checkout is the fallback once that folder is gone.
+    const cwd = launchDir(p.worktree, p.projectRoot);
     void ctx.scheduler.enqueue('failover', async () => {
       try {
         const res = await ctx.runners.launch({
           agent,
-          cwd: p.projectRoot,
+          cwd,
           prompt: resumePrompt(p.handoffId, p.fromAgentKind),
           timeoutSec: LAUNCH_TIMEOUT_SEC,
         });

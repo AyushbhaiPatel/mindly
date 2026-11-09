@@ -328,6 +328,54 @@ describe('maintenance and failover', () => {
     expect(String((launches[0]?.input as { prompt: string }).prompt)).toContain(h.id);
   });
 
+  it('launches the next agent in the worktree of the session that hit its limit', async () => {
+    const home = tempDir('mindly-failover-wt-home-');
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ failover: { autoLaunch: true } }));
+    t = await testDaemon({ home });
+    const root = repo();
+    const wt = linkedWorktree(root, 'feature');
+    const gone = linkedWorktree(root, 'gone');
+    const packet = {
+      goal: 'g',
+      plan: [],
+      filesChanged: [],
+      recentPrompts: [],
+      decisions: [],
+      blockers: [],
+      nextSteps: [],
+      branch: null,
+      headCommit: null,
+    };
+    const handoffFrom = (worktree: string) => {
+      const s = seedSession(t!.daemon, root, { agentKind: 'claude-code', worktree });
+      return t!.daemon.mindly.store.handoffs.create({
+        projectId: s.projectId,
+        fromSessionId: s.id,
+        toAgentKind: 'codex',
+        taskId: null,
+        reason: 'rate_limit',
+        summary: 'limit',
+        packet,
+      });
+    };
+    const inWorktree = handoffFrom(wt);
+    // A worktree that was removed meanwhile: the main checkout is the fallback.
+    const inGone = handoffFrom(gone);
+    git(root, 'worktree', 'remove', '--force', gone);
+    await failoverTick(t.daemon.jobs);
+    await t.daemon.scheduler.idle();
+    const cwdOf = (handoffId: string): unknown =>
+      (
+        t!.runners.calls.find(
+          (c) =>
+            c.kind === 'launch' &&
+            String((c.input as { prompt: string }).prompt).includes(handoffId),
+        )?.input as { cwd?: string } | undefined
+      )?.cwd;
+    expect(cwdOf(inWorktree.id)).toBe(wt);
+    expect(cwdOf(inGone.id)).toBe(root);
+  });
+
   it('cancels runs a previous daemon left queued', async () => {
     const home = tempDir('mindly-stale-home-');
     t = await testDaemon({ home });
