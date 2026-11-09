@@ -197,6 +197,11 @@ writes into another part's files are flagged (or blocked with `--strict`). In th
 Mindly keeps checking that all the parts still merge and pass your checks. `mindly split merge`
 combines them into one new branch, in dependency order, and never pushes.
 
+The merge takes what each agent committed on its part's branch. If a part's worktree still holds
+work that is not committed there, `mindly split merge` stops and names the files (`--force`
+merges without them), and `mindly split abort` after a merge keeps those worktrees unless you
+pass `--discard`.
+
 ### Which agent is better at what, in your repo
 
 ```bash

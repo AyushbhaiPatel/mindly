@@ -262,6 +262,8 @@ export interface SplitPartStatus {
   state: SplitPartState;
   /** Paths changed in the worktree since the split's base commit (committed or not). */
   filesChanged: string[];
+  /** Paths whose content in the worktree is not on the part's branch: a merge leaves them out. */
+  uncommitted: string[];
   lastActivityAt: number | null;
   /** Open conflicts involving the part's session. */
   conflicts: Conflict[];
@@ -314,8 +316,18 @@ export interface SplitMergeCheckResult {
   checksSkipped: 'untrusted' | 'none_configured' | 'conflicts' | null;
   sessionIds: string[];
   skipped: string[];
+  /** Parts whose worktree folder is gone, so their current work could not be checked. */
+  missing: string[];
   mergedTree: string | null;
   error?: string;
+}
+
+/** Work in a part's worktree that is not on the part's branch. */
+export interface SplitUnmergedWork {
+  part: string;
+  title: string;
+  /** Paths that differ between the worktree and the tip of the part's branch. */
+  paths: string[];
 }
 
 export interface SplitMergeResult {
@@ -325,7 +337,9 @@ export interface SplitMergeResult {
   /** Parts merged, in dependency order. */
   merged: string[];
   checks: SplitMergeCheckResult['checks'] | null;
-  checksSkipped: 'untrusted' | 'none_configured' | null;
+  checksSkipped: 'untrusted' | 'none_configured' | 'error' | null;
+  /** Work the merge left out because it is not committed on a part's branch (forced merges). */
+  leftBehind: SplitUnmergedWork[];
 }
 
 export interface SplitAbortResult {
@@ -333,6 +347,8 @@ export interface SplitAbortResult {
   removedWorktrees: string[];
   deletedBranches: string[];
   keptBranches: string[];
+  /** Uncommitted work that went away with the worktrees. */
+  discarded: SplitUnmergedWork[];
 }
 
 export class SplitService {
@@ -585,15 +601,42 @@ export class SplitService {
     );
   }
 
+  /**
+   * The session working on a part: the task owner while it runs, else the newest session still
+   * running in the part's worktree, else the last one that worked there.
+   */
   private partSession(part: SplitPart, task: Task): Session | null {
     const owner = task.ownerSessionId ? this.k.store.sessions.find(task.ownerSessionId) : null;
-    if (owner) return owner;
-    return (
-      this.k.store.sessions
-        .list(part.projectId, 200)
-        .filter((s) => insideDir(safeRealpath(s.worktree), part.worktree))
-        .sort((a, b) => b.lastSeenAt - a.lastSeenAt)[0] ?? null
-    );
+    if (owner && owner.status !== 'ended') return owner;
+    const inWorktree = this.k.store.sessions
+      .list(part.projectId, 200)
+      .filter((s) => insideDir(safeRealpath(s.worktree), part.worktree))
+      .sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+    return inWorktree.find((s) => s.status !== 'ended') ?? owner ?? inWorktree[0] ?? null;
+  }
+
+  /**
+   * Work in the parts' worktrees that is not on their branches (uncommitted or untracked files,
+   * or commits on another branch the worktree was switched to). `split merge` merges the part
+   * branches, so this is what a merge leaves out and what removing the worktrees deletes.
+   */
+  async unmergedWork(splitId: string): Promise<SplitUnmergedWork[]> {
+    const split = this.k.store.splits.get(splitId);
+    const root = this.projects.byId(split.projectId).root;
+    const git = this.git();
+    const out: SplitUnmergedWork[] = [];
+    for (const part of this.k.store.splits.parts(split.id)) {
+      const paths = await this.notOnBranch(git, root, part);
+      if (paths.length > 0) out.push({ part: part.key, title: part.title, paths });
+    }
+    return out;
+  }
+
+  private async notOnBranch(git: SplitGitPort, root: string, part: SplitPart): Promise<string[]> {
+    if (!existsSync(part.worktree)) return [];
+    if (!(await git.branchExists(root, part.branch))) return [];
+    const paths = await git.changedSince(root, part.worktree, `refs/heads/${part.branch}`);
+    return [...new Set(paths)].sort().slice(0, 200);
   }
 
   /** The latest merge check of a split. */
@@ -616,9 +659,11 @@ export class SplitService {
       const task = this.k.store.tasks.get(part.taskId);
       const session = this.partSession(part, task);
       let filesChanged: string[] = [];
+      let uncommitted: string[] = [];
       if (git && split.status !== 'aborted' && existsSync(part.worktree)) {
         try {
           filesChanged = await git.changedSince(root, part.worktree, split.baseCommit);
+          uncommitted = await this.notOnBranch(git, root, part);
         } catch (err) {
           this.k.logger.warn('split status: could not diff a worktree', {
             part: part.key,
@@ -626,20 +671,26 @@ export class SplitService {
           });
         }
       }
+      // A part whose agent has gone waits for the next one, whatever its task still says.
       const state: SplitPartState =
         task.status === 'done'
           ? 'done'
           : task.status === 'blocked'
             ? 'blocked'
-            : task.status === 'in_progress' || session
-              ? 'working'
-              : 'waiting';
+            : session
+              ? session.status !== 'ended'
+                ? 'working'
+                : 'waiting'
+              : task.status === 'in_progress'
+                ? 'working'
+                : 'waiting';
       parts.push({
         part,
         task,
         session,
         state,
         filesChanged,
+        uncommitted,
         lastActivityAt: session?.lastSeenAt ?? null,
         conflicts: session
           ? this.k.store.conflicts.list(split.projectId, { sessionId: session.id })
@@ -696,6 +747,7 @@ export class SplitService {
       checksSkipped: null,
       sessionIds,
       skipped: [],
+      missing: parts.filter((p) => !existsSync(p.worktree)).map((p) => p.key),
       mergedTree: null,
     };
     const finish = (status: 'passed' | 'failed' | 'error', r: SplitMergeCheckResult): Run => {
@@ -853,6 +905,19 @@ export class SplitService {
     if (await git.branchExists(project.root, into)) {
       throw new MindlyError('conflict', `branch ${into} already exists`);
     }
+    // Status and the merge check look at the worktrees; the merge takes the part branches. Work
+    // that is only in a worktree would be reported as merged and then removed with it.
+    const leftBehind = await this.unmergedWork(split.id);
+    if (leftBehind.length > 0 && !options.force) {
+      const one = leftBehind.length === 1;
+      throw new MindlyError(
+        'conflict',
+        `${one ? 'a part has' : `${leftBehind.length} parts have`} work that is not committed on ${one ? 'its' : 'their'} branch and would be left out: ${leftBehind
+          .map((w) => `"${w.title}" (${describePaths(w.paths)})`)
+          .join('; ')}`,
+        { details: { uncommitted: leftBehind } },
+      );
+    }
     const check = await this.mergeCheck(split.id, 'merge');
     const checkResult = check.result as SplitMergeCheckResult | null;
     if (!checkResult || !checkResult.clean) {
@@ -885,16 +950,26 @@ export class SplitService {
     if (project.config.checks.length === 0) checksSkipped = 'none_configured';
     else if (!project.trusted) checksSkipped = 'untrusted';
     else {
-      checks = (await git.runChecks(project.root, merged.commit, project.config.checks)).map(
-        (c) => ({
-          name: c.name,
-          ok: c.status === 'pass',
-          status: c.status,
-          exitCode: c.exitCode,
-          durationMs: c.durationMs,
-          outputTail: outputTail(c.output),
-        }),
-      );
+      // The branch exists from here on: a failure to run the checks must not leave the split
+      // active, or every retry would stop at "branch already exists".
+      try {
+        checks = (await git.runChecks(project.root, merged.commit, project.config.checks)).map(
+          (c) => ({
+            name: c.name,
+            ok: c.status === 'pass',
+            status: c.status,
+            exitCode: c.exitCode,
+            durationMs: c.durationMs,
+            outputTail: outputTail(c.output),
+          }),
+        );
+      } catch (err) {
+        checksSkipped = 'error';
+        this.k.logger.error('split merge: the checks could not run on the merged branch', {
+          splitId: split.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     const updated = this.k.store.splits.update(split.id, {
       status: 'merged',
@@ -916,6 +991,7 @@ export class SplitService {
       merged: order,
       checks,
       checksSkipped,
+      leftBehind,
     };
   }
 
@@ -928,13 +1004,33 @@ export class SplitService {
    */
   async abort(
     splitId: string,
-    options: { keepBranches?: boolean } = {},
+    options: { keepBranches?: boolean; discardUncommitted?: boolean } = {},
   ): Promise<SplitAbortResult> {
     const split = this.k.store.splits.get(splitId);
     if (split.status === 'aborted')
       throw new MindlyError('conflict', 'the split is already aborted');
     const root = this.projects.byId(split.projectId).root;
     const git = this.git();
+    let discarded: SplitUnmergedWork[] = [];
+    try {
+      discarded = await this.unmergedWork(split.id);
+    } catch (err) {
+      this.k.logger.warn('split abort: could not look for uncommitted work', {
+        splitId: split.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // Cleaning up after a merge is expected to lose nothing: work the merge did not take is
+    // only removed when asked for.
+    if (split.status === 'merged' && discarded.length > 0 && !options.discardUncommitted) {
+      throw new MindlyError(
+        'conflict',
+        `the merged branch does not have the uncommitted work of ${discarded
+          .map((w) => `"${w.title}" (${describePaths(w.paths)})`)
+          .join('; ')}`,
+        { details: { uncommitted: discarded } },
+      );
+    }
     const removedWorktrees: string[] = [];
     const deletedBranches: string[] = [];
     const keptBranches: string[] = [];
@@ -957,7 +1053,14 @@ export class SplitService {
       const task = this.k.store.tasks.get(part.taskId);
       if (task.ownerSessionId)
         this.k.store.intents.closeForSession(task.ownerSessionId, 'abandoned');
-      if (task.status !== 'done') this.tasks.update(task.id, { status: 'abandoned' }, null);
+      // The parts of a merged split were merged, finished or not: nothing was abandoned.
+      if (task.status !== 'done') {
+        this.tasks.update(
+          task.id,
+          { status: split.status === 'merged' ? 'done' : 'abandoned' },
+          null,
+        );
+      }
     }
     if (split.status === 'merged' && removedWorktrees.length + deletedBranches.length === 0) {
       throw new MindlyError('conflict', 'the split is merged and its worktrees are already gone');
@@ -994,7 +1097,7 @@ export class SplitService {
       type: 'split.aborted',
       payload: { splitId: split.id, removedWorktrees: removedWorktrees.length, keptBranches },
     });
-    return { split: updated, removedWorktrees, deletedBranches, keptBranches };
+    return { split: updated, removedWorktrees, deletedBranches, keptBranches, discarded };
   }
 
   // ------------------------------------------------------------------ hooks into the engine
@@ -1087,6 +1190,14 @@ export class SplitService {
       ttlMs: 24 * 60 * 60_000,
     });
   }
+}
+
+/** Up to three paths, then how many more. */
+function describePaths(paths: readonly string[]): string {
+  const shown = paths.slice(0, 3).map((p) => sanitizeLine(p, 160));
+  return paths.length > shown.length
+    ? `${shown.join(', ')} and ${paths.length - shown.length} more`
+    : shown.join(', ');
 }
 
 function outputTail(text: string, max = 4000): string {

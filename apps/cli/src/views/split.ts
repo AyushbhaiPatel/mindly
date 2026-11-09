@@ -6,6 +6,7 @@ import type {
   SplitMergeResult,
   SplitPartState,
   SplitStatusReport,
+  SplitUnmergedWork,
 } from '@mindly/engine';
 import {
   agentName,
@@ -119,6 +120,7 @@ export function renderSplitStatus(sc: Screen, r: SplitStatusReport): void {
       const who = p.session ? sessionName(p.session) : agentName(p.part.agentKind);
       const facts = [partStateWord(p.state)];
       if (p.filesChanged.length) facts.push(`${count(p.filesChanged.length, 'file')} changed`);
+      if (p.uncommitted.length) facts.push(`${p.uncommitted.length} not committed`);
       if (p.lastActivityAt) facts.push(`active ${relativeTime(p.lastActivityAt, sc.now)}`);
       if (p.conflicts.length) facts.push(`${count(p.conflicts.length, 'conflict')}`);
       const details = [
@@ -183,21 +185,48 @@ export function renderMergeCheck(sc: Screen, run: Run): void {
       2,
     );
   }
+  for (const key of r.missing ?? []) {
+    sc.text(
+      `${sc.mark('warn')} Part "${clean(key, 40)}" was not checked: its worktree folder is gone.`,
+      2,
+    );
+  }
   if (r.checksSkipped === 'untrusted')
     sc.note('Checks skipped: the project config is not trusted (mindly trust).', 2);
   else if (r.checksSkipped === 'none_configured')
     sc.note('No checks configured in .mindly/config.json.', 2);
 }
 
+/** `"API" (src/api/a.ts, src/api/b.ts and 3 more)`. */
+export function unmergedLine(w: SplitUnmergedWork): string {
+  const shown = w.paths.slice(0, 3).map((p) => clean(p, 120));
+  const more = w.paths.length - shown.length;
+  return `Part "${clean(w.title, 60)}": ${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
+}
+
+const COMMIT_WHY = 'commit the work there on the part branch: the merge only takes committed work';
+
 function nextSteps(r: SplitStatusReport): Step[] {
   const { split, parts } = r;
+  const uncommitted = parts.filter((p) => p.uncommitted.length > 0);
   if (split.status === 'merged') {
     return [
       {
         cmd: `git log --oneline ${split.integrationBranch ?? ''}`.trim(),
         why: 'review the merged branch and open a PR from it',
       },
-      { cmd: 'mindly split abort', why: 'remove the part worktrees (the merged branch stays)' },
+      // Removing the worktrees would delete work the merged branch does not have.
+      ...(uncommitted.length > 0
+        ? uncommitted.slice(0, 3).map((p) => ({
+            cmd: `cd ${p.part.worktree}`,
+            why: 'this part has work that is not in the merged branch; commit or copy it before removing the worktrees',
+          }))
+        : [
+            {
+              cmd: 'mindly split abort',
+              why: 'remove the part worktrees (the merged branch stays)',
+            },
+          ]),
     ];
   }
   if (split.status === 'aborted') return [];
@@ -211,7 +240,12 @@ function nextSteps(r: SplitStatusReport): Step[] {
   }
   const check = r.mergeCheck;
   const allDone = parts.length > 0 && parts.every((p) => p.state === 'done');
-  if (allDone && check?.status === 'passed') {
+  for (const p of allDone ? uncommitted.slice(0, 3) : []) {
+    steps.push({ cmd: `cd ${p.part.worktree}`, why: COMMIT_WHY });
+  }
+  if (allDone && uncommitted.length > 0) {
+    // Nothing to merge yet: the finished work is not on the part branches.
+  } else if (allDone && check?.status === 'passed') {
     steps.push({ cmd: 'mindly split merge', why: 'merge every part into one integration branch' });
   } else if (!check || check.status !== 'passed') {
     steps.push({ cmd: 'mindly split check', why: 'merge every part in memory and run the checks' });
@@ -234,11 +268,25 @@ export function renderMerged(sc: Screen, m: SplitMergeResult): void {
     }
   } else if (m.checksSkipped === 'untrusted') {
     sc.note('Checks skipped: the project config is not trusted (mindly trust).', 2);
+  } else if (m.checksSkipped === 'error') {
+    sc.text(`${sc.mark('warn')} The checks could not run on the merged branch (see the log).`, 2);
+  }
+  if (m.leftBehind.length > 0) {
+    sc.blank();
+    sc.text(
+      `${sc.mark('warn')} Not merged: work that is not committed on ${m.leftBehind.length === 1 ? "its part's branch" : "the parts' branches"} is still only in the worktrees.`,
+    );
+    for (const w of m.leftBehind) sc.text(unmergedLine(w), 2);
   }
   sc.next([
     { cmd: `git log --oneline ${m.branch}`, why: 'review the merged work' },
     { cmd: `git push -u origin ${m.branch}`, why: 'push it and open a pull request' },
-    { cmd: 'mindly split abort', why: 'remove the part worktrees (the merged branch stays)' },
+    m.leftBehind.length > 0
+      ? {
+          cmd: 'mindly split status',
+          why: 'see the worktrees that still hold unmerged work; removing them would delete it',
+        }
+      : { cmd: 'mindly split abort', why: 'remove the part worktrees (the merged branch stays)' },
   ]);
 }
 
@@ -251,6 +299,13 @@ export function renderAborted(sc: Screen, a: SplitAbortResult): void {
     }.`,
   );
   if (a.keptBranches.length) sc.note(`Branches kept: ${a.keptBranches.join(', ')}`, 2);
+  if (a.discarded.length > 0) {
+    sc.text(
+      `${sc.mark('warn')} Uncommitted work was removed with ${a.discarded.length === 1 ? 'a worktree' : 'the worktrees'}:`,
+      2,
+    );
+    for (const w of a.discarded) sc.text(unmergedLine(w), 4);
+  }
   if (a.split.integrationBranch)
     sc.note(`The merged branch ${a.split.integrationBranch} stays.`, 2);
 }

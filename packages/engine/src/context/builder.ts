@@ -56,7 +56,7 @@ export class ContextBuilder {
     const pid = project.project.id;
     const cands: Candidate[] = [];
 
-    const handoff = this.claimHandoff(session);
+    const handoff = this.claimHandoff(session) ?? this.splitBriefAgain(session);
     if (handoff) cands.push(...this.handoffCandidates(handoff));
 
     cands.push(...this.deliveryCandidates(session, 1));
@@ -367,6 +367,38 @@ export class ContextBuilder {
     return null;
   }
 
+  /**
+   * The brief of the split part whose worktree the session runs in, once it has been claimed. A
+   * brief is claimed by the first session of the part; an agent restarted in the same worktree,
+   * or one whose context was compacted, needs it again to know its goal and the files it owns.
+   * The part's task follows the new session unless its owner is still running.
+   */
+  private splitBriefAgain(session: Session): Handoff | null {
+    const part = this.k.store.splits.partForWorktree(
+      session.projectId,
+      safeRealpath(session.worktree),
+    );
+    if (!part?.handoffId) return null;
+    let h: Handoff;
+    try {
+      h = this.k.store.handoffs.get(part.handoffId);
+    } catch {
+      return null;
+    }
+    if (h.status !== 'claimed' || !h.packet.split) return null;
+    const task = this.k.store.tasks.find(part.taskId);
+    if (task && task.status !== 'done' && task.status !== 'abandoned') {
+      const owner = task.ownerSessionId ? this.k.store.sessions.find(task.ownerSessionId) : null;
+      if (!owner || owner.status === 'ended') {
+        this.k.store.tasks.update(task.id, { ownerSessionId: session.id });
+      }
+      if (!owner || owner.status === 'ended' || owner.id === session.id) {
+        this.k.store.sessions.setCurrentTask(session.id, task.id);
+      }
+    }
+    return h;
+  }
+
   private handoffCandidates(h: Handoff): Candidate[] {
     if (h.packet.split) {
       const split = this.k.store.splits.find(h.packet.split.splitId);
@@ -543,7 +575,10 @@ function splitBriefCandidate(h: Handoff, brief: HandoffSplitBrief, contract: str
       `Shared contract (approved decisions): ${contract.map((c) => sanitizeLine(c, 300)).join('; ')}`,
     );
   }
-  lines.push('When your part is finished, mark its task done (mindly_update_task).');
+  lines.push(
+    `Commit your work in this worktree on its branch${h.packet.branch ? ` (${sanitizeLine(h.packet.branch, 120)})` : ''} and stay on that branch: only what is committed there is merged.`,
+  );
+  lines.push('When your part is finished and committed, mark its task done (mindly_update_task).');
   return {
     item: {
       ref: h.id,

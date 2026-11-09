@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { isMindlyError, type SplitPlan } from '@mindly/core';
 import {
   installDefaultModules,
@@ -40,8 +40,11 @@ function fakeSplitGit(root: string) {
   const branches = new Set<string>();
   const worktrees = new Map<string, string>();
   const changed = new Map<string, string[]>();
+  // Paths of a worktree that are not on its branch (asked for with a branch as the base).
+  const uncommitted = new Map<string, string[]>();
   const calls: { mergeBranches: unknown[] } = { mergeBranches: [] };
   let mergeCheck: SplitMergeCheck | null = null;
+  let runChecks: SplitGitPort['runChecks'] = async () => [];
   const port: SplitGitPort = {
     listFiles: async () => FILES,
     branchExists: async (_root, b) => branches.has(b),
@@ -60,7 +63,8 @@ function fakeSplitGit(root: string) {
       return true;
     },
     deleteBranch: async (_root, b) => branches.delete(b),
-    changedSince: async (_root, wt) => changed.get(wt) ?? [],
+    changedSince: async (_root, wt, base) =>
+      (base.startsWith('refs/heads/') ? uncommitted.get(wt) : changed.get(wt)) ?? [],
     mergeCheck: async (_root, _base, sides) =>
       mergeCheck ?? {
         supported: true,
@@ -75,7 +79,7 @@ function fakeSplitGit(root: string) {
       branches.add(into);
       return { status: 'merged', commit: 'merge0001' };
     },
-    runChecks: async () => [],
+    runChecks: (...args) => runChecks(...args),
   };
   const findRepoRoot = async (cwd: string): Promise<string> => {
     for (const wt of worktrees.keys()) if (cwd === wt || cwd.startsWith(`${wt}/`)) return wt;
@@ -86,7 +90,11 @@ function fakeSplitGit(root: string) {
     branches,
     worktrees,
     changed,
+    uncommitted,
     calls,
+    setRunChecks: (fn: SplitGitPort['runChecks']) => {
+      runChecks = fn;
+    },
     setMergeCheck: (m: SplitMergeCheck | null) => {
       mergeCheck = m;
     },
@@ -327,6 +335,10 @@ describe('split through hook events', () => {
     expect(res.context).toContain('GET /billing');
     expect(res.context).toContain('owned by part api');
     expect(res.context).toContain('branch mindly/billing/api');
+    // Only committed work on the part branch is merged: the brief says so.
+    expect(res.context).toMatch(
+      /Commit your work in this worktree on its branch \(mindly\/billing\/api\)/,
+    );
     const session = mindly.store.sessions.findByExternal(pid, 'claude-code', 'api-1')!;
     expect(session.worktree).toBe(apiWt);
     expect(svc.partForSession(session)?.key).toBe('api');
@@ -644,6 +656,177 @@ describe('split through hook events', () => {
     await expect(svc.abort(created.split.id)).rejects.toSatisfy((e) =>
       isMindlyError(e, 'conflict'),
     );
+  });
+
+  it('does not merge past work that is only in a worktree, and does not delete it after a merge', async () => {
+    const { mindly, svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const [api, page] = created.parts as [
+      (typeof created.parts)[number],
+      (typeof created.parts)[number],
+    ];
+    mindly.tasks.update(api.taskId, { status: 'done' }, null);
+    // The page part's work was never committed on its branch.
+    fake.changed.set(page.worktree, ['src/app/billing.ts']);
+    fake.uncommitted.set(page.worktree, ['src/app/billing.ts']);
+    const status = await svc.status(created.split.id);
+    expect(status.parts.map((p) => p.uncommitted)).toEqual([[], ['src/app/billing.ts']]);
+    expect(await svc.unmergedWork(created.split.id)).toEqual([
+      { part: 'page', title: 'Part page', paths: ['src/app/billing.ts'] },
+    ]);
+
+    mindly.tasks.update(page.taskId, { status: 'done' }, null);
+    await expect(svc.merge(created.split.id)).rejects.toSatisfy(
+      (e) =>
+        isMindlyError(e, 'conflict') &&
+        /a part has work that is not committed on its branch and would be left out: "Part page" \(src\/app\/billing\.ts\)/.test(
+          (e as Error).message,
+        ) &&
+        Array.isArray((e as { details?: Record<string, unknown> }).details?.['uncommitted']),
+    );
+    expect(fake.calls.mergeBranches).toHaveLength(0);
+    expect(mindly.store.splits.get(created.split.id).status).toBe('active');
+
+    // Forced, the merge goes through and says what it left out.
+    mindly.tasks.update(page.taskId, { status: 'in_progress' }, null);
+    const merged = await svc.merge(created.split.id, { force: true });
+    expect(merged.leftBehind).toEqual([
+      { part: 'page', title: 'Part page', paths: ['src/app/billing.ts'] },
+    ]);
+
+    // Cleaning up after the merge would delete that work: it has to be asked for.
+    await expect(svc.abort(created.split.id)).rejects.toSatisfy(
+      (e) =>
+        isMindlyError(e, 'conflict') &&
+        /does not have the uncommitted work of "Part page"/.test((e as Error).message),
+    );
+    expect(existsSync(page.worktree)).toBe(true);
+    const aborted = await svc.abort(created.split.id, { discardUncommitted: true });
+    expect(aborted.discarded.map((w) => w.part)).toEqual(['page']);
+    expect(existsSync(page.worktree)).toBe(false);
+    // The unfinished part was merged with the others, not abandoned.
+    expect(mindly.store.tasks.get(page.taskId).status).toBe('done');
+    expect(mindly.store.splits.get(created.split.id).status).toBe('merged');
+  });
+
+  it('reports the uncommitted work an abort removes', async () => {
+    const { svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    fake.uncommitted.set(created.parts[0]!.worktree, ['src/api/a.ts', 'src/api/b.ts']);
+    const aborted = await svc.abort(created.split.id);
+    expect(aborted.discarded).toEqual([
+      { part: 'api', title: 'Part api', paths: ['src/api/a.ts', 'src/api/b.ts'] },
+    ]);
+    expect(aborted.split.status).toBe('aborted');
+  });
+
+  it('briefs the next session of a part again and hands the part to it', async () => {
+    const { mindly, svc, pid } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      strict: true,
+      connectedAgents: null,
+    });
+    const api = created.parts[0]!;
+    const start = (id: string, startSource: 'startup' | 'compact' | 'resume') =>
+      mindly.hooks.handle(event(api.worktree, 'claude-code', id, 'session_start', { startSource }));
+    expect((await start('api-1', 'startup')).context).toContain('Your part of the split');
+    // The same session after its context was compacted, or resumed: it needs the brief again.
+    expect((await start('api-1', 'compact')).context).toContain(
+      'Files you own (edit only these): src/api/**',
+    );
+    expect((await start('api-1', 'resume')).context).toContain('Your part of the split');
+    const first = mindly.store.sessions.findByExternal(pid, 'claude-code', 'api-1')!;
+    expect(mindly.store.tasks.get(api.taskId).ownerSessionId).toBe(first.id);
+
+    // The agent goes away: the part waits for the next one.
+    await mindly.hooks.handle(event(api.worktree, 'claude-code', 'api-1', 'session_end'));
+    let status = await svc.status(created.split.id);
+    expect(status.parts[0]!.state).toBe('waiting');
+
+    // A new session in the same worktree is briefed and takes the part over.
+    const again = await start('api-2', 'startup');
+    expect(again.context).toContain('Your part of the split');
+    expect(again.context).toContain('Files you own (edit only these): src/api/**');
+    expect(again.context).toContain('GET /billing');
+    const second = mindly.store.sessions.findByExternal(pid, 'claude-code', 'api-2')!;
+    expect(mindly.store.tasks.get(api.taskId).ownerSessionId).toBe(second.id);
+    expect(mindly.store.sessions.find(second.id)?.currentTaskId).toBe(api.taskId);
+    status = await svc.status(created.split.id);
+    expect(status.parts[0]!.state).toBe('working');
+    expect(status.parts[0]!.session?.id).toBe(second.id);
+
+    // A second agent in the worktree of a part whose owner still runs is briefed, not the owner.
+    expect((await start('api-3', 'startup')).context).toContain('Your part of the split');
+    expect(mindly.store.tasks.get(api.taskId).ownerSessionId).toBe(second.id);
+    // Sessions outside the part worktrees still get no brief.
+    await svc.abort(created.split.id);
+    expect((await start('api-4', 'startup')).context ?? '').not.toContain('Your part of the split');
+  });
+
+  it('says which parts a merge check could not look at', async () => {
+    const { svc, pid } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    rmSync(created.parts[1]!.worktree, { recursive: true, force: true });
+    const run = await svc.mergeCheck(created.split.id, 'user');
+    expect(run.status).toBe('passed');
+    expect((run.result as { missing: string[] }).missing).toEqual(['page']);
+  });
+
+  it('finishes the merge when the checks cannot run on the merged branch', async () => {
+    const { mindly, svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    for (const p of created.parts) mindly.tasks.update(p.taskId, { status: 'done' }, null);
+    const byId = mindly.projects.byId.bind(mindly.projects);
+    vi.spyOn(mindly.projects, 'byId').mockImplementation((id) => {
+      const ctx = byId(id);
+      return {
+        ...ctx,
+        trusted: true,
+        config: { ...ctx.config, checks: [{ name: 'unit', argv: ['true'], timeoutSec: 5 }] },
+      };
+    });
+    let calls = 0;
+    fake.setRunChecks(async () => {
+      calls += 1;
+      // The merge check runs them first; the run on the merged branch fails to start.
+      if (calls > 1) throw new Error('no space left on device');
+      return [{ name: 'unit', status: 'pass', exitCode: 0, durationMs: 1, output: '' }];
+    });
+    const merged = await svc.merge(created.split.id);
+    expect(merged.checks).toBeNull();
+    expect(merged.checksSkipped).toBe('error');
+    expect(mindly.store.splits.get(created.split.id)).toMatchObject({
+      status: 'merged',
+      integrationBranch: 'mindly/billing/integration',
+    });
   });
 
   it('abort keeps branches on request, cancels unclaimed briefs and drops open tasks', async () => {

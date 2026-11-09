@@ -18,7 +18,10 @@ import {
   trackOf,
   trackPromptLines,
   validatePlan,
+  type SplitAbortResult,
+  type SplitMergeCheckResult,
   type SplitMergeResult,
+  type SplitUnmergedWork,
   type TrackReport,
   type TrackSuggestion,
 } from '@mindly/engine';
@@ -33,6 +36,7 @@ import {
   renderMerged,
   renderPlan,
   renderSplitStatus,
+  unmergedLine,
 } from '../views/split.js';
 import { parseOptions } from './memory.js';
 import { adapterOf, adaptersFor, installCommand, userHome } from './setup.js';
@@ -389,9 +393,12 @@ export async function splitCheck(out: Out, o: { json?: boolean }): Promise<numbe
       return run.status === 'passed' ? 0 : 1;
     }
     const sc = out.screen();
+    const missing = (run.result as SplitMergeCheckResult | null)?.missing ?? [];
     sc.summary(
       run.status === 'passed'
-        ? `${sc.mark('ok')} Merge check clean: every part merges and the checks pass.`
+        ? missing.length > 0
+          ? `${sc.mark('warn')} Merge check clean for the parts that could be checked; ${count(missing.length, 'part')} could not.`
+          : `${sc.mark('ok')} Merge check clean: every part merges and the checks pass.`
         : run.status === 'failed'
           ? `${sc.mark('fail')} Merge check failed.`
           : `${sc.mark('fail')} Merge check could not run.`,
@@ -419,6 +426,13 @@ export async function splitMerge(
           'Merge anyway with: mindly split merge --force',
         );
       }
+      if (isMindlyError(err, 'conflict') && Array.isArray(err.details?.['uncommitted'])) {
+        throw new HintedError(
+          'conflict',
+          err.message,
+          "Commit it in each part's worktree on the part branch and merge again, or merge without it: mindly split merge --force",
+        );
+      }
       throw err;
     }
     if (o.json) out.json(m);
@@ -427,24 +441,55 @@ export async function splitMerge(
   });
 }
 
-/** `mindly split abort [--keep-branches] [-y]`. */
+/** `mindly split abort [--keep-branches] [--discard] [-y]`. */
 export async function splitAbort(
   out: Out,
-  o: { keepBranches?: boolean; yes?: boolean; json?: boolean },
+  o: { keepBranches?: boolean; discard?: boolean; yes?: boolean; json?: boolean },
 ): Promise<number> {
   return withProject(out.io, async (scope) => {
     const id = currentSplit(scope);
     const svc = splitOf(scope.mindly);
     const split = scope.mindly.store.splits.get(id);
+    // What the worktrees hold that no branch has. Best effort: abort itself looks again.
+    let unmerged: SplitUnmergedWork[] = [];
+    try {
+      if (split.status !== 'aborted') unmerged = await svc.unmergedWork(id);
+    } catch {
+      unmerged = [];
+    }
+    // After a merge, -y alone never removes work the merged branch does not have.
+    let discard = o.discard === true;
     if (!o.json || !o.yes) {
+      if (!o.yes && unmerged.length > 0) {
+        out.warn(
+          `These worktrees hold uncommitted work${split.status === 'merged' ? ' that is not in the merged branch' : ''}:`,
+        );
+        for (const w of unmerged) out.warn(`  ${unmergedLine(w)}`);
+      }
       const ok = await confirm(
         out.io,
         `Remove the worktrees${o.keepBranches ? '' : ' and branches'} of the split "${split.goal.slice(0, 60)}"? Uncommitted work in them is lost.`,
         o.yes === true,
       );
       if (!ok) return 1;
+      if (!o.yes) discard = true;
     }
-    const a = await svc.abort(id, { keepBranches: o.keepBranches === true });
+    let a: SplitAbortResult;
+    try {
+      a = await svc.abort(id, {
+        keepBranches: o.keepBranches === true,
+        discardUncommitted: discard,
+      });
+    } catch (err) {
+      if (isMindlyError(err, 'conflict') && Array.isArray(err.details?.['uncommitted'])) {
+        throw new HintedError(
+          'conflict',
+          err.message,
+          'Commit it on the part branch first, or remove it with the worktrees: mindly split abort --discard',
+        );
+      }
+      throw err;
+    }
     if (o.json) out.json(a);
     else renderAborted(out.screen(), a);
     return 0;
