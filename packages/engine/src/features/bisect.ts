@@ -326,6 +326,47 @@ export class BisectService {
   }
 
   /**
+   * The stored result of a bisect run, the same for `mindly bisect` and the sentinel. The blamed
+   * step is kept as it was when found, so `mindly track` can still attribute the run after the
+   * checkpoint itself is pruned. `checks` must already be sanitized.
+   */
+  resultRecord(input: {
+    status: BisectStatus | 'cancelled';
+    search: BisectSearchResult | null;
+    checks: readonly StepCheck[];
+    firstBad: StepInfo | null;
+    lastGood: StepInfo | null;
+    output: string | null;
+    durationMs: number;
+    mistakeId: string | null;
+  }): Record<string, unknown> {
+    const { status, search } = input;
+    return {
+      status,
+      checks: input.checks,
+      firstBad: input.firstBad?.seq ?? null,
+      blame:
+        status === 'found' && search?.firstBad
+          ? {
+              checkpointId: search.firstBad.id,
+              kind: search.firstBad.kind,
+              gap: search.firstBad.gap,
+              sessionId: search.firstBad.sessionId,
+              paths: search.firstBad.paths,
+              at: search.firstBad.createdAt,
+            }
+          : null,
+      lastGood: input.lastGood?.seq ?? null,
+      flaky: search?.flaky ?? false,
+      skipped: (search?.skipped ?? []).map((s) => s.seq),
+      output: input.output,
+      runs: input.checks.length,
+      durationMs: input.durationMs,
+      mistakeId: input.mistakeId,
+    };
+  }
+
+  /**
    * Remembers a reliable result as a mistake in the project (source: the user, who ran the
    * bisect), scoped to the step's paths, so agents are warned before they repeat it. Only agent
    * steps are recorded: nobody is blamed for a change made outside any agent.

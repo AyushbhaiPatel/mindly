@@ -67,6 +67,59 @@ export interface GitPort {
   split?: SplitGitPort;
   /** Optional (bisect): checkpoints of the working tree after every agent edit. */
   checkpoints?: CheckpointGitPort;
+  /** Optional (bisect, sentinel): scratch worktrees that check steps out and run commands. */
+  steps?: StepGitPort;
+}
+
+/** A scratch worktree that checks out one step at a time (never the user's checkout). */
+export interface StepWorkspace {
+  /** Absolute path of the scratch worktree. */
+  readonly path: string;
+  /** Commit currently checked out. */
+  readonly current: string;
+  /** Checks out `commit`; ignored folders (installed dependencies) stay. */
+  checkout(commit: string): Promise<void>;
+  /** Removes a temporary workspace; leaves a warm one in place. Safe to call more than once. */
+  dispose(): Promise<void>;
+}
+
+/** Outcome of one command run in a scratch worktree. */
+export interface CommandRunResult {
+  name: string;
+  status: 'pass' | 'fail' | 'timeout' | 'error';
+  exitCode: number | null;
+  durationMs: number;
+  /** Tail of the command's output (not yet redacted). */
+  output: string;
+}
+
+/** A command to run: argv without a shell, with a time limit. */
+export interface CommandSpec {
+  name: string;
+  argv: readonly string[];
+  timeoutSec: number;
+}
+
+/** Git operations behind `mindly bisect` and the sentinel. Every method may throw. */
+export interface StepGitPort {
+  /** A scratch worktree at `commit` in a private temp directory, removed by `dispose()`. */
+  scratch(repoDir: string, commit: string): Promise<StepWorkspace>;
+  /**
+   * The warm scratch worktree kept at `path` (outside the repository), created or reused and reset
+   * to `commit`. `dispose()` leaves it in place so installed dependencies survive.
+   */
+  warm(repoDir: string, path: string, commit: string): Promise<StepWorkspace>;
+  /** Deletes a warm scratch worktree; a missing one is ignored. */
+  removeWarm(repoDir: string, path: string): Promise<void>;
+  /** Paths that differ between two commits. */
+  changedPaths(repoDir: string, from: string, to: string): Promise<string[]>;
+  /** True for lockfiles and manifests (a setup command runs again when one changes). */
+  isManifestPath(path: string): boolean;
+  /**
+   * Runs one trusted command in `dir`: no shell, its own process group, a minimal environment, a
+   * time limit and a bounded output tail. Never pass a command the user did not approve.
+   */
+  run(dir: string, command: CommandSpec, signal?: AbortSignal): Promise<CommandRunResult>;
 }
 
 /** What one checkpoint capture needs. */
