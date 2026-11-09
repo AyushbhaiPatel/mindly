@@ -167,18 +167,33 @@ export function mentionsPath(command: string, path: string): boolean {
   return new RegExp(`(^|[\\s'"=/<>:(\`])${escapeRe(base)}($|[\\s'"\`;|&)<>:,])`).test(command);
 }
 
+/**
+ * A test for "does this command name `path`, its basename, or a directory above it?", prepared
+ * once per command: its words are split up front, so asking about many paths costs set lookups
+ * instead of a regular expression per path and directory.
+ */
+export function pathNamer(command: string): (path: string) => boolean {
+  const names = new Set<string>();
+  for (const raw of command.split(/[\s'"`;|&()<>=:,]+/)) {
+    const word = raw.replace(/^\.\//, '').replace(/\/+$/, '');
+    if (word === '' || word.length > 1024) continue;
+    // An absolute or longer spelling of a path names it too: every trailing part counts.
+    const parts = word.split('/');
+    for (let i = 0; i < parts.length && i < 64; i++) names.add(parts.slice(i).join('/'));
+  }
+  return (path) => {
+    if (path === '') return false;
+    if (names.has(path) || names.has(path.slice(path.lastIndexOf('/') + 1))) return true;
+    for (let at = path.lastIndexOf('/'); at > 0; at = path.lastIndexOf('/', at - 1)) {
+      if (names.has(path.slice(0, at))) return true;
+    }
+    return false;
+  };
+}
+
 /** Whether the command text names `path`, its basename, or a directory above it, as a word. */
 export function namesPathOrParent(command: string, path: string): boolean {
-  if (mentionsPath(command, path)) return true;
-  const segments = path.split('/');
-  for (let i = segments.length - 1; i > 0; i--) {
-    const dir = segments.slice(0, i).join('/');
-    if (
-      new RegExp(`(^|[\\s'"=<>:(\`])(\\./)?${escapeRe(dir)}/?($|[\\s'"\`;|&)<>:,])`).test(command)
-    )
-      return true;
-  }
-  return false;
+  return pathNamer(command)(path);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -203,6 +218,8 @@ interface Redirect {
 interface SimpleCommand {
   words: Word[];
   redirects: Redirect[];
+  /** Not a command: where a `( … )` subshell starts or ends. */
+  subshell?: 'open' | 'close';
 }
 
 interface Parsed {
@@ -400,7 +417,14 @@ function parse(input: string): Parsed {
       i++;
       continue;
     }
-    if (c === '|' || c === '&' || c === ';' || c === '(' || c === ')') {
+    if (c === '(' || c === ')') {
+      // A subshell: what it does to the working directory ends with it.
+      endCommand();
+      commands.push({ words: [], redirects: [], subshell: c === '(' ? 'open' : 'close' });
+      i++;
+      continue;
+    }
+    if (c === '|' || c === '&' || c === ';') {
       endCommand();
       i++;
       while (i < src.length && (src[i] === '|' || src[i] === '&' || src[i] === ';')) i++;
@@ -659,7 +683,9 @@ function joinWords(dir: Word, name: string, from: Word): Word {
 export interface ShellTarget {
   /**
    * The path as the command gives it, relative to the directory the command starts in (after any
-   * `cd` before it) or absolute. May hold `*`, `?` or `{a,b}` when `glob` is set.
+   * `cd` before it) or absolute. May hold `*`, `?` or `{a,b}` when `glob` is set. A path that
+   * starts with `~` is under a home directory that could not be placed here (`~name/x`, or any
+   * `~` path when no home was given).
    */
   path: string;
   /** The path is a wildcard pattern the shell expands. */
@@ -697,30 +723,52 @@ const looksLikePath = (text: string): boolean =>
  * guarantees is the common cases in both directions, so a read is not blocked and a plain write
  * is not missed.
  */
-export function shellWriteTargets(command: string): ShellTarget[] {
+export function shellWriteTargets(command: string, options: ShellReadOptions = {}): ShellTarget[] {
   const out = new Map<string, ShellTarget>();
-  collectTargets(command, '', 0, out);
+  collectTargets(command, '', 0, out, options.home ?? null);
   return [...out.values()];
 }
+
+/** What reading a command may know about where it runs. Nothing is looked up here. */
+export interface ShellReadOptions {
+  /**
+   * The user's home directory: `~` and `~/x` are read as paths under it. Without it they stay as
+   * written. `~name/x` (another user's home) always stays as written, for the caller to place.
+   */
+  home?: string;
+}
+
+/** `~` and `~/x` under `home`; anything else, also `~name/x`, unchanged. */
+function expandHome(text: string, home: string | null): string {
+  if (home === null) return text;
+  if (text === '~') return home;
+  return text.startsWith('~/') ? posix.join(home, text.slice(2)) : text;
+}
+
+/** A path that does not depend on the working directory: absolute, or under a home directory. */
+const isAnchored = (text: string): boolean => posix.isAbsolute(text) || text.startsWith('~');
 
 function collectTargets(
   command: string,
   startDir: string,
   depth: number,
   out: Map<string, ShellTarget>,
+  home: string | null,
 ): void {
   if (depth > MAX_DEPTH) return;
   const parsed = parse(command);
   // The directory later commands run in, relative to where the command started; null when a
   // `cd` went somewhere that cannot be read from the text.
   let dir: string | null = startDir;
+  // The directory to return to when each open `( … )` ends.
+  const outer: (string | null)[] = [];
 
   const add = (word: Word, tree: boolean, certain = true, entries: string[] = []): void => {
     if (out.size >= MAX_TARGETS || word.dynamic || word.text === '' || word.text === '-') return;
-    const text = word.text;
-    if (text.startsWith('~') || /^\/(dev|proc)\//.test(text)) return;
+    const text = expandHome(word.text, home);
+    if (/^\/(dev|proc)\//.test(text)) return;
     let path: string;
-    if (posix.isAbsolute(text)) path = posix.normalize(text);
+    if (isAnchored(text)) path = posix.normalize(text);
     else if (dir === null) return;
     else path = posix.normalize(posix.join(dir, text));
     const glob = !word.quoted && /[*?{]/.test(text);
@@ -734,6 +782,15 @@ function collectTargets(
   };
 
   for (const cmd of parsed.commands) {
+    if (cmd.subshell === 'open') {
+      outer.push(dir);
+      continue;
+    }
+    if (cmd.subshell === 'close') {
+      // An unmatched `)` (a `case` pattern) closes nothing.
+      if (outer.length > 0) dir = outer.pop() as string | null;
+      continue;
+    }
     for (const r of cmd.redirects) if (r.op.startsWith('>')) add(r.target, false);
     const words = programWords(cmd.words);
     const verdict = classify(words);
@@ -742,9 +799,15 @@ function collectTargets(
         break;
       case 'cd': {
         const to = verdict.dir;
-        if (to === null || to.dynamic || to.text === '-' || to.text.startsWith('~')) dir = null;
-        else if (posix.isAbsolute(to.text)) dir = posix.normalize(to.text);
-        else if (dir !== null) dir = posix.normalize(posix.join(dir, to.text));
+        if (to === null) {
+          // A bare `cd` goes home.
+          dir = home;
+          break;
+        }
+        const text = expandHome(to.text, home);
+        if (to.dynamic || text === '-') dir = null;
+        else if (isAnchored(text)) dir = posix.normalize(text);
+        else if (dir !== null) dir = posix.normalize(posix.join(dir, text));
         break;
       }
       case 'writes':
@@ -753,7 +816,7 @@ function collectTargets(
         if (verdict.into) add(verdict.into.dir, false, true, verdict.into.names);
         break;
       case 'inline':
-        if (dir !== null) collectTargets(verdict.code, dir, depth + 1, out);
+        if (dir !== null) collectTargets(verdict.code, dir, depth + 1, out, home);
         break;
       case 'script': {
         // Paths quoted inside inline code (`python -c "open('a/b.ts','w')"`); the write is
@@ -780,7 +843,7 @@ function collectTargets(
     }
   }
   for (const inner of parsed.nested) {
-    if (dir !== null) collectTargets(inner, dir, depth + 1, out);
+    if (dir !== null) collectTargets(inner, dir, depth + 1, out, home);
   }
 }
 

@@ -3,6 +3,7 @@ import {
   mentionsPath,
   namesPathOrParent,
   normalizeCommandLine,
+  pathNamer,
   shellMayWrite,
   shellWriteTargets,
 } from '../src/hooks/shell.js';
@@ -137,7 +138,46 @@ describe('write targets of a shell command', () => {
     expect(targets('echo $(rm a/b.ts)')).toEqual(['a/b.ts']);
     // Where a `cd` leads cannot be read: relative targets after it are unknown.
     expect(targets('cd "$DIR" && rm a.ts')).toEqual([]);
-    expect(targets('rm "$FILE" ~/x.ts')).toEqual([]);
+    expect(targets('rm "$FILE"')).toEqual([]);
+  });
+
+  it('places ~ under the home directory it is given', () => {
+    const at = (command: string) =>
+      shellWriteTargets(command, { home: '/home/dev' })
+        .map((t) => t.path)
+        .sort();
+    expect(at('rm ~/work/app/prisma/migrations/001.sql')).toEqual([
+      '/home/dev/work/app/prisma/migrations/001.sql',
+    ]);
+    expect(at('echo x > ~/notes.md')).toEqual(['/home/dev/notes.md']);
+    expect(at("cd ~/work/app && sed -i 's/a/b/' src/auth.ts")).toEqual([
+      '/home/dev/work/app/src/auth.ts',
+    ]);
+    expect(at('cd ~ && rm a.ts')).toEqual(['/home/dev/a.ts']);
+    expect(at('cd && rm a.ts')).toEqual(['/home/dev/a.ts']);
+    expect(at('cd src && rm ~/a.ts')).toEqual(['/home/dev/a.ts']);
+    // Another user's home cannot be placed here: the path is kept as written, not dropped.
+    expect(at('rm ~ci/app/a.ts')).toEqual(['~ci/app/a.ts']);
+    expect(at('cd ~ci/app && rm a.ts')).toEqual(['~ci/app/a.ts']);
+    // Without a home directory nothing is guessed, and nothing is dropped either.
+    expect(targets('rm ~/x.ts')).toEqual(['~/x.ts']);
+    expect(targets('cd ~/app && rm x.ts')).toEqual(['~/app/x.ts']);
+    expect(targets('cd && rm a.ts')).toEqual([]);
+  });
+
+  it('keeps a cd inside a subshell from leaking out of it', () => {
+    expect(targets('(cd a && rm x.ts); rm y.ts')).toEqual(['a/x.ts', 'y.ts']);
+    expect(targets('cd a; (cd b && rm x.ts); rm y.ts')).toEqual(['a/b/x.ts', 'a/y.ts']);
+    expect(targets('(cd a; (cd b; rm x.ts); rm y.ts); rm z.ts')).toEqual([
+      'a/b/x.ts',
+      'a/y.ts',
+      'z.ts',
+    ]);
+    expect(targets('(cd "$DIR" && rm x.ts); rm y.ts')).toEqual(['y.ts']);
+    // Braces group commands in the same shell: the directory stays changed.
+    expect(targets('{ cd a && rm x.ts; }; rm y.ts')).toEqual(['a/x.ts', 'a/y.ts']);
+    // An unmatched `)` (a case pattern) closes nothing.
+    expect(targets('cd a; case $x in y) rm x.ts;; esac; rm z.ts')).toEqual(['a/x.ts', 'a/z.ts']);
   });
 
   it('marks paths given to unknown programs as possible, not certain', () => {
@@ -165,6 +205,21 @@ describe('write targets of a shell command', () => {
     shellWriteTargets(`${'$('.repeat(5000)}rm a.ts`);
     shellWriteTargets('x '.repeat(200_000));
     expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it('answers many paths for one command from its words', () => {
+    const names = pathNamer('rm -rf ./src/generated/ && sed -i s/a/b/ /repo/src/auth.ts lib');
+    expect(names('src/generated/deep/a.ts')).toBe(true);
+    expect(names('src/auth.ts')).toBe(true);
+    expect(names('pkg/auth.ts')).toBe(true);
+    expect(names('lib/x.ts')).toBe(true);
+    expect(names('src/other.ts')).toBe(false);
+    expect(names('src/gen/a.ts')).toBe(false);
+    expect(names('')).toBe(false);
+    const started = performance.now();
+    const paths = Array.from({ length: 5000 }, (_, i) => `p/q/r/s/t/u/v/file${i}.ts`);
+    expect(paths.filter(names)).toHaveLength(0);
+    expect(performance.now() - started).toBeLessThan(200);
   });
 
   it('matches a path by a directory above it', () => {
