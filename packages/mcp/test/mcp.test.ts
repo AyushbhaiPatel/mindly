@@ -992,6 +992,66 @@ describe('telling windows of one agent apart', () => {
     }
   });
 
+  it('sees through a launcher between the server and its client', async () => {
+    // Each client starts its server through a launcher (npx, a node shim) that keeps running.
+    const live = [10, 100, 200, 110, 210, 1100, 2100];
+    for (const pid of live) running.add(pid);
+    try {
+      const launcher = (pid: number): ProcessRef => ({ ...ref(pid), name: 'node' });
+      const a = await harness({
+        ...world,
+        pid: 1100,
+        startTime: 1,
+        ancestors: [launcher(110), ref(100), TERMINAL],
+      });
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      // Window B was active last; A's server still finds its own session.
+      await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'win-b', 'prompt', { prompt: 'x' }));
+      expect(sid(await a.call('mindly_status'))).toBe(sessA);
+      const b = await harness(
+        { ...world, pid: 2100, startTime: 2, ancestors: [launcher(210), ref(200), TERMINAL] },
+        a,
+      );
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      const claims = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
+      expect(claims[sessA]?.sure).toBe(true);
+      expect(claims[sessB]?.sure).toBe(true);
+    } finally {
+      for (const pid of live) if (pid !== 10 && pid !== 100 && pid !== 200) running.delete(pid);
+    }
+  });
+
+  it('never leaves its own session out of a guess, whatever stands between', async () => {
+    // A helper process with a name that says nothing (not a known launcher) stands between.
+    for (const pid of [120, 1200]) running.add(pid);
+    try {
+      const a = await harness({
+        ...world,
+        pid: 1200,
+        startTime: 1,
+        ancestors: [{ ...ref(120), name: 'Client Helper' }, ref(100), TERMINAL],
+      });
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      expect(sid(await a.call('mindly_status'))).toBe(sessA);
+    } finally {
+      for (const pid of [120, 1200]) running.delete(pid);
+    }
+  });
+
+  it('marks a guess as known once the hook record that proves it arrives', async () => {
+    const a = await harness(windowA);
+    await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'win-a', 'session_start'));
+    const first = sid(await a.call('mindly_status'));
+    let claims = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
+    expect(claims[first]?.sure).toBe(false);
+    // The first hook's record is written only now (it was slow, or failed once and retried).
+    a.mindly.store.kv.set(hookAncestryKey('claude-code', 'win-a'), [ref(101), ref(100), TERMINAL]);
+    expect(sid(await a.call('mindly_status'))).toBe(first);
+    claims = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
+    expect(claims[first]?.sure).toBe(true);
+  });
+
   it('keeps the old rule when nothing is known about who started the hooks', async () => {
     const a = await harness(windowA);
     await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'plain', 'session_start'));

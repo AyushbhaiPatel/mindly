@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import {
   ancestorChain,
   hookAncestryKey,
+  isLauncherName,
   parseProcessChain,
   systemProcessLookup,
   type Logger,
@@ -44,6 +45,9 @@ interface Claim {
 }
 
 type Claims = Record<string, Claim>;
+
+/** How many launchers may stand between a server and its client. */
+const MAX_LAUNCHERS = 2;
 
 /** How long one reading of the process table is used. */
 const PROCESS_VIEW_MS = 5000;
@@ -136,30 +140,51 @@ export class SessionResolver {
   }
 
   /**
-   * How `session` relates to this server, from the ancestors its first hook recorded:
+   * How `session` relates to this server, from the ancestors its first hook recorded. `depth` is
+   * where the two chains meet in the server's own chain (0: the server's parent), -1 when they
+   * do not meet.
    *
-   * - `sameParent`: its hooks were started by the process that started this server, which is
-   *   the server's client. Only the direct parent counts: two windows under one terminal,
-   *   multiplexer or IDE host meet further up, and so does the session of a window that is gone.
-   * - `windowAlive`: whether the client that made the session still runs, or null when nothing
-   *   was recorded. A session whose hooks meet this server only further up and that has nothing
-   *   still running below that point belongs to a client that is gone.
+   * - `known`: the session's hooks were started by this server's own client. That is the case
+   *   when the chains meet at the server's parent, or a little further up with nothing but
+   *   launchers in between on the server's side (`npx`, `pnpm dlx`, a node shim that keeps
+   *   running) and nothing still running below that point on the hook's side. Two windows under
+   *   one terminal, multiplexer or IDE host meet further up, past a process that is not a
+   *   launcher, or with the other window's client still running below the meeting point.
+   * - `windowAlive`: whether the client that made the session still runs: true when something
+   *   below the meeting point on the hook's side runs, false when the client between the hook's
+   *   shell and the meeting point is gone too (a window closed without ending its session), null
+   *   when that cannot be told (nothing was recorded, or only the hook's own short-lived parent
+   *   lies below the meeting point, which has exited whoever the client is).
    */
-  private relation(session: Session): { sameParent: boolean; windowAlive: boolean | null } {
+  private relation(session: Session): {
+    known: boolean;
+    depth: number;
+    windowAlive: boolean | null;
+  } {
     const recorded = parseProcessChain(
       this.mindly.store.kv.get<unknown>(hookAncestryKey(session.agentKind, session.externalId)),
     );
-    if (recorded.length === 0) return { sameParent: false, windowAlive: null };
+    if (recorded.length === 0) return { known: false, depth: -1, windowAlive: null };
     const mine = this.chain();
     const same = (a: ProcessRef, b: ProcessRef): boolean =>
       a.pid === b.pid && a.start === b.start && a.start !== '';
-    const meet = recorded.findIndex((h) => mine.some((m) => same(m, h)));
-    if (meet === -1) return { sameParent: false, windowAlive: true };
-    const parent = mine[0];
-    if (parent && same(parent, recorded[meet] as ProcessRef)) {
-      return { sameParent: true, windowAlive: true };
+    let meet = -1;
+    let depth = -1;
+    for (let i = 0; i < recorded.length && meet === -1; i++) {
+      const j = mine.findIndex((m) => same(m, recorded[i] as ProcessRef));
+      if (j !== -1) {
+        meet = i;
+        depth = j;
+      }
     }
-    return { sameParent: false, windowAlive: recorded.slice(0, meet).some((h) => this.runs(h)) };
+    if (meet === -1) return { known: false, depth: -1, windowAlive: true };
+    const below = recorded.slice(0, meet);
+    const belowRuns = below.some((h) => this.runs(h));
+    const windowAlive = belowRuns ? true : below.length <= 1 ? null : false;
+    const throughLaunchers =
+      depth <= MAX_LAUNCHERS && mine.slice(0, depth).every((m) => isLauncherName(m.name));
+    const known = depth === 0 || (throughLaunchers && !belowRuns);
+    return { known, depth, windowAlive: known ? true : windowAlive };
   }
 
   // ----------------------------------------------------------------- project
@@ -271,31 +296,34 @@ export class SessionResolver {
    */
   private async improve(project: ScopedProject): Promise<boolean> {
     const before = this.bound;
-    const candidates = (await this.hookSessions(project)).filter((s) => s.id !== before?.id);
-    const relations = new Map(candidates.map((s) => [s.id, this.relation(s)]));
-    const sameParent = candidates.filter((s) => relations.get(s.id)?.sameParent);
-    // A bound session that was known to be ours is never improved on, so `before` is a guess or
-    // this server's own session here; a session known to be ours also counts the bound one.
-    const boundSameParent =
-      before && !before.own && this.bound
-        ? (() => {
-            const cur = this.mindly.store.sessions.find(before.id);
-            return cur !== null && this.relation(cur).sameParent;
-          })()
-        : false;
-    const sure = sameParent.length === 1 && !boundSameParent ? sameParent : [];
+    const all = await this.hookSessions(project);
+    const relations = new Map(all.map((s) => [s.id, this.relation(s)]));
+    // The session known to be this client's: the known one that meets the server closest, when
+    // only one does. Several at the same point is one host running several sessions, which
+    // ancestry cannot tell apart.
+    const known = all.filter((s) => relations.get(s.id)?.known);
+    const closest = Math.min(...known.map((s) => relations.get(s.id)?.depth ?? Infinity));
+    const top = known.filter((s) => relations.get(s.id)?.depth === closest);
+    const ours = top.length === 1 ? (top[0] as Session) : null;
+    if (ours && before && ours.id === before.id) {
+      // The guess was right: its hook record arrived after the server bound to it.
+      this.take(ours.id, false, true);
+      return false;
+    }
+    const candidates = all.filter((s) => s.id !== before?.id);
+    const sure = ours && ours.id !== before?.id ? [ours] : [];
     const knowable = this.chain().length > 0;
     let guessed: Session[] = [];
     if (!before || (before.own && !knowable)) {
-      const pool = sameParent.length > 1 ? sameParent : candidates;
+      const pool = top.length > 1 ? top.filter((s) => s.id !== before?.id) : candidates;
       guessed = pool.filter((s) => !sure.includes(s) && relations.get(s.id)?.windowAlive !== false);
     }
-    for (const [list, known] of [
+    for (const [list, sureOfIt] of [
       [sure, true],
       [guessed, false],
     ] as const) {
       for (const s of list) {
-        if (!this.take(s.id, false, known)) continue;
+        if (!this.take(s.id, false, sureOfIt)) continue;
         if (before?.own) this.handOver(before.id, s.id);
         return true;
       }
