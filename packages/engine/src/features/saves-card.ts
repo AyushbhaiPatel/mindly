@@ -88,8 +88,74 @@ const SERIF = "Newsreader, 'Newsreader Variable', Georgia, serif";
 const SANS = "'DM Sans', 'DM Sans Variable', system-ui, -apple-system, 'Segoe UI', sans-serif";
 const MONO = "ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
+/**
+ * Width of an average character as a share of the font size, per family. The card is laid out
+ * with these estimates (no font metrics are available where it is drawn), so they are generous.
+ */
+export const CARD_CHAR_WIDTH_EM = { sans: 0.55, serif: 0.5, mono: 0.6 } as const;
+
+type CardFont = keyof typeof CARD_CHAR_WIDTH_EM;
+
+function charWidth(size: number, font: CardFont): number {
+  return size * CARD_CHAR_WIDTH_EM[font];
+}
+
+function textWidth(text: string, size: number, font: CardFont): number {
+  return [...text].length * charWidth(size, font);
+}
+
+/** `text`, cut at the end with an ellipsis when it is wider than `maxWidth`. */
+function fitEnd(text: string, size: number, font: CardFont, maxWidth: number): string {
+  const max = Math.max(1, Math.floor(maxWidth / charWidth(size, font)));
+  const chars = [...text];
+  return chars.length <= max
+    ? text
+    : `${chars
+        .slice(0, max - 1)
+        .join('')
+        .trimEnd()}…`;
+}
+
+/** A path of at most `max` characters: the start and the file name, the middle elided. */
+function elideMiddle(path: string, max: number): string {
+  const chars = [...path];
+  if (chars.length <= max) return path;
+  const head = Math.ceil((max - 1) * 0.4);
+  const tail = max - 1 - head;
+  return `${chars.slice(0, head).join('')}…${chars.slice(chars.length - tail).join('')}`;
+}
+
+/** Longest path shown on a details line, so that two fit next to a "+N more". */
+const PATH_MAX_CHARS = 48;
+
+/**
+ * The files of one save on a line of at most `maxChars` characters: up to three paths, long
+ * ones shortened in the middle, and "+N more" for the ones that do not fit.
+ */
+function filesLine(paths: readonly string[], maxChars: number): string {
+  const all = paths.map((p) => elideMiddle(sanitizeLine(p, 200), PATH_MAX_CHARS));
+  const more = (n: number): string => (n > 0 ? `+${n} more` : '');
+  const join = (shown: string[], rest: number): string =>
+    [...shown, more(rest)].filter(Boolean).join(', ');
+  const shown: string[] = [];
+  for (const p of all.slice(0, 3)) {
+    const next = [...shown, p];
+    if ([...join(next, all.length - next.length)].length > maxChars) break;
+    shown.push(p);
+  }
+  if (shown.length === 0) {
+    const suffix = all.length > 1 ? `, ${more(all.length - 1)}` : '';
+    return `${elideMiddle(all[0] ?? '', maxChars - [...suffix].length)}${suffix}`;
+  }
+  return join(shown, all.length - shown.length);
+}
+
 const CARD_HEIGHT = 630;
+/** Baseline of the first kind (and agent) row. */
+const FIRST_ROW = 368;
 const KIND_ROW_HEIGHT = 36;
+/** Least space between the end of the longest kind label and the agent column. */
+const COLUMN_GAP = 32;
 /** Baseline of the footer line, measured from the bottom edge. */
 const FOOTER_FROM_BOTTOM = 48;
 /** Least distance between the baseline of the last kind row and the footer's. */
@@ -151,9 +217,14 @@ export function renderSavesCard(input: SavesCardInput): string {
     `font-family="${SANS}" fill="#6b6a64"`,
   );
 
-  // By kind.
-  let y = 368;
-  kinds.slice(0, 7).forEach((k, i) => {
+  // By kind, on the left. Each row ends where its label does.
+  const shownKinds = kinds.slice(0, 7);
+  const kindsEnd = Math.max(
+    0,
+    ...shownKinds.map((k) => X + 74 + textWidth(SAVE_KIND_LABELS[k], 24, 'sans')),
+  );
+  let y = FIRST_ROW;
+  shownKinds.forEach((k, i) => {
     const colour = KIND_COLOURS[i % KIND_COLOURS.length] as string;
     parts.push(`<circle cx="${X + 4}" cy="${y - 7}" r="5" fill="${colour}"/>`);
     t(
@@ -167,40 +238,42 @@ export function renderSavesCard(input: SavesCardInput): string {
     y += KIND_ROW_HEIGHT;
   });
 
-  // By agent.
+  // By agent: a column of its own on the right, one agent per row level with the kind rows, so
+  // the two lists never share a line. The dot sits at the right edge and the label ends next to
+  // it; a name that would reach the kind labels is shortened.
   if (agents.length > 0) {
-    let x = W - X;
-    const items: string[] = [];
-    for (const [kind, n] of [...agents].reverse()) {
-      const label = `${agentProductName(kind)} ${n}`;
-      const width = label.length * 12 + 34;
-      x -= width;
-      items.push(
-        `<circle cx="${x + 6}" cy="${360 - 7}" r="6" fill="${AGENT_COLOURS[kind] ?? '#c9c6bb'}"/>`,
-        `<text x="${x + 20}" y="360" font-size="22" font-family="${SANS}" fill="#3d3d3a">${esc(label)}</text>`,
+    const labelEnd = W - X - 20;
+    const room = labelEnd - Math.max(kindsEnd + COLUMN_GAP, W / 2);
+    agents.forEach(([kind, n], i) => {
+      const ay = FIRST_ROW + i * KIND_ROW_HEIGHT;
+      const count = ` ${n}`;
+      const nameRoom = room - textWidth(count, 22, 'sans');
+      const label = `${fitEnd(agentProductName(kind), 22, 'sans', nameRoom)}${count}`;
+      parts.push(
+        `<circle cx="${W - X - 6}" cy="${ay - 7}" r="6" fill="${AGENT_COLOURS[kind] ?? '#c9c6bb'}"/>`,
       );
-    }
-    parts.push(...items);
+      t(labelEnd, ay, 22, esc(label), `font-family="${SANS}" fill="#3d3d3a" text-anchor="end"`);
+    });
     t(W - X, 320, 18, 'Agents helped', `font-family="${SANS}" fill="#6b6a64" text-anchor="end"`);
   }
+  const rows = Math.max(shownKinds.length, agents.length);
+  y = FIRST_ROW + rows * KIND_ROW_HEIGHT;
 
   // The card is 1200x630 (the size link previews expect) and grows only when it has to: the
-  // footer sits 48 px above the bottom edge, and the last kind row keeps the same distance from
-  // it that six rows have on the standard card. A seventh row would otherwise be drawn over it.
-  const lastKindRow = y - KIND_ROW_HEIGHT;
-  let H = Math.max(CARD_HEIGHT, lastKindRow + FOOTER_CLEARANCE + FOOTER_FROM_BOTTOM);
+  // footer sits 48 px above the bottom edge, and the last row keeps the same distance from it
+  // that six rows have on the standard card. A seventh row would otherwise be drawn over it.
+  const lastRow = y - KIND_ROW_HEIGHT;
+  let H = Math.max(CARD_HEIGHT, lastRow + FOOTER_CLEARANCE + FOOTER_FROM_BOTTOM);
   // Details: sentences and files (never without --details), below the counts.
   if (details) {
     let dy = Math.max(y, 404) + 40;
     t(X, dy, 22, 'Details', `font-family="${SERIF}" fill="#141413"`);
     dy += 44;
     for (const s of detailRows) {
-      t(X, dy, 20, esc(sanitizeLine(s.title, 110)), `font-family="${SANS}" fill="#3d3d3a"`);
+      const title = fitEnd(sanitizeLine(s.title, 200), 20, 'sans', W - 2 * X);
+      t(X, dy, 20, esc(title), `font-family="${SANS}" fill="#3d3d3a"`);
       if (s.paths.length > 0) {
-        const files = s.paths
-          .slice(0, 3)
-          .map((p) => sanitizeLine(p, 80))
-          .join(', ');
+        const files = filesLine(s.paths, Math.floor((W - 2 * X - 16) / charWidth(16, 'mono')));
         t(X + 16, dy + 22, 16, esc(files), `font-family="${MONO}" fill="#6b6a64"`);
       }
       dy += s.paths.length > 0 ? 56 : 34;
