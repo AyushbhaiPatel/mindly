@@ -102,11 +102,14 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - Characters that render as nothing (zero-width and format characters, tag characters,
   variation selectors) and control characters cannot hide a secret: it is looked for in copies
   of the text with those characters removed, turned into spaces, or a mix of the two, and in one
-  where the token patterns (API keys, access tokens, JWTs) read past a run of them between letters
-  or digits and count it as a word boundary, so a key split inside and glued to words on either
-  side is still found. What any copy finds is replaced in the original together with any such
-  characters inside it. Redaction changes nothing else:
-  a stored prompt, or a prompt passed to an agent or a model, keeps the user's own characters
+  where each run of them between letters or digits becomes a mark that the token patterns (API
+  keys, access tokens, JWTs) read past and count as a word boundary, so a key split inside and
+  glued to words on either side is still found. The mark is the first of the noncharacters
+  U+FDD0..U+FDEF, then the private-use characters U+E000..U+E0FF, that the text does not hold; a
+  text that holds all 288 gets no such copy, and there a key both split inside and glued to words
+  on both sides by hidden characters can be missed. What any copy finds is replaced in the
+  original together with any such characters inside it. Redaction changes nothing else: a stored
+  prompt, or a prompt passed to an agent or a model, keeps the user's own characters
   (emoji joiners, a Persian zero-width non-joiner, bidi controls in a diff under review). Text that
   one agent's work puts in front of another agent (shared context, memories, coordination
   warnings, file paths) is shown without them.

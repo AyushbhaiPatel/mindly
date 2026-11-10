@@ -1,5 +1,4 @@
 import {
-  MARK,
   hasHiddenChars,
   matchCopies,
   matchCopy,
@@ -155,16 +154,16 @@ function compileExtra(source: string): RegExp | null {
 }
 
 /**
- * `source` (a pattern of `RULES`) for a `mark` copy: every character it matches may be followed
- * by `MARK`, which no character it matches can be, so a secret split by marks is read as one and
- * a word boundary holds next to a mark. The patterns are plain enough (characters, classes,
- * groups, quantifiers and `\b`) for this to be read off their source.
+ * `source` (a pattern of `RULES`) for a `mark` copy whose mark is `mark`: every character it
+ * matches may be followed by the mark, which no character it matches can be, so a secret split by
+ * marks is read as one and a word boundary holds next to a mark. The patterns are plain enough
+ * (characters, classes, groups, quantifiers and `\b`) for this to be read off their source.
  */
-function allowMarks(source: string): string {
-  const mark = '\\uE000';
+function allowMarks(source: string, mark: string): string {
+  const m = `\\u${mark.charCodeAt(0).toString(16).padStart(4, '0')}`;
   let out = '';
   const atom = (x: string): void => {
-    out += `(?:(?!${mark})${x}${mark}??)`;
+    out += `(?:(?!${m})${x}${m}??)`;
   };
   let i = 0;
   while (i < source.length) {
@@ -200,8 +199,6 @@ function allowMarks(source: string): string {
   return out;
 }
 
-let markedRules: Rule[] | null = null;
-
 /**
  * Rules whose secret is a token bounded by word boundaries (`\bghp_...\b`): those a hidden
  * character next to it or inside it can hide. The others (assignments, URLs, headers, key blocks,
@@ -222,24 +219,106 @@ const TOKEN_KINDS = new Set([
   'jwt',
 ]);
 
-/** The token rules of `RULES`, for a `mark` copy (see `allowMarks`). */
-function rulesForMarks(): Rule[] {
-  markedRules ??= RULES.filter((rule) => TOKEN_KINDS.has(rule.kind)).map((rule) => ({
-    ...rule,
-    re: new RegExp(allowMarks(rule.re.source), rule.re.flags),
-  }));
-  return markedRules;
+/** A token rule for a `mark` copy; `find` lists its matches when a plain search is not linear. */
+interface MarkedRule extends Rule {
+  find?: (text: string) => { at: number; match: string }[];
+}
+
+const markedRules = new Map<string, MarkedRule[]>();
+
+/** The token rules of `RULES`, for a `mark` copy whose mark is `mark` (see `allowMarks`). */
+function rulesForMarks(mark: string): MarkedRule[] {
+  let rules = markedRules.get(mark);
+  if (rules === undefined) {
+    rules = RULES.filter((rule) => TOKEN_KINDS.has(rule.kind)).map((rule) => {
+      const re = new RegExp(allowMarks(rule.re.source, mark), rule.re.flags);
+      if (rule.kind !== 'jwt') return { ...rule, re };
+      const sticky = new RegExp(re.source, 'y');
+      return { ...rule, re, find: (text: string) => findJwts(text, mark, sticky) };
+    });
+    markedRules.set(mark, rules);
+  }
+  return rules;
+}
+
+/** `[A-Za-z0-9_-]`: what the parts of a JWT are made of. */
+function isJwtUnit(c: number): boolean {
+  return (
+    (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 45
+  );
+}
+
+function isWordUnit(c: number): boolean {
+  return isJwtUnit(c) && c !== 45;
+}
+
+/** Most units in a JWT's first part, its `eyJ` included (see the `jwt` rule). */
+const JWT_HEAD_MAX = 2003;
+
+/**
+ * The matches of the `jwt` rule (`sticky`, made for `mark`) in a `mark` copy, in one pass. A JWT's
+ * first part ends at the first character that is neither a JWT unit nor a mark, which must be a
+ * `.`: every start inside one run of such characters reaches the same `.` and reads the same rest,
+ * so a run that does not end in a `.` is passed over, and in one that does only the first start
+ * (`eyJ` after a word boundary) whose first part is not too long is tried. A plain search tried
+ * every `eyJ` after a mark and read up to 2,000 characters from each.
+ */
+function findJwts(text: string, mark: string, sticky: RegExp): { at: number; match: string }[] {
+  const m = mark.charCodeAt(0);
+  const isRunUnit = (c: number): boolean => c === m || isJwtUnit(c);
+  const head = (k: number): boolean => {
+    let o = k;
+    for (const ch of 'eyJ') {
+      if (text[o] !== ch) return false;
+      o++;
+      if (text.charCodeAt(o) === m && ch !== 'J') o++;
+    }
+    return true;
+  };
+  const out: { at: number; match: string }[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (!isRunUnit(text.charCodeAt(i))) {
+      i++;
+      continue;
+    }
+    let end = i;
+    let units = 0;
+    while (end < text.length && isRunUnit(text.charCodeAt(end))) {
+      if (text.charCodeAt(end) !== m) units++;
+      end++;
+    }
+    let next = end;
+    if (text[end] === '.') {
+      for (let k = i; k < end; k++) {
+        const c = text.charCodeAt(k);
+        const boundary = isWordUnit(c) && (k === 0 || !isWordUnit(text.charCodeAt(k - 1)));
+        if (boundary && units <= JWT_HEAD_MAX && head(k)) {
+          sticky.lastIndex = k;
+          const found = sticky.exec(text);
+          if (found !== null) {
+            out.push({ at: k, match: found[0] });
+            next = k + found[0].length;
+          }
+          break;
+        }
+        if (c !== m) units--;
+      }
+    }
+    i = next;
+  }
+  return out;
 }
 
 /** `text` with the marks at its start and end that `match` has and `text` lost put back. */
-function keepMarks(match: string, text: string): string {
+function keepMarks(match: string, text: string, mark: string): string {
   let lead = 0;
-  while (match[lead] === MARK) lead++;
+  while (match[lead] === mark) lead++;
   let trail = 0;
-  while (trail < match.length - lead && match[match.length - 1 - trail] === MARK) trail++;
+  while (trail < match.length - lead && match[match.length - 1 - trail] === mark) trail++;
   let out = text;
-  if (lead > 0 && !out.startsWith(MARK.repeat(lead))) out = MARK.repeat(lead) + out;
-  if (trail > 0 && !out.endsWith(MARK.repeat(trail))) out += MARK.repeat(trail);
+  if (lead > 0 && !out.startsWith(mark.repeat(lead))) out = mark.repeat(lead) + out;
+  if (trail > 0 && !out.endsWith(mark.repeat(trail))) out += mark.repeat(trail);
   return out;
 }
 
@@ -256,22 +335,19 @@ interface Pass {
 let recording: Pass[] | null = null;
 
 /**
- * Redacts `input` with every rule. `marked` reads it as a `mark` copy, with the token rules only:
- * marks are passed over inside a secret and kept around it.
+ * Redacts `input` with every rule. With a `mark`, it reads `input` as a `mark` copy made with that
+ * character, with the token rules only: marks are passed over inside a secret and kept around it.
  */
-function redactVisible(
-  input: string,
-  options: RedactOptions = {},
-  marked = false,
-): RedactionResult {
+function redactVisible(input: string, options: RedactOptions = {}, mark = ''): RedactionResult {
   let text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
   let count = 0;
   const kinds = new Set<string>();
 
-  const apply = (kind: string, re: RegExp, replace: string, skip?: Rule['skip']): void => {
+  const apply = (kind: string, rule: Omit<MarkedRule, 'kind'>): void => {
+    const { re, replace, skip, find } = rule;
     re.lastIndex = 0;
     const pass: Pass | null = recording ? { input: text, edits: [] } : null;
-    text = text.replace(re, (...args: unknown[]) => {
+    const onMatch = (...args: unknown[]): string => {
       // Do not double-count already-redacted values.
       const match = String(args[0]);
       if (match.endsWith(REDACTED) || match === REDACTED) return match;
@@ -279,27 +355,38 @@ function redactVisible(
       const at = args.findIndex((a) => typeof a === 'number');
       const groups = args
         .slice(0, at)
-        .map((a) => (typeof a !== 'string' ? '' : marked ? a.split(MARK).join('') : a));
+        .map((a) => (typeof a !== 'string' ? '' : mark ? a.split(mark).join('') : a));
       if (skip?.(groups)) return match;
       let out = replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? ''));
-      if (marked) out = keepMarks(match, out);
+      if (mark) out = keepMarks(match, out, mark);
       // A replacement that changes nothing is no redaction.
       if (out === match) return match;
       count++;
       kinds.add(kind);
       pass?.edits.push({ at: args[at] as number, len: match.length, text: out });
       return out;
-    });
+    };
+    if (find) {
+      const input = text;
+      const parts: string[] = [];
+      let cursor = 0;
+      for (const { at, match } of find(input)) {
+        parts.push(input.slice(cursor, at), onMatch(match, at, input));
+        cursor = at + match.length;
+      }
+      parts.push(input.slice(cursor));
+      text = parts.join('');
+    } else {
+      text = text.replace(re, onMatch);
+    }
     if (pass && pass.edits.length > 0) recording?.push(pass);
   };
 
-  for (const rule of marked ? rulesForMarks() : RULES) {
-    apply(rule.kind, rule.re, rule.replace, rule.skip);
-  }
-  if (marked) return { text, count, kinds: [...kinds] };
+  for (const rule of mark ? rulesForMarks(mark) : RULES) apply(rule.kind, rule);
+  if (mark) return { text, count, kinds: [...kinds] };
   for (const source of options.extraPatterns ?? []) {
     const re = compileExtra(source);
-    if (re) apply('custom', re, REDACTED);
+    if (re) apply('custom', { re, replace: REDACTED });
   }
   return { text, count, kinds: [...kinds] };
 }
@@ -419,13 +506,13 @@ function replacedSpans(copy: string, passes: readonly Pass[], result: string): S
 function redactTraced(
   text: string,
   options: RedactOptions,
-  marked: boolean,
+  mark: string,
 ): { result: RedactionResult; spans: Span[] | null } {
   const passes: Pass[] = [];
   recording = passes;
   let result: RedactionResult;
   try {
-    result = redactVisible(text, options, marked);
+    result = redactVisible(text, options, mark);
   } finally {
     recording = null;
   }
@@ -449,7 +536,7 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
   for (let round = 0; round < MAX_HIDDEN_ROUNDS; round++) {
     const spans: Span[] = [];
     for (const copy of matchCopies(text)) {
-      const { result, spans: found } = redactTraced(copy.text, options, copy.mode === 'mark');
+      const { result, spans: found } = redactTraced(copy.text, options, copy.mark);
       if (found === null) return untraced(text, options);
       for (const k of result.kinds) kinds.add(k);
       for (const f of found) {

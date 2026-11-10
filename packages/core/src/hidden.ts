@@ -30,13 +30,14 @@ export function withoutHiddenChars(text: string): string {
 
 /**
  * A copy of a text made for matching, and where its units come from in the original. The copy is
- * made of segments, in order: a stretch of the original kept as it is, or one space (or `MARK`)
+ * made of segments, in order: a stretch of the original kept as it is, or one space (or mark)
  * standing for a run of hidden characters. Segment `k` starts at unit `copyAt[k]` of the copy and
  * at `originalAt[k]` of the original; a space or mark segment ends at `originalEnd[k]`, a kept one
- * has -1. `mode` is how the copy was made.
+ * has -1. `mode` is how the copy was made, and `mark` the character a `mark` copy uses (else '').
  */
 export interface MatchCopy {
   mode: CopyMode;
+  mark: string;
   text: string;
   copyAt: Int32Array;
   originalAt: Int32Array;
@@ -49,7 +50,8 @@ export interface MatchCopy {
  * characters (a run elsewhere is dropped, which changes no word boundary): within a word made of
  * word characters and such runs, `first` turns its first run into a space, `last` its last one,
  * `ends` both, and the runs inside are dropped. `mark` turns every run between two word characters
- * into `MARK`, which is no word character, so a word boundary holds on both sides of it, and which
+ * into a mark (see `pickMark`), which is no word character, so a word boundary holds on both sides
+ * of it, and which
  * the patterns run on this copy pass over inside a secret (see `allowMarks` in redact.ts): a
  * secret split inside and glued to words on either side, however many runs there are, is found
  * in this one copy.
@@ -66,12 +68,29 @@ export const COPY_MODES: readonly CopyMode[] = [
   'mark',
 ];
 
+/** Where the characters a `mark` copy may use start, and how many there are from each. */
+const MARK_RANGES: readonly (readonly [number, number])[] = [
+  [0xfdd0, 32], // noncharacters U+FDD0..U+FDEF
+  [0xe000, 256], // private use U+E000..U+E0FF
+];
+
 /**
- * The character a `mark` copy puts for a run of hidden characters between word characters: a
- * private-use character, which is neither hidden nor a word character. A text that already holds
- * it gets no `mark` copy.
+ * The character a `mark` copy of `text` puts for a run of hidden characters between word
+ * characters: the first of the noncharacters U+FDD0..U+FDEF, then the private-use characters
+ * U+E000..U+E0FF, that `text` does not hold. None of them is hidden or a word character. Null when
+ * the text holds every one of them, and then it gets no `mark` copy. One pass over the text.
  */
-export const MARK = '\uE000';
+export function pickMark(text: string): string | null {
+  const used = new Set<number>();
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if ((c >= 0xfdd0 && c <= 0xfdef) || (c >= 0xe000 && c <= 0xe0ff)) used.add(c);
+  }
+  for (const [first, count] of MARK_RANGES) {
+    for (let c = first; c < first + count; c++) if (!used.has(c)) return String.fromCharCode(c);
+  }
+  return null;
+}
 
 /** A run of hidden characters, and where it sits among word characters. */
 interface Run {
@@ -153,7 +172,7 @@ function spaced(r: Run, mode: CopyMode): boolean {
   }
 }
 
-function buildCopy(original: string, runs: readonly Run[], mode: CopyMode): MatchCopy {
+function buildCopy(original: string, runs: readonly Run[], mode: CopyMode, mark = ''): MatchCopy {
   const parts: string[] = [];
   const size = 2 * runs.length + 1;
   const copyAt = new Int32Array(size);
@@ -173,13 +192,14 @@ function buildCopy(original: string, runs: readonly Run[], mode: CopyMode): Matc
   };
   for (const r of runs) {
     segment(from, -1, original.slice(from, r.start));
-    if (mode === 'mark' && r.inner) segment(r.start, r.end, MARK);
+    if (mode === 'mark' && r.inner) segment(r.start, r.end, mark);
     else if (spaced(r, mode)) segment(r.start, r.end, ' ');
     from = r.end;
   }
   segment(from, -1, original.slice(from));
   return {
     mode,
+    mark,
     text: parts.join(''),
     copyAt: copyAt.subarray(0, k),
     originalAt: originalAt.subarray(0, k),
@@ -201,15 +221,20 @@ function unitInOriginal(copy: MatchCopy, u: number): [number, number] {
   return spaceEnd >= 0 ? [copy.originalAt[lo] ?? 0, spaceEnd] : [at, at + 1];
 }
 
-/** The copy of `original` made for matching in `mode` (see `CopyMode`). */
+/**
+ * The copy of `original` made for matching in `mode` (see `CopyMode`); a `mark` copy of a text
+ * that holds every mark character is made without hidden characters instead.
+ */
 export function matchCopy(original: string, mode: CopyMode): MatchCopy {
-  return buildCopy(original, hiddenRuns(original), mode);
+  const mark = mode === 'mark' ? pickMark(original) : '';
+  if (mark === null) return buildCopy(original, hiddenRuns(original), 'removed');
+  return buildCopy(original, hiddenRuns(original), mode, mark);
 }
 
 /**
  * Every distinct copy of `original` for matching, one per `COPY_MODES` entry that differs, made
  * one at a time as they are asked for. The `mark` copy is made only when a run sits between word
- * characters, and never for a text that holds `MARK` itself.
+ * characters, and when the text leaves a mark character free (see `pickMark`).
  */
 export function* matchCopies(original: string): Generator<MatchCopy> {
   const runs = hiddenRuns(original);
@@ -219,8 +244,9 @@ export function* matchCopies(original: string): Generator<MatchCopy> {
   // Without runs between word characters the mixed copies are the copy without hidden
   // characters; with only one such run per word, all three are the same.
   if (mixed) modes.push(...(multi ? (['first', 'last', 'ends'] as const) : (['ends'] as const)));
-  if (mixed && !original.includes(MARK)) modes.push('mark');
-  for (const m of modes) yield buildCopy(original, runs, m);
+  const mark = mixed ? pickMark(original) : null;
+  if (mark !== null) modes.push('mark');
+  for (const m of modes) yield buildCopy(original, runs, m, m === 'mark' ? (mark ?? '') : '');
 }
 
 function onlyHidden(text: string): boolean {

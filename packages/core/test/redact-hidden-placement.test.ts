@@ -67,4 +67,39 @@ describe('a key split and glued to words by hidden characters', () => {
     expect(shown(out)).not.toContain(GHP.slice(4, 16));
     expect(out).toBe(`see foo\u200bbar\u200d${REDACTED}\u200bbaz\u200bqux.`);
   });
+
+  it('is found when the text also holds a private-use or noncharacter', () => {
+    const split = 'foo\u200bbar\u200bAKIAIOSF\u200bODNN7EXAMPLE';
+    expect(redactText(`\uE000 ${split}`)).toBe(`\uE000 foo\u200bbar\u200b${REDACTED}`);
+    expect(redactText(`\uFDD0\uE000 ${split}`)).toBe(`\uFDD0\uE000 foo\u200bbar\u200b${REDACTED}`);
+    let all = '';
+    for (let c = 0xfdd0; c <= 0xfdef; c++) all += String.fromCharCode(c);
+    for (let c = 0xe000; c <= 0xe0fe; c++) all += String.fromCharCode(c);
+    expect(redactText(`${all} ${split}`)).toBe(`${all} foo\u200bbar\u200b${REDACTED}`);
+  });
+
+  it('finds a JWT split and glued to words', () => {
+    const jwt =
+      'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+    const text = `x foo\u200beyJhbG\u200b${jwt.slice(6)}\u200bbar`;
+    expect(redactText(text)).toBe(`x foo\u200b${REDACTED}\u200bbar`);
+  });
+});
+
+describe('JWT heads glued by hidden characters', () => {
+  it.each([
+    ['eyJ\u200b'],
+    ['eyJaaaaaaaa\u200b'],
+    ['eyJhbG\u200bciOiJIUzI1NiJ9\u200b'],
+    ['eyJa-a\u200b'],
+  ])('reads 250 KB of %j in linear time', (unit) => {
+    const text = unit.repeat(Math.ceil(250_000 / unit.length));
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const started = performance.now();
+      redact(text);
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(best).toBeLessThan(200);
+  });
 });
