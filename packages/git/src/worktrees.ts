@@ -362,50 +362,42 @@ function noteNew(path: string, newUnder: Set<string>): void {
   }
 }
 
-/** True when `abs`, a link, leads inside `root` to something under which a path changed. */
-function leadsToChange(root: string, abs: string, newUnder: ReadonlySet<string>): boolean {
-  try {
-    const target = realpathSync(abs);
-    if (target === root || !target.startsWith(`${root}/`)) return false;
-    const rel = target.slice(root.length + 1);
-    if (newUnder.has(rel)) return true;
-    // A file: anything changed beside it counts (it may be the one).
-    const slash = rel.lastIndexOf('/');
-    return !statSync(target).isDirectory() && slash > 0 && newUnder.has(rel.slice(0, slash));
-  } catch {
-    return false;
-  }
-}
+/** How a git directory whose storage is reached through a link is named in `gitData`. */
+export const linkedGitDirLabel = (path: string): string =>
+  `${path}, whose git storage is reached through a link and cannot be checked`;
 
 /**
- * True when `dir` (not the top level), which holds an entry named `HEAD` (tracked, untracked or
- * ignored), is a git directory with something to lose: it has an `objects` that is a folder on
- * disk (through a link too), and something in it other than that `HEAD` is not as in the last
- * commit (`newUnder`: staged, modified, deleted, untracked or ignored), or something is under
- * where a link in it leads, inside the worktree (`links`: its tracked links, and `objects` when
- * it is one; an untracked link is itself a change). Nothing is read, and nothing is assumed from
- * what is tracked: a fully tracked, unchanged one holds nothing that is not in a commit.
+ * What `dir` (not the top level), which holds an entry named `HEAD` (tracked, untracked or
+ * ignored), is, when it has an `objects` that is a folder on disk (through a link too):
+ * `linked` when its `objects` or `refs` is a link, or holds a tracked one (`linkedStorage`):
+ * what it stores may then be anywhere, and no link is followed to look; `changed` when
+ * something in it other than that `HEAD` is not as in the last commit (`newUnder`: staged,
+ * modified, deleted, untracked or ignored; a link elsewhere in it counts only by changing
+ * itself). Otherwise, or without such an `objects`, null: a fully tracked, unchanged one holds
+ * nothing that is not in a commit. Nothing is read.
  */
-function isGitDir(
+function gitDirKind(
   root: string,
   dir: string,
   newUnder: ReadonlySet<string>,
-  links: readonly string[],
-): boolean {
-  if (dir === '') return false;
+  linkedStorage: ReadonlySet<string>,
+): 'linked' | 'changed' | null {
+  if (dir === '') return null;
   const objects = join(root, dir, 'objects');
   try {
-    if (!statSync(objects).isDirectory()) return false;
+    if (!statSync(objects).isDirectory()) return null;
   } catch {
-    return false;
+    return null;
   }
-  if (newUnder.has(dir)) return true;
-  try {
-    if (lstatSync(objects).isSymbolicLink() && leadsToChange(root, objects, newUnder)) return true;
-  } catch {
-    // Gone since: nothing to follow.
+  if (linkedStorage.has(dir)) return 'linked';
+  for (const part of ['objects', 'refs']) {
+    try {
+      if (lstatSync(join(root, dir, part)).isSymbolicLink()) return 'linked';
+    } catch {
+      // No such entry.
+    }
   }
-  return links.some((l) => leadsToChange(root, join(root, l), newUnder));
+  return newUnder.has(dir) ? 'changed' : null;
 }
 
 /** How an uninitialised submodule folder that holds files is named in `gitData`. */
@@ -485,7 +477,8 @@ function inUninitialisedSubmodules(
  * it does not descend into), populated submodules and committed repositories (from the index),
  * a `.git` file, folder or link in any folder that holds a tracked, untracked or ignored file
  * (git looks past those, and past a `.git` it does not accept), git directories holding
- * anything untracked or ignored (a `--separate-git-dir`, a bare repository: see `isGitDir`), files
+ * anything not committed, or whose storage is reached through a link (a `--separate-git-dir`, a
+ * bare repository: see `gitDirKind`), files
  * in the folder of an uninitialised submodule
  * (git lists nothing under a gitlink), and a non-empty `modules` folder in the worktree's own
  * git directory (the git directories of its submodules, initialised or not). Only the outermost
@@ -554,23 +547,30 @@ export async function worktreeScan(
     return false;
   });
   for (const dir of tracked) listedIn.add(dir);
-  // The tracked links inside each folder holding a `HEAD`.
-  const linksIn = new Map<string, string[]>();
+  // Folders holding a `HEAD` with a tracked link under their `objects/` or `refs/`: one pass
+  // over each link's own path.
+  const linkedStorage = new Set<string>();
   for (const link of trackedLinks) {
-    for (let i = link.lastIndexOf('/'); i > 0; i = link.lastIndexOf('/', i - 1)) {
-      const dir = link.slice(0, i);
-      if (heads.has(dir)) linksIn.set(dir, [...(linksIn.get(dir) ?? []), link]);
+    const parts = link.split('/');
+    for (let i = 1; i < parts.length - 1; i++) {
+      if (parts[i] !== 'objects' && parts[i] !== 'refs') continue;
+      const dir = parts.slice(0, i).join('/');
+      if (heads.has(dir)) linkedStorage.add(dir);
     }
   }
-  // A git directory (a `--separate-git-dir`, a bare clone) with something not in a commit.
+  // A git directory (a `--separate-git-dir`, a bare clone) with something not in a commit, or
+  // whose storage cannot be checked.
+  const linked = new Set<string>();
   for (const dir of heads) {
-    if (isGitDir(root, dir, newUnder, linksIn.get(dir) ?? [])) found.add(dir);
+    const kind = gitDirKind(root, dir, newUnder, linkedStorage);
+    if (kind) found.add(dir);
+    if (kind === 'linked') linked.add(dir);
   }
   // One `lstat` per folder named: a `.git` there, whatever git makes of it.
   for (const dir of listedIn) if (existsOrLink(join(root, dir, '.git'))) found.add(dir);
   for (const path of gitlinks) if (existsOrLink(join(root, path, '.git'))) found.add(path);
   found.delete('');
-  const gitData = outermostPaths(found);
+  const gitData = outermostPaths(found).map((p) => (linked.has(p) ? linkedGitDirLabel(p) : p));
   for (const path of inUninitialisedSubmodules(root, gitlinks).keys()) {
     gitData.push(uninitialisedSubmoduleLabel(path));
   }

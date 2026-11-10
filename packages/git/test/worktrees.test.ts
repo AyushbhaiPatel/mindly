@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -20,6 +21,7 @@ import {
   flaggedChanges,
   ignoredDeniedFiles,
   gitDataPaths,
+  linkedGitDirLabel,
   worktreeScan,
   listFiles,
   listWorktrees,
@@ -572,8 +574,8 @@ describe('worktrees', () => {
     commitAll(root, 'skeleton');
     const path = join(tempDir(), 'part');
     await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
-    // As committed: nothing to lose.
-    expect((await worktreeScan(path)).gitData).toEqual([]);
+    // Its packs are reached through a link: it counts as committed already, nothing followed.
+    expect((await worktreeScan(path)).gitData).toEqual([linkedGitDirLabel('fx/remote.git')]);
     const clone = join(tempDir('cl-'), 'c');
     git(tempDir(), 'clone', '-q', '--no-local', join(path, 'fx/remote.git'), clone);
     write(clone, 'more.ts', 'more\n');
@@ -584,8 +586,82 @@ describe('worktrees', () => {
     git(path, 'init', '-q', '--bare', '-b', 'main', staged);
     pushOnlyCopy(staged);
     git(path, 'add', '-A', 'fixtures');
-    expect((await worktreeScan(path)).gitData).toEqual(['fixtures/remote.git', 'fx/remote.git']);
+    expect((await worktreeScan(path)).gitData).toEqual([
+      'fixtures/remote.git',
+      linkedGitDirLabel('fx/remote.git'),
+    ]);
   });
+
+  it('counts a git directory whose objects or refs go through a link, following none', async () => {
+    const seed = makeRepo({ 'seed.ts': 'seed\n' });
+    git(seed, 'repack', '-a', '-d', '-q');
+    /** A tracked bare repository at `rel` whose ref points at the seed's commit. */
+    const trackedBare = (root: string, rel: string): string => {
+      const b = join(root, rel);
+      git(root, 'init', '-q', '--bare', '-b', 'main', b);
+      for (const f of readdirSync(join(seed, '.git/objects/pack'))) {
+        copyFileSync(join(seed, '.git/objects/pack', f), join(b, 'objects/pack', f));
+      }
+      write(b, 'refs/heads/main', git(seed, 'rev-parse', 'HEAD'));
+      write(b, 'objects/info/.keep', '');
+      return b;
+    };
+    const root = makeRepo({ 'README.md': 'x\n', '.gitignore': 'packs/\nbuild/\n' });
+    // objects/pack a link to the top of the project.
+    const a = trackedBare(root, 'a/remote.git');
+    for (const f of readdirSync(join(a, 'objects/pack'))) {
+      renameSync(join(a, 'objects/pack', f), join(root, f));
+    }
+    rmSync(join(a, 'objects/pack'), { recursive: true });
+    symlinkSync('../../..', join(a, 'objects/pack'));
+    // objects a link to a store whose pack is a further link to an ignored folder.
+    const b = trackedBare(root, 'b/remote.git');
+    renameSync(join(b, 'objects'), join(root, 'store'));
+    symlinkSync('../../store', join(b, 'objects'));
+    renameSync(join(root, 'store/pack'), join(root, 'packs'));
+    symlinkSync('../packs', join(root, 'store/pack'));
+    // Links elsewhere in a git directory, to an ignored build folder and a tracked script.
+    const c = join(root, 'c/remote.git');
+    git(root, 'init', '-q', '--bare', '-b', 'main', c);
+    write(c, 'objects/info/.keep', '');
+    symlinkSync('../../../build', join(c, 'info/site'));
+    symlinkSync('../../../tools/hook.sh', join(c, 'hooks/post-update'));
+    write(root, 'tools/hook.sh', '#!/bin/sh\n');
+    git(root, 'add', '-A');
+    git(root, 'add', '-f', 'packs');
+    commitAll(root, 'skeleton');
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    // Committed as they are: the linked ones count already; the other one does not, whatever
+    // its links lead to (a build, a file with others changing beside it).
+    write(path, 'build/app.js', 'built\n');
+    write(path, 'tools/hook.log', 'ran\n');
+    expect((await worktreeScan(path)).gitData).toEqual([
+      linkedGitDirLabel('a/remote.git'),
+      linkedGitDirLabel('b/remote.git'),
+    ]);
+  });
+
+  it('looks at many tracked links in git directories in linear time', async () => {
+    const root = makeRepo({ 'README.md': 'x\n' });
+    const b = join(root, 'fx/remote.git');
+    git(root, 'init', '-q', '--bare', '-b', 'main', b);
+    write(b, 'objects/info/.keep', '');
+    mkdirSync(join(b, 'l'));
+    for (let i = 0; i < 80_000; i++) symlinkSync('../../../README.md', join(b, 'l', `x${i}`));
+    commitAll(root, 'links');
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    try {
+      const t = Date.now();
+      expect((await worktreeScan(path)).gitData).toEqual([]);
+      // Copying the link list per link took 30 s here.
+      expect(Date.now() - t).toBeLessThan(5_000);
+    } finally {
+      rmSync(path, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 300_000);
 
   it('takes any HEAD beside an untracked objects for a git directory, as git would', async () => {
     const origin = makeRepo({ 'a.ts': 'a\n' });
@@ -613,7 +689,7 @@ describe('worktrees', () => {
     }
     expect((await worktreeScan(path)).gitData).toEqual([
       '.repos/link.git',
-      '.repos/linked.git',
+      linkedGitDirLabel('.repos/linked.git'),
       '.repos/long.git',
       '.repos/nospace.git',
       'tmp/y',

@@ -348,6 +348,10 @@ describe('split abort never deletes git data in a worktree, short of a discard',
   const HELD = (paths: string): string =>
     `it holds git data that abort never deletes: ${paths}. Move it out of the worktree (or delete it yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything with mindly split abort --yes --discard`;
 
+  /** How a git directory whose storage is reached through a link is named. */
+  const LINKED = (path: string): string =>
+    `${path}, whose git storage is reached through a link and cannot be checked`;
+
   /** `split abort --yes --json`: the page part must be kept, held for `paths`. */
   async function keptFor(sb: Sandbox, paths: string, args: string[] = []): Promise<Aborted> {
     const r = await cli(sb, ['split', 'abort', '--yes', '--json', ...args]);
@@ -577,7 +581,7 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     const bare = join(partDir(sb, 'page'), 'remote.git');
     git(bare, 'init', '-q', '--bare', '-b', 'main');
     pushOnlyCopy(bare);
-    await keptFor(sb, 'remote.git');
+    await keptFor(sb, LINKED('remote.git'));
     expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
   });
 
@@ -662,14 +666,14 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     for (const f of added) copyFileSync(f, join(store, basename(f)));
     expect(added.length).toBeGreaterThan(0);
     const r = await cli(sb, ['split', 'abort', '--json'], { answers: ['y'] });
-    expect(jsonOf<Aborted>(r).keptBecause[page]).toBe(HELD('fx/remote.git'));
+    expect(jsonOf<Aborted>(r).keptBecause[page]).toBe(HELD(LINKED('fx/remote.git')));
     expect(r.code).toBe(1);
     for (const f of added) expect(existsSync(join(store, basename(f)))).toBe(true);
     // Its ref moved too: still kept, and the commit is there.
     const tip = git(work, 'rev-parse', 'HEAD');
     writeFileSync(join(page, 'fx/remote.git/refs/heads/main'), tip);
     const again = await cli(sb, ['split', 'abort', '--yes', '--json']);
-    expect(jsonOf<Aborted>(again).keptBecause[page]).toBe(HELD('fx/remote.git'));
+    expect(jsonOf<Aborted>(again).keptBecause[page]).toBe(HELD(LINKED('fx/remote.git')));
     expect(readFileSync(join(page, 'fx/remote.git/refs/heads/main'), 'utf8')).toBe(tip);
   });
 
