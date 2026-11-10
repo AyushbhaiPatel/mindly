@@ -211,6 +211,48 @@ export class SessionRepo {
     this.db.prepare('UPDATE sessions SET label = ? WHERE id = ?').run(label, id);
   }
 
+  /**
+   * Hands everything one session still has going to another session of the same agent: its
+   * unfinished tasks, its active intents and the messages addressed to it that are not
+   * acknowledged yet. Used when the two turn out to be one agent (an MCP server that started on
+   * a session of its own and then found the session its client's hooks made). Call it inside a
+   * transaction. Returns how many rows moved.
+   */
+  moveWork(fromId: string, toId: string): number {
+    if (fromId === toId) return 0;
+    const now = this.clock.now();
+    let moved = 0;
+    moved += Number(
+      this.db
+        .prepare(
+          `UPDATE tasks SET owner_session_id = ?, updated_at = ?
+             WHERE owner_session_id = ? AND status IN ('open', 'in_progress', 'blocked')`,
+        )
+        .run(toId, now, fromId).changes,
+    );
+    moved += Number(
+      this.db
+        .prepare(
+          `UPDATE intents SET session_id = ?, updated_at = ? WHERE session_id = ? AND status = 'active'`,
+        )
+        .run(toId, now, fromId).changes,
+    );
+    moved += Number(
+      this.db
+        .prepare(
+          `UPDATE OR IGNORE deliveries SET target_session_id = ?
+             WHERE target_session_id = ? AND status IN ('pending', 'delivered')`,
+        )
+        .run(toId, fromId).changes,
+    );
+    const from = this.find(fromId);
+    const to = this.find(toId);
+    if (from?.currentTaskId && to && !to.currentTaskId) {
+      this.setCurrentTask(toId, from.currentTaskId);
+    }
+    return moved;
+  }
+
   /** Marks sessions not seen for `staleMs` as ended. Returns affected ids. */
   endStale(projectId: string, staleMs: number): string[] {
     const cutoff = this.clock.now() - staleMs;
