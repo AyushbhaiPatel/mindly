@@ -42,6 +42,13 @@ const HOOK =
 /** A home directory whose settings run the hook above. */
 const FAKE_HOME = `${HOOK} && mkdir -p fakehome && printf '[core]\\n\\thooksPath = hk\\n' > fakehome/.gitconfig`;
 const COMMIT = 'git commit -q --allow-empty -m x';
+/** bash before 4.3 (macOS ships 3.2) has no namerefs, so those commands cannot run here. */
+const BASH_MAJOR = Number(
+  execFileSync('bash', ['-c', 'echo "${BASH_VERSINFO[0]}${BASH_VERSINFO[1]}"'], {
+    encoding: 'utf8',
+  }).trim(),
+);
+const NAMEREFS = BASH_MAJOR >= 43;
 
 const cases: {
   name: string;
@@ -50,6 +57,8 @@ const cases: {
   command: string;
   /** What the hook may say: never `allow`. */
   want: Verdict[];
+  /** Uses bash namerefs: run for real only where bash has them; the hook is asked either way. */
+  namerefs?: boolean;
 }[] = [
   // Output written to a file it is given.
   {
@@ -405,12 +414,14 @@ const cases: {
     prep: FAKE_HOME,
     command: `declare -n h=HOME; h=fakehome; ${COMMIT}`,
     want: ['warn', 'deny'],
+    namerefs: true,
   },
   {
     name: 'typeset -n, then a lower-case assignment',
     prep: FAKE_HOME,
     command: `typeset -n h=HOME; h=fakehome; ${COMMIT}`,
     want: ['warn', 'deny'],
+    namerefs: true,
   },
 ];
 
@@ -474,10 +485,12 @@ describe('git commands that write a covered file through an option or a setting'
       const g = setUp(c.scopes ?? PEM, c.prep);
       try {
         const done = runInCopy(g.dir, c.command, covered);
-        expect(
-          done.written.length,
-          `\`${c.command}\` writes a covered file; ${done.output}`,
-        ).toBeGreaterThan(0);
+        if (!c.namerefs || NAMEREFS) {
+          expect(
+            done.written.length,
+            `\`${c.command}\` writes a covered file; ${done.output}`,
+          ).toBeGreaterThan(0);
+        }
         const r = await g.shell(c.command);
         expect(
           c.want,
