@@ -28,8 +28,15 @@ interface MatchContext {
   text: string;
   start: number;
   end: number;
-  /** Command-line lookups left for this call; see `programAt`. */
-  budget: { scans: number };
+  /** The line last looked at by `httpClientBefore`, kept so each line is read once. */
+  line: LineMemo;
+}
+
+interface LineMemo {
+  start: number;
+  end: number;
+  /** Where the first HTTP client is named on the line, or -1. */
+  client: number;
 }
 
 /** Type names that follow `password:` in code (TypeScript, Python, Go, …), never secrets. */
@@ -85,43 +92,55 @@ const SECRET_WORDS =
 const SECRET_NAME = `[A-Za-z0-9_.-]{0,60}(?:${SECRET_WORDS})[A-Za-z0-9_.-]{0,60}`;
 
 /**
- * Last words of a name that only ever name display text or a kind, never the secret itself
- * (`passwordPlaceholder`, `token_type`, `passwordError`). Kept short on purpose: words such as
- * `text`, `input`, `message` or `note` also name fields that hold the secret.
+ * Last words of a name that only ever name display text, never the secret itself
+ * (`passwordPlaceholder`, `passwordError`). Kept short on purpose: words such as `text`, `input`,
+ * `message`, `prompt` or `type` also name fields and variables that hold the secret.
  */
 const DISPLAY_WORDS = new Set(
-  'placeholder label hint help tooltip caption heading title error description prompt type'.split(
-    ' ',
-  ),
+  'placeholder label hint help tooltip caption heading error'.split(' '),
 );
 
-/** True when the name in an assignment prefix (`passwordLabel: '`) ends in a display word. */
-function isDisplayName(prefix: string): boolean {
+/** The last word of the name in an assignment prefix: `passwordLabel: '` -> `label`. */
+function lastNameWord(prefix: string): string {
   const name = /([A-Za-z0-9_.-]{1,200})["']?\s{0,5}[:=]\s{0,5}["']?$/.exec(prefix)?.[1] ?? '';
   const words = name
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .split(/[\s_.-]+/)
     .filter((w) => w !== '');
-  return DISPLAY_WORDS.has((words[words.length - 1] ?? '').toLowerCase());
+  return (words[words.length - 1] ?? '').toLowerCase();
 }
 
-/** An ordinary word: letters only, capitals only at the start (or throughout), no longer than 14. */
-const PLAIN_WORD = /^[("]?(?:[A-Z]?[a-z]{1,13}(?:['-][a-z]{1,10})?|[A-Z]{1,6})[)"]?[.,:;!?]{0,3}$/;
+/**
+ * An ordinary word of a sentence: letters of any script with an inner hyphen or apostrophe, at
+ * most 24 characters and no capital after a lower-case letter; or a number of up to four digits.
+ * Brackets, quotes and sentence punctuation around it do not count. A token that mixes letters
+ * and digits is never plain.
+ */
+function isPlainWord(word: string): boolean {
+  const core = word.replace(/^[("'“‘«]+/, '').replace(/[)"'”’».,:;!?…]+$/, '');
+  if (core === '') return word.length <= 3;
+  if (/^\d{1,4}$/.test(core)) return true;
+  return core.length <= 24 && /^\p{L}+(?:['’-]\p{L}+)*$/u.test(core) && !/\p{Ll}\p{Lu}/u.test(core);
+}
 
-/** True for two or more ordinary words: a sentence or a label, not a token or a passphrase. */
+/** True for two or more ordinary words: a sentence or a label, not a token. */
 function isPlainWords(value: string): boolean {
   const words = value.trim().split(/\s+/);
-  return words.length >= 2 && words.length <= 40 && words.every((w) => PLAIN_WORD.test(w));
+  return words.length >= 2 && words.length <= 40 && words.every(isPlainWord);
 }
 
 /**
  * A quoted value is display text, not a secret, only when both hold: the name says so
- * (`passwordPlaceholder`, `token_type`) and the value reads as plain words (`"Enter your
- * password"`). Anything with a digit, a long or mixed-case word or a single word is still
- * redacted, whatever the name ends in.
+ * (`passwordPlaceholder`, `tokenError`) and the value reads as plain words (`"Enter your
+ * password"`). A single word, a token mixing letters and digits or a long or mixed-case word is
+ * still redacted, whatever the name ends in. A `..._type` name is display text only for an
+ * authorization scheme followed by plain words (`token_type: "Bearer access"`).
  */
 function isDisplayText(prefix: string, value: string): boolean {
-  return isDisplayName(prefix) && isPlainWords(value);
+  const last = lastNameWord(prefix);
+  if (last === 'type')
+    return /^\s*(?:Bearer|Basic|Digest|MAC)\s/i.test(value) && isPlainWords(value);
+  return DISPLAY_WORDS.has(last) && isPlainWords(value);
 }
 
 /**
@@ -130,142 +149,59 @@ function isDisplayText(prefix: string, value: string): boolean {
  */
 function startsDisplayText(prefix: string, value: string, at: MatchContext): boolean {
   const quote = prefix.slice(-1);
-  if ((quote !== '"' && quote !== "'") || !isDisplayName(prefix)) return false;
+  if (quote !== '"' && quote !== "'") return false;
+  const last = lastNameWord(prefix);
+  if (last !== 'type' && !DISPLAY_WORDS.has(last)) return false;
   const rest = at.text.slice(at.end, at.end + 400);
   const close = rest.search(quote === '"' ? /["\n]/ : /['\n]/);
-  return close !== -1 && rest[close] === quote && isPlainWords(value + rest.slice(0, close));
+  return (
+    close !== -1 && rest[close] === quote && isDisplayText(prefix, value + rest.slice(0, close))
+  );
 }
 
 /**
- * Programs whose `-u` / `--user` takes a user (or `user:group`, or a git remote and refspec), not
- * credentials. Rewriting those arguments would leave a stored command that cannot be run again.
+ * An HTTP client named as a word, with or without a directory or `.exe`: `curl`, `/usr/bin/curl`,
+ * `C:\tools\CURL.EXE`. For these, `-u name:value` means credentials.
  */
-const USER_FLAG_PROGRAMS = new Set(
-  (
-    'docker podman nerdctl kubectl oc crictl buildah chown install rsync tar id systemd-run git ' +
-    'docker-compose'
-  ).split(' '),
-);
+const HTTP_CLIENT =
+  /(?:^|[\s"'`(=;|&/\\])(?:curl|wget|curlie|aria2c|ab|lftp)(?:\.exe)?(?=$|[\s"'`);|&])/i;
 
-/** Programs that run another command as a user: `sudo -u postgres psql`. */
-const RUN_AS_PROGRAMS = new Set(['sudo', 'su', 'runuser', 'doas']);
-
-/** Programs where `-uname:password` (no space) is credentials. */
-const HTTP_PROGRAMS = new Set(['curl', 'wget', 'curlie', 'aria2c', 'ab', 'lftp']);
-
-/** How far back a command line is read to find its program. */
-const COMMAND_SCAN_CHARS = 2000;
-
-/** How many leading words of a command line are looked at to find its program. */
-const COMMAND_WORDS = 16;
+/** True when the newline at `i` is escaped with a backslash, so the line goes on after it. */
+function isContinuation(text: string, i: number): boolean {
+  const before = text[i - 1] === '\r' ? i - 2 : i - 1;
+  return text[before] === '\\';
+}
 
 /**
- * The words of the command line that ends at `end`, quotes removed. A command line starts after
- * an unquoted `;`, `|`, `&`, `(` or newline; quotes and a backslash before a newline do not end
- * it, so a URL with `&` in it or a continued line stays part of the same command.
+ * True when an HTTP client is named earlier on the line `pos` is on. A line is a physical line,
+ * joined with the next across a backslash before the newline. Nothing else is parsed: the client
+ * may sit inside `sh -c "..."`, after `&&` or in a sentence, and any other program's `-u` (a
+ * user, a group, a URL, a unit) is never touched.
  */
-function commandWords(text: string, end: number): string[] {
-  // Word boundaries are collected as offsets and only turned into strings at the end, so a text
-  // with many matches does not build a string per character.
-  let bounds: number[] = [];
-  let wordStart = -1;
-  let quote = 0;
-  const close = (i: number): void => {
-    if (wordStart !== -1) bounds.push(wordStart, i);
-    wordStart = -1;
-  };
-  for (let i = Math.max(0, end - COMMAND_SCAN_CHARS); i < end; i++) {
-    const ch = text.charCodeAt(i);
-    if (quote !== 0) {
-      if (ch === quote) quote = 0;
-    } else if (ch === 92 /* \ */) {
-      const next = text.charCodeAt(i + 1);
-      if (next === 10 || (next === 13 && text.charCodeAt(i + 2) === 10)) {
-        close(i);
-        i += next === 10 ? 1 : 2;
-      } else {
-        if (wordStart === -1) wordStart = i;
-        i++;
-      }
-    } else if (ch === 34 /* " */ || ch === 39 /* ' */) {
-      quote = ch;
-      if (wordStart === -1) wordStart = i;
-    } else if (ch === 59 || ch === 124 || ch === 38 || ch === 40 || ch === 10) {
-      // ; | & ( and newline start a new command line.
-      bounds = [];
-      wordStart = -1;
-    } else if (ch === 32 || ch === 9 || ch === 13) {
-      close(i);
-    } else if (wordStart === -1) {
-      wordStart = i;
-    }
+function httpClientBefore(at: MatchContext, pos: number): boolean {
+  const { text, line } = at;
+  if (pos < line.start || pos >= line.end) {
+    let start = text.lastIndexOf('\n', pos - 1);
+    while (start > 0 && isContinuation(text, start)) start = text.lastIndexOf('\n', start - 1);
+    let end = text.indexOf('\n', pos);
+    while (end !== -1 && isContinuation(text, end)) end = text.indexOf('\n', end + 1);
+    line.start = start + 1;
+    line.end = end === -1 ? text.length : end;
+    HTTP_CLIENT.lastIndex = 0;
+    const found = HTTP_CLIENT.exec(text.slice(line.start, line.end));
+    line.client = found === null ? -1 : line.start + found.index;
   }
-  close(end);
-  // The program is among the first words; the rest of a long line is not needed.
-  const words: string[] = [];
-  for (let k = 0; k < bounds.length && k < 2 * COMMAND_WORDS; k += 2) {
-    words.push(text.slice(bounds[k], bounds[k + 1]).replace(/["'\\]/g, ''));
-  }
-  return words;
+  return line.client !== -1 && line.client < pos;
 }
 
-/** `/usr/bin/Docker.exe` -> `docker`; an argument that is not a bare program name -> ''. */
-function programName(word: string): string {
-  const m = /^(?:[./~][^\s:]{0,200}\/)?([A-Za-z][A-Za-z0-9._-]{0,40}?)(?:\.exe)?$/i.exec(word);
-  return (m?.[1] ?? '').toLowerCase();
+/** Skip for the `-u name:value` rules: not on an HTTP client's line, or not a literal secret. */
+function isNotHttpCredentials(groups: readonly string[], at: MatchContext): boolean {
+  const value = groups[3] ?? '';
+  if (value.startsWith('$') || value.startsWith('//')) return true;
+  // The match may begin with the whitespace before the flag, which can be the line break.
+  const flag = at.start + (/^\s/.test(groups[1] ?? '') ? 1 : 0);
+  return !httpClientBefore(at, flag);
 }
-
-/**
- * The program a `-u` flag at the end of `words` belongs to: the run-as program itself when only
- * its own options stand between it and the flag (`sudo -n -u`), else the command it runs.
- */
-function programOfFlag(words: readonly string[]): string {
-  let i = 0;
-  while (i < words.length) {
-    const word = words[i] ?? '';
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
-      i++;
-      continue;
-    }
-    const name = programName(word);
-    if (!RUN_AS_PROGRAMS.has(name) && name !== 'env' && name !== 'time' && name !== 'nohup') {
-      return name;
-    }
-    // Skip the run-as program's own options, and the value of those that take one.
-    let j = i + 1;
-    while (j < words.length && (words[j] ?? '').startsWith('-')) {
-      j += /^(?:-[ugUhpCDRT]|--user|--group|--host|--prompt)$/.test(words[j] ?? '') ? 2 : 1;
-    }
-    if (j >= words.length) return name;
-    i = j;
-  }
-  return '';
-}
-
-/**
- * True when `-u name:value` is clearly a user and group (or a remote and refspec) and not
- * credentials. Credentials are the default: an unknown program gets its value redacted.
- */
-function isUserGroupArgument(name: string, value: string, at: MatchContext): boolean {
-  if (/^\d+$/.test(name) && /^\d+$/.test(value)) return true;
-  if (name === value && /^[a-z_][a-z0-9_-]{0,31}$/.test(name)) return true;
-  const program = programAt(at);
-  return USER_FLAG_PROGRAMS.has(program) || RUN_AS_PROGRAMS.has(program);
-}
-
-/**
- * The program of the command line a match sits on. Each lookup reads back up to
- * `COMMAND_SCAN_CHARS`, so one call only gets so many: past that the program is unknown (''),
- * which callers treat as "may be credentials". Hostile input cannot buy more work than that.
- */
-function programAt(at: MatchContext): string {
-  if (at.budget.scans <= 0) return '';
-  at.budget.scans--;
-  return programOfFlag(commandWords(at.text, at.start));
-}
-
-/** Command-line lookups one `redact()` call may do. */
-const MAX_COMMAND_SCANS = 2000;
 
 const RULES: Rule[] = [
   {
@@ -314,20 +250,18 @@ const RULES: Rule[] = [
   },
   {
     kind: 'cli_credentials',
-    // `-u user:password` / `--user user:password` / `--user=user:password` (curl, wget and other
-    // HTTP tools). Credentials unless it is clearly a user:group argument of docker, sudo, chown
-    // and the like, which must stay as written.
-    re: /((?:^|\s)(?:-u|--user)(?:\s{1,5}|=)["']?)([^\s:"'`]{1,200}):([^\s"'`]{3,200})/g,
+    // `curl -u user:password`, `--user user:password`, `--user=user:password`, `--proxy-user` and
+    // combined short flags ending in u (`-su`). Only on a line that names an HTTP client first.
+    re: /((?:^|\s)(?:-[A-Za-z]{0,8}u|--(?:proxy-)?user)(?:\s{1,5}|=)["']?)([^\s:"'`]{1,200}):([^\s"'`]{1,200})/g,
     replace: `$1$2:${REDACTED}`,
-    skip: (g, at) =>
-      (g[3] ?? '').startsWith('$') || isUserGroupArgument(g[2] ?? '', g[3] ?? '', at),
+    skip: isNotHttpCredentials,
   },
   {
     kind: 'cli_credentials',
-    // `curl -uuser:password`, with no space: only where the program is known to be an HTTP client.
-    re: /((?:^|\s)-u["']?)([^\s:"'`=-][^\s:"'`]{0,200}):([^\s"'`]{3,200})/g,
+    // `curl -uuser:password`, with no space after the flag.
+    re: /((?:^|\s)-u["']?)([^\s:"'`=-][^\s:"'`]{0,200}):([^\s"'`]{1,200})/g,
     replace: `$1$2:${REDACTED}`,
-    skip: (g, at) => (g[3] ?? '').startsWith('$') || !HTTP_PROGRAMS.has(programAt(at)),
+    skip: isNotHttpCredentials,
   },
   {
     kind: 'cli_credentials',
@@ -404,11 +338,11 @@ function compileExtra(source: string): RegExp | null {
 export function redact(input: string, options: RedactOptions = {}): RedactionResult {
   let text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
   let count = 0;
-  const budget = { scans: MAX_COMMAND_SCANS };
   const kinds = new Set<string>();
 
   const apply = (kind: string, re: RegExp, replace: string, skip?: Rule['skip']): void => {
     re.lastIndex = 0;
+    const line: LineMemo = { start: 0, end: 0, client: -1 };
     text = text.replace(re, (...args: unknown[]) => {
       const match = String(args[0]);
       const groups = args.map((a) => (typeof a === 'string' ? a : ''));
@@ -424,7 +358,7 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
       }
       const offset = args.find((a) => typeof a === 'number');
       const start = typeof offset === 'number' ? offset : 0;
-      if (skip?.(groups, { text, start, end: start + match.length, budget })) return match;
+      if (skip?.(groups, { text, start, end: start + match.length, line })) return match;
       count++;
       kinds.add(kind);
       return replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? ''));

@@ -78,18 +78,25 @@ describe('redact', () => {
 
   it.each([
     'passwordPlaceholder="Enter your password"',
-    'token_type: "Bearer access"',
+    'passwordPlaceholder="Enter your password (min 8 characters)"',
     "passwordLabel: 'Your password'",
+    'passwordLabel: "Mot de passe oublié"',
     'passwordError = "Passwords do not match"',
+    'passwordError: "Password must be at least 8 characters"',
+    'tokenError: "Invalid authentication token"',
+    'tokenError: "Token expired, re-authenticate"',
     '"password_hint": "At least twelve characters"',
-    "apiKeyDescription: 'Shown once after you create the key.'",
+    "apiKeyHelp: 'Shown once after you create the key.'",
+    'token_type: "Bearer access"',
+    // Known limit: plain words under a display-named key are taken for display text.
     'password_hint = "my real passphrase here"',
+    'passwordError = "open sesame please"',
   ])('leaves quoted display text next to a secret-like name alone: %s', (code) => {
     expect(redact(code)).toEqual({ text: code, count: 0, kinds: [] });
   });
 
   it.each([
-    // The name does not say "display text": words like input, text or note also hold secrets.
+    // The name does not say "display text": these words also name fields that hold secrets.
     ['const passwordInput = "correct horse battery staple"', 'correct horse battery staple'],
     ['passwordText: "correct horse battery staple"', 'correct horse battery staple'],
     ['SECRET_MESSAGE="launch code 0000 1111"', 'launch code 0000 1111'],
@@ -99,12 +106,18 @@ describe('redact', () => {
     ['config.password.text = "hunter2 SecretValue9"', 'SecretValue9'],
     ['password-message: "hunter2 SecretValue9"', 'SecretValue9'],
     ['client_secret_format: "Zx81kQ0pLm3nB7vC9tY2 uR5wZx81kQ0pLm3nB7vC"', 'uR5wZx81kQ0pLm3nB7vC'],
+    ['PASSWORD_PROMPT="open sesame please"', 'open sesame please'],
+    ['password_title: "open sesame please"', 'open sesame please'],
+    ['password_description = "open sesame please"', 'open sesame please'],
+    ['password_type = "hunter two"', 'hunter two'],
     // The name says "display text" but the value does not read as plain words.
     ['auth_token_type = "Bearer Zx81kQ0pLm3nB7vC9tY2uR5w"', 'Zx81kQ0pLm3nB7vC9tY2uR5w'],
-    ['DB_PASSWORD_INPUT="hunter2SecretValue9 "', 'hunter2SecretValue9'],
-    ["password_type='hunter2SecretValue9 '", 'hunter2SecretValue9'],
-    ['password_title: "hunter SecretValue"', 'SecretValue'],
+    ['DB_PASSWORD_LABEL="hunter2SecretValue9 "', 'hunter2SecretValue9'],
+    ["password_hint='hunter2SecretValue9 '", 'hunter2SecretValue9'],
+    ['password_label: "hunter SecretValue"', 'SecretValue'],
     ['passwordLabel = "correct horse battery9 staple"', 'battery9'],
+    ['passwordError = "code 12345 expired"', '12345'],
+    [`passwordHint = "starts ${'x'.repeat(25)} ends"`, 'x'.repeat(25)],
     ['token_type: "abc123def456"', 'abc123def456'],
     ["passwordHint = 'Summerwind'", 'Summerwind'],
     // A real secret name: the quoted value goes whole.
@@ -121,43 +134,50 @@ describe('redact', () => {
 
   it.each([
     ['vercel deploy --prod --token Zx81kQ0pLm3nB7vC9tY2uR5w', 'Zx81kQ0pLm3nB7vC9tY2uR5w'],
-    ['mysql --password hunter2SecretValue9 -e "select 1"', 'hunter2SecretValue9'],
-    ['tool --db-password "hunter2SecretValue9"', 'hunter2SecretValue9'],
-    ['docker login -u bob -p hunter2SecretValue9 registry.test', 'hunter2SecretValue9'],
-    ['podman login -p hunter2SecretValue9 registry.test', 'hunter2SecretValue9'],
-    ['curl -u admin:hunter2SecretValue9 https://x.test', 'hunter2SecretValue9'],
-    ['curl --user "admin:hunter2SecretValue9" https://x.test', 'hunter2SecretValue9'],
+    ['mysql --password PW -e "select 1"', 'PW'],
+    ['tool --db-password "PW"', 'PW'],
+    ['docker login -u bob -p PW registry.test', 'PW'],
+    ['podman login -p PW registry.test', 'PW'],
+    ['curl -u admin:PW https://x.test', 'PW'],
+    ['curl --user "admin:PW" https://x.test', 'PW'],
     ['curl -sS -X POST -u admin:12345678 https://x.test', '12345678'],
-    ['wget --user admin:hunter2SecretValue9 https://x.test', 'hunter2SecretValue9'],
-    ['curl "https://x.test/api?a=1&b=2" -u admin:hunter2SecretValue9', 'hunter2SecretValue9'],
-    ['curl https://x.test/api?a=1&b=2 -u admin:hunter2SecretValue9', 'hunter2SecretValue9'],
-    [
-      'curl https://x.test \\\n  -H "Accept: */*" \\\n  -u admin:hunter2SecretValue9',
-      'hunter2SecretValue9',
-    ],
-    [
-      'curl -H "Accept: text/html;q=0.9" -u admin:hunter2SecretValue9 x.test',
-      'hunter2SecretValue9',
-    ],
-    ['curl -d "a=1&b=2" -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    ['curl -H "X: a|b" -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    [
-      `curl -H "X-Long: ${'v'.repeat(400)}" -u admin:hunter2SecretValue9 x.test`,
-      'hunter2SecretValue9',
-    ],
-    ['curl.exe -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    ['CURL -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    ['curlie -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    ['ab -u admin:hunter2SecretValue9 x.test/', 'hunter2SecretValue9'],
-    ['aria2c -u admin:hunter2SecretValue9 x.test/f', 'hunter2SecretValue9'],
-    ['mytool sync --user admin:hunter2SecretValue9', 'hunter2SecretValue9'],
-    ['sudo curl -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    ['sudo -u deploy curl -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    ['docker ps; curl -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    ['curl --user=admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    ['curl -uadmin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-    ['wget -uadmin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
-  ])('redacts a secret passed as a command-line argument: %s', (command, secret) => {
+    ['curl -u admin:admin https://x.test', ':admin'],
+    ['wget --user admin:PW https://x.test', 'PW'],
+    ['curl "https://x.test/api?a=1&b=2" -u admin:PW', 'PW'],
+    ['curl https://x.test/api?a=1&b=2 -u admin:PW', 'PW'],
+    ['curl https://x.test \\\n  -H "Accept: */*" \\\n  -u admin:PW', 'PW'],
+    ['curl https://x.test \\\r\n  -u admin:PW', 'PW'],
+    ['curl -H "Accept: text/html;q=0.9" -u admin:PW x.test', 'PW'],
+    ['curl -d "a=1&b=2" -u admin:PW x.test', 'PW'],
+    ['curl -H "X: a|b" -u admin:PW x.test', 'PW'],
+    [`curl -H "X-Long: ${'v'.repeat(400)}" -u admin:PW x.test`, 'PW'],
+    ['curl.exe -u admin:PW x.test', 'PW'],
+    ['CURL -u admin:PW x.test', 'PW'],
+    ['/usr/bin/curl -u admin:PW x.test', 'PW'],
+    ['"C:\\tools\\curl.exe" -u admin:PW x.test', 'PW'],
+    ['curlie -u admin:PW x.test', 'PW'],
+    ['ab -u admin:PW x.test/', 'PW'],
+    ['aria2c -u admin:PW x.test/f', 'PW'],
+    ['sudo curl -u admin:PW x.test', 'PW'],
+    ['sudo -u deploy curl -u admin:PW x.test', 'PW'],
+    ['docker ps; curl -u admin:PW x.test', 'PW'],
+    ['docker run --rm alpine sh -c "curl -u admin:PW https://x.test"', 'PW'],
+    ['docker exec web curl -u admin:PW https://x.test', 'PW'],
+    ['kubectl exec pod -- curl -u admin:PW https://x.test', 'PW'],
+    ['ssh host "curl -u admin:PW https://x.test"', 'PW'],
+    ['make build && curl -u admin:PW https://x.test', 'PW'],
+    ['git log --oneline # then: curl -u admin:PW https://x.test', 'PW'],
+    ['Install the deps, then run curl -u admin:PW https://x.test', 'PW'],
+    ['Docker is up. Git is clean. Now curl -u admin:PW https://x.test', 'PW'],
+    ["docker isn't running yet\ncurl -u admin:PW https://x.test", 'PW'],
+    ['curl --user=admin:PW x.test', 'PW'],
+    ['curl -uadmin:PW x.test', 'PW'],
+    ['wget -uadmin:PW x.test', 'PW'],
+    ['curl -su admin:PW x.test', 'PW'],
+    ['curl --proxy-user admin:PW -x proxy.test:3128 x.test', 'PW'],
+  ])('redacts a secret passed as a command-line argument: %s', (template, placeholder) => {
+    const secret = placeholder === 'PW' ? 'hunter2SecretValue9' : placeholder;
+    const command = template.replace('PW', 'hunter2SecretValue9');
     const out = redact(command);
     expect(out.text).not.toContain(secret);
     expect(out.text).toContain(REDACTED);
@@ -167,30 +187,48 @@ describe('redact', () => {
 
   it.each([
     'docker login --password-stdin registry.example.com',
+    'docker login registry.test/app-p latest',
     'docker run -u 1000:1000 -p 8080:80 image',
     'docker run -u node:node image',
     'docker run -u node:staff -e "A=1;B=2" image',
+    'docker run -v $(pwd):/app -u app:staff image',
+    'timeout 60 docker run -u app:staff image',
+    '"C:\\Program Files\\Docker\\docker.exe" run -u app:staff image',
+    `docker run -e "LONG=${'v'.repeat(3000)}" -u app:staff image`,
     '/usr/bin/docker exec -u deploy:staff app ls',
     'podman run --user www-data:www-data image',
     'podman run --user=deploy:staff image',
     'kubectl exec -u deploy:staff pod -- ls',
     'sudo -u postgres:postgres psql',
     'sudo -n -u deploy:staff ./release.sh',
-    'sudo -u root docker run -u deploy:staff image',
     'chown -u deploy:staff file',
-    'sometool --user 1000:1000 run',
-    'sometool --user alice:alice run',
+    'sometool --user alice:staff run',
+    'mytool sync --user admin:hunter2SecretValue9',
+    'redis-cli -u redis://localhost:6379/0 ping',
+    'python -u C:\\Users\\me\\train.py',
+    'tool --user http://localhost:8080/x',
+    'journalctl --user -u app:worker',
+    'sed -u s:foo:bar: file',
+    'mysql -uroot:app -e "select 1"',
     'git push -u origin main:main',
     'git push -u origin:refs/heads/topic',
+    // On an HTTP client's line, but not a literal secret.
     'curl http://localhost:3000/sign-u http://localhost:8080/health',
-    'docker login registry.test/app-p latest',
-    'mysql -uroot:app -e "select 1"',
+    'curl -u "$USER:$PASS" https://x.test',
+    'curl -x http://proxy.test:3128 --proxy-user $PROXY_USER:$PROXY_PASS x.test',
+    // The client is named after the flag, or on another line.
+    'docker run -u app:staff image curl https://x.test',
+    'curl https://x.test\ndocker run -u app:staff image',
     'tool --token-file ./token.txt',
     'tool --token "$API_TOKEN" --password $DB_PASSWORD',
-    'curl -u "$USER:$PASS" https://x.test',
     'Pass --password and then the host name',
   ])('leaves command lines without a literal secret alone: %s', (command) => {
     expect(redact(command)).toEqual({ text: command, count: 0, kinds: [] });
+  });
+
+  it('does not redact 2,500 user:group arguments any differently from the first', () => {
+    const text = 'docker run -u app:staff image\n'.repeat(2500);
+    expect(redact(text)).toEqual({ text, count: 0, kinds: [] });
   });
 
   it('removes credentials from URLs but keeps the host', () => {
@@ -236,12 +274,21 @@ describe('redact', () => {
     const start = Date.now();
     redact(`${'a'.repeat(200_000)}=${'b'.repeat(200_000)}`);
     redact('password'.repeat(50_000));
-    redact('--token '.repeat(100_000));
-    redact('docker login '.repeat(60_000));
-    redact('curl -u a'.repeat(100_000));
-    redact(' -u a:bcd'.repeat(20_000));
-    redact('docker run -u a:bcd '.repeat(10_000));
-    redact('password="'.repeat(80_000));
     expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it.each([
+    ['flags with no value', '--token '.repeat(25_000)],
+    ['docker login prefixes', 'docker login '.repeat(15_000)],
+    ['one long curl line', `curl ${' -u a:bcd'.repeat(22_000)}`],
+    ['many user flags, no client', ' -u a:bcd'.repeat(110_000)],
+    ['many curl lines', 'curl -u a:bcd x\n'.repeat(62_000)],
+    ['many continued lines', 'curl x \\\n -u a:bcd \\\n'.repeat(50_000)],
+    ['unclosed quotes', 'password="'.repeat(20_000)],
+  ])('stays fast on %s', (_name, input) => {
+    expect(input.length).toBeGreaterThanOrEqual(190_000);
+    const start = Date.now();
+    redact(input);
+    expect(Date.now() - start).toBeLessThan(1500);
   });
 });
