@@ -82,7 +82,7 @@ const QUALIFIER = '(?:(?:api|stream|http|request|provider|server|unexpected|fata
 // and test runners print. A client's own error report may carry any of them.
 const LABEL_WORDS: Record<NoticeSource, string> = {
   assistant: `${QUALIFIER}error|request failed|fatal`,
-  client: `${QUALIFIER}(?:error|failed|failure|fatal|warning|warn)`,
+  client: `${QUALIFIER}(?:error|failed|failure|fatal|warning|warn)|stream disconnected(?: before completion)?`,
 };
 // Words that start another clause: "..., and the new resetAt field says when", "which ...".
 const CLAUSE =
@@ -90,28 +90,32 @@ const CLAUSE =
 // The time in "Your limit will reset at 3pm (Europe/Berlin)": no other clause, no new sentence.
 const RESET_TIME = `(?:(?!${CLAUSE}|[.!?;]\\s)[^\\n]){0,60}`;
 
-// Every sentence of the tail of a notice tells the user how to get going again, in the terms a
-// notice uses: when the limit resets, when to try again, where to upgrade or buy more, whom to
-// ask. A sentence that only mentions a plan, the docs or a settings page ("the banner now
-// shows the plan name", "Visit the settings page to see the new badge") is about something else.
-const TAIL_MARK = new RegExp(
-  [
-    '\\btry again\\b',
-    '\\bretry (?:later|after|in|at)\\b',
-    '\\bresets? (?:at|in|on|after|when|every|(?:\\w+ )?\\d)',
-    '\\bwill reset\\b',
-    '\\bupgrade (?:to|now|your)\\b',
-    '(?:^|\\s)/upgrade\\b',
-    '\\b(?:purchase|buy|add|get) (?:more )?credits\\b',
-    '\\byour admin(?:istrator)?\\b',
-    '\\byour (?:current )?(?:plan|subscription|billing)\\b',
-    '\\bbilling details\\b',
-    '\\bget (?:\\w+ )?(?:pro|plus|max|ultra|team|business)\\b',
-    '\\bfor more information\\b',
-    '\\bhttps?://\\S*(?:usage|pricing|billing|rate-?limits|plans?|upgrade)',
-  ].join('|'),
-  'i',
-);
+// Every sentence of the tail of a notice *is* an instruction or a reset time: it opens with
+// one, after at most a short lead-in ("To continue now, upgrade to Max", "For more information
+// on this error, read the docs"). A sentence that only mentions one ("The dialog now has a Try
+// again button", "The counter resets every 24 hours", "See the README for more information") is
+// about something else.
+const TAIL_LEAD_IN =
+  '(?:(?:please|or|and|then|you can|to (?:continue|keep going|get more (?:access|usage))(?: now)?,|for (?:more )?(?:information|details)(?: on this error)?,)\\s*)*';
+const TAIL_OPENER = [
+  'try again\\b',
+  'retry (?:later|after|at)\\b',
+  'resets? (?:at|in|on|after|when|(?:\\w+ )?\\d)',
+  '(?:your )?(?:usage )?(?:limits?|quota) (?:will )?resets? (?:at|in|on|after|when)\\b',
+  'upgrade (?:to|now|your)\\b',
+  '/(?:upgrade|usage|login)\\b',
+  '/?extra-usage\\b',
+  '(?:visit|go to|open|head to:?) (?:https?://|\\S*(?:usage|billing|pricing|settings)/)',
+  '(?:purchase|buy|add|get) (?:more )?credits\\b',
+  'get (?:\\w+ )?(?:pro|plus|max|ultra|team|business)\\b',
+  '(?:send a request to|contact|ask) your admin(?:istrator)?\\b',
+  'check your (?:plan|billing|usage|quota|subscription)\\b',
+  'read the docs\\b',
+  'switch to \\S+ (?:for|to)\\b',
+  'set a spend(?:ing)? limit\\b',
+  'wait (?:until|for \\d)',
+];
+const TAIL_SENTENCE = new RegExp(`^${TAIL_LEAD_IN}(?:${TAIL_OPENER.join('|')})`, 'i');
 // Code in a sentence makes it a sentence about code: "Retry logic added in src/limit.ts".
 const CODE_REF =
   /`|\b[\w-]+\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|swift|php|cs|md|json|ya?ml|toml|sql|sh|css|html)\b/i;
@@ -131,7 +135,7 @@ function tailSentences(text: string): string[] {
 /** True when every sentence of `text` says how to get going again and none is about code. */
 function allTail(text: string): boolean {
   const sentences = tailSentences(text);
-  return sentences.length > 0 && sentences.every((t) => TAIL_MARK.test(t) && !CODE_REF.test(t));
+  return sentences.length > 0 && sentences.every((t) => TAIL_SENTENCE.test(t) && !CODE_REF.test(t));
 }
 
 /**
@@ -292,9 +296,9 @@ const LEAD_TAG = /^\[[^\]\s]{1,24}\]\s+/;
 // quotation, a code comment, a diff line, a test-runner result.
 const WRITTEN_ABOUT =
   /^(?:[-*+•‣◦]\s|\d{1,3}[.)]\s|\[[ xX]\]|#{1,6}\s|["'`“”‘’«»>]|\/\/|\/\*|<!--|--\s|@@|[✓✔√✅☑]|(?:PASS|FAIL|ok \d|not ok)\b)/;
-// "Rate limited, retrying in 30s", "429 Too Many Requests; retrying 1/5 in 205ms": the client
-// is still trying, which is the opposite of having stopped at a limit.
-const RETRYING = /\bretrying\b|\b(?:retry|attempt)\s+#?\d+\s*(?:\/|of)\s*\d+/i;
+// "Rate limited, retrying in 30s", "rate limit reached, retry in 30s", "429 Too Many Requests;
+// retrying 1/5 in 205ms": the client is still trying, the opposite of having stopped at a limit.
+const RETRYING = /\bretrying\b|\bretry in \d|\b(?:retry|attempt)\s+#?\d+\s*(?:\/|of)\s*\d+/i;
 // The line a client writes in place of the assistant's answer when the API call failed.
 const API_ERROR_LINE = /^[^\p{L}\p{N}[]*\[?API Error\b/u;
 
@@ -319,33 +323,49 @@ const ACCOUNT_SIGNATURES: readonly RateLimitSignature[] = Object.values(RATE_LIM
 // `RESOURCE_EXHAUSTED`, `"code": 429`). Such a report is the agent's limit, whatever pages it
 // links to.
 const OWN_ERROR =
-  /^\W*\[?(?:api error|stream error|unexpected status \d{3})\b|\brate_limit_error\b|"rate_limit_exceeded"|\bresource_exhausted\b|"code"\s*:\s*429\b/i;
+  /^\W*\[?(?:api error|stream error|stream disconnected|unexpected status \d{3})\b|\brate_limit_error\b|"rate_limit_exceeded"|\bresource_exhausted\b|"code"\s*:\s*429\b/i;
 // Any other report counts unless the limit is someone else's: one hit calling another host,
 // or a named API that is not the model provider's ("for the GitHub API").
+// A host is a dotted name ending in a top-level domain and not running on into a longer token,
+// so a model id such as "us.anthropic.claude-sonnet-4-5-v1:0" is not taken for one.
 const TARGET_HOST =
-  /\b(?:for|from|to|at|on|calling|contacting|requesting)\s+(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})\b/gi;
+  /\b(?:for|from|to|at|on|calling|contacting|requesting)\s+(?:https?:\/\/)?((?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|ai|co|app|cloud|so|sh|me|us|ms|gle|xyz|tech|site))(?![\w.:-])/gi;
 const PROVIDER_HOST =
-  /(?:^|\.)(?:anthropic\.com|claude\.(?:com|ai)|openai\.com|openai\.azure\.com|chatgpt\.com|googleapis\.com|google\.com|google\.dev|ai\.dev|cursor\.(?:com|sh))$/i;
-const NAMED_API = /\b(?:for|from|by|calling|on|of|to)\s+(?:the\s+)?([A-Za-z][\w.-]*)\s+API\b/g;
-const PROVIDER_NAMES = new Set([
+  /(?:^|\.)(?:anthropic\.com|claude\.(?:com|ai)|openai\.com|openai\.azure\.com|chatgpt\.com|googleapis\.com|google\.com|google\.dev|ai\.dev|goo\.gle|aka\.ms|cursor\.(?:com|sh))$/i;
+// "for the Brave Search API", "for the github API": up to four words naming an API.
+const NAMED_API =
+  /\b(?:for|from|by|calling|on|of|to)\s+(?:the\s+)?((?:[a-z0-9][\w.-]*\s+){1,4}?)api\b/gi;
+// The agent's own provider, by any of its names, and words that name no other service.
+const PROVIDER_API_NAMES = new Set([
   'anthropic',
   'claude',
+  'anthropic messages',
   'openai',
+  'azure openai',
+  'openai responses',
   'chatgpt',
   'codex',
   'gemini',
-  'google',
+  'google gemini',
+  'google ai',
+  'google generative ai',
+  'generative language',
   'vertex',
+  'vertex ai',
   'cursor',
   'model',
+  'this',
+  'that',
+  'your',
+  'our',
 ]);
 
 /** True when `line` reports the rate limit of a service other than the model provider. */
 function otherService(line: string): boolean {
   if (OWN_ERROR.test(line)) return false;
   for (const m of line.matchAll(NAMED_API)) {
-    const name = (m[1] ?? '').toLowerCase();
-    if (!PROVIDER_NAMES.has(name) && /^[A-Z]/.test(m[1] ?? '')) return true;
+    const name = (m[1] ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (name && !PROVIDER_API_NAMES.has(name)) return true;
   }
   for (const m of line.matchAll(TARGET_HOST)) {
     if (!PROVIDER_HOST.test(m[1] ?? '')) return true;

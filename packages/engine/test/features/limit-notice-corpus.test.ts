@@ -64,6 +64,11 @@ const ACCOUNT: [kind: string, text: string, id: string][] = [
   ['claude-code', '[12:03:11] Usage limit reached', 'claude.usage_limit_reached'],
   ['claude-code', '2026-01-01T12:00:00Z Usage limit reached.', 'claude.usage_limit_reached'],
   ['claude-code', '[2026-01-01 12:00:00] [error] Weekly limit reached', 'claude.limit_reached'],
+  [
+    'claude-code',
+    "You\u2019ve hit your limit \u00b7 resets 10pm (Asia/Tokyo)\n/extra-usage to finish what you're working on.",
+    'claude.limit_reached',
+  ],
   // Codex
   [
     'codex',
@@ -137,6 +142,15 @@ const ACCOUNT: [kind: string, text: string, id: string][] = [
   ],
 ];
 
+const CURSOR_SWITCH: [kind: string, text: string, id: string][] = [
+  [
+    'cursor',
+    "You've hit your usage limit. Switch to Auto for more usage or set a Spend Limit to continue with this model.",
+    'generic.usage_limit',
+  ],
+];
+ACCOUNT.push(...CURSOR_SWITCH);
+
 const CLIENT: [kind: string, text: string, id: string][] = [
   ['claude-code', 'API Error: 429 Too Many Requests', 'claude.http_429'],
   [
@@ -155,7 +169,7 @@ const CLIENT: [kind: string, text: string, id: string][] = [
     'claude.rate_limit_error',
   ],
   ['claude-code', 'API Error: 429 Too Many Requests (api.anthropic.com)', 'claude.http_429'],
-  ['codex', 'stream error: rate limit reached, retry in 30s', 'codex.rate_limit'],
+  ['codex', 'stream error: rate limit reached, try again in 30s', 'codex.rate_limit'],
   ['codex', '■ stream error: rate limit reached', 'codex.rate_limit'],
   ['codex', 'stream error: rate limit reached for gpt-5', 'codex.rate_limit'],
   ['codex', 'Rate limited. Please try again in 20s.', 'codex.rate_limit'],
@@ -175,6 +189,23 @@ const CLIENT: [kind: string, text: string, id: string][] = [
     'codex.http_429',
   ],
   ['codex', 'exceeded retry limit, last status: 429 Too Many Requests', 'codex.retry_limit'],
+  [
+    'codex',
+    'stream disconnected before completion: Rate limit reached for gpt-5 in organization org-abc on tokens per min (TPM). Please try again in 2s.',
+    'codex.rate_limit',
+  ],
+  // A Bedrock model id or a short link is not another service's host.
+  [
+    'claude-code',
+    'Error: rate limit exceeded for us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+    'generic.rate_limit',
+  ],
+  [
+    'gemini',
+    'Quota exceeded for quota metric on https://goo.gle/rate-limits',
+    'generic.quota_exceeded',
+  ],
+  ['codex', 'Rate limit exceeded. See https://aka.ms/oai/quotaincrease', 'codex.rate_limit'],
   ['gemini', 'Resource has been exhausted (e.g. check quota).', 'gemini.resource_exhausted'],
   ['gemini', '[API Error: got status: RESOURCE_EXHAUSTED]', 'gemini.resource_exhausted_status'],
   ['gemini', '✕ [API Error: got status: RESOURCE_EXHAUSTED]', 'gemini.resource_exhausted_status'],
@@ -204,6 +235,10 @@ const NOT_A_LIMIT_FROM_CLIENT = [
   'Error: rate limit exceeded for api.github.com',
   'rate limit exceeded for the GitHub API',
   'Error: rate limit exceeded for the GitHub API',
+  'Error: rate limit exceeded for the Brave Search API',
+  'Error: rate limit exceeded for the Google Maps API',
+  'Error: rate limit exceeded for the github API',
+  'stream error: rate limit reached, retry in 30s',
   'HTTP 429 Too Many Requests from registry.npmjs.org',
   'Too many requests to https://api.stripe.com/v1/charges',
   // The client is still trying.
@@ -274,6 +309,12 @@ const NOT_A_LIMIT_FROM_ASSISTANT = [
   'Usage limit reached. The `retry` helper now waits.',
   'Usage limit reached. Then I fixed the tests.',
   'Usage limit reached. Upgrade the plan table next.',
+  'Usage limit reached \u2014 the banner now shows your plan name.',
+  'Usage limit reached. The dialog now has a Try again button.',
+  'Usage limit reached. The counter resets every 24 hours.',
+  'Usage limit reached. The banner links to https://acme.dev/pricing.',
+  'Usage limit reached. See the README for more information.',
+  'Done.\n\nUsage limit reached. The counter resets every 24 hours.',
   'Limit reached. Check the plan output above before retrying.',
   // A notice line followed by prose under it.
   'Usage limit reached.\nI will pick this up after lunch.',
@@ -284,7 +325,10 @@ const NOT_A_LIMIT_FROM_ASSISTANT = [
   "The banner now reads:\nYou've hit your usage limit. Upgrade to Pro or try again later.",
   "The banner now reads:\n\nYou've hit your usage limit. Upgrade to Pro or try again later.",
   'The banner now reads:\nUsage limit reached. Try again at 5pm.',
-  'When the counter hits zero the page shows\nWeekly limit reached ∙ resets Mon 9am',
+  'When the counter hits zero the page shows\nWeekly limit reached \u2219 resets Mon 9am',
+  // A known miss: without a blank line or a finished sentence before it, a real notice cannot be
+  // told from the quotation above, so it is not read.
+  "All tests pass\nYou've hit your limit \u00b7 resets 10pm",
   // The tail of a notice on its own.
   '/upgrade to increase your usage limit.',
   'Try again at 5pm.',

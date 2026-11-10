@@ -229,7 +229,7 @@ describe('rate-limit failover', () => {
     );
     expect(detectRateLimit('claude-code', ['5-hour limit reached'])).toBe('claude.five_hour_limit');
     expect(
-      detectRateLimit('codex', ['stream error: rate limit reached, retry in 30s'], 'client'),
+      detectRateLimit('codex', ['stream error: rate limit reached, try again in 30s'], 'client'),
     ).toBe('codex.rate_limit');
     expect(detectRateLimit('cursor', ['HTTP 429 Too Many Requests'], 'client')).toBe(
       'generic.too_many_requests',
@@ -306,7 +306,7 @@ describe('rate-limit failover', () => {
   // What any rate-limited API says: a limit only when the client itself reports it.
   const API_NOTICES: [string, string, string][] = [
     ['claude-code', 'API Error: 429 Too Many Requests', 'claude.http_429'],
-    ['codex', 'stream error: rate limit reached, retry in 30s', 'codex.rate_limit'],
+    ['codex', 'stream error: rate limit reached, try again in 30s', 'codex.rate_limit'],
     ['codex', '■ stream error: rate limit reached', 'codex.rate_limit'],
     ['codex', 'Rate limited. Please try again in 20s.', 'codex.rate_limit'],
     [
