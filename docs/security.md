@@ -67,12 +67,18 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   `$CURL` or `$HTTP_CLIENT`, but not `$HTTP_PORT` or `$HTTPBIN`), the value after `-u`,
   `--user`, `-U` / `--proxy-user` (alone or at the end of a cluster such as `-su`), ab's `-A` /
   `-P`, httpie's and xh's `-a` / `--auth`, `--cert file:`, `--pass`, `--tlspassword`,
-  `--oauth2-bearer` and `--bearer`, and an `Authorization:` header or item, is redacted. The
-  value is the run after the option, to its matching quote if it starts with one; in
-  `user:<value>` (lftp: `user,<value>`) only the secret goes, and `(`, `)`, `;` and `|` in an
-  unquoted value stay part of it. A bare user name or a `$VARIABLE` is left alone, and so is an
-  rsync target `user@host:/path` after a cluster. Nothing is capped or skipped: the work is one
-  pass per line.
+  `--oauth2-bearer`, `--bearer` and `-E` (curl's short `--cert`, for a certificate file), is
+  redacted, also when the option is its own quoted argument (`["curl", "-u", "admin:<value>"]`).
+  The value is the run after the option, to its matching quote if it starts with one; in
+  `user:<value>` only the secret goes (lftp, as the client nearest before the option, also takes
+  `user,<value>`), and `(`, `)`, `;`, `|` and a PowerShell escape inside an unquoted value stay
+  part of it. A bare user name or a `$VARIABLE` is left alone, and so is an rsync target
+  `user@host:/path` after a cluster. An `Authorization:` header or item is redacted when its
+  value looks like a credential: a scheme (`Bearer`, `Basic`, `Token`, ...) and a token of at
+  least 8 characters, a single token of at least 16, or the secret parameters of `Digest` and
+  `AWS4-HMAC-SHA256` (`response`, `nonce`, `Signature`, ...); a header named in a sentence is not.
+  On a line that is a JSON object, the client may come after the option. Nothing is capped or
+  skipped: the work is one pass per line.
   The trade-off: on a line that names a client, another program's `-u x:y` after it has its
   value redacted too (`curl … && docker run -u 1000:[REDACTED]`), which garbles that value and
   nothing else. Known gaps: a value on the line after its flag, a flag on a line that only a

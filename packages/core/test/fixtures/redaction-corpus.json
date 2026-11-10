@@ -83,12 +83,12 @@
     {
       "text": "😀 curl -H \"Authorization: Bearer S3CR3T\" https://x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "😀 curl -H 'Authorization: Bearer S3CR3T' https://x 😀",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "sh -c \"curl -u admin:S3CR3T https://x\"",
@@ -268,27 +268,27 @@
     {
       "text": "curl -H \"Authorization: Basic S3CR3T\" x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -H Authorization:\"Bearer S3CR3T\" x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl --header \"Proxy-Authorization: Bearer S3CR3T\" x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl --header=\"Authorization: Bearer S3CR3T\" x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl \"-HAuthorization: Bearer S3CR3T\" x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "http -a admin:S3CR3T example.org",
@@ -313,12 +313,12 @@
     {
       "text": "http example.org Authorization:S3CR3T",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "http example.org \"Authorization: Bearer S3CR3T\"",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "sudo -u deploy http -a admin:S3CR3T x",
@@ -538,12 +538,12 @@
     {
       "text": "subprocess.run([\"curl\", \"-u\", \"admin:S3CR3T\", url])",
       "parentRedacted": false,
-      "mustRedact": false
+      "mustRedact": true
     },
     {
       "text": "exec.Command(\"curl\", \"-u\", \"admin:S3CR3T\", url)",
       "parentRedacted": false,
-      "mustRedact": false
+      "mustRedact": true
     },
     {
       "text": "os.system(\"curl -u admin:S3CR3T \" + url)",
@@ -563,7 +563,7 @@
     {
       "text": "{\"cmd\":\"curl -H \\\"Authorization: Bearer S3CR3T\\\" https://x\"}",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "RUN curl -u admin:S3CR3T https://x",
@@ -593,7 +593,7 @@
     {
       "text": "{\"tool_input\":{\"command\":\"docker exec web bash -c \\\"curl -H 'Authorization: Bearer S3CR3T' http://x\\\"\"}}",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "\"{\\\"command\\\":\\\"curl -u admin:S3CR3T x\\\"}\"",
@@ -698,7 +698,7 @@
     {
       "text": "curl -H \"X: a\" -H \"Authorization: Bearer S3CR3T\" -H \"Y: b\" x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -H \"Authorization: Bearer $TOKEN\" x",
@@ -708,22 +708,22 @@
     {
       "text": "curl -H 'Authorization: token S3CR3T' x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -H \"authorization:S3CR3T\" x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -H \"Authorization:   Bearer   S3CR3T\" x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -H \"Authorization: Bearer S3CR3T, X\" x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -H @headers.txt x",
@@ -994,7 +994,7 @@
     {
       "text": "http POST :8080 Authorization:\"Bearer S3CR3T\"",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "http --auth-type=bearer --auth S3CR3T x",
@@ -1054,7 +1054,7 @@
     {
       "text": "Here's the command: curl -d 'a b' -H \"Authorization: Bearer S3CR3T\" https://x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "I've tried curl -X POST -d 'x=1' -u admin:S3CR3T https://x",
@@ -1139,17 +1139,17 @@
     {
       "text": "curl -sH \"Authorization: S3CR3TS3CR3T\" https://x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -sSH 'Authorization: Digest S3CR3T' https://x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -H \"Authorization: S3CR3TS3CR3T\" https://x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "\"$(command -v curl)\" -u admin:S3CR3T https://x",
@@ -3177,10 +3177,12 @@
       "expected": "curl x 2>&1 | tee log; id -u root:[REDACTED]"
     },
     {
-      "text": "const out = execSync(`curl -s ${url}`); spawn('docker', ['run', '-u', '1000:1000', img]);"
+      "text": "const out = execSync(`curl -s ${url}`); spawn('docker', ['run', '-u', '1000:1000', img]);",
+      "expected": "const out = execSync(`curl -s ${url}`); spawn('docker', ['run', '-u', '1000:[REDACTED]', img]);"
     },
     {
-      "text": "lftp -c 'open x; mirror' && sort -u a:b"
+      "text": "lftp -c 'open x; mirror' && sort -u a:b",
+      "expected": "lftp -c 'open x; mirror' && sort -u a:[REDACTED]"
     },
     {
       "text": "curl http://x; cut -d: -f1 /etc/passwd | sort -u"

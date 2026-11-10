@@ -73,7 +73,31 @@ const AUTH_HEADER = /(?:proxy-)?authorization[ \t]*:[ \t]*/giy;
 
 /** The scheme before the credentials in an `Authorization` header, kept as written. */
 const AUTH_SCHEME =
-  /(?:bearer|basic|token|digest|negotiate|ntlm|aws4-hmac-sha256)(?:[ \t]+|(?=["'\\\s]|$))/iy;
+  /(bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|aws4-hmac-sha256|hoba|mutual|vapid)[ \t]+/iy;
+
+/** Schemes whose credentials are `name=value` parameters: Digest, AWS Signature Version 4. */
+const PARAM_SCHEMES = new Set(['digest', 'aws4-hmac-sha256']);
+
+/** One `name=value` parameter of such a scheme, with the quotes around its value. */
+const AUTH_PARAM = /[\s,]*([A-Za-z][\w-]{0,40})=(\\?["']?)([^\s,"'\\]*)/y;
+
+/** Parameters whose values are secrets or prove one: the rest (`username`, `uri`) are kept. */
+const SECRET_PARAMS = new Set(['response', 'nonce', 'cnonce', 'opaque', 'signature', 'password']);
+
+/** A credential after a scheme is one token of at least this many characters, no spaces. */
+const MIN_SCHEME_TOKEN = 8;
+
+/** Without a scheme, a credential is one token of at least this many characters. */
+const MIN_BARE_TOKEN = 16;
+
+/**
+ * An option written as its own quoted argument and the quoted argument after it, as in argv
+ * arrays and JSON: `["curl", "-u", "admin:pw", url]`, `{"args":["--user","admin:pw"]}`.
+ */
+const QUOTED_OPTION = /(["'])(--?[A-Za-z][A-Za-z0-9-]{0,30})\1[\s,]*(["'])((?:(?!\3)[^\n])*)\3/g;
+
+/** File names that `-E` (curl's short `--cert`) takes: `client.pem:password`. */
+const CERT_FILE = /\.(?:pem|crt|cer|der|p12|pfx|key)$/i;
 
 /** A line that begins with whitespace and an option: part of a command wrapped over lines. */
 const INDENTED_OPTION = /[ \t]+--?[A-Za-z0-9#]/y;
@@ -116,6 +140,21 @@ function findClients(text: string, from: number, to: number): Clients {
   return { any, ab: first(AB), lftp: first(LFTP), httpie: first(HTTPIE) };
 }
 
+/** Every client named in a line, in order, and whether it is lftp. Read only when needed. */
+function clientsInLine(text: string, from: number, to: number): { at: number; lftp: boolean }[] {
+  const out: { at: number; lftp: boolean }[] = [];
+  const re = new RegExp(CLIENT.source, 'giu');
+  const line = text.slice(from, to);
+  for (let m = re.exec(line); m !== null; m = re.exec(line)) {
+    if (m[0] === '') {
+      re.lastIndex++;
+      continue;
+    }
+    out.push({ at: from + m.index, lftp: /lftp/i.test(m[0]) });
+  }
+  return out;
+}
+
 /** A credential option at the start of a run, and where its value starts. */
 interface Option {
   /**
@@ -129,6 +168,24 @@ interface Option {
   glued: number;
   /** A short-option cluster (`-su`), whose `user@host:/path` is rsync's, not credentials. */
   cluster: boolean;
+  /** curl's `-E`, which only counts for a certificate file (`client.pem:password`). */
+  short?: boolean;
+}
+
+/** An option written as its own argument (`"-u"`, `'--user'`), by name. */
+function optionByName(name: string, before: Clients): Option | null {
+  const plain = { auth: false, glued: -1, cluster: false };
+  if (name === '-u' || name === '-U' || name === '--user' || name === '--proxy-user') {
+    return { kind: 'user', ...plain };
+  }
+  if ((name === '-a' || name === '--auth') && before.httpie !== -1) {
+    return { kind: 'user', ...plain, auth: true };
+  }
+  if ((name === '-A' || name === '-P') && before.ab !== -1) return { kind: 'user', ...plain };
+  if (name === '--cert' || name === '--proxy-cert') return { kind: 'cert', ...plain };
+  if (name === '-E') return { kind: 'cert', ...plain, short: true };
+  if (SECRET_OPTIONS.has(name)) return { kind: 'secret', ...plain };
+  return null;
 }
 
 /**
@@ -142,7 +199,12 @@ function readOption(text: string, start: number, end: number, before: Clients): 
   const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(text.slice(start, Math.min(end, start + 64)));
   if (assignment !== null) i += assignment[0].length;
   while (i < end && (isQuoting(text[i] ?? '') || text[i] === '(' || text[i] === '`')) i++;
-  if (text[i] !== '-') return null;
+  if (text[i] !== '-') {
+    // `{"args":"-u admin:pw"}`: an option that opens a quoted string inside the run.
+    const inner = /["'([`]-/.exec(text.slice(i, end));
+    if (inner === null) return null;
+    i += inner.index + 1;
+  }
   const run = text.slice(i, end);
   const long = /^--[a-z0-9-]+/.exec(run)?.[0];
   if (long !== undefined) {
@@ -164,15 +226,19 @@ function readOption(text: string, start: number, end: number, before: Clients): 
   }
   // A short option, alone, at the end of a cluster, or with its value glued on: `-u`, `-su`,
   // `-uuser:pass`. The letters before it must be options that take no value.
-  const letters: { flag: string; noValue: string }[] = [{ flag: 'uU', noValue: CURL_NO_VALUE }];
-  if (before.httpie !== -1) letters.push({ flag: 'a', noValue: HTTPIE_NO_VALUE });
-  if (before.ab !== -1) letters.push({ flag: 'AP', noValue: '' });
-  for (const { flag, noValue } of letters) {
+  const letters: { flag: string; noValue: string; kind: Option['kind'] }[] = [
+    { flag: 'uU', noValue: CURL_NO_VALUE, kind: 'user' },
+    { flag: 'E', noValue: CURL_NO_VALUE, kind: 'cert' },
+  ];
+  if (before.httpie !== -1) letters.push({ flag: 'a', noValue: HTTPIE_NO_VALUE, kind: 'user' });
+  if (before.ab !== -1) letters.push({ flag: 'AP', noValue: '', kind: 'user' });
+  for (const { flag, noValue, kind } of letters) {
     for (let k = 1; k < run.length; k++) {
       const c = run[k] ?? '';
       if (flag.includes(c)) {
         const rest = i + k + 1;
-        return { kind: 'user', auth: c === 'a', glued: rest < end ? rest : -1, cluster: k > 1 };
+        const glued = rest < end ? rest : -1;
+        return { kind, auth: c === 'a', glued, cluster: k > 1, short: c === 'E' };
       }
       if (!noValue.includes(c)) break;
     }
@@ -214,8 +280,9 @@ function readValue(text: string, at: number, lineEnd: number): { from: number; t
       }
       // A backslash that escapes a quote belongs to the quoting around the value.
       if (c === '\\' && (text[to + 1] === '"' || text[to + 1] === "'")) break;
-      // A backtick closes Markdown code or a substitution around the command.
-      if (c === '`') break;
+      // A backtick before a space, punctuation or the end closes Markdown code around the
+      // command; one inside a word is PowerShell's escape (`P@ss`$w0rd`) and part of the value.
+      if (c === '`' && !/[A-Za-z0-9$`#@{]/.test(text[to + 1] ?? '')) break;
       to++;
     }
   }
@@ -252,10 +319,14 @@ class Finder {
     this.edits.push({ from, to });
   }
 
-  /** `name:secret` (or `name,secret` for lftp): the secret, or the name when it is empty. */
-  private user(from: number, to: number, sep: string, cluster: boolean, token: boolean): void {
+  /**
+   * `name:secret` (lftp also takes `name,secret`): the secret, or the name when it is empty.
+   * `seps` holds the separators the option's client takes.
+   */
+  private user(from: number, to: number, seps: string, cluster: boolean, token: boolean): void {
     const value = this.text.slice(from, to);
-    const at = value.indexOf(sep);
+    let at = -1;
+    for (let k = 0; k < value.length && at === -1; k++) if (seps.includes(value[k] ?? '')) at = k;
     if (at === -1) {
       if (token) this.push(from, to);
       return;
@@ -273,31 +344,85 @@ class Finder {
   }
 
   /** `--cert file:password`. A Windows drive letter or a `pkcs11:` / `file:` URI is no password. */
-  private cert(from: number, to: number): void {
+  private cert(from: number, to: number, short = false): void {
     const value = this.text.slice(from, to);
     const at = value.indexOf(':', /^[A-Za-z]:[\\/]/.test(value) ? 2 : 0);
     if (at <= 0 || /^(?:pkcs11|file)$/i.test(value.slice(0, at))) return;
+    // `-E` is also grep's and sed's: only a certificate file before the colon makes it curl's.
+    if (short && !CERT_FILE.test(value.slice(0, at))) return;
     this.push(from + at + 1, to);
   }
 
-  /** An `Authorization` header item from `at`: the scheme is kept, the rest of its run redacted. */
+  /**
+   * An `Authorization` header from `at`, just after its colon, when its value looks like a
+   * credential: a scheme and a token of at least 8 characters, or a single token of at least 16.
+   * The scheme is kept. A word in a sentence (`the Authorization: header`), or a quote that
+   * closes before any value (`headers['Authorization: ']`), is not a credential.
+   */
   private header(at: number, lineEnd: number): void {
+    const text = this.text;
     let from = at;
-    let quote = '';
-    while (from < lineEnd && isQuoting(this.text[from] ?? '')) {
-      if (this.text[from] !== '\\') quote = this.text[from] ?? '';
+    while (from < lineEnd && (text[from] === '"' || text[from] === "'" || text[from] === '\\')) {
       from++;
     }
+    // A quote right at the colon closes the string the header name was in: no value follows.
+    if (from > at && (text[from] === ']' || text[from] === ',' || text[from] === ')')) return;
     AUTH_SCHEME.lastIndex = from;
-    const scheme = AUTH_SCHEME.exec(this.text);
-    if (scheme !== null) from += scheme[0].length;
+    const scheme = AUTH_SCHEME.exec(text);
+    if (scheme !== null) {
+      from += scheme[0].length;
+      if (PARAM_SCHEMES.has((scheme[1] ?? '').toLowerCase()) && this.params(from, lineEnd)) {
+        return;
+      }
+    }
+    while (from < lineEnd && (text[from] === '"' || text[from] === "'" || text[from] === '\\')) {
+      from++;
+    }
     let to = from;
-    while (to < lineEnd && !isQuoting(this.text[to] ?? '')) {
-      if (quote === '' && isSpace(this.text[to] ?? '')) break;
-      if (this.text[to] === '`') break;
+    while (to < lineEnd) {
+      const c = text[to] ?? '';
+      if (isSpace(c) || c === '"' || c === "'" || c === '\\' || c === '`') break;
       to++;
     }
+    if (to - from < (scheme !== null ? MIN_SCHEME_TOKEN : MIN_BARE_TOKEN)) return;
     this.push(from, to);
+  }
+
+  /**
+   * Digest and AWS Signature parameters from `at`: the values of the secret ones. False when
+   * there are no parameters, so the value is read as a token.
+   */
+  private params(at: number, lineEnd: number): boolean {
+    let k = at;
+    let found = false;
+    for (;;) {
+      AUTH_PARAM.lastIndex = k;
+      const m = AUTH_PARAM.exec(this.text);
+      if (m === null || m.index + m[0].length > lineEnd || m[0].length === 0) return found;
+      found = true;
+      const end = m.index + m[0].length;
+      const value = m[3] ?? '';
+      if (SECRET_PARAMS.has((m[1] ?? '').toLowerCase())) this.push(end - value.length, end);
+      // The closing quote of a quoted value.
+      k = end;
+      while (
+        k < lineEnd &&
+        (this.text[k] === '"' || this.text[k] === "'" || this.text[k] === '\\')
+      ) {
+        k++;
+      }
+    }
+  }
+
+  /** Reads the value of an option at `runStart` whose value is `from`..`to`. */
+  private option(option: Option, from: number, to: number, seps: string, bearer: boolean): void {
+    if (option.kind === 'secret') {
+      if (this.text[from] !== '-') this.push(from, to);
+    } else if (option.kind === 'cert') {
+      this.cert(from, to, option.short === true);
+    } else if (this.text[from] !== '-') {
+      this.user(from, to, seps, option.cluster, bearer && option.auth);
+    }
   }
 
   /** Reads one logical line, `start`..`end`. */
@@ -305,11 +430,31 @@ class Finder {
     const text = this.text;
     const clients = findClients(text, start, end);
     if (clients.any === -1) return;
+    const lineText = text.slice(start, end);
     // httpie's `-A bearer` (or jwt) makes a value of `-a` without a colon a token.
-    const bearer = /(?:^|\s)(?:-A|--auth-type)[\s=]*["']?(?:bearer|jwt)\b/i.test(
-      text.slice(start, end),
-    );
-    let i = clients.any;
+    const bearer = /(?:^|\s)(?:-A|--auth-type)[\s=]*["']?(?:bearer|jwt)\b/i.test(lineText);
+    // A line that is a JSON object may name its client after the options: `{"args":..,"tool":"curl"}`.
+    const json = /^\s*\{/.test(lineText) && /\}\s*$/.test(lineText);
+    const before = (at: number, client: number): number =>
+      client !== -1 && (json || client < at) ? client : -1;
+    // lftp takes `name,password` as well as `name:password`, as the client nearest before the
+    // option decides; every other client takes only `name:password`.
+    const named = clients.lftp === -1 ? [] : clientsInLine(text, start, end);
+    let nearest = -1;
+    const separators = (at: number): string => {
+      if (named.length === 0) return ':';
+      while (nearest + 1 < named.length && (named[nearest + 1]?.at ?? end) < at) nearest++;
+      const client = named[nearest] ?? (json ? named[0] : undefined);
+      return client?.lftp === true ? ',:' : ':';
+    };
+    const gate = (at: number): Clients => ({
+      any: clients.any,
+      ab: before(at, clients.ab),
+      lftp: before(at, clients.lftp),
+      httpie: before(at, clients.httpie),
+    });
+
+    let i = json ? start : clients.any;
     while (i < end) {
       while (i < end && isSpace(text[i] ?? '')) i++;
       const runStart = i;
@@ -328,12 +473,7 @@ class Finder {
         this.header(k + header[0].length, end);
         break;
       }
-      const option = readOption(text, runStart, runEnd, {
-        any: clients.any,
-        ab: clients.ab !== -1 && clients.ab < runStart ? clients.ab : -1,
-        lftp: clients.lftp !== -1 && clients.lftp < runStart ? clients.lftp : -1,
-        httpie: clients.httpie !== -1 && clients.httpie < runStart ? clients.httpie : -1,
-      });
+      const option = readOption(text, runStart, runEnd, gate(runStart));
       if (option === null) continue;
       let valueAt = option.glued;
       if (valueAt === -1) {
@@ -343,16 +483,23 @@ class Finder {
         valueAt = k;
       }
       const { from, to } = readValue(text, valueAt, end);
-      if (option.kind === 'secret') {
-        if (text[from] !== '-') this.push(from, to);
-      } else if (option.kind === 'cert') {
-        this.cert(from, to);
-      } else if (text[from] !== '-') {
-        const sep = clients.lftp !== -1 && clients.lftp < runStart ? ',' : ':';
-        this.user(from, to, sep, option.cluster, bearer && option.auth);
-      }
+      this.option(option, from, to, separators(runStart), bearer);
       // Reading goes on after the value, whose run may hold spaces when it was quoted.
       if (option.glued === -1) i = Math.max(i, to);
+    }
+
+    // Options written as their own quoted argument, as in argv arrays and JSON.
+    const from = json ? start : clients.any;
+    QUOTED_OPTION.lastIndex = 0;
+    const tail = text.slice(from, end);
+    nearest = -1;
+    for (let m = QUOTED_OPTION.exec(tail); m !== null; m = QUOTED_OPTION.exec(tail)) {
+      const at = from + m.index;
+      const option = optionByName(m[2] ?? '', gate(at));
+      if (option === null) continue;
+      const valueEnd = at + m[0].length - 1;
+      const valueStart = valueEnd - (m[4] ?? '').length;
+      this.option(option, valueStart, valueEnd, separators(at), bearer);
     }
   }
 

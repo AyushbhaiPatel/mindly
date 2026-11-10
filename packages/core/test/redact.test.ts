@@ -301,6 +301,27 @@ describe('redact', () => {
     ['sh -c "lftp -u admin,PW ftp.example.com"', 'PW'],
     ['sh -c "ab -A admin:PW http://x.test/"', 'PW'],
     ['curl -u admin:"PW" https://x.test', 'PW'],
+    // lftp earlier on a line decides nothing for another client after it.
+    ["lftp -e 'mirror /src' ftp.example.org && curl -u admin:PW https://x.test", 'PW'],
+    ['Use lftp or curl, e.g. curl -u admin:PW https://x.test', 'PW'],
+    ['lftp -c "get f" host; wget --user=admin:PW https://x.test', 'PW'],
+    ['lftp -c "get f" host; http -a admin:PW example.org', 'PW'],
+    ['lftp -u admin:PW sftp://x.test', 'PW'],
+    // An option written as its own quoted argument: argv arrays and JSON.
+    ['subprocess.run(["curl", "-u", "admin:PW", url])', 'PW'],
+    ['["curl","-u","admin:PW","https://x.test"]', 'PW'],
+    ["subprocess.run(['curl', '--user', 'admin:PW', url])", 'PW'],
+    ['{"command":"curl","args":["--user","admin:PW"]}', 'PW'],
+    ["curl '-u' 'admin:PW' https://x.test", 'PW'],
+    // curl's -E, a PowerShell escape inside a password, a client after the option in JSON.
+    ['curl -E client.pem:PW https://x.test', 'PW'],
+    ['curl.exe -u admin:P@ss`$w0rdPW https://x.test', 'P@ss`$w0rdPW'],
+    ['{"args":"-u admin:PW","tool":"curl"}', 'PW'],
+    // Digest and AWS Signature parameters.
+    [
+      'curl -H \'Authorization: Digest username="u", realm="r", nonce="PW", response="PW"\' x',
+      'PW',
+    ],
     // -H at the end of a cluster, and the credential syntax of ab and lftp.
     ['curl -sH "Authorization: PW" https://x.test', 'PW'],
     ["curl -sSH 'Authorization: Digest PW' https://x.test", 'PW'],
@@ -443,6 +464,17 @@ describe('redact', () => {
     // nothing else on the line or any other line touched.
     const out = redact(text).text;
     expect(out).toBe(text.replace(/(-u [^\s:]+:)[^\s]+/, `$1${REDACTED}`));
+  });
+
+  it.each([
+    'With curl, send the Authorization: header on every request.',
+    'In curl, set the Authorization: Bearer header first.',
+    'Use curl; see RFC 7617 for Proxy-Authorization: Basic usage',
+    "// curl-compatible: headers['Authorization: '] = token",
+    'curl -s x | grep -E "error:.*"',
+    "curl -s x | grep -E 'level:warn'",
+  ])('leaves a line that only talks about headers or other programs alone: %s', (text) => {
+    expect(redact(text)).toEqual({ text, count: 0, kinds: [] });
   });
 
   it('leaves lines that only mention a client in another line alone', () => {
