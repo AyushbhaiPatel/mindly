@@ -127,44 +127,15 @@ export function splitList(s: string): string[] {
 }
 
 /**
- * Splits the "applies to files" field into path patterns: one per line, or separated by commas.
- * A comma inside braces belongs to the pattern (`src/{api,web}/**`), so it does not split there.
- *
- * Braces are read the way the matcher reads them: one group at a time, never nested (a `{`
- * inside a group is a plain character, and the first `}` closes the group). The alternatives of
- * a group are trimmed, so `{api, web}` means `api` or `web`, not `api` or ` web`.
+ * Splits the "applies to files" field into path patterns, one per line, as the form shows them.
+ * Each line is kept as written apart from the space around it: a comma is part of the pattern
+ * (in a file name, or between the alternatives of `{api,web}`), and so is space inside braces.
+ * A scope saved from the command line therefore comes back unchanged when only the title or
+ * the body of a memory is edited.
  */
 export function splitGlobs(s: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  /** The text of the open group after its `{`, or null outside a group. */
-  let group: string | null = null;
-  const closeLine = (): void => {
-    // Braces never span lines: an unclosed one must not swallow the patterns below it.
-    out.push(group === null ? cur : `${cur}{${group}`);
-    cur = '';
-    group = null;
-  };
-  for (const ch of s) {
-    if (ch === '\n' || ch === '\r') {
-      closeLine();
-    } else if (group !== null) {
-      if (ch === '}') {
-        const alternatives = group.split(',').map((a) => a.trim());
-        cur += `{${alternatives.join(',')}}`;
-        group = null;
-      } else {
-        group += ch;
-      }
-    } else if (ch === ',') {
-      out.push(cur);
-      cur = '';
-    } else if (ch === '{') {
-      group = '';
-    } else {
-      cur += ch;
-    }
-  }
-  closeLine();
-  return out.map((x) => x.trim()).filter(Boolean);
+  return s
+    .split(/\r?\n|\r/)
+    .map((x) => x.trim())
+    .filter(Boolean);
 }
