@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { impactOf, surfaceKey } from '../../src/index.js';
+import { impactOf, SURFACE_FORMAT, surfaceKey, type Mindly } from '../../src/index.js';
 import { event, writeTool } from '../helpers.js';
 import { AUTH_V1, featureSetup } from './fixtures.js';
 
@@ -241,39 +241,148 @@ describe('impact radar', () => {
     expect(told.some((t) => /restored the exports of src\/auth\.ts/.test(t))).toBe(true);
   });
 
-  it('does not compare against a surface stored in an older signature format', async () => {
+  // What a released version left behind: the surface alone, with no record of its format.
+  const asStoredBefore = (mindly: Mindly, pid: string): void => {
+    mindly.store.kv.delete(`surface-state:${pid}:src/auth.ts`);
+  };
+  const impactConflicts = (mindly: Mindly, pid: string) =>
+    mindly.store.conflicts.list(pid).filter((c) => c.kind === 'impact');
+
+  it('still sees an export removed after an upgrade', async () => {
     const { root, mindly, pid, write } = await featureSetup();
     await mindly.hooks.handle(
       event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
     );
-    // Left behind by an earlier version: same exports, signatures written differently, and no
-    // record of the format.
-    mindly.store.kv.set(surfaceKey(pid, 'src/auth.ts'), {
-      login: 'function:(user: string)',
-      VERSION: 'variable:',
-    });
-
-    // A body-only edit: compared with HEAD, not with the old surface, so nothing changed.
-    write('src/auth.ts', AUTH_V1.replace('"admin"', '"owner"'));
+    // Uncommitted: HEAD knows nothing about `logout`, only the stored surface does.
+    write('src/auth.ts', AUTH_V1 + 'export function logout() {}\n');
     await mindly.hooks.handle(
-      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'owner') }),
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'logout') }),
     );
-    expect(mindly.store.conflicts.list(pid).filter((c) => c.kind === 'impact')).toHaveLength(0);
-    expect(mindly.store.deliveries.list(pid).filter((d) => d.kind === 'impact')).toHaveLength(0);
-    // The surface is rewritten in the current format and used from here on.
-    expect(mindly.store.kv.get(surfaceKey(pid, 'src/auth.ts'))).toEqual({
-      login: 'function(user:string){',
-      VERSION: 'const',
-    });
-    write(
-      'src/auth.ts',
-      AUTH_V1.replace('login(user: string)', 'login(user: string, otp: string)'),
+    asStoredBefore(mindly, pid);
+
+    write('src/auth.ts', AUTH_V1);
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'x') }),
     );
+    const impact = impactConflicts(mindly, pid);
+    expect(impact).toHaveLength(1);
+    expect(impact[0]!.detail).toContain('Removed: logout');
+  });
+
+  it('does not report a change twice, or against another agent, after an upgrade', async () => {
+    const { root, mindly, pid, cc, write } = await featureSetup();
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+    );
+    const changed = AUTH_V1.replace('login(user: string)', 'login(user: string, otp: string)');
+    write('src/auth.ts', changed);
     await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'otp') }),
     );
-    const impact = mindly.store.conflicts.list(pid).filter((c) => c.kind === 'impact');
+    expect(impactConflicts(mindly, pid)).toHaveLength(1);
+    asStoredBefore(mindly, pid);
+
+    // Codex edits a body only: the signature Claude changed is not Codex's change.
+    write('src/auth.ts', changed.replace('"admin"', '"owner"'));
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/auth.ts', 'owner') }),
+    );
+    expect(impactConflicts(mindly, pid)).toHaveLength(1);
+    const toClaude = mindly.store.deliveries
+      .list(pid)
+      .filter((d) => d.targetSessionId === cc.id && d.kind === 'impact');
+    expect(toClaude).toHaveLength(0);
+  });
+
+  it('takes class signatures stored in an older format as unchanged, once', async () => {
+    const { root, mindly, pid, repo, write } = await featureSetup();
+    // Signatures as the git port writes them: `<kind>:<signature>`.
+    mindly.kernel.ports.git.exportSurface = (source) =>
+      new Map(
+        [...source.matchAll(/^export (class|function) (\w+)(.*)$/gm)].map((m) => [
+          m[2]!,
+          `${m[1]}:${m[3]!.replace(/\s+/g, '')}`,
+        ]),
+      );
+    const service = (base: string, body: string): string =>
+      `export class Service extends ${base} {\n  run() { return ${body}; }\n}\n` +
+      'export function login(user: string) {}\n';
+    repo.head['src/auth.ts'] = service('Base', '1');
+    write('src/auth.ts', service('Base', '1'));
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+    );
+    // The earlier version hashed the class another way.
+    mindly.store.kv.set(surfaceKey(pid, 'src/auth.ts'), {
+      Service: 'class:#written-by-the-old-format',
+      login: 'function:(user:string){}',
+    });
+
+    // A body-only edit of the class reports nothing and rewrites the surface.
+    write('src/auth.ts', service('Base', '2'));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', '2') }),
+    );
+    expect(impactConflicts(mindly, pid)).toHaveLength(0);
+    expect(mindly.store.kv.get(surfaceKey(pid, 'src/auth.ts'))).toEqual({
+      Service: 'class:extendsBase{',
+      login: 'function:(user:string){}',
+    });
+
+    // From here on a class change is seen.
+    write('src/auth.ts', service('Other', '2'));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'Other') }),
+    );
+    const impact = impactConflicts(mindly, pid);
+    expect(impact).toHaveLength(1);
+    expect(impact[0]!.detail).toContain('Changed signature: Service');
+  });
+
+  it('cannot tell a class change made by the first edit after an upgrade, but sees the rest', async () => {
+    const { root, mindly, pid, repo, write } = await featureSetup();
+    mindly.kernel.ports.git.exportSurface = (source) =>
+      new Map(
+        [...source.matchAll(/^export (class|function) (\w+)(.*)$/gm)].map((m) => [
+          m[2]!,
+          `${m[1]}:${m[3]!.replace(/\s+/g, '')}`,
+        ]),
+      );
+    const file = (base: string, params: string): string =>
+      `export class Service extends ${base} {}\nexport function login(${params}) {}\n`;
+    repo.head['src/auth.ts'] = file('Base', 'user: string');
+    write('src/auth.ts', file('Base', 'user: string'));
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+    );
+    mindly.store.kv.set(surfaceKey(pid, 'src/auth.ts'), {
+      Service: 'class:#written-by-the-old-format',
+      login: 'function:(user:string){}',
+    });
+
+    // The class and a function change in the same first edit: only the function can be compared.
+    write('src/auth.ts', file('Other', 'user: string, otp: string'));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'otp') }),
+    );
+    const impact = impactConflicts(mindly, pid);
     expect(impact).toHaveLength(1);
     expect(impact[0]!.detail).toContain('Changed signature: login');
+    expect(impact[0]!.detail).not.toContain('Service');
+  });
+
+  it('stores the surface and its format together even when a later step fails', async () => {
+    const { root, mindly, pid, write } = await featureSetup();
+    mindly.kernel.ports.git.dependentsOf = async () => {
+      throw new Error('boom');
+    };
+    write('src/auth.ts', 'export const VERSION = 3;\n');
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'v3') }),
+    );
+    expect(mindly.store.kv.get(surfaceKey(pid, 'src/auth.ts'))).toEqual({ VERSION: 'const' });
+    expect(mindly.store.kv.get(`surface-state:${pid}:src/auth.ts`)).toMatchObject({
+      format: SURFACE_FORMAT,
+    });
   });
 });

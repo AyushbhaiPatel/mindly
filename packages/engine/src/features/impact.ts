@@ -19,9 +19,64 @@ const MAX_BASELINE_BYTES = 512 * 1024;
 /**
  * Version of the signature format the export analysis produces. Bump it whenever a change to the
  * analysis alters the signature of unchanged code (how a class is hashed, how a signature is
- * normalised): surfaces stored by another version are not comparable with a fresh one.
+ * normalised), and list the kinds it touches in `FORMAT_CHANGES`.
  */
 export const SURFACE_FORMAT = 2;
+
+/**
+ * Per format, the kinds of export whose signature is written differently from that format on. A
+ * signature of one of these kinds stored by an earlier format cannot be compared with a fresh one;
+ * every other stored signature, and which names exist, still can.
+ *
+ * - 2: class signatures cover constructor parameters and function-valued members.
+ */
+const FORMAT_CHANGES: Readonly<Record<number, readonly string[]>> = {
+  2: ['class'],
+};
+
+/**
+ * Kind of a stored signature. The git port writes each one as `<kind>:<signature>`; a value
+ * without that prefix has no kind and is always compared.
+ */
+function kindOf(signature: string): string {
+  const colon = signature.indexOf(':');
+  return colon === -1 ? '' : signature.slice(0, colon);
+}
+
+/**
+ * The kinds whose stored signatures are not comparable when they were written in format `from`:
+ * those changed by any later format. `null` means none can be compared (a format newer than this
+ * version knows).
+ */
+function staleKinds(from: number): ReadonlySet<string> | null {
+  if (from > SURFACE_FORMAT) return null;
+  const kinds = new Set<string>();
+  for (let v = from + 1; v <= SURFACE_FORMAT; v++) {
+    for (const kind of FORMAT_CHANGES[v] ?? []) kinds.add(kind);
+  }
+  return kinds;
+}
+
+/**
+ * Brings signatures stored in format `from` up to the current one. A signature that can no longer
+ * be compared takes the current signature of the same export, so it reads as unchanged; a name
+ * that is gone, or whose kind changed, is left alone and still reports as removed or changed.
+ */
+function migrateSignatures(
+  stored: Iterable<[string, string]>,
+  from: number,
+  current: ReadonlyMap<string, string>,
+): Map<string, string> {
+  const out = new Map(stored);
+  if (from === SURFACE_FORMAT) return out;
+  const stale = staleKinds(from);
+  for (const [name, sig] of out) {
+    const now = current.get(name);
+    if (now === undefined || kindOf(now) !== kindOf(sig)) continue;
+    if (stale === null || stale.has(kindOf(sig))) out.set(name, now);
+  }
+  return out;
+}
 
 /** Result of analysing one changed file. */
 export interface ImpactReport {
@@ -45,7 +100,7 @@ export function surfaceKey(projectId: string, path: string, worktree?: string): 
 
 /** What is remembered next to a stored surface. */
 interface SurfaceState {
-  /** `SURFACE_FORMAT` the surface was written with (0 when stored before formats were recorded). */
+  /** `SURFACE_FORMAT` the surface was written with (1 when stored before formats were recorded). */
   format: number;
   /** HEAD of the checkout when the surface was stored (null when unknown). */
   head: string | null;
@@ -70,7 +125,7 @@ function readState(value: unknown): SurfaceState {
       )
     : [];
   return {
-    format: typeof v.format === 'number' ? v.format : 0,
+    format: typeof v.format === 'number' ? v.format : 1,
     head: typeof v.head === 'string' ? v.head : null,
     open,
   };
@@ -152,10 +207,20 @@ export class ImpactService {
     const state = readState(this.k.store.kv.get<unknown>(stateKey(key)));
     const head = await git.headCommit(tree);
     let before: Map<string, string> | null;
-    // A surface written in another format would differ from a fresh one for code nobody touched,
-    // so it is not a baseline: the file is treated as seen for the first time.
-    if (stored && typeof stored === 'object' && state.format === SURFACE_FORMAT) {
-      before = new Map(Object.entries(stored).filter(([, v]) => typeof v === 'string'));
+    if (stored && typeof stored === 'object') {
+      // A surface stored by another version is still right about which exports exist and about
+      // every signature that version wrote the same way; only the others are taken as unchanged.
+      before = migrateSignatures(
+        Object.entries(stored).filter(([, v]) => typeof v === 'string'),
+        state.format,
+        after,
+      );
+      state.open = state.open.map((o) => ({
+        conflictId: o.conflictId,
+        before: Object.fromEntries(
+          migrateSignatures(Object.entries(o.before), state.format, after),
+        ),
+      }));
       if (head !== null && state.head !== null && head !== state.head) {
         before = (await this.committedSurface(tree, file.path, state.head, head)) ?? before;
       }
@@ -163,30 +228,32 @@ export class ImpactService {
       const atHead = await git.fileAtRef(tree, 'HEAD', file.path);
       before = atHead === null ? null : git.exportSurface(atHead, file.path);
     }
-    this.k.store.kv.set(key, Object.fromEntries(after));
-    const saveState = (): void => {
-      this.k.store.kv.set(stateKey(key), {
-        format: SURFACE_FORMAT,
-        head,
-        open: state.open.slice(-MAX_OPEN_PER_FILE),
+    // The surface and what is recorded about it (its format, HEAD) are written together, so a
+    // failure further down never leaves one describing the other wrongly.
+    const save = (): void => {
+      this.k.store.transaction(() => {
+        this.k.store.kv.set(key, Object.fromEntries(after));
+        this.k.store.kv.set(stateKey(key), {
+          format: SURFACE_FORMAT,
+          head,
+          open: state.open.slice(-MAX_OPEN_PER_FILE),
+        });
       });
     };
     if (!before) {
-      saveState();
+      save();
       return null;
     }
 
     state.open = this.closeRestored(projectId, session, file.path, state.open, after);
+    save();
     const raw = git.diffExportSurface(before, after);
     const diff: ExportSurfaceDiff = {
       added: cleanNames(raw.added),
       removed: cleanNames(raw.removed),
       changed: cleanNames(raw.changed),
     };
-    if (diff.removed.length === 0 && diff.changed.length === 0) {
-      saveState();
-      return null;
-    }
+    if (diff.removed.length === 0 && diff.changed.length === 0) return null;
 
     const dependents = [
       ...new Set((await git.dependentsOf(tree, file.path)).filter((d) => d !== file.path)),
@@ -202,7 +269,6 @@ export class ImpactService {
       }
     }
     if (affected.length === 0 && dependents.length === 0) {
-      saveState();
       return { path: file.path, diff, dependents, affected: [], conflict: null };
     }
 
@@ -245,7 +311,7 @@ export class ImpactService {
       ...state.open.filter((o) => o.conflictId !== conflict.id),
       { conflictId: conflict.id, before: was },
     ];
-    saveState();
+    save();
     const diffKey = fingerprint(...diff.removed, '|', ...diff.changed, '|', ...diff.added);
     for (const a of affected) {
       this.send(
