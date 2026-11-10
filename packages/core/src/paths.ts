@@ -138,7 +138,8 @@ export function deniedPathTest(extraDeny: readonly string[] = []): (rel: string)
     tests = [...DEFAULT_DENY_PATHS, ...extraDeny].map((g) => {
       // What every matching path ends with, compared before the expression is run.
       const last = g.slice(g.lastIndexOf('/') + 1);
-      const tail = /[[{]/.test(last) ? '' : last.slice(last.search(/[^*?]*$/)).toLowerCase();
+      // (None for a pattern with groups or classes: a group may hold a `/`.)
+      const tail = /[[{]/.test(g) ? '' : last.slice(last.search(/[^*?]*$/)).toLowerCase();
       return {
         anywhere: !g.includes('/'),
         re: globToRegExp(g.includes('/') ? g.replace(/^\.\//, '') : g, opts),

@@ -61,7 +61,13 @@ describe('isDeniedPath', () => {
     expect(isDeniedPath('vault/x.txt', ['vault/**'])).toBe(true);
   });
   it('says the same when compiled once for many paths', () => {
-    const extra = ['vault/**', '*.sqlite', 'docs/{a,b}.md', 'build/x?.bin'];
+    const extra = [
+      'vault/**',
+      '*.sqlite',
+      'docs/{a,b}.md',
+      'build/x?.bin',
+      'config/{local,prod/secret}.json',
+    ];
     const denied = deniedPathTest(extra);
     for (const p of [
       '.env',
@@ -82,6 +88,9 @@ describe('isDeniedPath', () => {
       'build/x12.bin',
       'secrets/k.txt',
       'SECRETS/k.txt',
+      'config/local.json',
+      'config/prod/secret.json',
+      'config/other.json',
     ]) {
       expect(denied(p), p).toBe(isDeniedPath(p, extra));
     }
