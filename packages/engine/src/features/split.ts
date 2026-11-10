@@ -1,8 +1,10 @@
-import { createHash } from 'node:crypto';
+import { createHash, type Hash } from 'node:crypto';
 import {
+  closeSync,
   existsSync,
   lstatSync,
-  readFileSync,
+  openSync,
+  readSync,
   readlinkSync,
   realpathSync,
   rmdirSync,
@@ -357,6 +359,11 @@ export interface SplitUnmergedWork {
    * a confirmation never covers them.
    */
   opaque?: string[];
+  /**
+   * Nested git repositories among `paths` (their commits and uncommitted files go with them): a
+   * confirmation covers one while its refs and uncommitted files are as they were.
+   */
+  repos?: string[];
 }
 
 /**
@@ -710,13 +717,20 @@ export class SplitService {
     paths: string[];
     lost: string[];
     denied: ReadonlySet<string>;
+    repos: string[];
     content: string;
     files: Record<string, string>;
     opaque: string[];
   }> {
     if (!existsSync(part.worktree) || !(await git.branchExists(root, part.branch))) {
       const denied = new Set<string>();
-      return { paths: [], lost: [], denied, ...worktreeFingerprint(part.worktree, [], denied) };
+      return {
+        paths: [],
+        lost: [],
+        denied,
+        repos: [],
+        ...worktreeFingerprint(part.worktree, [], denied, new Map()),
+      };
     }
     const work = await git.uncommittedWork(
       root,
@@ -728,9 +742,16 @@ export class SplitService {
       this.k.config.redaction.denyPaths,
     );
     const paths = [...new Set(work.paths)].sort();
-    const lost = [...new Set([...paths, ...work.ignoredDenied, ...work.nestedRepos])].sort();
+    const repos = new Map(work.nestedRepos.map((r) => [r.path, r.state]));
+    const lost = [...new Set([...paths, ...work.ignoredDenied, ...repos.keys()])].sort();
     const denied = new Set(work.denied);
-    return { paths, lost, denied, ...worktreeFingerprint(part.worktree, lost, denied) };
+    return {
+      paths,
+      lost,
+      denied,
+      repos: [...repos.keys()].sort(),
+      ...worktreeFingerprint(part.worktree, lost, denied, repos),
+    };
   }
 
   /**
@@ -750,7 +771,7 @@ export class SplitService {
     now: { files: Readonly<Record<string, string>>; denied: ReadonlySet<string> },
   ): Promise<string | null> {
     const changed = (rel: string, digest: string): boolean =>
-      digest !== shown[rel] || digest === 'dir' || digest === 'unreadable';
+      digest !== shown[rel] || digest === 'dir';
     // A listed file that is no longer work (committed since) is left to git.
     const still = listed.filter((rel) => now.files[rel] !== undefined);
     // All of them first: one that changed keeps every listed file.
@@ -758,11 +779,23 @@ export class SplitService {
     if (first.length > 0) {
       return `a file it listed changed after the abort was confirmed: ${describePaths(first)}`;
     }
+    const changedSince = (rel: string): string =>
+      `a file it listed changed after the abort was confirmed: ${describePaths([rel])}`;
     for (const rel of still) {
-      const digest = fileDigest(part.worktree, rel, now.denied);
-      if (changed(rel, digest)) {
-        return `a file it listed changed after the abort was confirmed: ${describePaths([rel])}`;
+      const listedAs = now.files[rel] as string;
+      if (listedAs.startsWith('repo:')) {
+        // A nested repository: deleted only while its refs and files are as they were shown.
+        try {
+          if (!(await git.removeNestedRepo(root, part.worktree, rel, listedAs.slice(5)))) {
+            return changedSince(rel);
+          }
+        } catch (err) {
+          return `could not delete ${sanitizeLine(rel, 200)}: ${sanitizeLine(err instanceof Error ? err.message : String(err), 200)}`;
+        }
+        continue;
       }
+      const digest = fileDigest(part.worktree, rel, now.denied);
+      if (changed(rel, digest)) return changedSince(rel);
       if (digest === 'missing') continue;
       try {
         unlinkSync(join(part.worktree, rel));
@@ -776,6 +809,26 @@ export class SplitService {
       return `git could not put the listed files back to their last commit: ${sanitizeLine(err instanceof Error ? err.message : String(err), 300)}`;
     }
     return null;
+  }
+
+  /**
+   * Why the part's worktree must stay although its listed work is gone (or there was none):
+   * something a listing counts appeared since its last check, which git's own check would not
+   * all stop (it deletes ignored files). Null when there is nothing.
+   */
+  private async strayWork(
+    git: SplitGitPort,
+    root: string,
+    part: SplitPart,
+  ): Promise<string | null> {
+    try {
+      const stray = await git.strayWork(root, part.worktree, this.k.config.redaction.denyPaths);
+      return stray.length > 0
+        ? `it got new work while the abort ran: ${describePaths(stray)}`
+        : null;
+    } catch (err) {
+      return `could not check it for new work: ${sanitizeLine(err instanceof Error ? err.message : String(err), 300)}`;
+    }
   }
 
   /**
@@ -839,6 +892,7 @@ export class SplitService {
         ...(only.commits.length > 0 ? { commits: only.commits } : {}),
         ...(only.more || files.lost.length > PATHS_SHOWN ? { more: true as const } : {}),
         ...(files.opaque.length > 0 ? { opaque: files.opaque } : {}),
+        ...(files.repos.length > 0 ? { repos: files.repos } : {}),
       });
     }
     return { work, state };
@@ -1369,6 +1423,13 @@ export class SplitService {
           keptBecause[part.worktree] = why;
         }
       }
+      if (!unfinished && limited && existsSync(part.worktree)) {
+        const why = await this.strayWork(git, root, part);
+        if (why) {
+          unfinished = true;
+          keptBecause[part.worktree] = why;
+        }
+      }
       if (!unfinished) {
         // git is the last check: it refuses a worktree with modified or untracked files, with
         // submodules or that is locked, whatever the listing above missed or appeared since. Only
@@ -1619,7 +1680,8 @@ function lossRefusal(
 ): MindlyError {
   const list = fresh.map(describeWork).join('; ');
   const commits = fresh.some((w) => (w.commits ?? []).length > 0);
-  const paths = fresh.some((w) => w.paths.length > 0);
+  // Files to commit; nested repositories are not committed on a part branch.
+  const paths = fresh.some((w) => w.paths.some((p) => !(w.repos ?? []).includes(p)));
   const more = fresh.some((w) => w.more || (w.opaque ?? []).length > 0);
   const message = afterConfirm
     ? `nothing was removed: the parts hold work that was not shown when the abort was confirmed, or that cannot be checked: ${list}`
@@ -1649,12 +1711,14 @@ function worktreeFingerprint(
   worktree: string,
   paths: readonly string[],
   denied: ReadonlySet<string>,
+  repos: ReadonlyMap<string, string>,
 ): { content: string; files: Record<string, string>; opaque: string[] } {
   const h = createHash('sha256');
   const files: Record<string, string> = {};
   const opaque: string[] = [];
   for (const rel of paths) {
-    const digest = fileDigest(worktree, rel, denied);
+    const repo = repos.get(rel);
+    const digest = repo !== undefined ? `repo:${repo}` : fileDigest(worktree, rel, denied);
     if (digest === 'dir') opaque.push(rel);
     files[rel] = digest;
     h.update(rel).update('\0').update(digest).update('\0');
@@ -1680,8 +1744,11 @@ function lstatInWorktree(worktree: string, rel: string): Stats | null {
   }
 }
 
-/** What `rel` holds in the worktree: `missing`, `dir`, or a hash of its content and mode. */
-function fileDigest(worktree: string, rel: string, denied: ReadonlySet<string>): string {
+/**
+ * What `rel` holds in the worktree: `missing`, `dir`, or a hash of its content and mode (read in
+ * chunks, whatever its size). A file that cannot be read counts by size, time and mode.
+ */
+export function fileDigest(worktree: string, rel: string, denied: ReadonlySet<string>): string {
   const st = lstatInWorktree(worktree, rel);
   if (!st) return 'missing';
   if (st.isDirectory()) return 'dir';
@@ -1690,19 +1757,40 @@ function fileDigest(worktree: string, rel: string, denied: ReadonlySet<string>):
   try {
     if (denied.has(rel)) h.update(`stat:${st.size}:${st.mtimeMs}:${st.mode}`);
     else if (st.isSymbolicLink()) h.update('link:').update(readlinkSync(abs));
-    else if (st.isFile()) h.update(`file:${st.mode}:`).update(readFileSync(abs));
-    else h.update(`other:${st.mode}`);
+    else if (st.isFile()) {
+      h.update(`file:${st.mode}:`);
+      hashFile(abs, h);
+    } else h.update(`other:${st.mode}`);
   } catch {
-    // Never deleted on a confirmation (see `discardConfirmed`).
-    return 'unreadable';
+    return `unreadable:${st.size}:${st.mtimeMs}:${st.mode}`;
   }
   return h.digest('hex');
+}
+
+/** Feeds the file at `abs` into `h` a chunk at a time. */
+function hashFile(abs: string, h: Hash): void {
+  const fd = openSync(abs, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(1 << 20);
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      h.update(buf.subarray(0, n));
+    }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** `"API" (not committed: a.ts; 2 commits only on its branch: 1a2b3c4d5e6f Add plans, …)`. */
 function describeWork(w: SplitUnmergedWork): string {
   const what: string[] = [];
-  if (w.paths.length > 0) what.push(`not committed: ${describePaths(w.paths)}`);
+  const repos = new Set(w.repos ?? []);
+  const files = w.paths.filter((p) => !repos.has(p));
+  if (files.length > 0) what.push(`not committed: ${describePaths(files)}`);
+  if (repos.size > 0) {
+    what.push(`git repositories, with their commits and changes: ${describePaths([...repos])}`);
+  }
   const commits = w.commits ?? [];
   if (commits.length > 0) {
     what.push(

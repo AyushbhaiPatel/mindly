@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute } from 'node:path';
@@ -38,6 +38,8 @@ export const HARDENING_CONFIG: readonly string[] = [
   'maintenance.auto=false',
   'color.ui=never',
   'advice.detachedHead=false',
+  // `git status` (and so the check `git worktree remove` makes) must see untracked files.
+  'status.showUntrackedFiles=normal',
 ];
 
 /** Environment variables passed through from the parent process (everything else is dropped). */
@@ -225,6 +227,96 @@ export function runGit(args: readonly string[], options: RunGitOptions): Promise
       child.stdin.on('error', () => undefined);
       child.stdin.end(options.input ?? '');
     }
+  });
+}
+
+/**
+ * Runs `git` like `runGit` and reads its NUL-separated output as it comes, keeping only the
+ * records `keep` accepts: for listings too large to hold (every ignored file of a tree). Exit codes
+ * other than 0 and `okExitCodes` raise a `MindlyError`.
+ */
+export function runGitRecords(
+  args: readonly string[],
+  options: Omit<RunGitOptions, 'input' | 'maxBuffer'>,
+  keep: (record: string) => boolean,
+): Promise<string[]> {
+  try {
+    assertDirectory(options.cwd);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+  if (args.length === 0 || args.some((a) => typeof a !== 'string' || a.includes('\0'))) {
+    return Promise.reject(new MindlyError('invalid_input', 'invalid git arguments'));
+  }
+  const timeout = Math.min(
+    Math.max(1, Math.floor(options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS)),
+    MAX_GIT_TIMEOUT_MS,
+  );
+  const configArgs: string[] = [];
+  for (const kv of [...HARDENING_CONFIG, ...(options.config ?? [])]) {
+    if (kv.includes('\0') || !kv.includes('=')) {
+      return Promise.reject(new MindlyError('invalid_input', 'invalid git config override'));
+    }
+    configArgs.push('-c', kv);
+  }
+  const subcommand = args.find((a) => !a.startsWith('-')) ?? 'git';
+  const ok = new Set([0, ...(options.okExitCodes ?? [])]);
+  return new Promise<string[]>((resolve, reject) => {
+    const child = spawn('git', ['--no-pager', ...configArgs, ...args], {
+      cwd: options.cwd,
+      env: hardenedGitEnv(options.env ?? {}),
+      windowsHide: true,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const kept: string[] = [];
+    let rest = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, timeout);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      const records = (rest + chunk).split('\0');
+      rest = records.pop() ?? '';
+      for (const r of records) if (r !== '' && keep(r)) kept.push(r);
+    });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      if (stderr.length < 64 * 1024) stderr += chunk;
+    });
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      reject(
+        err.code === 'ENOENT'
+          ? new MindlyError('unavailable', 'git executable not found on PATH')
+          : new MindlyError('internal', `git ${subcommand} failed`),
+      );
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(
+          new MindlyError('timeout', `git ${subcommand} timed out`, {
+            details: { subcommand, timeoutMs: timeout },
+          }),
+        );
+        return;
+      }
+      const exitCode = code ?? -1;
+      if (!ok.has(exitCode)) {
+        reject(
+          new MindlyError('internal', `git ${subcommand} failed`, {
+            details: { subcommand, exitCode, stderr: safeStderr(stderr) },
+          }),
+        );
+        return;
+      }
+      if (rest !== '' && keep(rest)) kept.push(rest);
+      resolve(kept);
+    });
   });
 }
 

@@ -213,7 +213,12 @@ export function unmergedLine(w: SplitUnmergedWork): string {
     return `${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
   };
   const what: string[] = [];
-  if (w.paths.length > 0) what.push(list(w.paths));
+  const repos = new Set(w.repos ?? []);
+  const files = w.paths.filter((p) => !repos.has(p));
+  if (files.length > 0) what.push(list(files));
+  if (repos.size > 0) {
+    what.push(`git repositories, with their commits and changes: ${list([...repos])}`);
+  }
   const commits = w.commits ?? [];
   if (commits.length > 0) {
     what.push(`${count(commits.length, 'commit')} only on its branch: ${list(commits)}`);

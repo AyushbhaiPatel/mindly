@@ -838,7 +838,7 @@ describe('split status, merge and abort (acceptance 4)', () => {
     expect((await cli(sb, ['split', 'status'])).stdout).not.toContain('finish the abort');
   });
 
-  it('a yes never covers a nested repository, whatever is written into it while asked', async () => {
+  it('a yes covers a nested repository only as it was shown', async () => {
     const sb = await splitSandbox();
     await createSplit(sb);
     const nested = join(partDir(sb, 'page'), 'src/app/vendor');
@@ -855,10 +855,10 @@ describe('split status, merge and abort (acceptance 4)', () => {
     };
     const r = await cli(sb, ['split', 'abort'], { answers: [answer] as unknown as string[] });
     expect(r.code).toBe(1);
-    expect(r.stderr).toContain('folders whose content cannot be checked: src/app/vendor');
+    expect(r.stderr).toContain('git repositories, with their commits and changes: src/app/vendor');
     expect(existsSync(join(nested, 'new.ts'))).toBe(true);
-    // Only a discard that was not asked about removes it.
-    expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
+    // Shown as it is now, and confirmed, it goes.
+    expect((await cli(sb, ['split', 'abort'], { answers: ['y'] })).code).toBe(0);
     expect(existsSync(nested)).toBe(false);
   });
 

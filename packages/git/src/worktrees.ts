@@ -2,16 +2,17 @@ import { createHash } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
-  readdirSync,
+  readFileSync,
   readlinkSync,
   realpathSync,
-  type Dirent,
+  rmdirSync,
+  rmSync,
   type Stats,
 } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { DEFAULT_DENY_PATHS, MindlyError, isDeniedPath, sanitizeLine } from '@mindly/core';
 import { commitTree } from './capture.js';
-import { driverOverrides, gitVersion, runGit, versionAtLeast } from './exec.js';
+import { driverOverrides, gitVersion, runGit, runGitRecords, versionAtLeast } from './exec.js';
 import { MIN_MERGE_TREE_VERSION, parseMergeTreeOutput } from './merge.js';
 import { assertValidBranchName } from './refs.js';
 import { findRepoRoot, gitCommonDir, listWorktrees, resolveCommit } from './repo.js';
@@ -288,65 +289,160 @@ export async function restoreFromHead(worktree: string, paths: readonly string[]
   await runGit(['checkout-index', '-q', '-z', '--stdin'], common);
 }
 
-/** How many entries `ignoredNestedRepos` reads at most before it gives up. */
-export const NESTED_REPO_SEARCH_LIMIT = 200_000;
+/** A nested git repository in a working tree, with what removing it would lose. */
+export interface NestedRepo {
+  /** Its folder, repository-relative. */
+  path: string;
+  /**
+   * `ignored`: in an ignored folder (git deletes it with the worktree). `untracked`: a new one
+   * (git refuses the worktree). `submodule`: a populated submodule or committed repository
+   * (git refuses the worktree).
+   */
+  kind: 'ignored' | 'untracked' | 'submodule';
+  /** A fingerprint of its refs, HEAD and uncommitted files: changes when any of them does. */
+  state: string;
+}
 
 /**
- * Nested git repositories in the ignored folders of the working tree at `cwd` (a dependency
- * cloned into an ignored `vendor/` and patched there): git deletes ignored folders with the
- * worktree, and their commits and changes with them. `repos`: their folders. `unchecked`:
- * ignored folders that could not be looked through (unreadable, or more than `limit` entries in
- * all), which may hold one. Repository-relative. Installed packages (`node_modules`,
- * `site-packages`) and cache folders (holding a `CACHEDIR.TAG`) are not looked into.
+ * The state of the repository whose working tree is `dir`. `state` fingerprints its HEAD, every
+ * ref (a stash included) and its uncommitted files (paths, size, time and mode; content is not
+ * read). `rebuildable`: nothing in it would be lost, because it has no uncommitted files, no
+ * stash, and HEAD and every branch are reachable from its remote-tracking branches or tags (a
+ * dependency checkout that can be fetched again). A repository git cannot read gets a state made
+ * of its `.git` entry's size, time and mode, and is not rebuildable.
  */
-export async function ignoredNestedRepos(
-  cwd: string,
-  limit = NESTED_REPO_SEARCH_LIMIT,
-): Promise<{ repos: string[]; unchecked: string[] }> {
-  const root = await findRepoRoot(cwd);
-  const res = await runGit(
-    ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'],
-    { cwd: root, timeoutMs: 60_000 },
-  );
-  const dirs = res.stdout
-    .split('\0')
-    .filter((p) => p.endsWith('/'))
-    .map((p) => p.slice(0, -1))
-    .sort();
-  // A folder listed inside another listed one is looked through with it.
-  const top = dirs.filter((d) => !dirs.some((o) => o !== d && d.startsWith(`${o}/`)));
-  const repos: string[] = [];
-  const unchecked: string[] = [];
-  let budget = limit;
-  for (const dir of top) {
-    const stack = [dir];
-    let complete = true;
-    while (stack.length > 0) {
-      const rel = stack.pop() as string;
-      const name = rel.slice(rel.lastIndexOf('/') + 1).toLowerCase();
-      if (PACKAGE_DIRS.includes(name)) continue;
-      let entries: Dirent[];
-      try {
-        entries = readdirSync(join(root, rel), { withFileTypes: true });
-      } catch {
-        complete = false;
-        break;
-      }
-      budget -= entries.length;
-      if (budget < 0) {
-        complete = false;
-        break;
-      }
-      if (entries.some((e) => e.name === '.git')) {
-        repos.push(rel);
-        continue;
-      }
-      if (entries.some((e) => e.name === 'CACHEDIR.TAG' && e.isFile())) continue;
-      for (const e of entries) if (e.isDirectory()) stack.push(`${rel}/${e.name}`);
+export async function nestedRepoState(
+  dir: string,
+): Promise<{ state: string; rebuildable: boolean }> {
+  const h = createHash('sha256');
+  try {
+    const opts = { cwd: dir, timeoutMs: 60_000 };
+    // A `.git` git does not take for a repository would have it read the one around `dir`.
+    const top = (await runGit(['rev-parse', '--show-toplevel'], opts)).stdout.trim();
+    if (realpathSync(top) !== realpathSync(dir)) throw new Error('not a repository of its own');
+    const head = (
+      await runGit(['rev-parse', '-q', '--verify', 'HEAD'], { ...opts, okExitCodes: [1, 128] })
+    ).stdout.trim();
+    const refs = (await runGit(['for-each-ref', '--format=%(objectname) %(refname)'], opts)).stdout;
+    const status = (
+      await runGit(
+        ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'],
+        opts,
+      )
+    ).stdout;
+    h.update(`head:${head}\0refs:${refs}\0status:${status}\0`);
+    for (const rec of status.split('\0')) {
+      if (rec.length < 4) continue;
+      const st = lstatInTree(dir, rec.slice(3));
+      h.update(st ? `${rec}:${st.size}:${st.mtimeMs}:${st.mode}\0` : `${rec}:missing\0`);
     }
-    if (!complete) unchecked.push(dir);
+    let rebuildable = status === '' && !/ refs\/stash$/m.test(refs);
+    if (rebuildable && (head !== '' || refs !== '')) {
+      const unreached = await runGit(
+        [
+          'rev-list',
+          '-n',
+          '1',
+          ...(head !== '' ? ['HEAD'] : []),
+          '--branches',
+          '--not',
+          '--remotes',
+          '--tags',
+        ],
+        { ...opts, okExitCodes: [128] },
+      );
+      rebuildable = unreached.exitCode === 0 && unreached.stdout.trim() === '';
+    }
+    return { state: h.digest('hex'), rebuildable };
+  } catch {
+    const st = lstatInTree(dir, '.git');
+    return {
+      state: `unreadable:${st ? `${st.size}:${st.mtimeMs}:${st.mode}` : 'missing'}`,
+      rebuildable: false,
+    };
   }
-  return { repos: repos.sort(), unchecked };
+}
+
+/**
+ * Nested git repositories of the working tree at `cwd` that removing it would lose: every new
+ * (untracked) one, every populated submodule or committed repository, and those in ignored
+ * folders (a dependency cloned into `vendor/` and patched there) unless they are rebuildable
+ * (see `nestedRepoState`). git lists them itself, as folders it does not descend into, wherever
+ * they are (in `node_modules` too).
+ */
+export async function nestedRepos(cwd: string): Promise<NestedRepo[]> {
+  const root = await findRepoRoot(cwd);
+  const asDir = (r: string): boolean => r.endsWith('/');
+  const opts = { cwd: root, timeoutMs: 300_000 };
+  // Every ignored file is listed: read as it comes, keeping only the repositories.
+  const ignored = await runGitRecords(
+    ['ls-files', '-z', '--others', '--ignored', '--exclude-standard'],
+    opts,
+    asDir,
+  );
+  const untracked = await runGitRecords(
+    ['ls-files', '-z', '--others', '--exclude-standard'],
+    opts,
+    asDir,
+  );
+  const gitlinks = (
+    await runGitRecords(['ls-files', '-z', '-s'], opts, (r) => r.startsWith('160000 '))
+  ).map((r) => r.slice(r.indexOf('\t') + 1));
+  const found: { path: string; kind: NestedRepo['kind'] }[] = [
+    ...ignored.map((p) => ({ path: p.slice(0, -1), kind: 'ignored' as const })),
+    ...untracked.map((p) => ({ path: p.slice(0, -1), kind: 'untracked' as const })),
+    ...gitlinks
+      .filter((p) => lstatInTree(root, `${p}/.git`) !== null)
+      .map((p) => ({ path: p, kind: 'submodule' as const })),
+  ];
+  const out: NestedRepo[] = [];
+  for (const f of found) {
+    const { state, rebuildable } = await nestedRepoState(join(root, f.path));
+    if (f.kind === 'ignored' && rebuildable) continue;
+    out.push({ ...f, state });
+  }
+  return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * Deletes the nested repository at `rel` in the worktree, only while its state is still
+ * `expected` (checked right before). A submodule whose git directory lives in the worktree's own
+ * git directory loses that too, so that git no longer counts it. False when it changed (nothing
+ * is deleted) or is not a folder of the worktree.
+ */
+export async function removeNestedRepo(
+  worktree: string,
+  rel: string,
+  expected: string,
+): Promise<boolean> {
+  const root = await findRepoRoot(worktree);
+  if (rel === '' || rel.split('/').some((p) => p === '' || p === '.' || p === '..')) return false;
+  if (!lstatInTree(root, rel)?.isDirectory()) return false;
+  const dir = join(root, rel);
+  if ((await nestedRepoState(dir)).state !== expected) return false;
+  let gitdir: string | null = null;
+  if (lstatInTree(root, `${rel}/.git`)?.isFile()) {
+    const m = /^gitdir: (.+)$/m.exec(readFileSync(join(dir, '.git'), 'utf8'));
+    if (m) gitdir = resolve(dir, (m[1] as string).trim());
+  }
+  const admin = resolve(
+    root,
+    (await runGit(['rev-parse', '--git-dir'], { cwd: root, timeoutMs: 30_000 })).stdout.trim(),
+  );
+  const modules = join(admin, 'modules');
+  rmSync(dir, { recursive: true, force: true });
+  if (gitdir && gitdir.startsWith(`${modules}/`)) {
+    rmSync(gitdir, { recursive: true, force: true });
+    // Folders left empty, up to `modules` itself: git counts that folder as submodules.
+    for (let d = dirname(gitdir); d === modules || d.startsWith(`${modules}/`); d = dirname(d)) {
+      try {
+        rmdirSync(d);
+      } catch {
+        break;
+      }
+    }
+  }
+  return true;
 }
 
 /**

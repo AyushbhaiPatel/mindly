@@ -201,12 +201,13 @@ The merge takes what each agent committed on its part's branch. If a part's work
 work that is not committed there, `mindly split merge` stops and names the files (`--force`
 merges without them). Before or after a merge, `mindly split abort` removes nothing while the
 parts hold work no other branch has: uncommitted files (secrets such as a local `.env` included,
-listed by name only), or commits only on a part branch. After a squash or rebase merge of the
+listed by name only), nested git repositories, or commits only on a part branch. After a squash or rebase merge of the
 merged branch, every part commit is like that. Run `mindly split abort --keep-branches` to remove
 the worktrees and keep the part branches, so that no commit is lost; `mindly split abort --yes
---discard` deletes it all. When you confirm an abort on the terminal, it deletes only the files it
-listed, each only if it still holds what it held when you were asked: anything new, a listed file
-edited since, or a nested repository stops it.
+--discard` deletes it all. When you confirm an abort on the terminal, it deletes only what it
+listed, each file only if it still holds what it held when you were asked, and each nested
+repository only if its branches, HEAD and uncommitted files are as they were: anything new or
+changed since stops it.
 
 Then worktrees are removed the way `git worktree remove` does without `--force`: git refuses one
 with modified or untracked files (an edited file flagged skip-worktree or assume-unchanged
@@ -215,10 +216,14 @@ included), with submodules or that is locked, and the abort keeps it and says wh
 deny-list or your `redaction.denyPaths` count as work, except installed ones: anything in
 `node_modules` or `site-packages`, and, apart from `.env*` and key files, anything in
 `__pycache__`, `.tox`, `.gradle`, `vendor/bundle` or a virtualenv (a `venv`, `.venv` or `env`
-folder holding `pyvenv.cfg`). So does a git repository inside an ignored folder (outside
-`node_modules`, `site-packages` and cache folders holding a `CACHEDIR.TAG`), and an ignored folder
-too large to look through. When an abort keeps something, run `mindly split abort` again to
-finish.
+folder holding `pyvenv.cfg`). Nested git repositories count wherever they are, ignored or not:
+a new one, a submodule, or one in an ignored folder, unless it is a checkout that can be fetched
+again (no uncommitted files, no stash, and every branch on one of its remote-tracking branches or
+tags, like the git dependencies `mix deps.get` leaves in `deps/`). Right before git removes a
+worktree, the abort looks once more for untracked files, counted ignored files and nested
+repositories, and keeps the worktree if any appeared; git's own check covers untracked files
+after that, but an ignored file written in between goes with the worktree. When an abort keeps
+something, run `mindly split abort` again to finish.
 
 ### Which agent is better at what, in your repo
 

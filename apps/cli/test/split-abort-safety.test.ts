@@ -65,7 +65,7 @@ async function splitSandbox(prepare?: (sb: Sandbox) => void): Promise<Sandbox> {
 const partDir = (sb: Sandbox, key: string): string => join(`${sb.repo}.mindly`, `billing-${key}`);
 
 describe('split abort keeps what it cannot account for', () => {
-  it('keeps a worktree with uncommitted edits inside a submodule', async () => {
+  it('lists a submodule with uncommitted edits, and removes it only on a confirmation', async () => {
     const sub = tempDir('r10-sub-');
     git(sub, 'init', '-q', '-b', 'main');
     write(sub, 'lib.ts', 'export const lib = 1;\n');
@@ -88,24 +88,16 @@ describe('split abort keeps what it cannot account for', () => {
     git(page, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'update', '--init');
     write(page, 'src/app/vendor/lib.ts', 'export const lib = 2; // hours of work\n');
     write(page, 'src/app/vendor/new.ts', 'export const fresh = 1;\n');
-    const r = await cli(sb, ['split', 'abort', '--yes', '--json']);
-    // Without --discard nothing that no other branch has may be removed: git keeps it.
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    // Without a confirmation or --discard, nothing that no other branch has may be removed.
     expect(r.code).toBe(1);
-    const a = JSON.parse(r.stdout) as {
-      finished: boolean;
-      keptWorktrees: string[];
-      keptBecause: Record<string, string>;
-    };
-    expect(a.finished).toBe(false);
-    expect(a.keptWorktrees).toEqual([page]);
-    expect(a.keptBecause[page]).toMatch(/^git did not remove it: .*submodules/);
+    expect(r.stderr).toContain('git repositories, with their commits and changes: src/app/vendor');
     expect(existsSync(join(page, 'src/app/vendor/new.ts'))).toBe(true);
     expect(git(sb.repo, 'branch', '--list', 'mindly/billing/page').trim()).not.toBe('');
-    // The abort is not finished until that worktree goes: with --yes --discard, it does.
-    const status = await cli(sb, ['split', 'status']);
-    expect(status.stdout).toContain('finish the abort');
-    const discard = await cli(sb, ['split', 'abort', '--yes', '--discard']);
-    expect(discard.code).toBe(0);
+    // Shown and confirmed on the terminal, it goes, its git directory in the worktree's too.
+    const confirmed = await cli(sb, ['split', 'abort', '--keep-branches'], { answers: ['y'] });
+    expect(confirmed.stderr).toContain('src/app/vendor');
+    expect(confirmed.code).toBe(0);
     expect(existsSync(page)).toBe(false);
   });
 
@@ -248,7 +240,7 @@ describe('split abort leaves the last word to git, confirmed or not', () => {
     keptBecause: Record<string, string>;
   }
 
-  it('a confirmed abort keeps a repository committed into the part (no .gitmodules)', async () => {
+  it('a repository committed into the part (no .gitmodules) goes only as it was confirmed', async () => {
     const sb = await splitSandbox();
     const page = partDir(sb, 'page');
     // The agent makes a repository in its part, commits in it and records it on the part branch.
@@ -259,21 +251,33 @@ describe('split abort leaves the last word to git, confirmed or not', () => {
     git(nested, 'commit', '-q', '-m', 'nested work');
     git(page, 'add', 'src/app/vendor');
     git(page, 'commit', '-q', '-m', 'add vendor');
-    // Uncommitted work in it, which no listing of the part shows, and a file that is listed.
     write(page, 'src/app/vendor/wip.ts', 'export const wip = 1;\n');
     write(page, 'src/app/billing.ts', 'export const billing = 1;\n');
-    const r = await cli(sb, ['split', 'abort', '--keep-branches', '--json'], { answers: ['y'] });
-    expect(r.stderr).toContain('src/app/billing.ts');
+    // Uncommitted work is written in it after the confirmation, right before it goes.
+    let looks = 0;
+    hook.afterBranchLook = (branch) => {
+      if (branch === 'mindly/billing/page' && ++looks === 3) {
+        write(page, 'src/app/vendor/wip.ts', 'export const wip = 2; // more work\n');
+      }
+    };
+    let r: Awaited<ReturnType<typeof cli>>;
+    try {
+      r = await cli(sb, ['split', 'abort', '--json'], { answers: ['y'] });
+    } finally {
+      delete hook.afterBranchLook;
+    }
+    expect(looks).toBe(3);
+    expect(r.stderr).toContain('git repositories, with their commits and changes: src/app/vendor');
     expect(r.code).toBe(1);
     const a = JSON.parse(r.stdout) as Aborted;
-    expect(a.finished).toBe(false);
-    expect(a.keptWorktrees).toEqual([page]);
-    expect(a.keptBecause[page]).toMatch(/^git did not remove it: .*submodules/);
-    // The confirmed file went; the repository and its work stay.
-    expect(existsSync(join(page, 'src/app/billing.ts'))).toBe(false);
-    expect(existsSync(join(nested, 'wip.ts'))).toBe(true);
+    expect(a.keptBecause[page]).toBe(
+      'a file it listed changed after the abort was confirmed: src/app/vendor',
+    );
+    expect(readFileSync(join(nested, 'wip.ts'), 'utf8')).toContain('more work');
     expect(existsSync(join(nested, '.git'))).toBe(true);
-    expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
+    // As it is now, shown and confirmed again: it goes.
+    const again = await cli(sb, ['split', 'abort'], { answers: ['y'] });
+    expect(again.code).toBe(0);
     expect(existsSync(page)).toBe(false);
   });
 
@@ -301,7 +305,7 @@ describe('split abort leaves the last word to git, confirmed or not', () => {
     const a = JSON.parse(r.stdout) as Aborted;
     expect(a.finished).toBe(false);
     expect(a.keptWorktrees).toEqual([page]);
-    expect(a.keptBecause[page]).toMatch(/^git did not remove it: .*modified or untracked/);
+    expect(a.keptBecause[page]).toBe('it got new work while the abort ran: src/app/late.ts');
     expect(readFileSync(join(page, 'src/app/late.ts'), 'utf8')).toBe('export const late = 1;\n');
     // What was confirmed went: the new file, and the edit (the committed file is back).
     expect(existsSync(join(page, 'src/app/billing.ts'))).toBe(false);
@@ -313,22 +317,88 @@ describe('split abort leaves the last word to git, confirmed or not', () => {
     expect(existsSync(page)).toBe(false);
   });
 
-  it('keeps a nested repository in an ignored folder, confirmed or not', async () => {
-    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', 'tools/\n'));
+  it('lists a nested repository in an ignored folder, whatever is next to it', async () => {
+    const sb = await splitSandbox((s) =>
+      write(s.repo, '.gitignore', 'tools/\nnode_modules/\nlib/\n'),
+    );
     const page = partDir(sb, 'page');
-    const nested = join(page, 'tools/patched-dep');
-    write(page, 'tools/patched-dep/fix.ts', 'export const fix = 1;\n');
-    git(nested, 'init', '-q', '-b', 'main');
-    git(nested, 'add', '-A');
-    git(nested, 'commit', '-q', '-m', 'local fix, never pushed');
+    // Neither an empty CACHEDIR.TAG nor an installed-packages folder hides one.
+    write(page, 'tools/CACHEDIR.TAG', '');
+    for (const rel of [
+      'tools/patched-dep',
+      'node_modules/dep',
+      'lib/python3.12/site-packages/pkg',
+    ]) {
+      write(page, `${rel}/fix.ts`, 'export const fix = 1;\n');
+      git(join(page, rel), 'init', '-q', '-b', 'main');
+      git(join(page, rel), 'add', '-A');
+      git(join(page, rel), 'commit', '-q', '-m', 'local fix, never pushed');
+    }
     const r = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
     expect(r.code).toBe(1);
-    expect(r.stderr).toContain('tools/patched-dep');
+    expect(r.stderr).toContain(
+      'lib/python3.12/site-packages/pkg, node_modules/dep, tools/patched-dep',
+    );
+    expect(existsSync(join(page, 'tools/patched-dep/.git'))).toBe(true);
+    // Listed, it can be confirmed.
     const confirmed = await cli(sb, ['split', 'abort', '--keep-branches'], { answers: ['y'] });
-    expect(confirmed.code).toBe(1);
-    expect(existsSync(join(nested, '.git'))).toBe(true);
-    expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
+    expect(confirmed.code).toBe(0);
     expect(existsSync(page)).toBe(false);
+  });
+
+  it('does not count a dependency checkout that can be fetched again, and lists one with local work', async () => {
+    const upstream = tempDir('r10-dep-');
+    git(upstream, 'init', '-q', '-b', 'main');
+    write(upstream, 'mix.exs', 'x\n');
+    git(upstream, 'add', '-A');
+    git(upstream, 'commit', '-q', '-m', 'dep');
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', '/deps\n/_build\n'));
+    // What `mix deps.get` leaves for a git dependency.
+    for (const key of ['api', 'page'])
+      git(sb.repo, 'clone', '-q', upstream, join(partDir(sb, key), 'deps/jason'));
+    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(0);
+    const sb2 = await splitSandbox((s) => write(s.repo, '.gitignore', '/deps\n'));
+    const page = partDir(sb2, 'page');
+    git(sb2.repo, 'clone', '-q', upstream, join(page, 'deps/jason'));
+    write(page, 'deps/jason/mix.exs', 'patched\n');
+    const r = await cli(sb2, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('deps/jason');
+    const confirmed = await cli(sb2, ['split', 'abort', '--keep-branches'], { answers: ['y'] });
+    expect(confirmed.code).toBe(0);
+  });
+
+  it('does not stop at a large ignored build folder', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', 'build/\n'));
+    const page = partDir(sb, 'page');
+    // Many folders and files: nothing walks them, git lists them once.
+    for (let d = 0; d < 100; d++) {
+      for (let f = 0; f < 100; f++) write(page, `build/d${d}/f${f}.o`, '');
+    }
+    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(0);
+  });
+
+  it('keeps a file written after the last check when git would not show untracked files', async () => {
+    const sb = await splitSandbox();
+    // A common setting in large repositories; worktrees share it.
+    git(sb.repo, 'config', 'status.showUntrackedFiles', 'no');
+    const page = partDir(sb, 'page');
+    write(page, 'src/app/billing.ts', 'export const billing = 1;\n');
+    let looks = 0;
+    hook.afterBranchLook = (branch) => {
+      if (branch === 'mindly/billing/page' && ++looks === 3) {
+        write(page, 'src/app/late.ts', 'export const late = 1;\n');
+      }
+    };
+    let r: Awaited<ReturnType<typeof cli>>;
+    try {
+      r = await cli(sb, ['split', 'abort', '--json'], { answers: ['y'] });
+    } finally {
+      delete hook.afterBranchLook;
+    }
+    expect(looks).toBe(3);
+    expect(r.code).toBe(1);
+    expect(readFileSync(join(page, 'src/app/late.ts'), 'utf8')).toBe('export const late = 1;\n');
   });
 
   it('counts an edit to a file flagged skip-worktree, and removes it once confirmed', async () => {

@@ -10,7 +10,9 @@ import {
   deleteBranch,
   flaggedChanges,
   ignoredDeniedFiles,
-  ignoredNestedRepos,
+  nestedRepoState,
+  nestedRepos,
+  removeNestedRepo,
   listFiles,
   listWorktrees,
   mergeIntoNewBranch,
@@ -401,20 +403,94 @@ describe('worktrees', () => {
     expect(git(path, 'status', '--porcelain')).toBe(' M c.txt\n');
   });
 
-  it('finds nested repositories in ignored folders, and says when it could not look', async () => {
-    const root = makeRepo({ '.gitignore': 'tools/\nnode_modules/\ntarget/\nsrc/vendor/\n' });
-    git(root, 'init', '-q', join(root, 'tools/patched-dep'));
+  it('finds every nested repository git sees, wherever it is, and skips rebuildable ones', async () => {
+    const root = makeRepo({ '.gitignore': 'tools/\nnode_modules/\nlib/\n/deps\nsrc/vendor/\n' });
+    const repo = (rel: string, commit = true): void => {
+      write(root, `${rel}/a.txt`, 'a\n');
+      git(join(root, rel), 'init', '-q', '-b', 'main');
+      if (commit) commitAll(join(root, rel), 'local');
+    };
+    // Next to an empty CACHEDIR.TAG, in node_modules or site-packages: still listed.
+    write(root, 'tools/CACHEDIR.TAG', '');
+    repo('tools/patched-dep');
+    repo('node_modules/dep');
+    repo('lib/python3.12/site-packages/pkg');
+    repo('tools/empty', false);
+    // Not a repository (a stale gitfile): its files are only ignored files.
     write(root, 'src/vendor/lib/.git', 'gitdir: /elsewhere\n');
-    // Installed packages and caches are not looked into.
-    git(root, 'init', '-q', join(root, 'node_modules/dep'));
-    write(root, 'target/CACHEDIR.TAG', 'Signature: 8a477f597d28d172789f06886806bc55\n');
-    git(root, 'init', '-q', join(root, 'target/debug/build/x'));
-    write(root, 'tools/notes/a.txt', 'a\n');
-    expect(await ignoredNestedRepos(root)).toEqual({
-      repos: ['src/vendor/lib', 'tools/patched-dep'],
-      unchecked: [],
-    });
-    expect((await ignoredNestedRepos(root, 3)).unchecked.length).toBeGreaterThan(0);
+    // A new one, not ignored.
+    repo('src/newrepo');
+    // A dependency checkout that can be fetched again is not listed; with a local commit, or an
+    // edit, it is.
+    const upstream = makeRepo({ 'mix.exs': 'x\n' });
+    git(root, 'clone', '-q', upstream, join(root, 'deps/jason'));
+    git(root, 'clone', '-q', upstream, join(root, 'deps/plug'));
+    write(root, 'deps/plug/mix.exs', 'patched\n');
+    git(root, 'clone', '-q', upstream, join(root, 'deps/ecto'));
+    write(root, 'deps/ecto/fix.ex', 'fix\n');
+    commitAll(join(root, 'deps/ecto'), 'fix');
+    const found = await nestedRepos(root);
+    expect(found.map((r) => `${r.kind} ${r.path}`)).toEqual([
+      'ignored deps/ecto',
+      'ignored deps/plug',
+      'ignored lib/python3.12/site-packages/pkg',
+      'ignored node_modules/dep',
+      'untracked src/newrepo',
+      'ignored tools/empty',
+      'ignored tools/patched-dep',
+    ]);
+    // The state is stable, and changes with a commit or an edit in the repository.
+    const state = async (rel: string): Promise<string> =>
+      (await nestedRepoState(join(root, rel))).state;
+    const before = await state('tools/patched-dep');
+    expect(await state('tools/patched-dep')).toBe(before);
+    write(root, 'tools/patched-dep/a.txt', 'edited, same size\n'.slice(0, 2));
+    const edited = await state('tools/patched-dep');
+    expect(edited).not.toBe(before);
+    commitAll(join(root, 'tools/patched-dep'), 'more');
+    expect(await state('tools/patched-dep')).not.toBe(edited);
+  });
+
+  it('deletes a nested repository only while it is as it was seen', async () => {
+    const root = makeRepo({ '.gitignore': 'tools/\n' });
+    write(root, 'tools/dep/a.txt', 'a\n');
+    git(join(root, 'tools/dep'), 'init', '-q', '-b', 'main');
+    commitAll(join(root, 'tools/dep'), 'local');
+    const seen = (await nestedRepoState(join(root, 'tools/dep'))).state;
+    write(root, 'tools/dep/b.txt', 'b\n');
+    expect(await removeNestedRepo(root, 'tools/dep', seen)).toBe(false);
+    expect(existsSync(join(root, 'tools/dep/b.txt'))).toBe(true);
+    const now = (await nestedRepoState(join(root, 'tools/dep'))).state;
+    expect(await removeNestedRepo(root, '../x', now)).toBe(false);
+    expect(await removeNestedRepo(root, 'tools/dep', now)).toBe(true);
+    expect(existsSync(join(root, 'tools/dep'))).toBe(false);
+  });
+
+  it('lists nested repositories in time linear in the ignored folders', async () => {
+    const root = makeRepo({ '.gitignore': '__pycache__/\n' });
+    for (let i = 0; i < 20_000; i++) {
+      write(root, `src/p${Math.floor(i / 100)}/m${i}/__pycache__/__init__.cpython-312.pyc`, '');
+    }
+    try {
+      const t = Date.now();
+      expect(await nestedRepos(root)).toEqual([]);
+      // A pairwise comparison of the folders took over 15 s here.
+      expect(Date.now() - t).toBeLessThan(8_000);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('refuses a worktree with an untracked file whatever status.showUntrackedFiles says', async () => {
+    const root = makeRepo();
+    git(root, 'config', 'status.showUntrackedFiles', 'no');
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    write(path, 'late.ts', 'written last\n');
+    await expect(removeWorktree(root, path, { force: false })).rejects.toSatisfy(
+      (e) => isMindlyError(e, 'conflict') && e.details?.['refused'] === true,
+    );
+    expect(existsSync(join(path, 'late.ts'))).toBe(true);
   });
 
   it('lists tracked and untracked files, not ignored ones', async () => {

@@ -24,7 +24,8 @@ import {
   findRepoRoot,
   flaggedChanges,
   ignoredDeniedFiles,
-  ignoredNestedRepos,
+  nestedRepos,
+  removeNestedRepo,
   headCommit,
   hunkHashes,
   isManifestPath,
@@ -106,6 +107,24 @@ export function createSplitGitPort(): SplitGitPort {
       (await addWorktree(repoRoot, path, branch, startPoint)).path,
     removeWorktree: (repoRoot, path, options) => removeWorktree(repoRoot, path, options),
     restoreFromHead: (_repoRoot, worktree, paths) => restoreFromHead(worktree, paths),
+    removeNestedRepo: (_repoRoot, worktree, path, expected) =>
+      removeNestedRepo(worktree, path, expected),
+    strayWork: async (_repoRoot, worktree, secretDeny) => {
+      const untracked = await runGit(['ls-files', '-z', '--others', '--exclude-standard'], {
+        cwd: worktree,
+        timeoutMs: 120_000,
+      });
+      return [
+        ...new Set([
+          ...untracked.stdout
+            .split('\0')
+            .filter((p) => p !== '')
+            .map((p) => p.replace(/\/$/, '')),
+          ...(await ignoredDeniedFiles(worktree, secretDeny)),
+          ...(await nestedRepos(worktree)).map((r) => r.path),
+        ]),
+      ].sort();
+    },
     deleteBranch: (repoRoot, branch, expectedTip) => deleteBranch(repoRoot, branch, expectedTip),
     branchOnlyWork: (repoRoot, branch, options) => branchOnlyWork(repoRoot, branch, options),
     uncommittedWork: async (repoRoot, worktree, branch, extraDeny, secretDeny) => {
@@ -129,7 +148,7 @@ export function createSplitGitPort(): SplitGitPort {
       // Edited files flagged skip-worktree or assume-unchanged: neither the capture nor git's
       // status sees them.
       const flagged = await flaggedChanges(worktree, extraDeny);
-      const nested = await ignoredNestedRepos(worktree);
+      const nested = await nestedRepos(worktree);
       const paths = new Set([
         ...res.stdout.split('\0').filter((p) => p !== ''),
         // Left out of the capture because they are on the deny-list: still work in the worktree.
@@ -140,7 +159,7 @@ export function createSplitGitPort(): SplitGitPort {
         paths: [...paths].sort(),
         denied: [...new Set([...captured.skipped, ...ignored, ...flagged.denied])].sort(),
         ignoredDenied: ignored.filter((p) => !paths.has(p)),
-        nestedRepos: [...new Set([...nested.repos, ...nested.unchecked])].sort(),
+        nestedRepos: nested.map((r) => ({ path: r.path, state: r.state })),
       };
     },
     changedSince: async (repoRoot, worktree, base, extraDeny) => {
