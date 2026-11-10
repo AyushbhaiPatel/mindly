@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { defaultUserConfig, ProjectConfigSchema } from '../src/config.js';
+import {
+  channelUrlProblem,
+  defaultUserConfig,
+  ProjectConfigSchema,
+  UserConfigSchema,
+} from '../src/config.js';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadUserConfig, unusableNotifyChannels } from '../src/config.js';
 import { codename, isUuid, parseCodename, uuidv7 } from '../src/ids.js';
 import { sanitizeForContext, truncate } from '../src/text.js';
 
@@ -80,6 +89,80 @@ describe('config', () => {
     expect(c.llm.provider).toBe('none');
     expect(c.failover.autoLaunch).toBe(false);
     expect(c.notify.channels).toEqual([]);
+  });
+  it('sends by default what something produces', () => {
+    expect(defaultUserConfig().notify.triggers).toEqual([
+      'rate_limited',
+      'conflict_critical',
+      'check_failed',
+    ]);
+    // Older config files that list it are still read.
+    expect(
+      UserConfigSchema.safeParse({ notify: { triggers: ['agent_blocked', 'rate_limited'] } })
+        .success,
+    ).toBe(true);
+  });
+  it('refuses a notification channel URL that could never be used', () => {
+    const channel = (url: string, type: 'webhook' | 'ntfy' = 'webhook') =>
+      UserConfigSchema.safeParse({
+        notify: {
+          channels: [type === 'ntfy' ? { type, url, topic: 'mindly_topic_1' } : { type, url }],
+        },
+      });
+    for (const url of [
+      'http://example.com/hook',
+      'ftp://example.com/x',
+      'file:///etc/passwd',
+      'javascript:alert(1)',
+      'https://user:pw@example.com/x',
+      'http://127.0.0.1.evil.example/x',
+    ]) {
+      const r = channel(url);
+      expect(r.success, url).toBe(false);
+      // The reason is said, the URL (which may hold a token) is not repeated.
+      const said = JSON.stringify(r.error?.issues.map((i) => i.message));
+      expect(said).toMatch(/url must|credentials/);
+      expect(said).not.toContain('example');
+      expect(channel(url, 'ntfy').success, `ntfy ${url}`).toBe(false);
+    }
+    for (const url of [
+      'https://hooks.example.com/abc',
+      'http://localhost:8080/hook',
+      'http://127.0.0.1:9/hook',
+      'http://[::1]:9/hook',
+      'https://ntfy.example.com/base/?auth=tk_x',
+    ]) {
+      expect(channel(url).success, url).toBe(true);
+    }
+    expect(channelUrlProblem('http://example.com')).toBe(
+      'url must use https (http only for localhost)',
+    );
+    expect(channelUrlProblem('https://a:b@example.com')).toBe('url must not contain credentials');
+    expect(channelUrlProblem('https://example.com')).toBeNull();
+  });
+  it('reads a config file that holds an unusable channel URL, leaving that channel out', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'mindly-core-cfg-')), 'config.json');
+    writeFileSync(
+      path,
+      JSON.stringify({
+        notify: {
+          channels: [
+            { type: 'webhook', url: 'http://example.com/hook' },
+            { type: 'desktop' },
+            { type: 'ntfy', url: 'https://a:b@ntfy.example.com', topic: 'mindly_topic_1' },
+          ],
+        },
+        hooks: { timeoutMs: 900 },
+      }),
+    );
+    // The file was valid before URLs were checked: it must not stop every command now.
+    const config = loadUserConfig(path);
+    expect(config.notify.channels).toEqual([{ type: 'desktop' }]);
+    expect(config.hooks.timeoutMs).toBe(900);
+    expect(unusableNotifyChannels(path)).toEqual([
+      { type: 'webhook', problem: 'url must use https (http only for localhost)' },
+      { type: 'ntfy', problem: 'url must not contain credentials' },
+    ]);
   });
   it('rejects NUL in check argv', () => {
     expect(ProjectConfigSchema.safeParse({ checks: [{ name: 'x', argv: ['a\0'] }] }).success).toBe(
