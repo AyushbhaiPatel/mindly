@@ -48,9 +48,11 @@ memory, which is then injected into every other agent.
   so. Anything else is taken as a possible change of the whole working tree, which gets a warning
   when a covered file is there: an alias, a subcommand or option not known here, a `-c` setting
   not known to be harmless, a variable set for git or exported earlier on the line (also for a
-  shell that runs git) other than locale, time zone, terminal, author and harmless pager or editor
+  shell that runs git, with `+=` as with `=`, under `set -a`, or by `eval`, a `trap` or a file
+  read with `source`) other than locale, time zone, terminal, author and harmless pager or editor
   ones, a push into a repository on this machine, and a config write that changes what later
-  commands do. The folders git fills (a clone, a new repository or working tree, a submodule) are
+  commands do. A variable set without `export` counts when its name is upper-case, as one already
+  in the environment (`HOME`, `PATH`) may be; a lower-case one (`msg=fix`) stays the shell's. The folders git fills (a clone, a new repository or working tree, a submodule) are
   checked as written as a whole, and the code it runs (`rebase --exec`, `bisect run`,
   `difftool --extcmd`, `submodule foreach`, a `!` alias) is read like any other command. What
   git runs on its own, from settings already in place, is not seen: hooks in `.git/hooks` or

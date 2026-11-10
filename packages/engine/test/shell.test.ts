@@ -1200,6 +1200,12 @@ describe('write targets of a shell command', () => {
     const paths = Array.from({ length: 5000 }, (_, i) => `p/q/r/s/t/u/v/file${i}.ts`);
     expect(paths.filter(names)).toHaveLength(0);
     expect(performance.now() - started).toBeLessThan(200);
+    // A long run of slashes is read in linear time.
+    const slashes = performance.now();
+    pathNamer(`cat ${'/'.repeat(199_990)}x`);
+    readShellWrites(`git clone https://e.invalid${'/'.repeat(199_950)}x`);
+    readShellWrites(`git submodule add https://e.invalid${'/'.repeat(199_950)}x`);
+    expect(performance.now() - slashes).toBeLessThan(500);
   });
 
   it('matches a path by a directory above it', () => {

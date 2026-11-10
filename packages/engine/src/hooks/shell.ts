@@ -361,6 +361,13 @@ export function mentionsPath(command: string, path: string): boolean {
   return new RegExp(`(^|[\\s'"=/<>:(\`])${escapeRe(base)}($|[\\s'"\`;|&)<>:,])`).test(command);
 }
 
+/** `text` without the run of `ch` it ends with; a loop, as a regex takes quadratic time here. */
+const trimEnd = (text: string, ch: string): string => {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === ch) end--;
+  return text.slice(0, end);
+};
+
 /**
  * A test for "does this command name `path`, its basename, or a directory above it?", prepared
  * once per command: its words are split up front, so asking about many paths costs set lookups
@@ -369,7 +376,7 @@ export function mentionsPath(command: string, path: string): boolean {
 export function pathNamer(command: string): (path: string) => boolean {
   const names = new Set<string>();
   for (const raw of command.split(/[\s'"`;|&()<>=:,]+/)) {
-    const word = raw.replace(/^\.\//, '').replace(/\/+$/, '');
+    const word = trimEnd(raw.replace(/^\.\//, ''), '/');
     if (word === '' || word.length > 1024) continue;
     // An absolute or longer spelling of a path names it too: every trailing part counts.
     const parts = word.split('/');
@@ -890,8 +897,9 @@ function parse(
   return { commands, cut };
 }
 
+/** `NAME=value`, or `NAME+=value`, which adds to the value: both set the variable. */
 const isAssignment = (w: Word): boolean =>
-  w.mask.startsWith('u') && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w.text);
+  w.mask.startsWith('u') && /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w.text);
 
 function withoutAssignments(words: readonly Word[]): Word[] {
   let at = 0;
@@ -1024,7 +1032,8 @@ type Verdict =
   | { kind: 'writes'; items: Item[] }
   | { kind: 'unknown'; args: Word[]; bare: boolean }
   | { kind: 'cd'; how: 'cd' | 'pushd' | 'popd'; dir: Word | null }
-  | { kind: 'inline'; code: string }
+  /** Shell code it runs: in a shell of its own, or in this one (`same`: `eval`, `trap`). */
+  | { kind: 'inline'; code: string; same?: boolean }
   | { kind: 'script'; code: string }
   | {
       kind: 'git';
@@ -1227,16 +1236,19 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
       return readGit(words, stdin);
     case 'trap':
       // The first argument is what runs when the signal comes.
-      return args[0] && args.length > 1 ? { kind: 'inline', code: args[0].text } : READS;
+      return args[0] && args.length > 1
+        ? { kind: 'inline', code: args[0].text, same: true }
+        : READS;
     case 'alias': {
       const code = args
         .filter((w) => w.text.includes('='))
         .map((w) => w.text.slice(w.text.indexOf('=') + 1));
-      return code.length > 0 ? { kind: 'inline', code: code.join('\n') } : READS;
+      return code.length > 0 ? { kind: 'inline', code: code.join('\n'), same: true } : READS;
     }
     case 'eval':
       return {
         kind: 'inline',
+        same: true,
         code: words
           .slice(1)
           .map((w) => w.text)
@@ -1557,26 +1569,85 @@ const HARMLESS_PAGER = /^(cat|less|more|true|false)?$/;
  * (`HOME`, `XDG_CONFIG_HOME`, `GIT_DIR`, `GIT_CONFIG_*`) or run a program (`EDITOR`, `PATH`,
  * `SSH_ASKPASS`, `GIT_EXTERNAL_DIFF`).
  */
-function harmlessVariable(name: string, value: string): boolean {
+function harmlessVariable(name: string, value: string, adds: boolean): boolean {
   if (/^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)$/.test(name)) return true;
   if (/^(GIT_TERMINAL_PROMPT|LANG|LANGUAGE|LC_[A-Z]+|TZ|NO_COLOR|TERM)$/.test(name)) return true;
+  // What `+=` adds to is not known here, so the value it ends with is not either.
+  if (adds) return false;
   if (name === 'GIT_PAGER' || name === 'PAGER') return /^(cat|less)?$/.test(value);
   if (/^(GIT_EDITOR|GIT_SEQUENCE_EDITOR|EDITOR|VISUAL)$/.test(name))
     return /^(true|:|cat)?$/.test(value);
   return false;
 }
 
-/**
- * A variable set in a way that may change what git does: `X=…`, or a bare name that `export`
- * gives a value set before. Harmless ones are left out.
- */
-const unsafeVariable = (w: Word): boolean => {
-  const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$/s.exec(w.text);
-  return m !== null && !harmlessVariable(m[1] as string, m[2] ?? '');
+/** A variable word: `X=…`, `X+=…`, or a bare name (`export X`). */
+const variableWord = (w: Word): { name: string; value: string | null; adds: boolean } | null => {
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:(\+?)=(.*))?$/s.exec(w.text);
+  return m ? { name: m[1] as string, value: m[3] ?? null, adds: m[2] === '+' } : null;
 };
 
-/** Shell words that may give a variable to the commands after them (`export GIT_DIR=x`). */
+/**
+ * A variable set in a way that may change what git does: `X=…`, `X+=…`, or a bare name that
+ * `export` gives a value set before. Harmless ones are left out.
+ */
+const unsafeVariable = (w: Word): boolean => {
+  const v = variableWord(w);
+  return v !== null && !harmlessVariable(v.name, v.value ?? '', v.adds);
+};
+
+/**
+ * A variable that may already be in the environment, so that setting it without `export` still
+ * reaches git: one named the way environment variables are (`HOME`, `PATH`, `GIT_DIR`). A
+ * lower-case name (`msg=fix`) is the shell's own unless it is exported.
+ */
+const environmentName = (w: Word): boolean =>
+  /^[A-Z_][A-Z0-9_]*$/.test(variableWord(w)?.name ?? '');
+
+/** Shell words that set variables for the commands after them (`export GIT_DIR=x`). */
 const EXPORTS = new Set(['export', 'declare', 'typeset', 'local', 'readonly']);
+
+/**
+ * Whether a command that sets variables (`export`, `declare`, an assignment alone) may change
+ * what a later git command runs with. `allExport`: `set -a` is on, so every variable set is
+ * exported. Variables set without being exported reach git only when already in the environment.
+ */
+function setsGitVariable(
+  program: string,
+  cmd: SimpleCommand,
+  words: readonly Word[],
+  allExport: boolean,
+): boolean {
+  if (words.length === 0) {
+    // Assignments alone: `X=1; git …`.
+    return cmd.words.some(
+      (w) => isAssignment(w) && unsafeVariable(w) && (allExport || environmentName(w)),
+    );
+  }
+  if (!EXPORTS.has(program)) return false;
+  const flags = words.slice(1).filter(isFlag);
+  const names = words.slice(1).filter((w) => !isFlag(w) && !w.text.startsWith('+'));
+  // `-f` names functions; `export -n` takes the export away (as `declare +x` does).
+  const letters = flags.filter((f) => !f.text.startsWith('--')).map((f) => f.text.slice(1));
+  if (letters.some((l) => l.includes('f'))) return false;
+  if (program === 'export' && letters.some((l) => l.includes('n'))) return false;
+  const exported = program === 'export' || allExport || letters.some((l) => l.includes('x'));
+  return names.some(
+    (w) =>
+      unsafeVariable(w) && (exported || (environmentName(w) && variableWord(w)?.value !== null)),
+  );
+}
+
+/** `set -a` / `set -o allexport` turns exporting every variable on, `set +a` off; null: neither. */
+function allExportSet(words: readonly Word[]): boolean | null {
+  let on: boolean | null = null;
+  for (let i = 1; i < words.length; i++) {
+    const t = (words[i] as Word).text;
+    if (/^[-+]o$/.test(t) && words[i + 1]?.text === 'allexport') on = t === '-o';
+    else if (/^-[a-zA-Z]*a/.test(t)) on = true;
+    else if (/^\+[a-zA-Z]*a/.test(t)) on = false;
+  }
+  return on;
+}
 
 const TRACKED_FILES: FileKinds = { tracked: true, untracked: false, ignored: false };
 /** Any file that is there, whatever git makes of it. */
@@ -1857,7 +1928,10 @@ const GIT_OPTIONS: Readonly<Record<string, GitOptions>> = {
       --bare --mirror --local --no-local --no-hardlinks --shared --recurse-submodules
       --no-recurse-submodules --shallow-submodules --no-shallow-submodules --remote-submodules
       --no-remote-submodules --single-branch --no-single-branch --tags --no-tags --sparse
-      --also-filter-submodules --dissociate --reject-shallow --no-reject-shallow`),
+      --also-filter-submodules --dissociate --reject-shallow --no-reject-shallow --recursive
+      --no-recursive --ipv4 --ipv6 --hardlinks --no-verbose --no-quiet --no-bare --no-mirror
+      --no-shared --no-dissociate --no-sparse --no-also-filter-submodules --no-depth
+      --no-filter --no-template --no-reference --no-config --no-upload-pack`),
   },
   worktree: { short: 'bB', long: ['--reason', '--orphan'] },
   // `submodule add`'s options; another verb is a change of the whole tree, or only looks.
@@ -1922,7 +1996,8 @@ const GIT_OPTIONS: Readonly<Record<string, GitOptions>> = {
   },
   push: {
     short: 'o',
-    long: ['--receive-pack', '--exec', '--push-option', '--repo'],
+    // Each takes the next word as its value: `--recurse-submodules no .` pushes to `.`.
+    long: ['--receive-pack', '--exec', '--push-option', '--repo', '--recurse-submodules'],
     safe: PUSH_SAFE,
   },
   // Commands none of whose options writes a working file or runs a program given in the text.
@@ -2085,12 +2160,16 @@ const localSource = (w: Word | undefined): boolean =>
 
 /** The folder a clone of `from` goes to when none is given: its last part, less `.git`/`.bundle`. */
 const cloneName = (from: Word | undefined): Word[] => {
-  const name = from?.text
-    .replace(/\/+$/, '')
-    .replace(/\/\.git$/, '')
-    .replace(/\.(git|bundle)$/, '')
-    .split(/[/:]/)
-    .pop();
+  if (from === undefined) return [];
+  let text = trimEnd(from.text, '/');
+  if (text.endsWith('/.git')) text = text.slice(0, -'/.git'.length);
+  for (const ext of ['.git', '.bundle']) {
+    if (text.endsWith(ext)) {
+      text = text.slice(0, -ext.length);
+      break;
+    }
+  }
+  const name = text.slice(Math.max(text.lastIndexOf('/'), text.lastIndexOf(':')) + 1);
   return name ? [word(name)] : [];
 };
 
@@ -2787,6 +2866,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     timeUp: options.timeUp ?? (() => false),
     commands: 0,
     gitEnv: false,
+    allExport: false,
   };
   collectTargets(command, '', 0, reading);
   return {
@@ -2808,8 +2888,10 @@ interface Reading {
   timeUp: () => boolean;
   /** Simple commands read so far, over every nested reading. */
   commands: number;
-  /** A `GIT_*` variable that may change what git does was exported earlier on the line. */
+  /** A variable that may change what git does was exported earlier on the line. */
   gitEnv: boolean;
+  /** `set -a` is on: every variable set is exported. */
+  allExport: boolean;
 }
 
 /**
@@ -2864,7 +2946,13 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   let previous: string | null = startDir;
   let stack: (string | null)[] = [];
   // What to return to when each open `( … )` ends.
-  const outer: { dir: string | null; previous: string | null; stack: (string | null)[] }[] = [];
+  const outer: {
+    dir: string | null;
+    previous: string | null;
+    stack: (string | null)[];
+    gitEnv: boolean;
+    allExport: boolean;
+  }[] = [];
   let bare = 0;
 
   /**
@@ -2995,14 +3083,21 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   let wasCd = false;
   for (const cmd of parsed.commands) {
     if (cmd.subshell === 'open') {
-      outer.push({ dir, previous, stack: [...stack] });
+      outer.push({
+        dir,
+        previous,
+        stack: [...stack],
+        gitEnv: r.gitEnv,
+        allExport: r.allExport,
+      });
       before = null;
       continue;
     }
     if (cmd.subshell === 'close') {
       // An unmatched `)` (a `case` pattern) closes nothing.
       const back = outer.pop();
-      if (back) ({ dir, previous, stack } = back);
+      // What a subshell sets or exports stays in it.
+      if (back) ({ dir, previous, stack, gitEnv: r.gitEnv, allExport: r.allExport } = back);
       before = null;
       continue;
     }
@@ -3019,10 +3114,17 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // Substitutions run where they are written, before the command that holds them.
     const at = cmd.otherwise && wasCd ? beforeCd : dir;
     wasCd = false;
-    for (const inner of cmd.nested) collectTargets(inner, at, depth + 1, r);
+    // Each runs in a shell of its own: what it sets or exports stays there.
+    const apart = (code: string, from: string | null, gitEnv: boolean): void => {
+      const was = { gitEnv: r.gitEnv, allExport: r.allExport };
+      r.gitEnv ||= gitEnv;
+      collectTargets(code, from, depth + 1, r);
+      ({ gitEnv: r.gitEnv, allExport: r.allExport } = was);
+    };
+    for (const inner of cmd.nested) apart(inner, at, false);
     // The shell expands a here-document whose delimiter is not quoted: substitutions in it run.
     if (cmd.stdin !== null && cmd.stdinExpands) {
-      for (const inner of substitutions(cmd.stdin)) collectTargets(inner, at, depth + 1, r);
+      for (const inner of substitutions(cmd.stdin)) apart(inner, at, false);
     }
     const { words, chdir } = programWords(cmd.words);
     const here = chdir ? enter(chdir, at) : at;
@@ -3049,25 +3151,30 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       } else if (name === 'cat' && feeder.length === 1) stdin = before.stdin;
     }
     before = cmd;
-    // A `GIT_*` variable set for git, or exported (or set) earlier on the line, may make it do
-    // anything to the tree.
+    // A variable set for git, or exported (or set, under `set -a`) earlier on the line, may make
+    // it do anything to the tree. What a pipeline's part or a background command sets stays in
+    // its own shell.
+    const kept = { gitEnv: r.gitEnv, allExport: r.allExport };
     const program = words[0] && !words[0].dynamic ? programName(words[0]) : '';
     const assigned = cmd.words
       .slice(0, words[0] ? cmd.words.indexOf(words[0]) : cmd.words.length)
       .some((w) => isAssignment(w) && unsafeVariable(w));
-    if (words.length === 0 && assigned) r.gitEnv = true;
-    if (EXPORTS.has(program) && words.slice(1).some((w) => !isFlag(w) && unsafeVariable(w)))
-      r.gitEnv = true;
+    if (setsGitVariable(program, cmd, words, r.allExport)) r.gitEnv = true;
+    if (program === 'set') r.allExport = allExportSet(words) ?? r.allExport;
+    // A file read into this shell (`source x`, `. <(…)`) may set anything; it is not read here.
+    if (program === 'source' || program === '.') r.gitEnv = true;
     const verdict =
       program === 'git' && (assigned || r.gitEnv)
         ? readGit(words, stdin, true)
         : classify(words, stdin);
-    /** Code this command runs (a shell's, git's own): the settings given to it hold there. */
-    const nested = (code: string, from: string | null): void => {
-      const was = r.gitEnv;
+    /**
+     * Code this command runs: in a shell of its own (a shell's, git's own), where the settings
+     * given to it hold, or in this one (`eval`, `trap`), where what it sets stays for the rest.
+     */
+    const nested = (code: string, from: string | null, same = false): void => {
+      if (!same) return apart(code, from, assigned);
       r.gitEnv ||= assigned;
       collectTargets(code, from, depth + 1, r);
-      r.gitEnv = was;
     };
     switch (verdict.kind) {
       case 'reads':
@@ -3196,7 +3303,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         break;
       }
       case 'inline':
-        nested(verdict.code, here);
+        nested(verdict.code, here, verdict.same);
         break;
       case 'script': {
         const found = readCode(verdict.code);
@@ -3228,6 +3335,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         }
         break;
     }
+    if (cmd.apart) ({ gitEnv: r.gitEnv, allExport: r.allExport } = kept);
   }
 }
 
