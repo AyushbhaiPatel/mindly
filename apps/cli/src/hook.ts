@@ -3,7 +3,6 @@ import {
   createLogger,
   defaultUserConfig,
   describeError,
-  EMPTY_HOOK_RESULT,
   fileSink,
   homePaths,
   loadUserConfig,
@@ -141,6 +140,14 @@ export async function runHook(
   return rendered.exitCode;
 }
 
+function closeQuietly(mindly: Pick<Mindly, 'close'> | null): void {
+  try {
+    mindly?.close();
+  } catch {
+    // Closing must never turn a successful hook into a failure.
+  }
+}
+
 /**
  * The answer to a pre-tool event of a writing or shell tool whose payload was too large to read:
  * a refusal, rendered as the agent expects. Null for any other event, which fails open.
@@ -160,20 +167,13 @@ function refuseUnreadWrite(
     });
     if (evt?.event !== 'pre_tool' || !(evt.tool?.writes || evt.tool?.shell)) return null;
     return adapter.render(evt, {
-      ...EMPTY_HOOK_RESULT,
+      context: null,
+      userMessage: null,
       decision: 'deny',
       reason:
         'Mindly could not check this change: it is too large to check. Make the change in smaller steps.',
     });
   } catch {
     return null;
-  }
-}
-
-function closeQuietly(mindly: Pick<Mindly, 'close'> | null): void {
-  try {
-    mindly?.close();
-  } catch {
-    // Closing must never turn a successful hook into a failure.
   }
 }
