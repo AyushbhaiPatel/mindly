@@ -83,6 +83,7 @@ export {
   flaggedChanges,
   ignoredDeniedFiles,
   gitDataPaths,
+  elsewhereGitDirLabel,
   linkedGitDirLabel,
   worktreeScan,
   listFiles,

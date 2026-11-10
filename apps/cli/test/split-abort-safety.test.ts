@@ -76,6 +76,34 @@ async function splitSandbox(prepare?: (sb: Sandbox) => void): Promise<Sandbox> {
 
 const partDir = (sb: Sandbox, key: string): string => join(`${sb.repo}.mindly`, `billing-${key}`);
 
+/** git with an explicit git dir, as an agent may run it; `input` goes to its stdin. */
+function gd(gitDir: string, args: string[], input = ''): string {
+  return execFileSync('git', [`--git-dir=${gitDir}`, ...args], {
+    env: {
+      PATH: process.env['PATH'],
+      HOME: process.env['HOME'],
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_AUTHOR_NAME: 'A',
+      GIT_AUTHOR_EMAIL: 'a@example.invalid',
+      GIT_COMMITTER_NAME: 'A',
+      GIT_COMMITTER_EMAIL: 'a@example.invalid',
+    },
+    encoding: 'utf8',
+    input,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }).trim();
+}
+
+/** A commit made with plumbing through `gitDir`, put on `ref`. */
+function commitThrough(gitDir: string, text: string, ref = 'refs/heads/main'): string {
+  const blob = gd(gitDir, ['hash-object', '-w', '--stdin'], text);
+  const tree = gd(gitDir, ['mktree'], `100644 blob ${blob}\twork.ts\n`);
+  const commit = gd(gitDir, ['commit-tree', tree, '-m', 'only here']);
+  gd(gitDir, ['update-ref', ref, commit]);
+  return commit;
+}
+
 /** The JSON a CLI run printed; when there is none, a failure that says why (exit code, stderr). */
 function jsonOf<T>(r: { code: number; stdout: string; stderr: string }): T {
   try {
@@ -675,6 +703,30 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     const again = await cli(sb, ['split', 'abort', '--yes', '--json']);
     expect(jsonOf<Aborted>(again).keptBecause[page]).toBe(HELD(LINKED('fx/remote.git')));
     expect(readFileSync(join(page, 'fx/remote.git/refs/heads/main'), 'utf8')).toBe(tip);
+  });
+
+  it('keeps a git directory whose common dir is in an ignored folder', async () => {
+    const sb = await splitSandbox((s) => {
+      write(s.repo, '.gitignore', '.cache/\n');
+      write(s.repo, 'wt/HEAD', 'ref: refs/heads/main\n');
+      write(s.repo, 'wt/commondir', '../.cache/common\n');
+      write(s.repo, 'wt/objects/.keep', '');
+    });
+    const page = partDir(sb, 'page');
+    const common = join(page, '.cache/common');
+    git(page, 'init', '-q', '--bare', '-b', 'main', common);
+    renameSync(join(common, 'HEAD'), join(page, '.cache/HEAD.orig'));
+    commitThrough(join(page, 'wt'), 'hours of work\n', 'refs/heads/feature');
+    expect(gd(join(page, 'wt'), ['log', '--format=%s', 'feature'])).toBe('only here');
+    // Every part holds that git directory (it is committed): every part is kept.
+    const r = await cli(sb, ['split', 'abort', '--yes', '--json']);
+    expect(r.code).toBe(1);
+    const a = jsonOf<Aborted>(r);
+    expect(a.keptWorktrees).toEqual([partDir(sb, 'api'), page]);
+    expect(a.keptBecause[page]).toBe(
+      HELD('wt, whose git storage is reached elsewhere and cannot be checked'),
+    );
+    expect(gd(join(page, 'wt'), ['log', '--format=%s', 'feature'])).toBe('only here');
   });
 
   it('keeps a bare clone git accepts, whatever its HEAD looks like', async () => {

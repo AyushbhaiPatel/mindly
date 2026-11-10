@@ -214,8 +214,9 @@ checkout in `deps/` or `node_modules`, one made in a folder the part tracks), a 
 `.git` file, folder or link in any folder that holds a file (even one git does not accept as a
 repository), a git directory among untracked or ignored files (a `--separate-git-dir`, a bare
 clone: a folder with a `HEAD` and an `objects` folder, holding anything not as in the last
-commit, staged, changed or new; or one whose `objects` or `refs` is a link or holds one, since
-what it stores may then be anywhere and no link is followed to check), files
+commit, staged, changed or new; or one whose `objects`, `refs` or `packed-refs` is a link or
+holds one, or that has a `commondir`, a `gitdir` or an `objects/info/alternates`, since what it
+stores may then be anywhere and neither links nor those files are followed to check), files
 written into the folder of an uninitialised submodule (git lists nothing there; empty folders
 do not count), or the git directories of the part's submodules, initialised or not. A part holding any of it keeps its worktree and branch, the
 abort stays unfinished, and it says, naming each path (the worktree itself as "the worktree's

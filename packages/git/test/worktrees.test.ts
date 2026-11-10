@@ -20,6 +20,7 @@ import {
   deleteBranch,
   flaggedChanges,
   ignoredDeniedFiles,
+  elsewhereGitDirLabel,
   gitDataPaths,
   linkedGitDirLabel,
   worktreeScan,
@@ -32,6 +33,34 @@ import {
 import { commitAll, git, makeRepo, tempDir, write } from './helpers.js';
 
 const FILE = ['-c', 'protocol.file.allow=always'];
+
+/** git with an explicit git dir, as an agent may run it; `input` goes to its stdin. */
+function gd(gitDir: string, args: string[], input = ''): string {
+  return execFileSync('git', [`--git-dir=${gitDir}`, ...args], {
+    env: {
+      PATH: process.env['PATH'],
+      HOME: process.env['HOME'],
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_AUTHOR_NAME: 'A',
+      GIT_AUTHOR_EMAIL: 'a@example.invalid',
+      GIT_COMMITTER_NAME: 'A',
+      GIT_COMMITTER_EMAIL: 'a@example.invalid',
+    },
+    encoding: 'utf8',
+    input,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }).trim();
+}
+
+/** A commit made with plumbing through `gitDir`, put on `ref`. */
+function commitThrough(gitDir: string, text: string, ref = 'refs/heads/main'): string {
+  const blob = gd(gitDir, ['hash-object', '-w', '--stdin'], text);
+  const tree = gd(gitDir, ['mktree'], `100644 blob ${blob}\twork.ts\n`);
+  const commit = gd(gitDir, ['commit-tree', tree, '-m', 'only here']);
+  gd(gitDir, ['update-ref', ref, commit]);
+  return commit;
+}
 
 /** The commits only `branch` has, as `branchOnlyWork` lists them. */
 async function only(
@@ -639,6 +668,47 @@ describe('worktrees', () => {
     expect((await worktreeScan(path)).gitData).toEqual([
       linkedGitDirLabel('a/remote.git'),
       linkedGitDirLabel('b/remote.git'),
+    ]);
+  });
+
+  it('counts a git directory whose storage is elsewhere, reading none of it', async () => {
+    const root = makeRepo({ 'README.md': 'x\n', '.gitignore': '.cache/\n' });
+    // A committed git directory whose common dir is in an ignored folder.
+    write(root, 'wt/HEAD', 'ref: refs/heads/main\n');
+    write(root, 'wt/commondir', '../.cache/common\n');
+    write(root, 'wt/objects/.keep', '');
+    // The shape of a linked worktree's git directory: HEAD and commondir, no objects.
+    write(root, 'admin/HEAD', 'ref: refs/heads/main\n');
+    write(root, 'admin/commondir', '../.cache/common\n');
+    // A bare repository whose packed-refs is a tracked link.
+    git(root, 'init', '-q', '--bare', '-b', 'main', join(root, 'pr.git'));
+    write(root, 'pr.git/objects/info/.keep', '');
+    symlinkSync('../.cache/packed-refs', join(root, 'pr.git/packed-refs'));
+    commitAll(root, 'skeleton');
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    // Commits stored through the common dir: the worktree looks clean.
+    const common = join(path, '.cache/common');
+    git(path, 'init', '-q', '--bare', '-b', 'main', common);
+    renameSync(join(common, 'HEAD'), join(path, '.cache/HEAD.orig'));
+    commitThrough(join(path, 'wt'), 'only here\n', 'refs/heads/feature');
+    expect(git(path, 'status', '--porcelain')).toBe('');
+    // A git directory, committed, whose history is only in an ignored alternate store.
+    const store = join(path, '.cache/store.git');
+    git(path, 'init', '-q', '--bare', '-b', 'main', store);
+    const c = commitThrough(store, 'only here\n');
+    renameSync(join(store, 'objects'), join(path, '.cache/objects'));
+    const alt = join(path, 'alt.git');
+    git(path, 'init', '-q', '--bare', '-b', 'main', alt);
+    write(alt, 'objects/info/alternates', '../../.cache/objects\n');
+    write(alt, 'refs/heads/main', `${c}\n`);
+    commitAll(path, 'agent repo');
+    expect(gd(alt, ['log', '--format=%H', 'main'])).toBe(c);
+    expect((await worktreeScan(path)).gitData).toEqual([
+      elsewhereGitDirLabel('admin'),
+      elsewhereGitDirLabel('alt.git'),
+      linkedGitDirLabel('pr.git'),
+      elsewhereGitDirLabel('wt'),
     ]);
   });
 
