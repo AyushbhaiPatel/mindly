@@ -13,6 +13,7 @@ import {
   MindlyError,
   tryResolveInsideRoot,
   type Memory,
+  type MemoryEvidence,
   type MemoryKind,
   type MemorySource,
   type Trust,
@@ -346,8 +347,18 @@ export class MemoryService {
           reason: input.reason ?? null,
         });
       }
-      // Evidence of the version that was replaced goes with it.
-      if (replaces) this.k.store.memories.clearEvidence(m.id);
+      if (replaces) {
+        // Evidence of the version that was replaced goes with it.
+        this.k.store.memories.clearEvidence(m.id);
+      } else if (existing && input.source.type !== 'user') {
+        // The agent that proposed it restates its claim as it stands now. Evidence that no longer
+        // holds is not support for it any more: left attached, the next sweep would mark the
+        // restated memory stale again. Evidence that still holds stays, with or without new
+        // evidence given; with none left and none given, the memory is a plain proposal.
+        for (const e of this.k.store.memories.evidenceFor(m.id)) {
+          if (!evidenceHolds(input.projectRoot, e)) this.k.store.memories.deleteEvidence(e.id);
+        }
+      }
       this.attachEvidence(m.id, input.projectId, evidence);
       this.k.store.events.append({
         projectId: input.projectId,
@@ -650,6 +661,48 @@ export function normalizeBlock(text: string): string {
     .map(normalizeLine)
     .filter((l) => l.length > 0)
     .join('\n');
+}
+
+const MAX_WINDOW_LINES = 20_000;
+
+/**
+ * Decides whether an evidence excerpt is still present in `content`. Matches the normalised
+ * stored excerpt as a substring, or (because stored excerpts are redacted/sanitised and may differ
+ * from the original) any run of normalised lines whose hash equals the stored content hash.
+ */
+export function excerptPresent(
+  content: string,
+  excerpt: string,
+  contentHash: string | null,
+): boolean {
+  const normContent = normalizeBlock(content);
+  const normExcerpt = normalizeBlock(excerpt);
+  if (normExcerpt.length > 0 && normContent.includes(normExcerpt)) return true;
+  if (!contentHash) return false;
+  if (normExcerpt.length > 0 && sha256(normExcerpt) === contentHash) {
+    // The stored excerpt is the original; the substring test above is authoritative.
+    return false;
+  }
+  const n = Math.max(1, normExcerpt.split('\n').length);
+  const lines = normContent.split('\n').slice(0, MAX_WINDOW_LINES);
+  for (let i = 0; i + n <= lines.length; i++) {
+    if (sha256(lines.slice(i, i + n).join('\n')) === contentHash) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether an evidence row still holds, judged as the self-healing sweep judges it: the file is
+ * there and, for a row with an excerpt, the excerpt is in it (outside Mindly's own section). A
+ * file that cannot be read is given the benefit of the doubt.
+ */
+function evidenceHolds(projectRoot: string, e: MemoryEvidence): boolean {
+  const resolved = tryResolveInsideRoot(projectRoot, e.ref);
+  if (!resolved || !isFile(resolved.abs)) return false;
+  if (e.excerpt === null) return true;
+  const content = readBounded(resolved.abs);
+  if (content === null) return true;
+  return excerptPresent(stripManagedSection(content), e.excerpt, e.contentHash);
 }
 
 function isFile(abs: string): boolean {

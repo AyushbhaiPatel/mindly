@@ -1,9 +1,9 @@
 import { statSync } from 'node:fs';
-import { sha256, type MemoryEvidence, type Session } from '@mindly/core';
+import { type MemoryEvidence, type Session } from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
 import { stripManagedSection } from '../memory/managed-section.js';
-import { normalizeBlock, readBounded, type MemoryService } from '../memory/service.js';
+import { excerptPresent, readBounded, type MemoryService } from '../memory/service.js';
 import type { Mindly } from '../mindly.js';
 import {
   attachService,
@@ -14,7 +14,6 @@ import {
 } from './shared.js';
 
 const MAX_SWEEP_EVIDENCE = 2000;
-const MAX_WINDOW_LINES = 20_000;
 
 /** Outcome of re-checking one evidence row. */
 export interface EvidenceCheck {
@@ -35,32 +34,6 @@ export interface SweepResult {
   invalid: number;
   markedStale: number;
   restored: number;
-}
-
-/**
- * Decides whether an evidence excerpt is still present in `content`. Matches the normalised
- * stored excerpt as a substring, or (because stored excerpts are redacted/sanitised and may differ
- * from the original) any run of normalised lines whose hash equals the stored content hash.
- */
-export function excerptPresent(
-  content: string,
-  excerpt: string,
-  contentHash: string | null,
-): boolean {
-  const normContent = normalizeBlock(content);
-  const normExcerpt = normalizeBlock(excerpt);
-  if (normExcerpt.length > 0 && normContent.includes(normExcerpt)) return true;
-  if (!contentHash) return false;
-  if (normExcerpt.length > 0 && sha256(normExcerpt) === contentHash) {
-    // The stored excerpt is the original; the substring test above is authoritative.
-    return false;
-  }
-  const n = Math.max(1, normExcerpt.split('\n').length);
-  const lines = normContent.split('\n').slice(0, MAX_WINDOW_LINES);
-  for (let i = 0; i + n <= lines.length; i++) {
-    if (sha256(lines.slice(i, i + n).join('\n')) === contentHash) return true;
-  }
-  return false;
 }
 
 /**

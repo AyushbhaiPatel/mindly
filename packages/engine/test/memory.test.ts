@@ -684,6 +684,30 @@ describe('trust layer', () => {
       outcome: 'updated',
       memory: { body: 'listens on 9090', trust: 'verified' },
     });
+    // The evidence that no longer held went with the restatement, so the next sweep (file
+    // unchanged) leaves it verified and sends no new stale notice.
+    expect(mindly.store.memories.evidenceFor(fact.id).map((e) => [e.excerpt, e.valid])).toEqual([
+      ['PORT_NUMBER_FOR_SERVER = 9090', true],
+    ]);
+    expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ invalid: 0, markedStale: 0 });
+    expect(mindly.store.memories.get(fact.id).trust).toBe('verified');
+
+    // Restated without evidence: what still holds stays, what does not is dropped.
+    writeFileSync(join(root, 'src', 'host.ts'), 'export const HOST_NAME_FOR_SERVER = "a";\n');
+    mindly.memory.rememberResult({
+      ...base,
+      title,
+      body: 'listens on 9090',
+      evidence: [{ path: 'src/host.ts', excerpt: 'HOST_NAME_FOR_SERVER = "a"' }],
+    });
+    writeFileSync(join(root, 'src', 'host.ts'), 'export const HOST_NAME_FOR_SERVER = "b";\n');
+    expect(
+      mindly.memory.rememberResult({ ...base, title, body: 'listens on 9090 on every host' }).memory
+        .trust,
+    ).toBe('proposed');
+    expect(mindly.store.memories.evidenceFor(fact.id).map((e) => e.ref)).toEqual(['src/server.ts']);
+    selfHealingOf(mindly).sweep(pid);
+    expect(mindly.store.memories.get(fact.id).trust).toBe('proposed');
 
     // Another agent kind cannot change it, verified or stale.
     const claude = { type: 'agent' as const, sessionId: null, agentKind: 'claude-code' };
@@ -700,7 +724,7 @@ describe('trust layer', () => {
         /agents can only change memories they proposed/,
       );
     }
-    expect(mindly.store.memories.get(fact.id).body).toBe('listens on 9090');
+    expect(mindly.store.memories.get(fact.id).body).toBe('listens on 9090 on every host');
     // Its own author may archive it, stale or not.
     expect(mindly.memory.update(fact.id, { status: 'archived' }, agent, null).status).toBe(
       'archived',
