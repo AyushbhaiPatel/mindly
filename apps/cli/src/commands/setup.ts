@@ -1,7 +1,7 @@
-import { constants, existsSync, realpathSync, rmSync } from 'node:fs';
+import { constants, existsSync, realpathSync } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 import {
   applyInstallSteps,
   createClaudeCodeAdapter,
@@ -37,7 +37,9 @@ import {
   inRunnerCache,
   isKeptCopy,
   launcherPath,
-  ownedLib,
+  ownedRuntime,
+  removeRuntime,
+  runtimeDir,
   pointLauncherAt,
   runnerTree,
   stableNode,
@@ -237,10 +239,11 @@ async function keepRunnerCopy(env: NodeJS.ProcessEnv): Promise<string | null> {
   }
 }
 
-/** `$MINDLY_HOME/lib` when it holds copies init made (and nothing Mindly did not create). */
-function ownedCopies(env: NodeJS.ProcessEnv): string | null {
+/** The Mindly home when its runtime folder holds copies init made, else null. */
+function homeWithCopies(env: NodeJS.ProcessEnv): string | null {
   try {
-    return ownedLib(mindlyHome(env));
+    const home = mindlyHome(env);
+    return ownedRuntime(home) === null ? null : home;
   } catch {
     return null;
   }
@@ -376,7 +379,7 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
       out.style.dim(
         inRunnerCache(command[command.length - 1] as string)
           ? "Mindly is running from a package runner's cache, which may be cleared at any time. Install it with npm i -g mindly-cli and run mindly init again so agents keep reaching it."
-          : `Mindly is running from a package runner's cache, so it keeps its own copy in ${join(mindlyHome(env), 'lib')} for the agents. A newer version's init moves the agents to its own copy; npm i -g mindly-cli is the alternative.`,
+          : `Mindly is running from a package runner's cache, so it keeps its own copy in ${runtimeDir(mindlyHome(env))} for the agents. A newer version's init moves the agents to its own copy; npm i -g mindly-cli is the alternative.`,
       ),
     );
   }
@@ -558,10 +561,10 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
     total += 1;
   }
   // The copy `npx mindly-cli init` keeps for the agents goes when Mindly is removed user-wide.
-  const copies = explicit === null && projectRoot === null ? ownedCopies(env) : null;
+  const copies = explicit === null && projectRoot === null ? homeWithCopies(env) : null;
   if (copies !== null) {
     out.line(out.style.bold("Mindly's own copy"));
-    out.line(`  Delete ${copies}, the copy of Mindly that init made for your agents`);
+    out.line(`  Delete ${runtimeDir(copies)}, the copy of Mindly that init made for your agents`);
     total += 1;
   }
   if (o.dryRun) {
@@ -601,11 +604,10 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
   let copiesRemoved = false;
   if (copies !== null) {
     try {
-      rmSync(copies, { recursive: true, force: true });
-      copiesRemoved = true;
+      copiesRemoved = removeRuntime(copies) !== null;
     } catch (err) {
       const why = clean(err instanceof Error ? err.message : String(err), 200);
-      out.warn(`${copies} could not be removed (${why}). Delete that folder by hand.`);
+      out.warn(`${runtimeDir(copies)} could not be removed (${why}). Delete that folder by hand.`);
     }
   }
   const sc = out.screen();
@@ -620,9 +622,9 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
     sc.text(`${sc.mark('ok')} Removed Mindly's rules section from your agent instruction files.`);
   }
   if (copiesRemoved) {
-    sc.text(`${sc.mark('ok')} Removed Mindly's own copy from ${copies}.`);
+    sc.text(`${sc.mark('ok')} Removed Mindly's own copy from ${runtimeDir(copies as string)}.`);
     sc.note(
-      `${launcherPath(dirname(copies as string))} stays, so hooks still set up in other projects end quietly instead of failing; delete it once no project uses Mindly.`,
+      `${launcherPath(copies as string)} stays, so hooks still set up in other projects end quietly instead of failing; delete it once no project uses Mindly.`,
       2,
     );
   }

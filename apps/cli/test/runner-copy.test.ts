@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest';
 import { installCommand } from '../src/commands/setup.js';
 import {
   copyDir,
+  copyIntact,
   ensureCopy,
   inRunnerCache,
   launcherPath,
@@ -137,17 +138,17 @@ describe('the copy kept in the Mindly home', () => {
     const home = tempDir('mindly-home-');
     const copied = await ensureCopy(home, '0.5.0', tree);
     expect(copied).toBe(
-      join(home, 'lib', '0.5.0', 'node_modules', 'mindly-cli', 'dist', 'main.js'),
+      join(home, 'runtime', '0.5.0', 'node_modules', 'mindly-cli', 'dist', 'main.js'),
     );
     rmSync(dirname(tree.root), { recursive: true, force: true });
     expect(runs(copied)).toBe('ok dep-1');
     expect(launch(home, ['hook', 'claude-code', 'Stop']).out.trim()).toBe(
       'ok dep-1 hook claude-code Stop',
     );
-    const bin = join(home, 'lib', '0.5.0', 'node_modules', '.bin', 'mindly');
+    const bin = join(home, 'runtime', '0.5.0', 'node_modules', '.bin', 'mindly');
     expect(lstatSync(bin).isSymbolicLink()).toBe(true);
     expect(isAbsolute(readlinkSync(bin))).toBe(false);
-    expect(readdirSync(join(home, 'lib')).sort()).toEqual(['.mindly', '0.5.0', 'current']);
+    expect(readdirSync(join(home, 'runtime')).sort()).toEqual(['.mindly', '0.5.0', 'current']);
     // A second init reuses the copy.
     expect(await ensureCopy(home, '0.5.0', tree)).toBe(copied);
   });
@@ -183,12 +184,12 @@ describe('the copy kept in the Mindly home', () => {
     const npx = runnerTree(npxTree())!;
     const dlx = runnerTree(pnpmTree())!;
     await ensureCopy(home, '0.5.0', npx);
-    expect(copyDir(home, '0.5.0', dlx)).toBe(join(home, 'lib', '0.5.0-2'));
+    expect(copyDir(home, '0.5.0', dlx)).toBe(join(home, 'runtime', '0.5.0-2'));
     const copied = await ensureCopy(home, '0.5.0', dlx);
-    expect(copied.startsWith(join(home, 'lib', '0.5.0-2'))).toBe(true);
+    expect(copied.startsWith(join(home, 'runtime', '0.5.0-2'))).toBe(true);
     expect(runs(copied)).toBe('ok dep-1');
     expect(launch(home, ['x']).out.trim()).toBe('ok dep-1 x');
-    expect(copyDir(home, '0.5.0', npx)).toBe(join(home, 'lib', '0.5.0'));
+    expect(copyDir(home, '0.5.0', npx)).toBe(join(home, 'runtime', '0.5.0'));
   });
 
   it('lets inits that race share a copy, also with different layouts', async () => {
@@ -206,7 +207,7 @@ describe('the copy kept in the Mindly home', () => {
     ]);
     for (const entry of both) expect(runs(entry)).toBe('ok dep-1');
     expect(new Set(both).size).toBe(2);
-    expect(readdirSync(join(other, 'lib')).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
+    expect(readdirSync(join(other, 'runtime')).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
   });
 
   it('leaves nothing half-copied behind when the copy fails', async () => {
@@ -215,7 +216,37 @@ describe('the copy kept in the Mindly home', () => {
     await expect(
       ensureCopy(home, '0.5.0', { root: tree.root, entry: join('missing', 'main.js') }),
     ).rejects.toThrow();
-    expect(readdirSync(join(home, 'lib'))).toEqual([]);
+    expect(readdirSync(join(home, 'runtime'))).toEqual(['.mindly']);
+  });
+
+  it('does not reuse a copy that lost files, and init again repairs it', async () => {
+    const home = tempDir('mindly-home-');
+    const tree = runnerTree(npxTree())!;
+    await ensureCopy(home, '0.5.0', tree);
+    rmSync(join(home, 'runtime', '0.5.0', 'node_modules', 'dep'), { recursive: true });
+    expect(copyIntact(join(home, 'runtime', '0.5.0'), tree)).toBe(false);
+    expect(launch(home, ['doctor']).code).toBe(1);
+    const repaired = await ensureCopy(home, '0.5.0', runnerTree(npxTree())!);
+    expect(repaired.startsWith(join(home, 'runtime', '0.5.0-2'))).toBe(true);
+    expect(launch(home, ['doctor']).out.trim()).toBe('ok dep-1 doctor');
+  });
+
+  it('does not reuse a copy that was never finished', async () => {
+    const home = tempDir('mindly-home-');
+    const tree = runnerTree(npxTree())!;
+    await ensureCopy(home, '0.5.0', tree);
+    rmSync(join(home, 'runtime', '0.5.0', '.complete'));
+    expect(copyIntact(join(home, 'runtime', '0.5.0'), tree)).toBe(false);
+    expect(copyDir(home, '0.5.0', tree)).toBe(join(home, 'runtime', '0.5.0-2'));
+  });
+
+  it('refuses a runtime folder Mindly did not create', async () => {
+    const home = tempDir('mindly-home-');
+    file(join(home, 'runtime', 'theirs.txt'), 'x');
+    await expect(ensureCopy(home, '0.5.0', runnerTree(npxTree())!)).rejects.toThrow(
+      /not made by Mindly/,
+    );
+    expect(readdirSync(join(home, 'runtime'))).toEqual(['theirs.txt']);
   });
 });
 
@@ -223,16 +254,43 @@ describe('the launcher', () => {
   it('ends hooks and the status line quietly when the copy is gone', async () => {
     const home = tempDir('mindly-home-');
     await ensureCopy(home, '0.5.0', runnerTree(npxTree())!);
-    rmSync(join(home, 'lib', '0.5.0', 'node_modules', 'dep'), { recursive: true });
+    rmSync(join(home, 'runtime', '0.5.0', 'node_modules', 'dep'), { recursive: true });
     for (const args of [['hook', 'claude-code', 'Stop'], ['statusline']]) {
       expect(launch(home, args)).toEqual({ code: 0, out: '', err: '' });
     }
-    rmSync(join(home, 'lib'), { recursive: true });
+    rmSync(join(home, 'runtime'), { recursive: true });
     expect(launch(home, ['hook', 'codex', 'Stop'])).toEqual({ code: 0, out: '', err: '' });
     const doctor = launch(home, ['doctor']);
     expect(doctor.code).toBe(1);
     expect(doctor.err.trim().split('\n')).toHaveLength(1);
     expect(doctor.err).toMatch(/^Mindly could not start .*npx mindly-cli init/);
+  });
+
+  it('ends hooks quietly when the pointer is damaged or leads anywhere but the copy', async () => {
+    const home = tempDir('mindly-home-');
+    await ensureCopy(home, '0.5.0', runnerTree(npxTree())!);
+    const runtime = join(home, 'runtime');
+    const current = join(runtime, 'current');
+    file(join(home, 'elsewhere.mjs'), "console.log('not mindly'); process.exit(3);\n");
+    file(join(runtime, 'stray.mjs'), "console.log('not mindly'); process.exit(3);\n");
+    const pointers: (string | Buffer)[] = [
+      '',
+      '0.5.0\n',
+      Buffer.from([0, 255, 10, 7]),
+      '0.5.0/node_modules/mindly-cli/package.json\n',
+      '../elsewhere.mjs\n',
+      `${join(home, 'elsewhere.mjs')}\n`,
+      'stray.mjs\n',
+    ];
+    for (const pointer of pointers) {
+      writeFileSync(current, pointer);
+      for (const args of [['hook', 'claude-code', 'Stop'], ['statusline']]) {
+        expect(launch(home, args), JSON.stringify(pointer)).toEqual({ code: 0, out: '', err: '' });
+      }
+    }
+    rmSync(current);
+    mkdirSync(current);
+    expect(launch(home, ['hook', 'claude-code', 'Stop'])).toEqual({ code: 0, out: '', err: '' });
   });
 });
 
@@ -289,23 +347,40 @@ describe('uninstall', () => {
     // Then a user-wide install and a user-wide uninstall.
     expect((await cli(sb, ['init', '--yes'])).code).toBe(0);
     const dry = await cli(sb, ['uninstall', '--dry-run']);
-    expect(dry.stdout).toContain(join(sb.mindlyHome, 'lib'));
+    expect(dry.stdout).toContain(join(sb.mindlyHome, 'runtime'));
     const removed = await cli(sb, ['uninstall', '--yes']);
     expect(removed.code).toBe(0);
     expect(removed.stdout).toContain(launcherPath(sb.mindlyHome));
-    expect(existsSync(join(sb.mindlyHome, 'lib'))).toBe(false);
+    expect(existsSync(join(sb.mindlyHome, 'runtime'))).toBe(false);
     expect(existsSync(launcherPath(sb.mindlyHome))).toBe(true);
     expect(existsSync(join(sb.mindlyHome, 'mindly.db'))).toBe(true);
     expect(sh(stop, sb.repo)).toEqual({ code: 0, out: '', err: '' });
   });
 
-  it('keeps a lib folder Mindly did not create, and a linked one', async () => {
+  it('deletes only what Mindly made, never folders it shares the home with', async () => {
+    const sb = sandbox();
+    mkdirSync(join(sb.home, '.claude'));
+    // MINDLY_HOME shared with other tools (~/.local): its lib holds someone else's files.
+    file(join(sb.mindlyHome, 'lib', 'python3', 'site.py'), 'precious');
+    file(join(sb.mindlyHome, 'bin', 'other-tool'), 'x');
+    expect((await cli(sb, ['init', '--yes'])).code).toBe(0);
+    await ensureCopy(sb.mindlyHome, '0.5.0', runnerTree(npxTree())!);
+    // Something else dropped into Mindly's own folder stays too.
+    file(join(sb.mindlyHome, 'runtime', 'notes.txt'), 'x');
+    const out = await cli(sb, ['uninstall', '--yes']);
+    expect(out.stdout).toContain("Mindly's own copy");
+    expect(existsSync(join(sb.mindlyHome, 'lib', 'python3', 'site.py'))).toBe(true);
+    expect(existsSync(join(sb.mindlyHome, 'bin', 'other-tool'))).toBe(true);
+    expect(readdirSync(join(sb.mindlyHome, 'runtime'))).toEqual(['notes.txt']);
+  });
+
+  it('keeps a runtime folder Mindly did not create, and a linked one', async () => {
     const sb = sandbox();
     mkdirSync(join(sb.home, '.claude'));
     expect((await cli(sb, ['init', '--yes'])).code).toBe(0);
-    file(join(sb.mindlyHome, 'lib', 'python3', 'site.py'), '');
+    file(join(sb.mindlyHome, 'runtime', '0.5.0', 'node_modules', 'x.js'), '');
     expect((await cli(sb, ['uninstall', '--yes'])).stdout).not.toContain("Mindly's own copy");
-    expect(existsSync(join(sb.mindlyHome, 'lib', 'python3', 'site.py'))).toBe(true);
+    expect(existsSync(join(sb.mindlyHome, 'runtime', '0.5.0', 'node_modules', 'x.js'))).toBe(true);
 
     const sb2 = sandbox();
     mkdirSync(join(sb2.home, '.claude'));
@@ -313,7 +388,7 @@ describe('uninstall', () => {
     const outside = tempDir('mindly-outside-');
     file(join(outside, '.mindly'), '');
     file(join(outside, 'keep.txt'), 'x');
-    symlinkSync(outside, join(sb2.mindlyHome, 'lib'));
+    symlinkSync(outside, join(sb2.mindlyHome, 'runtime'));
     expect((await cli(sb2, ['uninstall', '--yes'])).code).toBe(0);
     expect(existsSync(join(outside, 'keep.txt'))).toBe(true);
   });
@@ -324,6 +399,6 @@ describe('uninstall', () => {
     expect((await cli(sb, ['init', '--yes'])).code).toBe(0);
     await ensureCopy(sb.mindlyHome, '0.5.0', runnerTree(npxTree())!);
     expect((await cli(sb, ['uninstall', '--agents', 'claude-code', '--yes'])).code).toBe(0);
-    expect(existsSync(join(sb.mindlyHome, 'lib', '0.5.0'))).toBe(true);
+    expect(existsSync(join(sb.mindlyHome, 'runtime', '0.5.0'))).toBe(true);
   });
 });

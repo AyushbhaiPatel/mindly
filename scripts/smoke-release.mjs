@@ -12,6 +12,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -196,32 +197,44 @@ try {
   const repo3 = join(root, 'repo3');
   mkdirSync(repo3);
   run('git', ['init', '-q', '-b', 'main'], { cwd: repo3 });
-  const viaNpx = spawnSync(
-    'npm',
-    [
-      'exec',
-      '--yes',
-      `--package=${tarball}`,
-      '--',
-      'mindly',
-      'init',
-      '--project',
-      '--yes',
-      '--agents',
-      'claude-code',
-    ],
-    {
-      cwd: repo3,
-      env: { ...env, PATH: process.env.PATH ?? '' },
-      encoding: 'utf8',
-      timeout: 600_000,
-    },
+  const npxInit = () =>
+    spawnSync(
+      'npm',
+      [
+        'exec',
+        '--yes',
+        `--package=${tarball}`,
+        '--',
+        'mindly',
+        'init',
+        '--project',
+        '--yes',
+        '--agents',
+        'claude-code',
+      ],
+      {
+        cwd: repo3,
+        env: { ...env, PATH: process.env.PATH ?? '' },
+        encoding: 'utf8',
+        timeout: 600_000,
+      },
+    );
+  const viaNpx = npxInit();
+  // A second run finds its copy intact and reuses it.
+  const again = npxInit();
+  const runtimeEntries = existsSync(join(dirs.mindlyHome, 'runtime'))
+    ? readdirSync(join(dirs.mindlyHome, 'runtime')).sort()
+    : [];
+  check(
+    again.status === 0 && runtimeEntries.join(' ') === `.mindly ${expected} current`,
+    'init through npx again reuses the copy',
+    runtimeEntries.join(' '),
   );
   const settings3File = join(repo3, '.claude', 'settings.json');
   const settings3 = existsSync(settings3File) ? readFileSync(settings3File, 'utf8') : '';
   const npxCommands = [...settings3.matchAll(/"command":\s*"([^"]+)"/g)].map((m) => m[1]);
   const launcher = join(dirs.mindlyHome, 'bin', 'mindly.cjs');
-  const copyMain = join(dirs.mindlyHome, 'lib', expected, 'node_modules', 'mindly-cli', 'dist');
+  const copyMain = join(dirs.mindlyHome, 'runtime', expected, 'node_modules', 'mindly-cli', 'dist');
   check(
     viaNpx.status === 0 &&
       npxCommands.length > 0 &&
@@ -249,12 +262,22 @@ try {
     `recorded hook runs without the npx cache or a registry (exit ${offline.status}, ${took} ms)`,
     offline.stderr,
   );
-  rmSync(join(dirs.mindlyHome, 'lib'), { recursive: true, force: true });
+  rmSync(join(dirs.mindlyHome, 'runtime'), { recursive: true, force: true });
   const gone = runStop();
   check(
     gone.status === 0 && gone.stdout === '' && gone.stderr === '',
     `recorded hook ends quietly once the copy is gone (exit ${gone.status})`,
     `${gone.stdout}${gone.stderr}`,
+  );
+  const repaired = npxInit();
+  const back = runStop();
+  check(
+    repaired.status === 0 &&
+      existsSync(join(copyMain, 'main.js')) &&
+      back.status === 0 &&
+      back.stderr === '',
+    'init through npx again restores the copy',
+    `${repaired.stderr}${back.stderr}`,
   );
 
   // 5. A SessionStart hook payload; with one rule in memory the hook must inject it.
