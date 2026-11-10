@@ -623,6 +623,23 @@ describe('redact', () => {
     expect(out).toContain(REDACTED);
   });
 
+  it.each([
+    // A continuation between `Authorization:` and the scheme, or between the scheme and the token.
+    'curl https://x.test \\\n  -H "Authorization: \\\n    Bearer PW"',
+    'curl https://x.test \\\n  -H "Authorization: \\\n    Basic PW"',
+    'curl https://x.test \\\n  -H "Authorization: Bearer \\\n    PW"',
+    'curl.exe https://x.test ^\r\n  -H "Authorization: ^\r\n    Bearer PW"',
+    // A header map in JSON or code, the key quoted.
+    '{"tool":"curl","url":"https://x.test","headers":{"Authorization":"Bearer PW"}}',
+    'fetch(url, { headers: { "Authorization": "Bearer PW" } })',
+    "requests.get(url, headers={'Authorization': 'Basic PW'})",
+  ])('redacts a header token: %j', (template) => {
+    const secret = 'f00dfacecafebeef1234567890abcdef';
+    const out = redactText(template.replace('PW', secret));
+    expect(out).not.toContain(secret);
+    expect(out).toContain(REDACTED);
+  });
+
   it('keeps a spaced value that is the next parameter for that parameter', () => {
     const line = `curl -H 'Authorization: Digest username="u", nonce= realm="r", response= abc==' x`;
     expect(redactText(line)).toBe(

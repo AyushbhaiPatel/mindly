@@ -69,11 +69,11 @@ const SECRET_OPTIONS = new Set([
 ]);
 
 /** An `Authorization` header, as a curl `-H` value or an httpie item. */
-const AUTH_HEADER = /(?:proxy-)?authorization[ \t]*:[ \t]*/giy;
+const AUTH_HEADER = /(?:proxy-)?authorization["']?[ \t]*:[ \t]*/giy;
 
 /** The scheme before the credentials in an `Authorization` header, kept as written. */
 const AUTH_SCHEME =
-  /(bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|aws4-[a-z0-9-]+|hoba|mutual|vapid)[ \t]+/iy;
+  /(bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|aws4-[a-z0-9-]+|hoba|mutual|vapid)(?:[ \t]+|(?=[ \t]*[\\^`]\r?\n))/iy;
 
 /**
  * Schemes whose credentials are `name=value` parameters: Digest, and AWS Signature Version 4 in
@@ -384,18 +384,12 @@ class Finder {
    */
   private header(at: number, lineEnd: number): void {
     const text = this.text;
-    let from = at;
-    while (from < lineEnd && (text[from] === '"' || text[from] === "'" || text[from] === '\\')) {
-      from++;
-    }
+    let from = this.skipQuoting(at, lineEnd);
     // A quote right at the colon closes the string the header name was in: no value follows.
     if (from > at && (text[from] === ']' || text[from] === ',' || text[from] === ')')) return;
     AUTH_SCHEME.lastIndex = from;
     const scheme = AUTH_SCHEME.exec(text);
-    if (scheme !== null) from += scheme[0].length;
-    while (from < lineEnd && (text[from] === '"' || text[from] === "'" || text[from] === '\\')) {
-      from++;
-    }
+    if (scheme !== null) from = this.skipQuoting(from + scheme[0].length, lineEnd);
     let to = from;
     while (to < lineEnd) {
       const c = text[to] ?? '';
@@ -408,6 +402,37 @@ class Finder {
     const params = PARAM_SCHEME.test(scheme?.[1] ?? '');
     if (params && PARAM_START.test(text.slice(from, to))) return;
     this.push(from, to);
+  }
+
+  /**
+   * From `at`: past quotes and backslashes, and past a line continuation (`\\`, `^` or a backtick
+   * at the end of a physical line) with the spaces around it, which a header value can be split
+   * by (`-H "Authorization: \\` and then `Bearer ...` on the next line).
+   */
+  private skipQuoting(at: number, lineEnd: number): number {
+    const text = this.text;
+    let k = at;
+    while (k < lineEnd) {
+      const c = text[k] ?? '';
+      const next = text[k + 1] === '\r' ? k + 2 : k + 1;
+      if ((c === '\\' || c === '^' || c === '`') && text[next] === '\n') {
+        k = next + 1;
+        while (k < lineEnd && (text[k] === ' ' || text[k] === '\t')) k++;
+      } else if (c === '"' || c === "'" || c === '\\') {
+        k++;
+      } else if (c === ' ' || c === '\t') {
+        // Spaces count only before a continuation.
+        let j = k;
+        while (j < lineEnd && (text[j] === ' ' || text[j] === '\t')) j++;
+        const after = text[j + 1] === '\r' ? j + 2 : j + 1;
+        const cj = text[j] ?? '';
+        if (!((cj === '\\' || cj === '^' || cj === '`') && text[after] === '\n')) break;
+        k = j;
+      } else {
+        break;
+      }
+    }
+    return k;
   }
 
   /**

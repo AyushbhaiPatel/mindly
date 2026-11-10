@@ -73,7 +73,8 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   `user:<value>` only the secret goes (lftp, as the client nearest before the option, also takes
   `user,<value>`), and `(`, `)`, `;`, `|` and a PowerShell escape inside an unquoted value stay
   part of it. A bare user name or a `$VARIABLE` is left alone, and so is an rsync target
-  `user@host:/path` after a cluster. An `Authorization:` header or item is redacted when its
+  `user@host:/path` after a cluster. An `Authorization:` header or item (also a quoted key,
+  `"Authorization": "Bearer ..."`, and split by a line continuation) is redacted when its
   value looks like a credential: a scheme (`Bearer`, `Basic`, `Token`, ...) and a token of at
   least 8 characters, a single token of at least 16, or the secret parameters of `Digest` and
   `AWS4-...` (SigV4 and SigV4a: `response`, `nonce`, `cnonce`, `opaque`, `Signature`), which are
