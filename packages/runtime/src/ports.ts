@@ -281,10 +281,12 @@ export function createGitPort(): GitPort {
       };
       /** The tree a revision names, or null when there is none of that name. */
       const treeOf = async (rev: string): Promise<string | null> => {
-        const res = await runGit(['rev-parse', '--verify', '--quiet', `${rev}^{tree}`], {
-          ...options,
-          okExitCodes: [1, 128],
-        });
+        const verify = (name: string) =>
+          runGit(['rev-parse', '--verify', '--quiet', name], { ...options, okExitCodes: [1, 128] });
+        // The revision itself first: peeled at once, a parent that is not there (`stash@{0}^3`)
+        // can still come out as a tree.
+        if ((await verify(rev)).exitCode !== 0) return null;
+        const res = await verify(`${rev}^{tree}`);
         return res.exitCode === 0 ? res.stdout.trim() || null : null;
       };
       /** The one remote branch of that name (`origin/x` for `x`), as `git checkout x` finds it. */
@@ -301,10 +303,39 @@ export function createGitPort(): GitPort {
           query.root ??
           realpathSync((await runGit(['rev-parse', '--show-toplevel'], options)).stdout.trim());
         let against = query.against;
+        if (query.stale) {
+          // Remote-tracking refs may move before the command runs: a revision that is one, or
+          // one that does not exist yet (a fetch may bring it), is not answered for.
+          for (const rev of against) {
+            for (const part of rev.split(/\.\.\.?/)) {
+              const name = part.replace(/[~^].*$/, '');
+              if (name === '' || name === 'HEAD' || name === '@' || /^@\{-?\d+\}$/.test(name))
+                continue;
+              if (/FETCH_HEAD|^refs\/remotes\//.test(name)) return null;
+              const full = await runGit(
+                ['rev-parse', '--verify', '--quiet', '--symbolic-full-name', name],
+                {
+                  ...options,
+                  okExitCodes: [1, 128],
+                },
+              );
+              if (full.exitCode !== 0 || full.stdout.trim().startsWith('refs/remotes/'))
+                return null;
+            }
+          }
+        }
         if (query.mayFail) {
           // Words that may name no revision: a missing one makes the command write nothing.
           const trees: string[] = [];
           for (const rev of against) {
+            // A merge's `HEAD...x` is kept as it is, once both sides are there.
+            const sides = rev.split('...');
+            if (sides.length === 2) {
+              for (const side of sides)
+                if ((await treeOf(side)) === null) return Object.assign([], { root });
+              trees.push(rev);
+              continue;
+            }
             const tree = (await treeOf(rev)) ?? (query.guess ? await remoteOf(rev) : null);
             if (tree === null) return Object.assign([], { root });
             trees.push(tree);
@@ -321,21 +352,35 @@ export function createGitPort(): GitPort {
                 ['ls-files', '-z', '--full-name', '--cached', '--', ...query.pathspecs],
                 options,
               )
-            : runGit(
-                [
-                  'diff',
-                  '--name-only',
-                  '-z',
-                  '--no-renames',
-                  '--no-relative',
-                  '--no-ext-diff',
-                  '--no-textconv',
-                  ...against,
-                  '--',
-                  ...query.pathspecs,
-                ],
-                options,
-              ),
+            : query.listTree
+              ? runGit(
+                  [
+                    'ls-tree',
+                    '-r',
+                    '-z',
+                    '--name-only',
+                    '--full-tree',
+                    ...against,
+                    '--',
+                    ...query.pathspecs,
+                  ],
+                  options,
+                )
+              : runGit(
+                  [
+                    'diff',
+                    '--name-only',
+                    '-z',
+                    '--no-renames',
+                    '--no-relative',
+                    '--no-ext-diff',
+                    '--no-textconv',
+                    ...against,
+                    '--',
+                    ...query.pathspecs,
+                  ],
+                  options,
+                ),
           query.untracked
             ? runGit(
                 [

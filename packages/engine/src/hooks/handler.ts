@@ -672,11 +672,9 @@ export class HookHandler {
     if (!git.whatGitChanges || timeUp()) return null;
     const at = resolve(cwd, q.cwd);
     if (!isDirectory(at)) return null;
-    // A word that is a path only when such a file exists: else this reading writes nothing.
-    const first = q.pathspecs[0];
-    if (q.ifExists && first !== undefined && !exists(resolve(at, first))) {
-      return { root: tops.get(at) ?? at, files: [] };
-    }
+    // A word that may be a path or a branch is asked as a path whatever is on disk: git reads it
+    // as one when it matches the index too (a deleted file it would bring back), and a pathspec
+    // that matches nothing changes nothing.
     // git compares every file of the tree: on a large one that takes longer than a listing. It
     // gets what the hook can spare, keeping enough to search what is written afterwards.
     const timeoutMs = Math.floor(
@@ -698,6 +696,8 @@ export class HookHandler {
             tracked: q.tracked,
             mayFail: q.mayFail,
             guess: q.guess,
+            listTree: q.listTree,
+            stale: q.stale,
             ...(known !== undefined ? { root: known } : {}),
             timeoutMs,
           })

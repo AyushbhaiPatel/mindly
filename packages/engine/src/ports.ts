@@ -53,6 +53,13 @@ export interface GitPort {
       tracked?: boolean;
       mayFail?: boolean;
       guess?: boolean;
+      /** List every file of the one revision instead (what a stash's untracked part holds). */
+      listTree?: boolean;
+      /**
+       * Remote-tracking refs may have moved before the command runs: a revision that is one, or
+       * that does not exist yet, cannot be answered for (null).
+       */
+      stale?: boolean;
       root?: string;
       timeoutMs: number;
     },

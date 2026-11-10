@@ -383,12 +383,11 @@ describe('write targets of a shell command', () => {
       ).length;
     const given = (command: string) =>
       read(command)
-        .filter((t) => t.fallback === null)
+        .filter((t) => t.fallback === null && t.certain)
         .map((t) => t.path);
-    // A fetch, a reset of the index, a commit or a stash changes what git would answer.
+    // A reset of the index, a commit, a stash or a program that may run git changes what git
+    // would answer.
     for (const cmd of [
-      'git fetch && git checkout origin/main -- secret/key.txt',
-      'git fetch origin main && git restore --source=origin/main secret/key.txt',
       'git reset && git checkout -- secret/key.txt',
       'git add -A && git commit -qm wip && git checkout HEAD~1 -- secret/key.txt',
       'git stash && git checkout stash@{0} -- secret/key.txt',
@@ -396,7 +395,8 @@ describe('write targets of a shell command', () => {
       './sync.sh && git checkout -- secret/key.txt',
       'make && git checkout -- secret/key.txt',
       'bash -c "git pull" && git checkout -- secret/key.txt',
-      'echo $(git stash) && git checkout -- secret/key.txt',
+      'echo $(git stash drop) && git checkout stash@{1} -- secret/key.txt',
+      'git pull && git checkout -- secret/key.txt',
       'cd /elsewhere && cd - && git checkout -- secret/key.txt',
       'GIT_DIR=other.git git checkout -- secret/key.txt',
       'git --git-dir=other.git checkout -- secret/key.txt',
@@ -406,16 +406,43 @@ describe('write targets of a shell command', () => {
       expect(given(cmd), cmd).toEqual(['secret/key.txt']);
     }
     // The whole tree: the tracked files there.
-    expect(read('git fetch origin && git reset --hard origin/main')).toEqual([
+    expect(read('git reset -q && git checkout -- .')).toEqual([
       expect.objectContaining({
-        path: TOP,
+        path: '.',
         fallback: null,
         touches: { tracked: true, untracked: false, ignored: false },
       }),
     ]);
-    expect(read('git fetch && git checkout -- .')).toEqual([
-      expect.objectContaining({ path: '.', fallback: null, touches: expect.anything() }),
-    ]);
+    // A fetch moves remote-tracking refs only: git is still asked, and says nothing for one of
+    // them, or for a revision that is not there yet.
+    for (const cmd of [
+      'git fetch && git checkout origin/main -- secret/key.txt',
+      'git remote update && git reset --hard origin/main',
+      'git fetch && git switch other',
+    ]) {
+      const questions = readShellWrites(cmd, { home: HOME, top: TOP }).questions;
+      expect(questions.length, cmd).toBeGreaterThan(0);
+      expect(
+        questions.every((x) => x.stale),
+        cmd,
+      ).toBe(true);
+    }
+    expect(readShellWrites('git fetch && git checkout -- x').questions[0]?.stale).toBe(false);
+    // `git add` brings untracked files into what a later reset or stash takes away; a commit
+    // makes a later switch write what differs from the working tree.
+    expect(readShellWrites('git add -A && git stash').questions[0]).toMatchObject({
+      against: ['HEAD'],
+      untracked: true,
+    });
+    expect(
+      readShellWrites('git add -A && git commit -qm wip && git switch feature').questions[0],
+    ).toMatchObject({ against: ['feature'], untracked: true });
+    // A stash put away and brought back on the same line is counted once, with the first.
+    expect(
+      readShellWrites('git stash && git checkout feature && git stash pop').questions.map((x) =>
+        x.against.join(' '),
+      ),
+    ).toEqual(['HEAD', '', 'HEAD feature']);
     // Looking around first changes nothing, nor does a folder of the same tree.
     for (const cmd of [
       'git status && git checkout -- secret/key.txt',
@@ -434,16 +461,50 @@ describe('write targets of a shell command', () => {
         (q) => q.against.length === 2,
       ).length;
     expect(switches('git add -A && git checkout -- x && git switch other')).toBe(1);
-    expect(switches('git fetch && git switch other')).toBe(0);
-    expect(switches('git commit -qm x && git switch other')).toBe(0);
-    expect(read('git fetch && git switch other')).toEqual([
+    expect(switches('git merge other && git switch other')).toBe(0);
+    expect(read('git merge x && git switch other')).toContainEqual(
       expect.objectContaining({ path: TOP, fallback: null, certain: true }),
-    ]);
+    );
     // Case is ignored with `--icase-pathspecs`.
     expect(read('git --icase-pathspecs checkout -- SECRET')[0]).toMatchObject({ nocase: true });
     expect(read("git checkout -- ':(icase)SECRET'")[0]).toMatchObject({ nocase: true });
     // A git command whose folder the text does not tell is said, not dropped.
     expect(readShellWrites('cd "$DIR" && git checkout -- .').limit).toContain('git command');
+  });
+
+  it('asks about what a stash, a merge or a picked commit brings in', () => {
+    const ask = (command: string) =>
+      readShellWrites(command, { home: HOME, top: TOP }).questions.map(
+        (q) => `${q.against.join(' ')}${q.listTree ? ' (all of it)' : ''}`,
+      );
+    expect(ask('git stash pop')).toEqual(['stash@{0}^1 stash@{0}', 'stash@{0}^3 (all of it)']);
+    expect(ask('git stash apply 2')).toEqual(['stash@{2}^1 stash@{2}', 'stash@{2}^3 (all of it)']);
+    expect(ask('git stash branch tmp stash@{1}')).toEqual([
+      'HEAD stash@{1}^1',
+      'stash@{1}^1 stash@{1}',
+      'stash@{1}^3 (all of it)',
+    ]);
+    expect(ask('git merge other')).toEqual(['HEAD...other']);
+    expect(ask('git merge -m msg a b')).toEqual(['HEAD...a', 'HEAD...b']);
+    expect(ask('git cherry-pick -x abc123')).toEqual(['abc123^ abc123']);
+    expect(ask('git revert a..b')).toEqual(['a b']);
+    expect(ask('git rebase main')).toEqual(['HEAD main']);
+    // What cannot be asked is a possible write of the tracked files: a warning at most.
+    for (const cmd of ['git pull', 'git am x.mbox', 'git apply x.patch', 'git merge --abort']) {
+      const reading = readShellWrites(cmd, { home: HOME, top: TOP });
+      expect(reading.questions, cmd).toEqual([]);
+      expect(reading.targets, cmd).toEqual([
+        expect.objectContaining({ path: TOP, certain: false, touches: expect.anything() }),
+      ]);
+    }
+    expect(readShellWrites('git apply --check x.patch').targets).toEqual([]);
+    // git clean reads pathspecs as git does.
+    expect(read('git clean -fd :/').map((t) => [t.path, t.how])).toEqual([[TOP, 'clean']]);
+    expect(read("git clean -fx -- '*.pem'").map((t) => t.path)).toEqual(['*.pem', '*/**/*.pem']);
+    // Pathspecs that only leave files out stand for everything else.
+    expect(read("git reset -q && git stash push -- ':!src'")).toEqual([
+      expect.objectContaining({ path: TOP, fallback: null }),
+    ]);
   });
 
   it('stands in for git commands it does not ask about', () => {

@@ -431,6 +431,155 @@ describe('git commands that switch branches or come after other commands', () =>
   });
 });
 
+describe('git commands whose files the line does not name', () => {
+  /** A repository with a protected tracked file, a `feature` branch and an `origin` remote. */
+  const setUp = () => {
+    const g = guarded({ 'Certificates are issued by hand': ['**/*.pem'] });
+    mkdirSync(join(g.dir, 'certs'));
+    mkdirSync(join(g.dir, 'src'));
+    writeFileSync(join(g.dir, 'certs', 'server.pem'), 'k1\n');
+    writeFileSync(join(g.dir, 'src', 'a.ts'), 'x\n');
+    g.git('add', '-A');
+    g.git('commit', '-q', '-m', 'init');
+    g.git('checkout', '-q', '-b', 'feature');
+    writeFileSync(join(g.dir, 'src', 'a.ts'), 'y\n');
+    g.git('commit', '-qam', 'feature');
+    g.git('checkout', '-q', 'main');
+    return g;
+  };
+
+  it('brings back a stash: what it changed, and the untracked files it holds', async () => {
+    const { dir, mindly, shell, git } = setUp();
+    try {
+      writeFileSync(join(dir, 'certs', 'server.pem'), 'k-stashed\n');
+      git('stash', '-q');
+      for (const command of ['git stash pop', 'git stash apply', 'git stash branch tmp']) {
+        const r = await shell(command);
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('certs/server.pem');
+      }
+      git('stash', 'drop', '-q');
+      writeFileSync(join(dir, 'src', 'new.pem'), 'n\n');
+      git('stash', '-q', '-u');
+      expect((await shell('git stash pop')).decision).toBe('deny');
+      git('stash', 'drop', '-q');
+      writeFileSync(join(dir, 'src', 'a.ts'), 'z\n');
+      git('stash', '-q');
+      const plain = await shell('git stash pop');
+      expect(plain.decision, plain.reason ?? '').toBeNull();
+    } finally {
+      mindly.close();
+    }
+  });
+
+  it('reads a word as a path when the index has it, though the file is gone', async () => {
+    const { dir, mindly, shell } = setUp();
+    try {
+      rmSync(join(dir, 'certs', 'server.pem'));
+      for (const command of [
+        'git checkout certs/server.pem',
+        'git checkout certs/server.pem src/a.ts',
+        'git checkout certs',
+      ]) {
+        expect((await shell(command)).decision, command).toBe('deny');
+      }
+    } finally {
+      mindly.close();
+    }
+  });
+
+  it('asks about a merge, a picked commit and a rebase; warns about a pull', async () => {
+    const { dir, mindly, shell, git } = setUp();
+    try {
+      git('checkout', '-q', '-b', 'certs-change');
+      writeFileSync(join(dir, 'certs', 'server.pem'), 'k2\n');
+      git('commit', '-qam', 'certs');
+      git('checkout', '-q', 'main');
+      for (const command of [
+        'git merge certs-change',
+        'git cherry-pick certs-change',
+        'git revert certs-change',
+        'git rebase certs-change',
+      ]) {
+        const r = await shell(command);
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('certs/server.pem');
+      }
+      for (const command of ['git merge feature', 'git cherry-pick feature']) {
+        expect((await shell(command)).decision, command).toBeNull();
+      }
+      for (const command of ['git pull', 'git am x.mbox', 'git apply x.patch']) {
+        const r = await shell(command);
+        expect(r.decision, command).toBeNull();
+        expect(r.context, command).toContain('Certificates are issued by hand');
+      }
+    } finally {
+      mindly.close();
+    }
+  });
+
+  it('keeps asking after commands whose effect git can still tell', async () => {
+    const { dir, mindly, shell, git } = setUp();
+    try {
+      git('remote', 'add', 'origin', dir);
+      writeFileSync(join(dir, 'src', 'b.ts'), 'local work\n');
+      for (const command of [
+        'git add -A && git commit -qm wip && git checkout feature',
+        'git stash && git checkout feature && git stash pop',
+        'git stash -u && git checkout feature && git stash pop',
+        'git fetch && git checkout feature',
+        'git commit -qam wip && git checkout -- .',
+        'git add -A && git stash',
+      ]) {
+        const r = await shell(command);
+        expect(r.decision, `${command}: ${r.reason}`).toBeNull();
+      }
+      // A file added and then stashed or reset goes with it.
+      writeFileSync(join(dir, 'certs', 'new.pem'), 'n\n');
+      for (const command of ['git add -A && git stash', 'git add certs && git reset --hard']) {
+        expect((await shell(command)).decision, command).toBe('deny');
+      }
+      rmSync(join(dir, 'certs', 'new.pem'));
+      // A remote-tracking ref after a fetch is not answered for.
+      git('fetch', '-q', 'origin');
+      for (const command of [
+        'git fetch && git checkout origin/main -- certs/server.pem',
+        'git remote update && git reset --hard origin/main',
+      ]) {
+        expect((await shell(command)).decision, command).toBe('deny');
+      }
+      // Pathspecs that only leave files out stand for everything else.
+      writeFileSync(join(dir, 'certs', 'server.pem'), 'k-dirty\n');
+      for (const command of [
+        "git add src && git checkout -- ':!src'",
+        "git reset -q && git stash push -- ':!src'",
+      ]) {
+        expect((await shell(command)).decision, command).toBe('deny');
+      }
+    } finally {
+      mindly.close();
+    }
+  });
+
+  it('cleans what git clean pathspecs match', async () => {
+    const { dir, mindly, shell } = setUp();
+    try {
+      mkdirSync(join(dir, 'newdir'));
+      writeFileSync(join(dir, 'newdir', 'key.pem'), 'u\n');
+      for (const [command, cwd] of [
+        ['git clean -fd :/', dir],
+        ['git clean -fdx :/', join(dir, 'src')],
+        ["git clean -fx -- '*.pem'", dir],
+      ] as const) {
+        expect((await shell(command, cwd)).decision, command).toBe('deny');
+      }
+      expect((await shell("git clean -fx -- '*.ts'")).decision).toBeNull();
+    } finally {
+      mindly.close();
+    }
+  });
+});
+
 describe('linked worktrees', () => {
   it('lists every working tree of a repository in one call', async () => {
     const dir = repo();
