@@ -3,11 +3,13 @@ import {
   createLogger,
   defaultUserConfig,
   describeError,
+  EMPTY_HOOK_RESULT,
   fileSink,
   homePaths,
   loadUserConfig,
   mindlyHome,
   nullSink,
+  type AgentAdapter,
   type HookResult,
   type Logger,
   type NormalizedHookEvent,
@@ -76,7 +78,11 @@ export async function runHook(
   try {
     raw = await readStdin(io.stdin, MAX_HOOK_STDIN_BYTES);
   } catch (err) {
-    return fail(err instanceof StdinTooLarge ? 'payload too large' : 'stdin unreadable');
+    if (!(err instanceof StdinTooLarge)) return fail('stdin unreadable');
+    // A write too large to read cannot be checked: refused, not let through unchecked.
+    const refused = refuseUnreadWrite(adapter, nativeEvent, io.cwd);
+    if (refused !== null) io.stdout.write(refused.stdout);
+    return refused === null ? fail('payload too large') : refused.exitCode;
   }
   let payload: unknown;
   try {
@@ -133,6 +139,35 @@ export async function runHook(
   logger.debug('hook handled', { agent, event: nativeEvent, ms: Date.now() - started });
   if (rendered.stdout !== '') io.stdout.write(rendered.stdout);
   return rendered.exitCode;
+}
+
+/**
+ * The answer to a pre-tool event of a writing or shell tool whose payload was too large to read:
+ * a refusal, rendered as the agent expects. Null for any other event, which fails open.
+ */
+function refuseUnreadWrite(
+  adapter: AgentAdapter,
+  nativeEvent: string,
+  cwd: string,
+): { stdout: string; exitCode: number } | null {
+  try {
+    // Only the event name is known; a stand-in payload tells what kind of event it is.
+    const stand = { session_id: 'x', conversation_id: 'x', cwd, workspace_roots: [cwd] };
+    const evt = adapter.parse(nativeEvent, {
+      ...stand,
+      tool_name: 'Write',
+      tool_input: { file_path: 'x', content: '' },
+    });
+    if (evt?.event !== 'pre_tool' || !(evt.tool?.writes || evt.tool?.shell)) return null;
+    return adapter.render(evt, {
+      ...EMPTY_HOOK_RESULT,
+      decision: 'deny',
+      reason:
+        'Mindly could not check this change: it is too large to check. Make the change in smaller steps.',
+    });
+  } catch {
+    return null;
+  }
 }
 
 function closeQuietly(mindly: Pick<Mindly, 'close'> | null): void {

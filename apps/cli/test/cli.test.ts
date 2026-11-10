@@ -427,6 +427,27 @@ describe('hook', () => {
     }
   });
 
+  it('refuses a write too large to read, and lets any other oversized event through', async () => {
+    const sb = sandbox();
+    const big = 'x'.repeat(3 * 1024 * 1024);
+    const write = JSON.stringify({
+      ...fixture('claude-code.PostToolUse.Write'),
+      hook_event_name: 'PreToolUse',
+      cwd: sb.repo,
+      tool_input: { file_path: join(sb.repo, 'a.ts'), content: big },
+    });
+    const io = testIo(sb, { stdin: write });
+    expect(await runHook('claude-code', 'PreToolUse', io)).toBe(0);
+    const out = JSON.parse(io.out.join(''));
+    expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain('too large to check');
+    for (const native of ['PostToolUse', 'UserPromptSubmit']) {
+      const other = testIo(sb, { stdin: write });
+      expect(await runHook('claude-code', native, other)).toBe(0);
+      expect(other.out.join('')).toBe('');
+    }
+  });
+
   it('a hook that exceeds the deadline exits 0 quickly with no output', async () => {
     const sb = sandbox();
     expect((await cli(sb, ['config', 'set', 'hooks.timeoutMs', '200'])).code).toBe(0);
