@@ -79,7 +79,7 @@ export async function runHook(
   } catch (err) {
     if (!(err instanceof StdinTooLarge)) return fail('stdin unreadable');
     // A write too large to read cannot be checked: refused, not let through unchecked.
-    const refused = refuseUnreadWrite(adapter, nativeEvent, io.cwd, err.head);
+    const refused = refuseUnreadWrite(adapter, nativeEvent, io.cwd, err.toolName);
     if (refused !== null) io.stdout.write(refused.stdout);
     return refused === null ? fail('payload too large') : refused.exitCode;
   }
@@ -157,12 +157,11 @@ function refuseUnreadWrite(
   adapter: AgentAdapter,
   nativeEvent: string,
   cwd: string,
-  head: string,
+  name: string | null,
 ): { stdout: string; exitCode: number } | null {
   try {
-    // Only the event name and the start of the payload are known: the tool's name is looked for
-    // there, and a stand-in payload tells what kind of event and tool it is.
-    const name = /"(?:tool_name|toolName|tool)"\s*:\s*"([^"\\]{1,200})"/.exec(head)?.[1];
+    // Only the event name and the payload's tool name are known: a stand-in payload tells what
+    // kind of event and tool it is.
     const stand = { session_id: 'x', conversation_id: 'x', cwd, workspace_roots: [cwd] };
     const input = { file_path: 'x', content: '', command: 'x' };
     // Without a name, only an event that is a write or a shell command whatever the tool counts.
