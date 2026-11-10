@@ -57,12 +57,17 @@ interface Relation {
   clientRuns: boolean | null;
 }
 
-/** What a server did while it spoke for a session it only guessed at. */
-interface GuessWork {
-  sessionId: string;
-  intents: Set<string>;
-  tasks: Set<string>;
+/**
+ * What a server did since it last spoke for a session that is its own (known, or its own
+ * `mcp-` session): the rows it wrote, each with the time it last wrote it, and the task it made
+ * current. `at` is the session those rows are with now.
+ */
+interface ServerWork {
+  at: string;
+  intents: Map<string, number>;
+  tasks: Map<string, number>;
   messages: Set<string>;
+  currentTask: string | null;
 }
 
 /** How many launchers may stand between a server and its client. */
@@ -104,7 +109,7 @@ export class SessionResolver {
   private self: ProcessRef | null = null;
   private ancestors: readonly ProcessRef[] | null;
   private bound: { id: string; own: boolean; sure: boolean } | null = null;
-  private guessWork: GuessWork | null = null;
+  private work: ServerWork | null = null;
   private scoped: ScopedProject | null = null;
   private readonly roots = new Map<string, string | null>();
 
@@ -447,7 +452,7 @@ export class SessionResolver {
       if (this.bound.sure || this.relation(session).clientRuns !== false) {
         store.sessions.touch(this.bound.id);
       }
-      this.carryGuessWork(session.id);
+      this.carryWork(session.id, this.bound.sure);
       return { project, session: store.sessions.get(this.bound.id) };
     }
 
@@ -466,47 +471,87 @@ export class SessionResolver {
       transcriptPath: null,
     });
     if (!this.bound) this.take(session.id, true, true);
-    this.carryGuessWork(session.id);
+    this.carryWork(session.id, true);
     return { project, session };
   }
 
-  /**
-   * Notes something this server did while it speaks for a session it only guessed at: an
-   * intent it declared, a task it created or claimed, a message it sent. When the server moves
-   * to another session, these go with it; the guessed session's own work stays where it is.
-   */
-  noteWork(kind: 'intent' | 'task' | 'message', id: string): void {
-    const bound = this.bound;
-    if (!bound || bound.own || bound.sure) return;
-    if (this.guessWork?.sessionId !== bound.id) {
-      this.guessWork = {
-        sessionId: bound.id,
-        intents: new Set(),
-        tasks: new Set(),
-        messages: new Set(),
-      };
-    }
-    const set =
-      kind === 'intent'
-        ? this.guessWork.intents
-        : kind === 'task'
-          ? this.guessWork.tasks
-          : this.guessWork.messages;
-    if (set.size < 500) set.add(id);
+  /** True while the server speaks for a session it only guessed at. */
+  get guessing(): boolean {
+    return this.bound !== null && !this.bound.own && !this.bound.sure;
   }
 
-  /** Moves what this server did on a guess it has left to the session it speaks for now. */
-  private carryGuessWork(toId: string): void {
-    const work = this.guessWork;
-    if (!work || work.sessionId === toId) return;
-    this.guessWork = null;
+  /**
+   * Notes a row this server wrote while it speaks for a session it only guessed at: an intent it
+   * declared, a task it created, claimed or changed, a message it sent. `updatedAt` is the time
+   * the row carries after this server's write. The rows go along with the server through every
+   * move until it speaks for a session that is its own; one that someone else has changed since
+   * is left where it is.
+   */
+  noteWork(kind: 'intent' | 'task' | 'message', id: string, updatedAt = 0): void {
+    const bound = this.bound;
+    if (!bound || !this.guessing) return;
+    this.work ??= {
+      at: bound.id,
+      intents: new Map(),
+      tasks: new Map(),
+      messages: new Set(),
+      currentTask: null,
+    };
+    if (this.work.at !== bound.id) return;
+    if (kind === 'message') {
+      if (this.work.messages.size < 500) this.work.messages.add(id);
+      return;
+    }
+    const rows = kind === 'intent' ? this.work.intents : this.work.tasks;
+    if (rows.size < 500 || rows.has(id)) rows.set(id, updatedAt);
+  }
+
+  /** True when `taskId` is a row this server wrote on its current guess. */
+  wrote(kind: 'task' | 'intent', id: string): boolean {
+    const rows = kind === 'task' ? this.work?.tasks : this.work?.intents;
+    return rows?.has(id) ?? false;
+  }
+
+  /**
+   * Notes the task this server made current while on a guess. The guessed session's own current
+   * task is not this server's to change: the server keeps its own and sets it only on a session
+   * that is its own.
+   */
+  noteCurrentTask(taskId: string): void {
+    if (this.work && this.guessing) this.work.currentTask = taskId;
+  }
+
+  /**
+   * Takes what this server did along to the session it now speaks for, and, once that session is
+   * its own (`home`), settles it there: its current task is set, and nothing is tracked any more.
+   */
+  private carryWork(toId: string, home: boolean): void {
+    const work = this.work;
+    if (!work) return;
+    const store = this.mindly.store;
     try {
-      this.mindly.store.sessions.moveRows(work.sessionId, toId, {
-        intents: [...work.intents],
-        tasks: [...work.tasks],
-        messages: [...work.messages],
-      });
+      if (work.at !== toId) {
+        const moved = store.sessions.moveRows(work.at, toId, {
+          intents: [...work.intents].map(([id, updatedAt]) => ({ id, updatedAt })),
+          tasks: [...work.tasks].map(([id, updatedAt]) => ({ id, updatedAt })),
+          messages: [...work.messages],
+        });
+        // What stayed behind was changed by someone else, or is no longer where this server
+        // left it: it is not this server's to move any more.
+        work.intents = new Map(moved.intents.map((id) => [id, moved.at]));
+        work.tasks = new Map(moved.tasks.map((id) => [id, moved.at]));
+        work.messages = new Set(moved.messages);
+        work.at = toId;
+      }
+      if (!home) return;
+      this.work = null;
+      const current = work.currentTask;
+      if (current && work.tasks.has(current)) {
+        const task = store.tasks.find(current);
+        if (task?.ownerSessionId === toId) store.sessions.setCurrentTask(toId, current);
+      }
     } catch (err) {
+      this.work = home ? null : work;
       this.logger?.warn('mcp work not moved', {
         error: err instanceof Error ? err.message : String(err),
       });

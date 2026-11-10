@@ -71,6 +71,47 @@ describe('sessions', () => {
     expect(again.session.branch).toBe('main');
   });
 
+  it('moves only the rows nobody else changed, and leaves current tasks alone', () => {
+    const { store, project, clock, a, b } = setup();
+    const mine = store.tasks.create({
+      projectId: project.id,
+      title: 'mine',
+      status: 'in_progress',
+      ownerSessionId: a.id,
+    });
+    const touched = store.tasks.create({
+      projectId: project.id,
+      title: 'touched by the other window',
+      status: 'in_progress',
+      ownerSessionId: a.id,
+    });
+    const intent = store.intents.declare({
+      projectId: project.id,
+      sessionId: a.id,
+      taskId: null,
+      summary: 'mine',
+      targets: { files: ['a.ts'], symbols: [] },
+      ttlMs: 60_000,
+    });
+    store.sessions.setCurrentTask(a.id, touched.id);
+    clock.advance(10);
+    store.tasks.update(touched.id, { status: 'blocked' });
+    const moved = store.sessions.moveRows(a.id, b.id, {
+      intents: [{ id: intent.id, updatedAt: intent.updatedAt }],
+      tasks: [
+        { id: mine.id, updatedAt: mine.updatedAt },
+        { id: touched.id, updatedAt: touched.updatedAt },
+      ],
+      messages: [],
+    });
+    expect(moved.tasks).toEqual([mine.id]);
+    expect(moved.intents).toEqual([intent.id]);
+    expect(store.tasks.get(mine.id).ownerSessionId).toBe(b.id);
+    expect(store.tasks.get(touched.id).ownerSessionId).toBe(a.id);
+    expect(store.sessions.get(a.id).currentTaskId).toBe(touched.id);
+    expect(store.sessions.get(b.id).currentTaskId).toBeNull();
+  });
+
   it('lists live sessions and ends stale ones', () => {
     const { store, project, clock, a } = setup();
     clock.advance(60_000);

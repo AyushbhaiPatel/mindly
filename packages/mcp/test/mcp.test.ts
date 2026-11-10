@@ -1225,6 +1225,111 @@ describe('telling windows of one agent apart', () => {
     expect(sent.find((d) => d.title === 'from B')?.sourceSessionId).toBe(sessB);
   });
 
+  describe('work done on a guess', () => {
+    const projectOf = (h: Harness, id: string): string => h.mindly.store.sessions.get(id).projectId;
+
+    it('follows the server through a second guess to its own session', async () => {
+      running.add(300);
+      try {
+        const a = await harness(windowA);
+        const sessC = await hookSession(a, 'win-c', [ref(301), ref(300), TERMINAL]);
+        const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+        const b = await harness(windowB, a);
+        expect(sid(await b.call('mindly_status'))).toBe(sessA);
+        const task = await b.call('mindly_task_create', { title: 'window B task' });
+        const taskB = (task.structured?.['task'] as { id: string }).id;
+        await b.call('mindly_declare_intent', { summary: 'B edits auth', files: ['src/auth.ts'] });
+        // Window A's server takes its session back; B guesses window C's.
+        expect(sid(await a.call('mindly_status'))).toBe(sessA);
+        expect(sid(await b.call('mindly_status'))).toBe(sessC);
+        await b.call('mindly_declare_intent', { summary: 'B edits pkg', files: ['package.json'] });
+        // Window B's hooks start: everything B did goes to B's own session.
+        const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+        expect(sid(await b.call('mindly_status'))).toBe(sessB);
+        expect(a.mindly.store.tasks.get(taskB).ownerSessionId).toBe(sessB);
+        const intents = (id: string) =>
+          a.mindly.store.intents.activeForSession(id).map((i) => i.summary);
+        expect(intents(sessB).sort()).toEqual(['B edits auth', 'B edits pkg']);
+        expect(intents(sessA)).toEqual([]);
+        expect(intents(sessC)).toEqual([]);
+        // B's current task is set on B's own session, never on the windows it guessed.
+        expect(a.mindly.store.sessions.get(sessB).currentTaskId).toBe(taskB);
+        expect(a.mindly.store.sessions.get(sessC).currentTaskId).toBeNull();
+      } finally {
+        running.delete(300);
+      }
+    });
+
+    it("leaves the guessed window's current task as it was", async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const tA = a.mindly.tasks.create({
+        projectId: projectOf(a, sessA),
+        title: 'window A task',
+        owner: a.mindly.store.sessions.get(sessA),
+      });
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      await b.call('mindly_task_create', { title: 'window B task' });
+      expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(tA.id);
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      expect(a.mindly.store.tasks.get(tA.id).ownerSessionId).toBe(sessA);
+      expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(tA.id);
+    });
+
+    it("does not take files the guessed window's hooks record, whatever its intent is called", async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      await b.call('mindly_declare_intent', { summary: 'Editing auth', files: ['src/auth.ts'] });
+      a.mindly.intents.noteEditing(a.mindly.store.sessions.get(sessA), ['package.json']);
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      const filesOf = (id: string) =>
+        a.mindly.store.intents.activeForSession(id).flatMap((i) => i.targets.files);
+      expect(filesOf(sessA)).toEqual(['package.json']);
+      expect(filesOf(sessB)).toEqual(['src/auth.ts']);
+    });
+
+    it('leaves a task the guessed window took up, and stops tracking once the guess is right', async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      const made = await b.call('mindly_task_create', { title: 'made by B' });
+      const shared = (made.structured?.['task'] as { id: string }).id;
+      // Window A's agent works on it too: whose it is is no longer clear.
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      a.mindly.tasks.update(shared, { status: 'blocked' }, a.mindly.store.sessions.get(sessA));
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      expect(a.mindly.store.tasks.get(shared).ownerSessionId).toBe(sessA);
+    });
+
+    it('settles its work once a guess turns out to be its own', async () => {
+      const a = await harness(windowA);
+      await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'win-a', 'session_start'));
+      const first = sid(await a.call('mindly_status'));
+      const made = await a.call('mindly_task_create', { title: 'made on the guess' });
+      const taskId = (made.structured?.['task'] as { id: string }).id;
+      // The record arrives: the guess was right, and the task is now simply that session's.
+      a.mindly.store.kv.set(hookAncestryKey('claude-code', 'win-a'), [
+        ref(101),
+        ref(100),
+        TERMINAL,
+      ]);
+      expect(sid(await a.call('mindly_status'))).toBe(first);
+      expect(a.mindly.store.sessions.get(first).currentTaskId).toBe(taskId);
+      // That session ends; the server moves on, and the task stays with the ended session.
+      await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'win-a', 'session_end'));
+      const next = sid(await a.call('mindly_status'));
+      expect(next).not.toBe(first);
+      expect(a.mindly.store.tasks.get(taskId).ownerSessionId).toBe(first);
+    });
+  });
+
   it('never leaves its own session out of a guess, whatever stands between', async () => {
     // A helper process with a name that says nothing (not a known launcher) stands between.
     for (const pid of [120, 1200]) running.add(pid);

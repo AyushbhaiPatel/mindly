@@ -230,49 +230,57 @@ export class SessionRepo {
    * transaction. Returns how many rows moved.
    */
   /**
-   * Moves particular rows from one session to another: active intents, unfinished tasks it owns
-   * and messages it sent, each only while it still belongs to `fromId`. For a server that spoke
-   * for a session it only guessed at and leaves it: what it did there goes with it, and the
-   * session's own work stays. Returns how many rows moved.
+   * Moves particular rows from one session to another, for a server that spoke for a session it
+   * only guessed at and leaves it: active intents and unfinished tasks are given with the
+   * `updatedAt` they had when that server last wrote them, and move only while they still
+   * belong to `fromId` and nobody changed them since; messages move while `fromId` is still
+   * their sender. Anything else is left where it is: when it is not clear whose a row is, it
+   * stays. Current tasks are not touched. Returns the ids that moved and the time they now carry.
    */
   moveRows(
     fromId: string,
     toId: string,
-    rows: { intents: readonly string[]; tasks: readonly string[]; messages: readonly string[] },
-  ): number {
-    if (fromId === toId) return 0;
+    rows: {
+      intents: readonly { id: string; updatedAt: number }[];
+      tasks: readonly { id: string; updatedAt: number }[];
+      messages: readonly string[];
+    },
+  ): { intents: string[]; tasks: string[]; messages: string[]; at: number } {
     const now = this.clock.now();
-    let moved = 0;
-    const each = (ids: readonly string[], sql: string, args: (id: string) => unknown[]): void => {
-      const stmt = this.db.prepare(sql);
-      for (const id of ids.slice(0, 500))
-        moved += Number(stmt.run(...(args(id) as never[])).changes);
+    const out = {
+      intents: [] as string[],
+      tasks: [] as string[],
+      messages: [] as string[],
+      at: now,
     };
-    const move = (): void => {
-      each(
-        rows.intents,
-        `UPDATE intents SET session_id = ?, updated_at = ? WHERE id = ? AND session_id = ? AND status = 'active'`,
-        (id) => [toId, now, id, fromId],
+    if (fromId === toId) return out;
+    transaction(this.db, () => {
+      const intent = this.db.prepare(
+        `UPDATE intents SET session_id = ?, updated_at = ?
+           WHERE id = ? AND session_id = ? AND updated_at = ? AND status = 'active'`,
       );
-      each(
-        rows.tasks,
-        `UPDATE tasks SET owner_session_id = ?, updated_at = ?
-           WHERE id = ? AND owner_session_id = ? AND status IN ('open', 'in_progress', 'blocked')`,
-        (id) => [toId, now, id, fromId],
-      );
-      each(
-        rows.messages,
-        'UPDATE deliveries SET source_session_id = ? WHERE id = ? AND source_session_id = ?',
-        (id) => [toId, id, fromId],
-      );
-      const from = this.find(fromId);
-      if (from?.currentTaskId && rows.tasks.includes(from.currentTaskId)) {
-        this.setCurrentTask(toId, from.currentTaskId);
-        this.setCurrentTask(fromId, null);
+      for (const r of rows.intents.slice(0, 500)) {
+        if (Number(intent.run(toId, now, r.id, fromId, r.updatedAt).changes) > 0) {
+          out.intents.push(r.id);
+        }
       }
-    };
-    transaction(this.db, move);
-    return moved;
+      const task = this.db.prepare(
+        `UPDATE tasks SET owner_session_id = ?, updated_at = ?
+           WHERE id = ? AND owner_session_id = ? AND updated_at = ?
+             AND status IN ('open', 'in_progress', 'blocked')`,
+      );
+      for (const r of rows.tasks.slice(0, 500)) {
+        if (Number(task.run(toId, now, r.id, fromId, r.updatedAt).changes) > 0)
+          out.tasks.push(r.id);
+      }
+      const message = this.db.prepare(
+        'UPDATE deliveries SET source_session_id = ? WHERE id = ? AND source_session_id = ?',
+      );
+      for (const id of rows.messages.slice(0, 500)) {
+        if (Number(message.run(toId, id, fromId).changes) > 0) out.messages.push(id);
+      }
+    });
+    return out;
   }
 
   moveWork(fromId: string, toId: string): number {
