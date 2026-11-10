@@ -546,10 +546,12 @@ export class SentinelService {
     } catch (err) {
       const runId = run?.id ?? null;
       const stopped = err instanceof BisectAborted || signal.aborted;
-      // Whatever failed, nothing is saved unless the lock is still ours: it may have been taken
-      // over since the last look, before a heartbeat noticed, and the new holder's state is not
-      // ours to overwrite.
-      const lost = lockLost() || (!stopped && !lock.held());
+      // Whatever failed, nothing is saved once the lock names another holder: it may have been
+      // taken over since the last look, before a heartbeat noticed, and the new holder's state
+      // is not ours to overwrite (`held()` aborts the lock's signal then). A lock that cannot
+      // be read is not taken over: the back-off is still saved.
+      if (!stopped) lock.held();
+      const lost = lockLost();
       if (stopped || lost) {
         if (lost) this.k.logger.warn('sentinel: lock lost, pass stopped', { projectId });
         if (run) {

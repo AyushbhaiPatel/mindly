@@ -985,6 +985,25 @@ describe('sentinel pass', () => {
     expect(readFileSync(lockFile, 'utf8')).toBe(theirs);
   });
 
+  it('still backs off a failed pass when its lock cannot be read', async () => {
+    const w = await world(breaksAt(3));
+    const svc = sentinelOf(w.mindly);
+    w.addSteps(1, 2);
+    await w.pass();
+    const lockFile = join(dirname(svc.warmPath(w.pid, w.root)), 'lock');
+    w.addSteps(3, 4);
+    // The lock file is gone (not taken over: nothing names another holder), then a failure.
+    const countSince = w.mindly.store.runs.countSince.bind(w.mindly.store.runs);
+    w.mindly.store.runs.countSince = () => {
+      rmSync(lockFile, { force: true });
+      throw new Error('database is locked');
+    };
+    const r = await w.pass();
+    w.mindly.store.runs.countSince = countSince;
+    expect(r.status).toBe('error');
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toMatchObject({ skips: 1, skippedSeq: 4 });
+  });
+
   it("refuses to run when Mindly's home is inside the repository", async () => {
     const w = await world(() => 'pass');
     const svc = new SentinelService(
