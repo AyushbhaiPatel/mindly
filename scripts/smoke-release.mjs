@@ -191,8 +191,8 @@ try {
     fallback,
   );
 
-  // 4c. `npx mindly-cli init`: hooks must run a copy in MINDLY_HOME, not npx or the npx cache,
-  // and keep working with the npx cache gone and no registry.
+  // 4c. `npx mindly-cli init`: hooks must run the launcher in MINDLY_HOME, not npx or the npx
+  // cache, keep working with the npx cache gone and no registry, and end quietly without the copy.
   const repo3 = join(root, 'repo3');
   mkdirSync(repo3);
   run('git', ['init', '-q', '-b', 'main'], { cwd: repo3 });
@@ -220,32 +220,41 @@ try {
   const settings3File = join(repo3, '.claude', 'settings.json');
   const settings3 = existsSync(settings3File) ? readFileSync(settings3File, 'utf8') : '';
   const npxCommands = [...settings3.matchAll(/"command":\s*"([^"]+)"/g)].map((m) => m[1]);
+  const launcher = join(dirs.mindlyHome, 'bin', 'mindly.cjs');
   const copyMain = join(dirs.mindlyHome, 'lib', expected, 'node_modules', 'mindly-cli', 'dist');
   check(
     viaNpx.status === 0 &&
       npxCommands.length > 0 &&
-      npxCommands.every((c) => c.includes(join(copyMain, 'main.js')) && !/\bnpx\b|_npx/.test(c)),
-    `init through npx records a copy in MINDLY_HOME (${npxCommands.length} hooks)`,
+      npxCommands.every((c) => c.includes(launcher) && !/\bnpx\b|_npx/.test(c)) &&
+      existsSync(join(copyMain, 'main.js')),
+    `init through npx records the launcher in MINDLY_HOME (${npxCommands.length} hooks)`,
     viaNpx.status === 0 ? (npxCommands[0] ?? '') : `${viaNpx.stdout}\n${viaNpx.stderr}`,
   );
-  rmSync(join(env.npm_config_cache, '_npx'), { recursive: true, force: true });
-  const started = Date.now();
-  const offline = spawnSync(
-    process.execPath,
-    [join(copyMain, 'main.js'), 'hook', 'claude-code', 'Stop'],
-    {
+  // Run the recorded Stop hook as an agent does, through a shell.
+  const stopHook = npxCommands.find((c) => / hook claude-code Stop$/.test(c)) ?? 'false';
+  const runStop = () =>
+    spawnSync('/bin/sh', ['-c', stopHook], {
       cwd: repo3,
       env: { ...env, PATH: process.env.PATH ?? '', npm_config_registry: 'http://127.0.0.1:9/' },
       input: '{}',
       encoding: 'utf8',
       timeout: 30_000,
-    },
-  );
+    });
+  rmSync(join(env.npm_config_cache, '_npx'), { recursive: true, force: true });
+  const started = Date.now();
+  const offline = runStop();
   const took = Date.now() - started;
   check(
     offline.status === 0 && offline.stderr === '' && took < 5_000,
-    `copied hook runs without the npx cache or a registry (exit ${offline.status}, ${took} ms)`,
+    `recorded hook runs without the npx cache or a registry (exit ${offline.status}, ${took} ms)`,
     offline.stderr,
+  );
+  rmSync(join(dirs.mindlyHome, 'lib'), { recursive: true, force: true });
+  const gone = runStop();
+  check(
+    gone.status === 0 && gone.stdout === '' && gone.stderr === '',
+    `recorded hook ends quietly once the copy is gone (exit ${gone.status})`,
+    `${gone.stdout}${gone.stderr}`,
   );
 
   // 5. A SessionStart hook payload; with one rule in memory the hook must inject it.
