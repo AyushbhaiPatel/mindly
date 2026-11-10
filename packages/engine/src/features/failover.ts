@@ -96,16 +96,18 @@ const RESET_TIME = `(?:(?!${CLAUSE}|[.!?;]\\s)[^\\n]){0,60}`;
 // again button", "The counter resets every 24 hours", "See the README for more information") is
 // about something else.
 const TAIL_LEAD_IN =
-  '(?:(?:please|or|and|then|you can|to (?:continue|keep going|get more (?:access|usage))(?: now)?,|for (?:more )?(?:information|details)(?: on this error)?,)\\s*)*';
+  '(?:(?:please|or|and|you can|to (?:continue|keep going|get more (?:access|usage))(?: now)?,|for (?:more )?(?:information|details)(?: on this error)?,)\\s*)*';
 const TAIL_OPENER = [
-  'try again\\b',
+  'try again\\b(?! with\\b)',
   'retry (?:later|after|at)\\b',
-  'resets? (?:at|in|on|after|when|(?:\\w+ )?\\d)',
+  'resets? (?:(?:tomorrow|today|tonight) )?(?:at|in|on|after|when|(?:\\w+ )?\\d)',
   '(?:your )?(?:usage )?(?:limits?|quota) (?:will )?resets? (?:at|in|on|after|when)\\b',
-  'upgrade (?:to|now|your)\\b',
+  'upgrade (?:to|now|your (?:plan|subscription|account))\\b',
+  '/?upgrade or /?extra-usage\\b',
+  'turn on /?extra-usage\\b',
   '/(?:upgrade|usage|login)\\b',
   '/?extra-usage\\b',
-  '(?:visit|go to|open|head to:?) (?:https?://|\\S*(?:usage|billing|pricing|settings)/)',
+  '(?:visit|go to|open|head to:?) (?:https?://|[a-z0-9-]+(?:\\.[a-z0-9-]+)+/|\\S*(?:usage|billing|pricing|settings)/)',
   '(?:purchase|buy|add|get) (?:more )?credits\\b',
   'get (?:\\w+ )?(?:pro|plus|max|ultra|team|business)\\b',
   '(?:send a request to|contact|ask) your admin(?:istrator)?\\b',
@@ -116,9 +118,10 @@ const TAIL_OPENER = [
   'wait (?:until|for \\d)',
 ];
 const TAIL_SENTENCE = new RegExp(`^${TAIL_LEAD_IN}(?:${TAIL_OPENER.join('|')})`, 'i');
-// Code in a sentence makes it a sentence about code: "Retry logic added in src/limit.ts".
+// Code in a sentence makes it a sentence about code: "Retry logic added in src/limit.ts". A
+// name followed by a path is a host ("cursor.sh/settings"), not a file.
 const CODE_REF =
-  /`|\b[\w-]+\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|swift|php|cs|md|json|ya?ml|toml|sql|sh|css|html)\b/i;
+  /`|\b[\w-]+\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|swift|php|cs|md|json|ya?ml|toml|sql|sh|css|html)\b(?!\/)/i;
 const URL = /\bhttps?:\/\/\S+/gi;
 const NOTICE_SEP = /^\s*[.,;:!|·∙•–—/-]/;
 const SENTENCE_BREAK = /[.!?;](?=\s|$)|[|·∙•–—]/;
@@ -248,7 +251,7 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
     account(
       'gemini.quota_exhausted',
       (l) =>
-        `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)(?: (?:on|for) (?:this|the) model| on (?:model )?(?=[\\w.:-]*[\\d-])[a-z][\\w.:-]*\\w| for (?:today|this (?:month|week|period)))?`,
+        `^${l}?(?:(?:you have|you${APOS}ve) reached your (?:(?:daily|monthly|free) )?(?:[\\w.-]+ )?quota limit|(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)(?: (?:on|for) (?:this|the) model| on (?:model )?(?=[\\w.:-]*[\\d-])[a-z][\\w.:-]*\\w| for (?:today|this (?:month|week|period)))?)`,
     ),
     // "Resource has been exhausted (e.g. check quota)."
     api('gemini.resource_exhausted', opening('resource has been exhausted')),
@@ -258,7 +261,10 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
   generic: [
     account(
       'generic.usage_limit',
-      opening(`usage limit (?:reached|exceeded|hit)|${HIT} (?:your|the) (?:usage )?limit`),
+      // "Usage limit reached for gemini-2.5-pro.", "You've hit your free requests limit."
+      opening(
+        `usage limit (?:reached|exceeded|hit)(?: for (?=[\\w.:-]*[\\d-])[a-z][\\w.:-]*\\w)?|${HIT} (?:your|the) (?:(?:usage|free|fast|premium|monthly|daily|requests?) ){0,2}limit`,
+      ),
     ),
     // "You exceeded your current quota, please check your plan and billing details."
     account(
@@ -296,9 +302,15 @@ const LEAD_TAG = /^\[[^\]\s]{1,24}\]\s+/;
 // quotation, a code comment, a diff line, a test-runner result.
 const WRITTEN_ABOUT =
   /^(?:[-*+•‣◦]\s|\d{1,3}[.)]\s|\[[ xX]\]|#{1,6}\s|["'`“”‘’«»>]|\/\/|\/\*|<!--|--\s|@@|[✓✔√✅☑]|(?:PASS|FAIL|ok \d|not ok)\b)/;
-// "Rate limited, retrying in 30s", "rate limit reached, retry in 30s", "429 Too Many Requests;
-// retrying 1/5 in 205ms": the client is still trying, the opposite of having stopped at a limit.
-const RETRYING = /\bretrying\b|\bretry in \d|\b(?:retry|attempt)\s+#?\d+\s*(?:\/|of)\s*\d+/i;
+// "Rate limited, retrying in 30s", "rate limit reached, retry in 30s", "backing off for 2s",
+// "429 Too Many Requests; retrying 1/5 in 205ms": the client is still trying, the opposite of
+// having stopped at a limit.
+const RETRYING =
+  /\bretrying\b|\bbacking off\b|(?<!please )\bretry in \d|\b(?:retry|attempt)\s+#?\d+\s*(?:\/|of)\s*\d+/i;
+// The provider's own error body. The server's "Please retry in 49s" inside it is advice to the
+// caller, and the client reports the body once it has stopped retrying.
+const PROVIDER_BODY =
+  /\brate_limit_error\b|"rate_limit_exceeded"|\bresource_exhausted\b|"code"\s*:\s*429\b/i;
 // The line a client writes in place of the assistant's answer when the API call failed.
 const API_ERROR_LINE = /^[^\p{L}\p{N}[]*\[?API Error\b/u;
 
@@ -326,10 +338,11 @@ const OWN_ERROR =
   /^\W*\[?(?:api error|stream error|stream disconnected|unexpected status \d{3})\b|\brate_limit_error\b|"rate_limit_exceeded"|\bresource_exhausted\b|"code"\s*:\s*429\b/i;
 // Any other report counts unless the limit is someone else's: one hit calling another host,
 // or a named API that is not the model provider's ("for the GitHub API").
-// A host is a dotted name ending in a top-level domain and not running on into a longer token,
-// so a model id such as "us.anthropic.claude-sonnet-4-5-v1:0" is not taken for one.
+// A host is dotted labels ending in a top-level domain of two or more letters, followed by the
+// end of the line, a space, a path, a port, closing punctuation or the full stop of a sentence.
+// A model id runs on into a longer token ("us.anthropic.claude-sonnet-4-5-v1:0") and is not one.
 const TARGET_HOST =
-  /\b(?:for|from|to|at|on|calling|contacting|requesting)\s+(?:https?:\/\/)?((?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|ai|co|app|cloud|so|sh|me|us|ms|gle|xyz|tech|site))(?![\w.:-])/gi;
+  /\b(?:for|from|to|at|on|calling|contacting|requesting)\s+(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})(?=$|[\s/?#),;'"\]]|:\d|\.(?:\s|$))/gi;
 const PROVIDER_HOST =
   /(?:^|\.)(?:anthropic\.com|claude\.(?:com|ai)|openai\.com|openai\.azure\.com|chatgpt\.com|googleapis\.com|google\.com|google\.dev|ai\.dev|goo\.gle|aka\.ms|cursor\.(?:com|sh))$/i;
 // "for the Brave Search API", "for the github API": up to four words naming an API.
@@ -412,7 +425,8 @@ function messageLines(text: string): MessageLine[] {
 
 /** `raw` as a candidate notice line from `source`, or null when it can never be one. */
 function candidate(raw: string, source: NoticeSource): string | null {
-  if (raw.length > 2 * MAX_NOTICE_LINE_CHARS[source] || RETRYING.test(raw)) return null;
+  if (raw.length > 2 * MAX_NOTICE_LINE_CHARS[source]) return null;
+  if (RETRYING.test(raw) && !PROVIDER_BODY.test(raw)) return null;
   if (source === 'assistant' && WRITTEN_ABOUT.test(raw.trimStart())) return null;
   const line = stripLead(raw).trimEnd();
   return line.length === 0 || line.length > MAX_NOTICE_LINE_CHARS[source] ? null : line;

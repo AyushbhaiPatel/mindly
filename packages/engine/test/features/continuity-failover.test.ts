@@ -331,7 +331,7 @@ describe('rate-limit failover', () => {
     ['cursor', '429 Too Many Requests', 'generic.too_many_requests'],
     ['cursor', 'Request failed: 429 Too Many Requests', 'generic.too_many_requests'],
     ['cursor', 'Warning: usage limit reached, resets at 5pm', 'generic.usage_limit'],
-    ['cursor', 'WARN rate limited; backing off for 2s', 'generic.rate_limit'],
+    ['cursor', 'WARN rate limited', 'generic.rate_limit'],
     ['cursor', 'Failed: rate limit exceeded', 'generic.rate_limit'],
   ];
 
@@ -773,7 +773,7 @@ describe('rate-limit failover', () => {
 
   it('reads the error a client reports more generously than what the model wrote', async () => {
     const at = new Date(1_750_000_000_000).toISOString();
-    const line = 'WARN rate limited; backing off for 2s';
+    const line = 'WARN rate limited; giving up after 5 attempts';
     const entries = parseTranscriptTail(
       jsonl([
         { type: 'event_msg', timestamp: at, payload: { type: 'agent_message', message: line } },

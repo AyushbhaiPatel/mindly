@@ -150,6 +150,35 @@ const CURSOR_SWITCH: [kind: string, text: string, id: string][] = [
   ],
 ];
 ACCOUNT.push(...CURSOR_SWITCH);
+ACCOUNT.push(
+  [
+    'claude-code',
+    "You\u2019ve hit your limit \u00b7 resets 10pm (Asia/Tokyo)\n/upgrade or /extra-usage to finish what you're working on.",
+    'claude.limit_reached',
+  ],
+  [
+    'claude-code',
+    "You\u2019ve hit your limit \u00b7 resets 10pm (Asia/Tokyo)\nTurn on /extra-usage to finish what you're working on.",
+    'claude.limit_reached',
+  ],
+  [
+    'claude-code',
+    "You've hit your weekly limit \u00b7 resets tomorrow at 9am",
+    'claude.limit_reached',
+  ],
+  [
+    'cursor',
+    "You've hit your usage limit. Visit cursor.sh/settings to upgrade or try again tomorrow.",
+    'generic.usage_limit',
+  ],
+  [
+    'cursor',
+    "You've hit your free requests limit. Upgrade to Pro for more requests.",
+    'generic.usage_limit',
+  ],
+  ['gemini', 'You have reached your daily gemini-2.5-pro quota limit.', 'gemini.quota_exhausted'],
+  ['gemini', 'Usage limit reached for gemini-2.5-pro.', 'generic.usage_limit'],
+);
 
 const CLIENT: [kind: string, text: string, id: string][] = [
   ['claude-code', 'API Error: 429 Too Many Requests', 'claude.http_429'],
@@ -202,6 +231,16 @@ const CLIENT: [kind: string, text: string, id: string][] = [
   ],
   [
     'gemini',
+    '[API Error: {"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits.\\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 250, model: gemini-2.5-flash\\nPlease retry in 49.164318299s.","status":"RESOURCE_EXHAUSTED"}}]',
+    'gemini.resource_exhausted_status',
+  ],
+  [
+    'gemini',
+    '[API Error: You exceeded your current quota, please check your plan and billing details. Please retry in 49.16s.]',
+    'generic.quota_used_up',
+  ],
+  [
+    'gemini',
     'Quota exceeded for quota metric on https://goo.gle/rate-limits',
     'generic.quota_exceeded',
   ],
@@ -225,7 +264,7 @@ const CLIENT: [kind: string, text: string, id: string][] = [
   ['cursor', '429 Too Many Requests', 'generic.too_many_requests'],
   ['cursor', 'Request failed: 429 Too Many Requests', 'generic.too_many_requests'],
   ['cursor', 'Warning: usage limit reached, resets at 5pm', 'generic.usage_limit'],
-  ['cursor', 'WARN rate limited; backing off for 2s', 'generic.rate_limit'],
+  ['cursor', 'WARN rate limited', 'generic.rate_limit'],
   ['cursor', 'Failed: rate limit exceeded', 'generic.rate_limit'],
 ];
 
@@ -239,6 +278,13 @@ const NOT_A_LIMIT_FROM_CLIENT = [
   'Error: rate limit exceeded for the Google Maps API',
   'Error: rate limit exceeded for the github API',
   'stream error: rate limit reached, retry in 30s',
+  'WARN rate limited; backing off for 2s',
+  // Third-party hosts at the end of a sentence, with a port, or under any top-level domain.
+  'Error: rate limit exceeded for api.github.com.',
+  'HTTP 429 Too Many Requests from registry.npmjs.org.',
+  'Error: rate limit exceeded for api.github.com:443',
+  'Error: rate limit exceeded for api.example.co.uk',
+  'Too many requests to https://api.data.gov/ed/collegescorecard/v1/schools',
   'HTTP 429 Too Many Requests from registry.npmjs.org',
   'Too many requests to https://api.stripe.com/v1/charges',
   // The client is still trying.
@@ -309,6 +355,9 @@ const NOT_A_LIMIT_FROM_ASSISTANT = [
   'Usage limit reached. The `retry` helper now waits.',
   'Usage limit reached. Then I fixed the tests.',
   'Usage limit reached. Upgrade the plan table next.',
+  'Usage limit reached. Upgrade your dependencies next.',
+  'Usage limit reached. Then try again with the debugger attached.',
+  'Usage limit reached. Try again with the debugger attached.',
   'Usage limit reached \u2014 the banner now shows your plan name.',
   'Usage limit reached. The dialog now has a Try again button.',
   'Usage limit reached. The counter resets every 24 hours.',
