@@ -53,6 +53,10 @@ const MAX_SENTENCE = 220;
 export const MAX_MODEL_BUDGET_MS = 600;
 /** Share of the hook deadline the model may use; the hook still has its context to build. */
 const MODEL_BUDGET_SHARE = 0.4;
+/** Time kept back for what the hook does after the model (building the context it answers with). */
+const MODEL_RESERVE_MS = 250;
+/** Below this there is no point asking: the model is left out and the heuristic decides. */
+const MIN_MODEL_BUDGET_MS = 100;
 
 /** Reasons already logged by this process: the log says once that the model is not working. */
 const loggedModelFailures = new Set<string>();
@@ -222,10 +226,18 @@ export class RuleService {
       return none;
     }
     if (!detected.some((d) => d.strength === 'medium')) return none;
-    const budget = Math.min(
-      MAX_MODEL_BUDGET_MS,
-      Math.floor(this.k.config.hooks.timeoutMs * MODEL_BUDGET_SHARE),
-    );
+    const timeoutMs = this.k.config.hooks.timeoutMs;
+    // What is left of the hook's deadline, counted from when this instance opened (a hook
+    // process opens one per hook): work done before this point (a slow rescan) leaves less.
+    const left =
+      this.k.openedAt === undefined
+        ? timeoutMs
+        : this.k.openedAt + timeoutMs - Date.now() - MODEL_RESERVE_MS;
+    const budget = Math.min(MAX_MODEL_BUDGET_MS, Math.floor(timeoutMs * MODEL_BUDGET_SHARE), left);
+    if (budget < MIN_MODEL_BUDGET_MS) {
+      this.logModelFailure('out of time');
+      return none;
+    }
     const controller = new AbortController();
     const deadline = Date.now() + budget;
     const timer = setTimeout(() => controller.abort(), budget);

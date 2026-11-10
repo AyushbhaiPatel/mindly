@@ -77,6 +77,27 @@ describe('rules confirmed by the model', () => {
     expect(model.options[0]?.signal?.aborted).toBe(true);
   });
 
+  it('leaves the model out when the hook has already used most of its time', async () => {
+    const model = silentModel();
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'syn-rules-model-')));
+    // The real clock: the hook's time is wall-clock time.
+    const mindly = Mindly.open({ inMemory: true, ports: { git: fakeGit, llm: model.port } });
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    // A rescan that takes most of the default 1500 ms deadline.
+    const checkpoints = (mindly as unknown as { checkpoints: { rescan: () => Promise<unknown> } })
+      .checkpoints;
+    checkpoints.rescan = () => new Promise((resolve) => setTimeout(() => resolve(null), 1000));
+    const started = Date.now();
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'prompt', { prompt: 'No, use pnpm instead of npm.' }),
+    );
+    // Since the instance was opened (as a hook process opens it), the deadline is still kept.
+    expect(Date.now() - started).toBeLessThan(1400);
+    const pid = mindly.store.projects.upsertByRoot(root, 'demo').id;
+    const rules = mindly.memory.list(pid, { kinds: ['rule'] });
+    expect(rules.map((r) => r.trust)).toEqual(['proposed']);
+  });
+
   it('asks about several sentences at once, within one budget', async () => {
     const model = silentModel();
     const p = open(model.port, (c) => {
