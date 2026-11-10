@@ -1,4 +1,10 @@
-import { REPO_FILE_SOURCE, sanitizeLine, type Memory, type Session } from '@mindly/core';
+import {
+  REPO_FILE_SOURCE,
+  redactText,
+  sanitizeLine,
+  type Memory,
+  type Session,
+} from '@mindly/core';
 import { DELIVERY_TTL_MS, LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
 import {
   dedupeRules,
@@ -33,6 +39,13 @@ export interface DetectedRule {
 }
 
 const MAX_SENTENCE = 220;
+/** Longest the model may take to confirm the corrections of one prompt, in milliseconds. */
+export const MAX_MODEL_BUDGET_MS = 600;
+/** Share of the hook deadline the model may use; the hook still has its context to build. */
+const MODEL_BUDGET_SHARE = 0.4;
+
+/** Reasons already logged by this process: the log says once that the model is not working. */
+const loggedModelFailures = new Set<string>();
 /** Rules from prompts longer than this are proposed rather than approved. */
 export const MAX_APPROVABLE_PROMPT = 500;
 
@@ -123,16 +136,15 @@ export class RuleService {
     // there are only ever proposed, never auto-approved.
     const mayApprove =
       input.prompt.length <= MAX_APPROVABLE_PROMPT && !input.prompt.includes('```');
+    const verdicts = await this.confirmWithModel(detected);
     const out: Memory[] = [];
-    for (const d of detected) {
-      let strength = d.strength;
-      let scopeGlobs: string[] = [];
-      if (strength === 'medium' && this.k.ports.llm.available) {
-        const verdict = await this.k.ports.llm.classifyCorrection(d.text);
-        if (verdict && !verdict.isRule) continue;
-        if (verdict && verdict.confidence >= 0.8) strength = 'strong';
-        if (verdict) scopeGlobs = verdict.scopeGlobs.slice(0, 5);
-      }
+    for (const [i, d] of detected.entries()) {
+      const verdict = verdicts[i] ?? null;
+      // The model may say a medium-strength sentence is not a rule, or narrow its scope. It
+      // never raises its trust: weaker phrasing stays proposed until the user approves it.
+      if (verdict && !verdict.isRule) continue;
+      const strength = d.strength;
+      const scopeGlobs = verdict ? verdict.scopeGlobs.slice(0, 5) : [];
       let rule: Memory;
       try {
         rule = this.memory.remember({
@@ -161,6 +173,63 @@ export class RuleService {
       this.broadcast(input.projectId, input.session, rule);
     }
     return out;
+  }
+
+  /**
+   * Asks the model about the medium-strength candidates, all at once and within a share of the
+   * hook's deadline. A candidate the model did not answer for in time keeps its heuristic result,
+   * so the rule is stored exactly as it would be with no model configured.
+   */
+  private async confirmWithModel(
+    detected: readonly DetectedRule[],
+  ): Promise<(Awaited<ReturnType<Kernel['ports']['llm']['classifyCorrection']>> | null)[]> {
+    const llm = this.k.ports.llm;
+    const none = detected.map(() => null);
+    if (!llm.available) {
+      if (llm.unavailableReason && detected.some((d) => d.strength === 'medium')) {
+        this.logModelFailure(`the configured model cannot be used: ${llm.unavailableReason}`);
+      }
+      return none;
+    }
+    if (!detected.some((d) => d.strength === 'medium')) return none;
+    const budget = Math.min(
+      MAX_MODEL_BUDGET_MS,
+      Math.floor(this.k.config.hooks.timeoutMs * MODEL_BUDGET_SHARE),
+    );
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), budget);
+    timer.unref?.();
+    const extraPatterns = this.k.config.redaction.extraPatterns;
+    try {
+      return await Promise.all(
+        detected.map((d) =>
+          d.strength === 'medium'
+            ? llm
+                .classifyCorrection(redactText(d.text, { extraPatterns }), {
+                  signal: controller.signal,
+                  redactPatterns: extraPatterns,
+                  onFailure: (reason) => this.logModelFailure(reason),
+                })
+                .catch(() => null)
+            : Promise.resolve(null),
+        ),
+      );
+    } finally {
+      clearTimeout(timer);
+      // Whatever is still in flight is not waited for.
+      controller.abort();
+    }
+  }
+
+  private logModelFailure(reason: string): void {
+    const text = sanitizeLine(reason, 200);
+    if (loggedModelFailures.has(text)) return;
+    loggedModelFailures.add(text);
+    if (text === 'out of time') {
+      this.k.logger.debug('model did not confirm a rule in time; kept the heuristic result');
+    } else {
+      this.k.logger.warn('model call failed; rules are captured without it', { reason: text });
+    }
   }
 
   /**

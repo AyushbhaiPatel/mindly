@@ -174,7 +174,7 @@ export function createSplitGitPort(): SplitGitPort {
     },
   };
 }
-import { createLlmHelpers, createProvider } from '@mindly/llm';
+import { createLlmHelpers, createProvider, NoneProvider } from '@mindly/llm';
 import { createNotifier } from '@mindly/notify';
 
 const GRAPH_TTL_MS = 60_000;
@@ -292,7 +292,9 @@ export function createLlmPort(
   const helpers = createLlmHelpers(provider);
   return {
     available: provider.name !== 'none',
-    classifyCorrection: (prompt) => helpers.classifyCorrection(prompt),
+    unavailableReason:
+      config.provider !== 'none' && provider instanceof NoneProvider ? provider.reason : null,
+    classifyCorrection: (prompt, options) => helpers.classifyCorrection(prompt, options),
     summarizeTurn: (input) => helpers.summarizeTurn(input),
   };
 }
