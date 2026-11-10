@@ -198,21 +198,31 @@ interface CommitDelta {
 }
 
 /**
- * Applies what commits changed about a file's exports to a surface taken before them. Only the
- * exports the surface still holds as they were at the old commit take the new commit's value (or
- * go, when the commits removed them): a surface that already shows the new value, or an agent's
- * own change to the export, is left alone, so the delta is never counted twice and an agent's
- * edit is never overwritten by it.
+ * The baseline to compare `after` with once HEAD moved from `then` to `now` since `surface` was
+ * stored. A commit, pull, checkout, reset or stash is not an agent edit, so nothing it did is
+ * reported; what is still the agents' own is compared as usual. Per export:
+ *
+ * - The file holds it as `now` does: the git operation explains it (a pull brought it, a
+ *   checkout or `git stash` put the committed version back over an uncommitted change), so it
+ *   reads as unchanged. An agent edit that itself undid an uncommitted change to the export since
+ *   the move is missed with it; that cannot be told apart.
+ * - The surface holds it as `then` did: the surface predates what the commits did to it, so it
+ *   takes the value at `now`.
+ * - Otherwise the surface shows an uncommitted change still in the working tree (or one the
+ *   surface already saw after the commit) and is kept, so the file is compared with it.
  */
 function applyCommitDelta(
   surface: ReadonlyMap<string, string>,
   delta: CommitDelta,
+  after: ReadonlyMap<string, string>,
 ): Map<string, string> {
   const out = new Map(surface);
-  for (const name of new Set([...delta.then.keys(), ...delta.now.keys()])) {
+  const names = new Set([...surface.keys(), ...delta.then.keys(), ...delta.now.keys()]);
+  for (const name of names) {
     const was = delta.then.get(name);
     const is = delta.now.get(name);
-    if (was === is || out.get(name) !== was) continue;
+    const explained = after.get(name) === is;
+    if (!explained && out.get(name) !== was) continue;
     if (is === undefined) out.delete(name);
     else out.set(name, is);
   }
@@ -329,7 +339,7 @@ export class ImpactService {
       before = content === null ? null : git.exportSurface(content, file.path);
     } else if (head !== null && seen.priorHead !== null && head !== seen.priorHead) {
       const moved = await this.commitDelta(tree, file.path, seen.priorHead, head);
-      if (moved) before = applyCommitDelta(before, moved);
+      if (moved) before = applyCommitDelta(before, moved, after);
     }
     await this.recordHead(tree, key, seen.priorHead, head);
     if (!before) return null;
@@ -429,9 +439,9 @@ export class ImpactService {
   }
 
   /**
-   * The file's exports at `oldHead` and `newHead` when the commits between them changed them, or
-   * null when they did not (or cannot be read). A commit, checkout or pull happens outside any
-   * agent edit; what it changed must not be reported as the next agent's change.
+   * The file's exports at `oldHead` and `newHead`, or null when either cannot be read. Wanted even
+   * when the commits left the exports alone: a checkout or stash between them may have put the
+   * committed file back over an uncommitted change the stored surface still shows.
    */
   private async commitDelta(
     tree: string,
@@ -447,10 +457,7 @@ export class ImpactService {
       return at?.state === 'file' ? git.exportSurface(at.content, path) : null;
     };
     const [then, now] = [await surfaceAt(oldHead), await surfaceAt(newHead)];
-    if (!then || !now) return null;
-    const moved = git.diffExportSurface(then, now);
-    const same = moved.added.length + moved.removed.length + moved.changed.length === 0;
-    return same ? null : { then, now };
+    return then && now ? { then, now } : null;
   }
 
   /**

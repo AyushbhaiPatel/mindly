@@ -737,4 +737,67 @@ describe('impact radar', () => {
     expect(impact[0]!.title).toMatch(/^claude-code #[0-9a-f]{8} changed the exports/);
     expect(mindly.store.kv.get(`surface-state:${pid}:src/auth.ts`)).toMatchObject({ head: 'h1' });
   });
+
+  describe('after a git operation moved HEAD', () => {
+    const PULLED = AUTH_V1 + 'export function logout() {}\n';
+    const OTP = 'login(user: string, otp: string)';
+    const withCommits = (mindly: Mindly, commits: Record<string, string>) => {
+      const git = mindly.kernel.ports.git;
+      git.fileStateAtRef = async (_cwd, ref, path) =>
+        path === 'src/auth.ts' && commits[ref] !== undefined
+          ? { state: 'file', content: commits[ref] }
+          : { state: 'no_ref' };
+      git.isAncestor = async (_cwd, a, d) => a === d || (a === 'h0' && d === 'h1');
+      git.headCommit = async () => 'h0';
+      return git;
+    };
+
+    it('does not blame the next agent for a change a stash set aside', async () => {
+      const { root, mindly, pid, cc, cx, write } = await featureSetup();
+      await mindly.hooks.handle(
+        event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+      );
+      const git = withCommits(mindly, { h0: AUTH_V1, h1: PULLED });
+      // Claude changes `login` (uncommitted), which is reported.
+      write('src/auth.ts', AUTH_V1.replace('login(user: string)', OTP));
+      await impactOf(mindly).analyze(pid, root, cc, authFile(root));
+      expect(impactConflicts(mindly, pid)).toHaveLength(1);
+
+      // `git stash && git pull`: the change is set aside and the pull adds `logout`.
+      git.headCommit = async () => 'h1';
+      write('src/auth.ts', PULLED + 'export function extra() {}\n');
+      const report = await impactOf(mindly).analyze(pid, root, cx, authFile(root));
+      expect(report).toBeNull();
+      expect(impactConflicts(mindly, pid).filter((c) => c.title.startsWith('codex'))).toEqual([]);
+    });
+
+    it('does not blame the next agent when a checkout leaves the exports as committed', async () => {
+      const { root, mindly, pid, cc, cx, write } = await featureSetup();
+      const git = withCommits(mindly, { h0: AUTH_V1, h1: AUTH_V1 });
+      write('src/auth.ts', AUTH_V1.replace('login(user: string)', OTP));
+      await impactOf(mindly).analyze(pid, root, cc, authFile(root));
+
+      // `git checkout -f other`, whose file has the same exports as before.
+      git.headCommit = async () => 'h1';
+      write('src/auth.ts', AUTH_V1 + 'export function extra() {}\n');
+      expect(await impactOf(mindly).analyze(pid, root, cx, authFile(root))).toBeNull();
+    });
+
+    it('still compares an uncommitted change that survived the pull', async () => {
+      const { root, mindly, pid, cc, cx, write } = await featureSetup();
+      await mindly.hooks.handle(
+        event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+      );
+      const git = withCommits(mindly, { h0: AUTH_V1, h1: PULLED });
+      write('src/auth.ts', AUTH_V1.replace('login(user: string)', OTP));
+      await impactOf(mindly).analyze(pid, root, cc, authFile(root));
+
+      // A plain pull keeps Claude's change; Codex then removes VERSION.
+      git.headCommit = async () => 'h1';
+      const pulled = PULLED.replace('login(user: string)', OTP);
+      write('src/auth.ts', pulled.replace('export const VERSION = 1;\n', ''));
+      const report = await impactOf(mindly).analyze(pid, root, cx, authFile(root));
+      expect(report?.diff).toEqual({ added: [], removed: ['VERSION'], changed: [] });
+    });
+  });
 });
