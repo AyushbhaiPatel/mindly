@@ -291,9 +291,19 @@ export class SessionRepo {
       intents: readonly { id: string; updatedAt: number; sig: string }[];
       tasks: readonly { id: string; updatedAt: number; sig: string }[];
       messages: readonly string[];
+      /**
+       * Handoffs re-filed in the name of `toId`, so it cannot pick them up itself: pending ones,
+       * and ones `toId` itself already picked up (they are put back as pending).
+       */
+      handoffs?: readonly string[];
     },
-  ): { intents: string[]; tasks: string[]; messages: string[] } {
-    const out = { intents: [] as string[], tasks: [] as string[], messages: [] as string[] };
+  ): { intents: string[]; tasks: string[]; messages: string[]; handoffs: string[] } {
+    const out = {
+      intents: [] as string[],
+      tasks: [] as string[],
+      messages: [] as string[],
+      handoffs: [] as string[],
+    };
     if (fromId === toId) return out;
     const now = this.clock.now();
     transaction(this.db, () => {
@@ -325,6 +335,15 @@ export class SessionRepo {
       );
       for (const id of rows.messages.slice(0, 500)) {
         if (Number(message.run(toId, id, fromId).changes) > 0) out.messages.push(id);
+      }
+      const handoff = this.db.prepare(
+        `UPDATE handoffs SET from_session_id = ?, status = 'pending',
+             claimed_by_session_id = NULL, claimed_at = NULL
+           WHERE id = ? AND from_session_id = ?
+             AND (status = 'pending' OR (status = 'claimed' AND claimed_by_session_id = ?))`,
+      );
+      for (const id of (rows.handoffs ?? []).slice(0, 500)) {
+        if (Number(handoff.run(toId, id, fromId, toId).changes) > 0) out.handoffs.push(id);
       }
     });
     return out;

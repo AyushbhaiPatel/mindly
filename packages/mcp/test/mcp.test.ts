@@ -1232,6 +1232,87 @@ describe('telling windows of one agent apart', () => {
     expect(sent.find((d) => d.title === 'from B')?.sourceSessionId).toBe(sessB);
   });
 
+  describe('one window that cannot be proven to be its own', () => {
+    it('behaves normally when started through a launcher', async () => {
+      for (const pid of [140, 1800]) running.add(pid);
+      try {
+        const a = await harness({
+          ...world,
+          pid: 1800,
+          startTime: 1,
+          ancestors: [{ ...ref(140), name: 'npx' }, ref(100), TERMINAL],
+        });
+        const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+        expect(sid(await a.call('mindly_status'))).toBe(sessA);
+        const claims = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
+        expect(claims[sessA]?.sure).toBe(false);
+        // A handoff filed after the window started is picked up through the server.
+        await a.mindly.hooks.handle(hook(a.root, 'codex', 'cx-1', 'session_start'));
+        const project = await a.mindly.projects.resolve(a.root);
+        const cx = a.mindly.store.sessions.findByExternal(project.project.id, 'codex', 'cx-1')!;
+        const handed = a.mindly.tasks.create({
+          projectId: project.project.id,
+          title: 'handed',
+          owner: cx,
+        });
+        await failoverService(a.mindly).handoffs.create(cx, {
+          summary: 'continue this',
+          toAgentKind: 'claude-code',
+        });
+        a.mindly.telepathy.send({
+          projectId: cx.projectId,
+          from: cx,
+          to: { sessionIds: [sessA] },
+          kind: 'message',
+          title: 'a message for you',
+          body: '',
+        });
+        const ctx = await a.call('mindly_context');
+        expect(ctx.text).toContain('handed off');
+        expect(ctx.text).toContain('a message for you');
+        expect(a.mindly.store.tasks.get(handed.id).ownerSessionId).toBe(sessA);
+        expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(handed.id);
+        // Its own older task can be taken up again.
+        const older = a.mindly.tasks.create({
+          projectId: project.project.id,
+          title: 'older',
+          owner: a.mindly.store.sessions.get(sessA),
+        });
+        await a.mindly.tasks.update(older.id, { status: 'blocked' }, null);
+        const claim = await a.call('mindly_task_claim', { id: older.id });
+        expect(claim.text).toMatch(/^Claimed/);
+        expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(older.id);
+      } finally {
+        for (const pid of [140, 1800]) running.delete(pid);
+      }
+    });
+
+    it('behaves normally where the process table cannot be read', async () => {
+      // `ancestors: []`: nothing can be known about who started whom.
+      const h = await harness();
+      const own = sid(await h.call('mindly_status'));
+      const made = await h.call('mindly_task_create', { title: 'server task' });
+      const x = (made.structured?.['task'] as { id: string }).id;
+      // The one window's hooks start: the server moves there with its work.
+      await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win', 'session_start'));
+      const project = await h.mindly.projects.resolve(h.root);
+      const win = h.mindly.store.sessions.findByExternal(project.project.id, 'claude-code', 'win')!;
+      expect(sid(await h.call('mindly_status'))).toBe(win.id);
+      expect(h.mindly.store.tasks.get(x).ownerSessionId).toBe(win.id);
+      expect(h.mindly.store.sessions.get(win.id).currentTaskId).toBe(x);
+      expect(h.mindly.store.sessions.get(own).status).toBe('ended');
+    });
+
+    it('stays on its own session when two windows cannot be told apart', async () => {
+      const h = await harness();
+      const own = sid(await h.call('mindly_status'));
+      await h.call('mindly_task_create', { title: 'server task' });
+      await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win-1', 'session_start'));
+      await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win-2', 'session_start'));
+      expect(sid(await h.call('mindly_status'))).toBe(own);
+    });
+  });
+
   describe('work done on a guess', () => {
     const projectOf = (h: Harness, id: string): string => h.mindly.store.sessions.get(id).projectId;
 
@@ -1520,6 +1601,69 @@ describe('telling windows of one agent apart', () => {
       } finally {
         repo.moveRows = real;
       }
+    });
+
+    it("leaves the window's messages unread, and says when a claim changed nothing", async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const tA = a.mindly.tasks.create({
+        projectId: projectOf(a, sessA),
+        title: 'window A task',
+        owner: a.mindly.store.sessions.get(sessA),
+      });
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      await a.mindly.hooks.handle(hook(a.root, 'codex', 'cx-1', 'session_start'));
+      const project = await a.mindly.projects.resolve(a.root);
+      const cx = a.mindly.store.sessions.findByExternal(project.project.id, 'codex', 'cx-1')!;
+      a.mindly.telepathy.send({
+        projectId: cx.projectId,
+        from: cx,
+        to: { sessionIds: [sessA] },
+        kind: 'message',
+        title: 'for window A only',
+        body: 'hello A',
+      });
+      expect((await b.call('mindly_context')).text).not.toContain('for window A only');
+      expect(
+        a.mindly.telepathy.pending(a.mindly.store.sessions.get(sessA), 10).map((d) => d.title),
+      ).toEqual(['for window A only']);
+      const claim = await b.call('mindly_task_claim', { id: tA.id });
+      expect(claim.text).toMatch(/^Not claimed/);
+      expect(claim.structured?.['claimed']).toBe(false);
+    });
+
+    it('files a handoff in its own name on a guess, so it never picks it up itself', async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      await b.call('mindly_task_create', { title: 'B work to hand on' });
+      const ho = await b.call('mindly_handoff', { summary: 'B hands its work on' });
+      const hid = (ho.structured?.['handoff'] as { id: string }).id;
+      expect(a.mindly.store.handoffs.get(hid).fromSessionId).not.toBe(sessA);
+      // B's own session starts (its first hook may even pick the handoff up): at home the
+      // handoff is filed in B's name and waits for someone else.
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      const h = a.mindly.store.handoffs.get(hid);
+      expect(h.fromSessionId).toBe(sessB);
+      expect(h.status).toBe('pending');
+    });
+
+    it('makes another open task current at home when the one it made current is done', async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      const first = await b.call('mindly_task_create', { title: 'B long task' });
+      const t1 = (first.structured?.['task'] as { id: string }).id;
+      const second = await b.call('mindly_task_create', { title: 'B quick task' });
+      const t2 = (second.structured?.['task'] as { id: string }).id;
+      await b.call('mindly_task_update', { id: t2, status: 'done' });
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      expect(a.mindly.store.sessions.get(sessB).currentTaskId).toBe(t1);
     });
 
     it('settles its work once a guess turns out to be its own', async () => {

@@ -59,7 +59,7 @@ interface Relation {
 
 /** A row an MCP server wrote while on a guess, where it is now and what it looked like then. */
 interface WorkRow {
-  kind: 'intent' | 'task' | 'message';
+  kind: 'intent' | 'task' | 'message' | 'handoff';
   id: string;
   /** The session the row is with now. */
   at: string;
@@ -398,6 +398,9 @@ export class SessionResolver {
         : null;
     for (const { s, k } of ordered) {
       if (current && !better(k, current)) break;
+      // A server on a session of its own moves its work only onto a guess that is the one
+      // window there is; otherwise it stays where it is.
+      if (before?.own && !(await this.sole(project, s))) continue;
       if (!this.take(s.id, false, false)) continue;
       if (before?.own) this.handOver(before.id, s.id);
       return true;
@@ -465,7 +468,8 @@ export class SessionResolver {
       }
       this.carryWork(session.id, this.bound.sure);
       const now = store.sessions.get(this.bound.id);
-      return this.bound.sure ? { project, session: now } : this.guessScope(project, now);
+      if (this.bound.sure || (await this.sole(project, now))) return { project, session: now };
+      return this.guessScope(project, now);
     }
 
     const existing = store.sessions.findByExternal(
@@ -492,6 +496,42 @@ export class SessionResolver {
    * session it is given carries the server's own current task, not the other window's, and
    * `guess` records what this call writes, against that session whatever the server does later.
    */
+  /**
+   * True when the guess `session` is the one window there is: nothing tells it is another
+   * window's (it is not matched through another client that still runs, nor a window that may be
+   * gone), no other live session of this agent kind in this tree has a client that runs or may
+   * run, and no other running server speaks for it. With one window (a server started through a
+   * launcher, or a system where the process table cannot be read) that is the normal case, and
+   * such a guess is treated as the server's own session for everything.
+   */
+  private async sole(project: ScopedProject, session: Session): Promise<boolean> {
+    const r = this.relation(session);
+    if ((r.rank !== 1 && r.rank !== 2) || r.clientRuns === false) return false;
+    const claim = this.claims()[session.id];
+    if (claim && claim.owner !== this.owner) return false;
+    const others = (await this.hookSessions(project)).filter((s) => s.id !== session.id);
+    return others.every((s) => this.relation(s).clientRuns === false);
+  }
+
+  /**
+   * The server's own session, as a sender: what it files while it speaks for a session it cannot
+   * tell from another window's is filed in its own name, so that window cannot take it as its
+   * own. The session is not kept live: it exists to be named.
+   */
+  private selfSession(project: ScopedProject): Session {
+    const store = this.mindly.store;
+    const { session } = store.sessions.upsert({
+      projectId: project.project.id,
+      agentKind: this.ctx.agentKind,
+      externalId: this.externalId,
+      worktree: this.ctx.cwd,
+      branch: null,
+      transcriptPath: null,
+    });
+    if (this.bound?.id !== session.id) store.sessions.setStatus(session.id, 'ended');
+    return store.sessions.get(session.id);
+  }
+
   private guessScope(project: ScopedProject, session: Session): CallScope {
     const store = this.mindly.store;
     // Looked up when used, not now: by the time a slow call notes what it wrote, the server may
@@ -523,6 +563,16 @@ export class SessionResolver {
         // Whose work a handoff describes: none of the other window's.
         workOf: () => ({ ...session, id: `mcp-work-${this.owner}`, currentTaskId: ownTask() }),
         decisionIds: () => [...(this.work?.memories ?? [])],
+        self: () => this.selfSession(project),
+        noteHandoff: (id, from) => {
+          work().rows.set(`handoff:${id}`, {
+            kind: 'handoff',
+            id,
+            at: from,
+            updatedAt: 0,
+            sig: '',
+          });
+        },
         note: (kind, id) => {
           const w = work();
           if (kind === 'memory') {
@@ -561,19 +611,25 @@ export class SessionResolver {
     if (!work) return;
     const store = this.mindly.store;
     try {
-      const from = new Set([...work.rows.values()].map((r) => r.at).filter((at) => at !== toId));
-      for (const at of from) {
-        const rows = [...work.rows.values()].filter((r) => r.at === at);
+      // Handoffs the server filed in its own name stay so until it is home: then they are filed
+      // in the name of its session, which therefore cannot pick its own handoff up.
+      const moving = [...work.rows.values()].filter(
+        (r) => r.at !== toId && (r.kind !== 'handoff' || home),
+      );
+      for (const at of new Set(moving.map((r) => r.at))) {
+        const rows = moving.filter((r) => r.at === at);
         const pick = (kind: WorkRow['kind']) => rows.filter((r) => r.kind === kind);
         const moved = store.sessions.moveRows(at, toId, {
           intents: pick('intent'),
           tasks: pick('task'),
           messages: pick('message').map((r) => r.id),
+          handoffs: pick('handoff').map((r) => r.id),
         });
         const done = new Set([
           ...moved.intents.map((id) => `intent:${id}`),
           ...moved.tasks.map((id) => `task:${id}`),
           ...moved.messages.map((id) => `message:${id}`),
+          ...moved.handoffs.map((id) => `handoff:${id}`),
         ]);
         for (const r of rows) {
           const key = `${r.kind}:${r.id}`;
@@ -582,18 +638,23 @@ export class SessionResolver {
             work.rows.delete(key);
             continue;
           }
-          const stamp = r.kind === 'message' ? null : store.sessions.rowStamp(r.kind, r.id);
+          const stamp =
+            r.kind === 'task' || r.kind === 'intent' ? store.sessions.rowStamp(r.kind, r.id) : null;
           work.rows.set(key, { ...r, at: toId, ...(stamp ?? {}) });
         }
       }
       if (!home) return;
       this.work = null;
-      const current = work.currentTask;
-      if (current && work.rows.has(`task:${current}`)) {
-        if (store.tasks.find(current)?.ownerSessionId === toId) {
-          store.sessions.setCurrentTask(toId, current);
-        }
-      }
+      // Its current task, or, when that one is finished, another unfinished task it wrote.
+      const unfinished = (id: string): boolean => {
+        const t = store.tasks.find(id);
+        return t?.ownerSessionId === toId && ['open', 'in_progress', 'blocked'].includes(t.status);
+      };
+      const tasks = [...work.rows.values()].filter((r) => r.kind === 'task').map((r) => r.id);
+      const current = [work.currentTask, ...tasks].find(
+        (id): id is string => id !== null && tasks.includes(id) && unfinished(id),
+      );
+      if (current) store.sessions.setCurrentTask(toId, current);
     } catch (err) {
       this.logger?.warn('mcp work not moved', {
         error: err instanceof Error ? err.message : String(err),

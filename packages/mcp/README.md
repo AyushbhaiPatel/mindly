@@ -27,11 +27,18 @@ A server works out which session it speaks for and keeps it. In order of prefere
    guess, and the server gives it up for (1) as soon as it can.
 3. A session of its own, with external id `mcp-<pid>-<startTime>`.
 
+A guess that is the only live session of the agent kind in the tree whose client runs (or may run,
+when the process table cannot be read), and that no other running server speaks for, is the one
+window there is: the server treats it as its own session for everything. Any other guess is kept
+at arm's length: the server reads its context as a guest (it picks up no handoff and marks none of
+that window's messages delivered), files handoffs in its own name, and does not claim tasks that
+window owns.
+
 Each server records its claim, so two servers never share a session; a claim is free again only
 when its process is gone. A server on its own session moves to its client's hook session once it
 knows which that is (the first tool call may come before the first hook) and takes its unfinished
-tasks, active intents and unread messages along; it never moves them to a session it only guesses
-at. A session stays live while its server is being used, except a guessed one whose client is
+tasks, active intents, unread messages and handoffs along; it never moves them to a session it only
+guesses at, unless that guess is the one window there is. A session stays live while its server is being used, except a guessed one whose client is
 gone, which the server lets go of. When the client disconnects (stdin closes, the process is
 signalled, the client stops reading) the server's own session is ended and its intents are
 closed. `createMcp` returns the server together with that `release` call for other transports.

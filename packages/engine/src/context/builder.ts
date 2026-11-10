@@ -49,19 +49,20 @@ export class ContextBuilder {
     private readonly mistakes: MistakeService,
   ) {}
 
-  /** Sessions whose handoffs are not to be picked up by the context being built (see below). */
-  private readonly noClaims = new Set<string>();
+  /** Sessions the context being built is read for as a guest (see `asGuest`). */
+  private readonly guests = new Set<string>();
 
   /**
-   * The context `sessionStart` builds, without picking up a handoff for the session: for an MCP
-   * server that speaks for a session it only guessed at, whose handoffs are that window's.
+   * Builds context for `session` as a guest: an MCP server that cannot tell whether the session
+   * is its client's or another window's. What belongs to the session is left for it: a handoff
+   * waiting for it is not picked up, and messages to it are not shown or marked delivered.
    */
-  sessionStartWithoutClaim(project: ProjectContext, session: Session): BuiltContext {
-    this.noClaims.add(session.id);
+  asGuest(session: Session, build: () => BuiltContext): BuiltContext {
+    this.guests.add(session.id);
     try {
-      return this.sessionStart(project, session);
+      return build();
     } finally {
-      this.noClaims.delete(session.id);
+      this.guests.delete(session.id);
     }
   }
 
@@ -328,6 +329,7 @@ export class ContextBuilder {
   }
 
   private deliveryCandidates(session: Session, order: number): Candidate[] {
+    if (this.guests.has(session.id)) return [];
     const now = this.k.clock.now();
     return this.telepathy.pending(session, 15).map((d) => {
       const from = d.sourceSessionId ? this.k.store.sessions.find(d.sourceSessionId) : null;
@@ -352,7 +354,7 @@ export class ContextBuilder {
   }
 
   private claimHandoff(session: Session): Handoff | null {
-    if (this.noClaims.has(session.id)) return null;
+    if (this.guests.has(session.id)) return null;
     for (const h of this.k.store.handoffs.pendingFor(
       session.projectId,
       session.agentKind,

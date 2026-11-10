@@ -74,6 +74,10 @@ export interface GuessScope {
   workOf(): Session;
   /** The memories the server recorded on the guess, for its handoffs. */
   decisionIds(): string[];
+  /** The server's own session, in whose name it files what the window must not take as its own. */
+  self(): Session;
+  /** Notes a handoff the server filed in the name of `from` (its own session). */
+  noteHandoff(id: string, from: string): void;
   /**
    * Notes a row this call wrote. Intents, tasks and messages go along with the server until it
    * is home; memories stay where they are and are named in its handoffs.
