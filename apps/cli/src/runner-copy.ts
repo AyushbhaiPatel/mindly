@@ -42,7 +42,21 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 
-const RUNNER_CACHES = [/\/_npx\//, /\/dlx[-/]/, /\/\.bun\/install\/cache\//, /\/bunx-[^/]+\//];
+/**
+ * The folders package runners install into, by their actual layout rather than a folder name,
+ * so a user called `dlx` or a project called `bunx-demo` is not mistaken for one:
+ * - npm (npx, npm exec): `<cache>/_npx/<hex hash>/node_modules/`
+ * - pnpm dlx 9+: `<cache>/dlx/<base32 hash>/<time>-<pid>/node_modules/`, and older pnpm and
+ *   yarn dlx: `<tmp>/dlx-<pid>/…/node_modules/`
+ * - bunx: `<tmp>/bunx-<uid>-<package>@<version>/node_modules/`, or bun's own install cache
+ */
+const RUNNER_CACHES = [
+  /\/_npx\/[0-9a-f]{8,64}\/node_modules\//,
+  /\/dlx\/[0-9a-z]{16,64}\/(?:[0-9a-f]+-[0-9a-f]+\/)?node_modules\//,
+  /\/dlx-\d+\/(?:[^/]+\/)*node_modules\//,
+  /\/bunx-\d+-[^/]+@[^/]+\/node_modules\//,
+  /\/\.bun\/install\/cache\//,
+];
 
 function real(path: string): string {
   try {
