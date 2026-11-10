@@ -10,8 +10,11 @@ import './quiet-warnings.js';
  */
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  const [{ quietOnClosedPipe }, { failsOpen, nodeProblem }] = await Promise.all([
+    import('./closed-pipe.js'),
+    import('./node-check.js'),
+  ]);
   quietOnClosedPipe();
-  const { failsOpen, nodeProblem } = await import('./node-check.js');
   const problem = await nodeProblem(argv, {
     version: process.version,
     loadSqlite: () => import('node:sqlite'),
@@ -41,19 +44,6 @@ async function main(): Promise<void> {
     return;
   }
   process.exitCode = code;
-}
-
-/**
- * A reader that goes away early (`mindly init | head -1`) closes the pipe; the next write then
- * fails with EPIPE. That is the reader's choice, not an error: stop quietly.
- */
-function quietOnClosedPipe(): void {
-  for (const stream of [process.stdout, process.stderr]) {
-    stream.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EPIPE') process.exit(0);
-      throw err;
-    });
-  }
 }
 
 void main();

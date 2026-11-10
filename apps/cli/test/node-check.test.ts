@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { MINDLY_VERSION } from '@mindly/core';
 import { describe, expect, it } from 'vitest';
 import { inRunnerCache, installCommand } from '../src/commands/setup.js';
-import { olderVersionNote } from '../src/commands/daemon.js';
 import { failsOpen, nodeProblem, nodeVersionSupported } from '../src/node-check.js';
 import { tempDir } from './helpers.js';
 
@@ -107,15 +106,6 @@ describe('the launcher recorded by init', () => {
     const command = await installCommand({ PATH: '' });
     expect(command[0]).toBe(process.execPath);
     expect(inRunnerCache(command[1] as string)).toBe(false);
-  });
-});
-
-describe('the background service of another version', () => {
-  it('says to restart it only when its version differs', () => {
-    expect(olderVersionNote(MINDLY_VERSION)).toBe(null);
-    expect(olderVersionNote('0.0.1')).toBe(
-      `It runs Mindly 0.0.1, and this is ${MINDLY_VERSION}. Restart it to use this version: mindly daemon stop && mindly daemon start`,
-    );
   });
 });
 

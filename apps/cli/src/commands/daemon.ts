@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import {
   ensureHome,
   homePaths,
-  MINDLY_VERSION,
   mindlyHome,
   MindlyError,
   resolveLayout,
@@ -80,15 +79,6 @@ export async function healthy(port: number): Promise<boolean> {
 }
 
 /** The running daemon (state file present, process alive and answering), or null. */
-/**
- * The note for a background service started by another version of Mindly (usually the one before
- * an upgrade). It keeps running the old code while serving the new dashboard files from disk.
- */
-export function olderVersionNote(running: string): string | null {
-  if (running === MINDLY_VERSION) return null;
-  return `It runs Mindly ${running}, and this is ${MINDLY_VERSION}. Restart it to use this version: mindly daemon stop && mindly daemon start`;
-}
-
 export async function runningDaemon(env: NodeJS.ProcessEnv): Promise<DaemonState | null> {
   const state = readState(env);
   if (!state || !pidAlive(state.pid)) return null;
@@ -194,8 +184,6 @@ export async function daemonStart(out: Out, o: { foreground?: boolean }): Promis
   const running = await runningDaemon(env);
   if (running) {
     out.line(`The background service is already running at http://${HOST}:${running.port}.`);
-    const older = olderVersionNote(running.version);
-    if (older) out.line(older);
     return 0;
   }
   if (o.foreground) {
@@ -270,8 +258,6 @@ export async function daemonStatus(out: Out, o: { json?: boolean }): Promise<num
       `Version ${state.version}, started ${relativeTime(state.startedAt, sc.now)}. It serves Mission Control and runs checks in the background.`,
       2,
     );
-    const older = olderVersionNote(state.version);
-    if (older) sc.note(older, 2);
     sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
   } else if (alive && state) {
     sc.summary(
