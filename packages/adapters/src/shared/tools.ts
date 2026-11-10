@@ -182,19 +182,35 @@ export interface BuildToolOptions {
   shell?: boolean;
 }
 
-/** Builds the normalised `tool` section of an event. */
+/** The first line of `apply_patch` given a here-document with a quoted delimiter. */
+const PATCH_HEAD =
+  /^\s*(?:apply_patch|applypatch)[ \t]+<<(-?)[ \t]*(['"])([A-Za-z_][A-Za-z0-9_]*)\2[ \t]*$/;
+
 /**
  * A shell call that bash never runs: `apply_patch` given a patch in a here-document whose
- * delimiter is quoted (so nothing in it is expanded), as the whole command. The agent takes it
- * as its patch tool. A bare patch text, or a here-document bash expands, is shell code.
+ * delimiter is quoted (so nothing in it is expanded), as the whole command, the delimiter ending
+ * it on its last line and on no line before (with `<<-`, after leading tabs too). The agent takes
+ * it as its patch tool. Anything else, a bare patch text or a here-document bash expands or ends
+ * early, is shell code.
  */
-const PATCH_CALL =
-  /^\s*(?:apply_patch|applypatch)[ \t]+<<-?[ \t]*(['"])([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*\r?\n\*\*\* Begin Patch\r?\n(?:(?!\*\*\* End Patch)[\s\S])*\*\*\* End Patch[ \t]*\r?\n\2\s*$/;
-
 function isPatchCall(command: string): boolean {
-  return command.includes('*** Begin Patch') && PATCH_CALL.test(command);
+  if (!command.includes('*** Begin Patch')) return false;
+  const lines = command.replace(/\r\n/g, '\n').replace(/\n+$/, '').split('\n');
+  const head = PATCH_HEAD.exec(lines[0] ?? '');
+  if (head === null || lines.length < 4) return false;
+  const tabs = head[1] === '-';
+  const delimiter = head[3] as string;
+  const ends = (line: string): boolean => (tabs ? line.replace(/^\t+/, '') : line) === delimiter;
+  if (!ends(lines[lines.length - 1] as string)) return false;
+  const body = lines.slice(1, -1);
+  if (body.some(ends)) return false;
+  return (
+    (body[0] ?? '').trimEnd() === '*** Begin Patch' &&
+    (body[body.length - 1] ?? '').trimEnd() === '*** End Patch'
+  );
 }
 
+/** Builds the normalised `tool` section of an event. */
 export function buildTool(opts: BuildToolOptions): NonNullable<NormalizedHookEvent['tool']> {
   const cls = classifyTool(opts.name);
   const command = readCommand(opts.input, ['command', 'cmd']);

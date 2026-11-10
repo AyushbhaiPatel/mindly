@@ -871,6 +871,50 @@ cases.push(
   },
 );
 
+/** The covered file gone from the last commit, its rule's folder left empty on disk. */
+const EMPTY_RULE_FOLDER = 'git rm -q certs/server.pem && git commit -qm rm && mkdir certs';
+
+cases.push(
+  // A folder `mkdir` is asked to make may not be made: a copy to it still writes the name itself.
+  {
+    name: 'mkdir -p through a covered file fails, then cp overwrites the file',
+    command: 'mkdir -p certs/server.pem/x; cp src/a.ts certs/server.pem',
+    want: ['deny'],
+  },
+  {
+    name: 'mkdir -p through a covered file fails, then mv overwrites the file',
+    command: 'mkdir -p certs/server.pem/x 2>/dev/null; mv src/a.ts certs/server.pem',
+    want: ['deny'],
+  },
+  {
+    name: 'mkdir that never runs, then cp makes a covered file',
+    command: 'false && mkdir -p new.pem/x; cp src/a.ts new.pem',
+    want: ['deny'],
+  },
+  // git bringing a covered file back into an empty folder a rule names.
+  {
+    name: 'git checkout of a revision into an empty rule folder',
+    scopes: ['certs/**'],
+    prep: EMPTY_RULE_FOLDER,
+    command: 'git checkout -q HEAD~1 -- .',
+    want: ['warn'],
+  },
+  {
+    name: 'git reset --hard into an empty rule folder',
+    scopes: ['certs/**'],
+    prep: EMPTY_RULE_FOLDER,
+    command: 'git reset -q --hard HEAD~1',
+    want: ['warn'],
+  },
+  // A `cd` that fails leaves the commands after it where the shell was.
+  {
+    name: 'cd to a folder that is not there, then a covered file removed',
+    scopes: ['certs/**'],
+    command: 'cd nope; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+);
+
 describe('git commands that write a covered file through an option or a setting', () => {
   for (const c of cases) {
     it(c.name, async () => {
@@ -1065,6 +1109,10 @@ notReadFully.push(
 
 describe('a shell line that holds a patch is read as a shell line', () => {
   for (const command of [
+    // A here-document that ends early: bash runs what follows its delimiter.
+    "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: notes.txt\n+a\nEOF\nrm -f certs/server.pem\n*** End Patch\nEOF",
+    'apply_patch <<"EOF"\n*** Begin Patch\n*** Add File: notes.txt\n+a\nEOF\nrm -f certs/server.pem\n*** End Patch\nEOF',
+    "apply_patch <<-'EOF'\n*** Begin Patch\n*** Add File: notes.txt\n+a\n\tEOF\nrm -f certs/server.pem\n*** End Patch\nEOF",
     // An unquoted delimiter: bash expands the here-document, substitutions and all.
     'apply_patch <<EOF\n*** Begin Patch\n*** Add File: notes.txt\n+$(rm -f certs/server.pem)\n*** End Patch\nEOF',
     // A bare patch given to the shell: bash runs each of its lines.
