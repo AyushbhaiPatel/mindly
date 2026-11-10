@@ -450,25 +450,33 @@ export async function splitAbort(
     const id = currentSplit(scope);
     const svc = splitOf(scope.mindly);
     const split = scope.mindly.store.splits.get(id);
-    // What the worktrees hold that no branch has. Best effort: abort itself looks again.
+    const keepBranches = o.keepBranches === true;
+    // What the abort would delete that nothing else holds: uncommitted work in the worktrees and
+    // commits only the part branches have. Not knowing is not a reason to delete it.
     let unmerged: SplitUnmergedWork[] = [];
     try {
-      if (split.status !== 'aborted') unmerged = await svc.unmergedWork(id);
-    } catch {
-      unmerged = [];
+      if (split.status !== 'aborted') unmerged = await svc.abortLoses(id, { keepBranches });
+    } catch (err) {
+      if (o.discard !== true) {
+        throw new HintedError(
+          'unavailable',
+          `could not check the parts for work an abort would delete, so nothing was removed: ${err instanceof Error ? err.message : String(err)}`,
+          'Try again, or remove the worktrees and branches whatever they hold: mindly split abort --discard',
+        );
+      }
     }
     // After a merge, -y alone never removes work the merged branch does not have.
     let discard = o.discard === true;
     if (!o.json || !o.yes) {
       if (!o.yes && unmerged.length > 0) {
         out.warn(
-          `These worktrees hold uncommitted work${split.status === 'merged' ? ' that is not in the merged branch' : ''}:`,
+          `These parts hold work that ${split.status === 'merged' ? 'the merged branch does not have' : 'no other branch has'}:`,
         );
         for (const w of unmerged) out.warn(`  ${unmergedLine(w)}`);
       }
       const ok = await confirm(
         out.io,
-        `Remove the worktrees${o.keepBranches ? '' : ' and branches'} of the split "${split.goal.slice(0, 60)}"? Uncommitted work in them is lost.`,
+        `Remove the worktrees${keepBranches ? '' : ' and branches'} of the split "${split.goal.slice(0, 60)}"? Uncommitted work in them${keepBranches ? '' : ' and commits only on their branches'} is lost.`,
         o.yes === true,
       );
       if (!ok) return 1;
@@ -476,16 +484,20 @@ export async function splitAbort(
     }
     let a: SplitAbortResult;
     try {
-      a = await svc.abort(id, {
-        keepBranches: o.keepBranches === true,
-        discardUncommitted: discard,
-      });
+      a = await svc.abort(id, { keepBranches, discardUncommitted: discard });
     } catch (err) {
       if (isMindlyError(err, 'conflict') && Array.isArray(err.details?.['uncommitted'])) {
         throw new HintedError(
           'conflict',
           err.message,
-          'Commit it on the part branch first, or remove it with the worktrees: mindly split abort --discard',
+          `Commit it on the part branch and merge it into ${split.integrationBranch ?? 'the merged branch'}, keep the part branches (mindly split abort --keep-branches), or remove it: mindly split abort --discard`,
+        );
+      }
+      if (isMindlyError(err, 'unavailable') && err.details?.['lossCheckFailed'] === true) {
+        throw new HintedError(
+          'unavailable',
+          err.message,
+          'Try again, or remove the worktrees and branches whatever they hold: mindly split abort --discard',
         );
       }
       throw err;

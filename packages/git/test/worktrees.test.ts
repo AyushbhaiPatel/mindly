@@ -5,6 +5,7 @@ import { isMindlyError } from '@mindly/core';
 import {
   addWorktree,
   branchExists,
+  commitsOnlyOn,
   deleteBranch,
   listFiles,
   listWorktrees,
@@ -95,6 +96,74 @@ describe('worktrees', () => {
     await expect(removeWorktree(root, root)).rejects.toSatisfy((e) =>
       isMindlyError(e, 'invalid_input'),
     );
+  });
+
+  it('lists the commits only a branch holds, ignoring the branches deleted with it', async () => {
+    const root = makeRepo();
+    const dir = tempDir();
+    const a = join(dir, 'a');
+    const b = join(dir, 'b');
+    await addWorktree(root, a, 'mindly/demo/a', 'HEAD');
+    await addWorktree(root, b, 'mindly/demo/b', 'HEAD');
+    expect(await commitsOnlyOn(root, 'mindly/demo/a')).toEqual([]);
+    write(a, 'a.txt', 'a\n');
+    commitAll(a, 'first in a');
+    write(a, 'a2.txt', 'a2\n');
+    commitAll(a, 'second in a');
+    const second = git(a, 'rev-parse', 'HEAD').trim();
+    expect((await commitsOnlyOn(root, 'mindly/demo/a')).map((c) => c.subject)).toEqual([
+      'second in a',
+      'first in a',
+    ]);
+    expect((await commitsOnlyOn(root, 'mindly/demo/a', [], 1))[0]).toEqual({
+      commit: second,
+      subject: 'second in a',
+    });
+    // Merged into another branch: nothing is lost by deleting it, unless that one goes too.
+    git(root, 'branch', 'integration', 'mindly/demo/a');
+    expect(await commitsOnlyOn(root, 'mindly/demo/a')).toEqual([]);
+    git(b, 'merge', '-q', '--no-edit', 'mindly/demo/a');
+    git(root, 'branch', '-D', 'integration');
+    expect(await commitsOnlyOn(root, 'mindly/demo/a')).toEqual([]);
+    expect(await commitsOnlyOn(root, 'mindly/demo/a', ['mindly/demo/b'])).toHaveLength(2);
+    // A tag holds commits too; a missing branch has none.
+    git(root, 'tag', 'kept', 'mindly/demo/a');
+    expect(await commitsOnlyOn(root, 'mindly/demo/a', ['mindly/demo/b'])).toEqual([]);
+    expect(await commitsOnlyOn(root, 'mindly/demo/none')).toEqual([]);
+    await expect(commitsOnlyOn(root, 'bad..name')).rejects.toThrow();
+  });
+
+  it('sees commits merged by a split merge as held, whatever their dates', async () => {
+    const root = makeRepo({ 'README.md': '# a\n' });
+    for (let i = 0; i < 8; i++) {
+      write(root, 'history.txt', `${i}\n`);
+      commitAll(root, `history ${i}`);
+    }
+    const dir = tempDir();
+    const keys = ['api', 'webhook', 'page'];
+    for (const k of keys) {
+      const path = join(dir, k);
+      await addWorktree(root, path, `mindly/demo/${k}`, 'HEAD');
+      write(path, `${k}.txt`, `${k}\n`);
+      commitAll(path, `work in ${k}`);
+    }
+    git(root, 'branch', 'feature/other', 'mindly/demo/webhook');
+    // The merge commits carry a fixed synthetic date, older than the part commits.
+    const merged = await mergeIntoNewBranch({
+      repoRoot: root,
+      branch: 'mindly/demo/integration',
+      base: 'HEAD',
+      sources: keys.map((k) => ({ label: k, ref: `mindly/demo/${k}` })),
+    });
+    expect(merged.status).toBe('merged');
+    const parts = keys.map((k) => `mindly/demo/${k}`);
+    for (const p of parts) expect(await commitsOnlyOn(root, p, parts)).toEqual([]);
+    // A commit made on a part branch after the merge is only there.
+    write(join(dir, 'api'), 'late.txt', 'late\n');
+    const late = commitAll(join(dir, 'api'), 'late work');
+    expect(await commitsOnlyOn(root, 'mindly/demo/api', parts)).toEqual([
+      { commit: late, subject: 'late work' },
+    ]);
   });
 
   it('lists tracked and untracked files, not ignored ones', async () => {

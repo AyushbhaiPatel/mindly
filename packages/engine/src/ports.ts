@@ -225,6 +225,15 @@ export interface SplitGitPort {
   /** Removes a linked worktree (and its uncommitted work). False when it was not a worktree. */
   removeWorktree(repoRoot: string, path: string): Promise<boolean>;
   deleteBranch(repoRoot: string, branch: string): Promise<boolean>;
+  /**
+   * Commits of `branch`, newest first and at most 50, that no other branch, tag or remote-tracking
+   * branch has (branches in `ignoring` do not count): what deleting the branch would lose.
+   */
+  commitsOnlyOn(
+    repoRoot: string,
+    branch: string,
+    ignoring: readonly string[],
+  ): Promise<{ commit: string; subject: string }[]>;
   /** Paths that differ between `base` and the worktree's current content (committed or not). */
   changedSince(repoRoot: string, worktree: string, base: string): Promise<string[]>;
   /** Shadow-merges the sides' worktrees (uncommitted work included) on top of `base`. */

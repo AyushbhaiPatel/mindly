@@ -513,7 +513,7 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .option('--keep-branches', 'keep the part branches')
     .option(
       '--discard',
-      'after a merge, also remove worktrees that hold work the merged branch does not have',
+      'after a merge, also remove worktrees and branches that hold work the merged branch does not have',
     )
     .option('-y, --yes', 'do not ask')
     .option('--json', 'machine-readable output')

@@ -110,6 +110,76 @@ export async function deleteBranch(repoRoot: string, branch: string): Promise<bo
   return true;
 }
 
+/** A commit that only one branch holds (see `commitsOnlyOn`). */
+export interface BranchOnlyCommit {
+  commit: string;
+  subject: string;
+}
+
+/**
+ * Commits of `refs/heads/<branch>` that no other branch, tag or remote-tracking branch reaches,
+ * newest first and at most `max`: what deleting the branch would lose. Branches in `ignoring`
+ * (deleted together with it) do not count as holding a commit. Empty when the branch is gone.
+ */
+export async function commitsOnlyOn(
+  repoRoot: string,
+  branch: string,
+  ignoring: readonly string[] = [],
+  max = 50,
+): Promise<BranchOnlyCommit[]> {
+  assertValidBranchName(branch);
+  for (const b of ignoring) assertValidBranchName(b);
+  const root = await findRepoRoot(repoRoot);
+  const ref = `refs/heads/${branch}`;
+  if (!(await resolveCommit(root, ref))) return [];
+  const limit = Math.max(1, Math.floor(max));
+  const going = new Set([branch, ...ignoring].map((b) => `refs/heads/${b}`));
+  const refs = await runGit(
+    [
+      'for-each-ref',
+      '--format=%(objectname) %(objecttype) %(*objecttype) %(refname)',
+      'refs/heads',
+      'refs/tags',
+      'refs/remotes',
+    ],
+    { cwd: root, timeoutMs: 30_000 },
+  );
+  const others = new Set<string>();
+  for (const line of refs.stdout.split('\n')) {
+    const [id, type, peeled, ...name] = line.split(' ');
+    if (!id || going.has(name.join(' '))) continue;
+    if (type === 'commit' || peeled === 'commit') others.add(`^${id}`);
+  }
+  // A walk with negative refs trusts commit dates, and the merge commits of `split merge` carry
+  // a fixed synthetic date: it can list commits another ref does have. Each one it lists is
+  // checked with `--contains`, which does not depend on dates.
+  const res = await runGit(
+    ['log', '--no-color', '--format=%H%x09%s', `--max-count=${2 * limit}`, '--stdin', ref, '--'],
+    { cwd: root, timeoutMs: 30_000, input: [...others].map((o) => `${o}\n`).join('') },
+  );
+  const out: BranchOnlyCommit[] = [];
+  for (const line of res.stdout.split('\n')) {
+    const tab = line.indexOf('\t');
+    if (tab <= 0) continue;
+    if (out.length >= limit) break;
+    const commit = line.slice(0, tab);
+    const holders = await runGit(
+      [
+        'for-each-ref',
+        '--format=%(refname)',
+        `--contains=${commit}`,
+        'refs/heads',
+        'refs/tags',
+        'refs/remotes',
+      ],
+      { cwd: root, timeoutMs: 30_000 },
+    );
+    if (holders.stdout.split('\n').some((r) => r !== '' && !going.has(r))) continue;
+    out.push({ commit, subject: line.slice(tab + 1) });
+  }
+  return out;
+}
+
 /** Tracked and untracked (non-ignored) files of the working tree at `cwd`, repository-relative. */
 export async function listFiles(cwd: string, max = 20_000): Promise<string[]> {
   const root = await findRepoRoot(cwd);

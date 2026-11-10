@@ -199,8 +199,9 @@ combines them into one new branch, in dependency order, and never pushes.
 
 The merge takes what each agent committed on its part's branch. If a part's worktree still holds
 work that is not committed there, `mindly split merge` stops and names the files (`--force`
-merges without them), and `mindly split abort` after a merge keeps those worktrees unless you
-pass `--discard`.
+merges without them). After a merge, `mindly split abort` keeps the worktrees and branches if
+they hold work the merged branch does not have (uncommitted files, or commits made on a part
+branch since) unless you pass `--discard`.
 
 ### Which agent is better at what, in your repo
 

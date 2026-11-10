@@ -264,6 +264,11 @@ export interface SplitPartStatus {
   filesChanged: string[];
   /** Paths whose content in the worktree is not on the part's branch: a merge leaves them out. */
   uncommitted: string[];
+  /**
+   * Merged splits only: commits on the part's branch that the merged branch (or any other branch)
+   * does not have, such as work committed after the merge. Removing the branch would lose them.
+   */
+  unmergedCommits: string[];
   lastActivityAt: number | null;
   /** Open conflicts involving the part's session. */
   conflicts: Conflict[];
@@ -322,12 +327,17 @@ export interface SplitMergeCheckResult {
   error?: string;
 }
 
-/** Work in a part's worktree that is not on the part's branch. */
+/** Work in a part's worktree that is not on the part's branch, or only on that branch. */
 export interface SplitUnmergedWork {
   part: string;
   title: string;
   /** Paths that differ between the worktree and the tip of the part's branch. */
   paths: string[];
+  /**
+   * Commits (`<id> <subject>`, newest first, at most 50) that only the part's branch has, when
+   * the branch is to be deleted. Absent when there are none.
+   */
+  commits?: string[];
 }
 
 export interface SplitMergeResult {
@@ -347,7 +357,7 @@ export interface SplitAbortResult {
   removedWorktrees: string[];
   deletedBranches: string[];
   keptBranches: string[];
-  /** Uncommitted work that went away with the worktrees. */
+  /** Uncommitted work, and commits only a deleted branch had, that went away with the split. */
   discarded: SplitUnmergedWork[];
 }
 
@@ -639,6 +649,52 @@ export class SplitService {
     return [...new Set(paths)].sort().slice(0, 200);
   }
 
+  /**
+   * Commits only the part's branch has: no other branch, tag or remote-tracking branch reaches
+   * them, the split's other part branches aside (they go with it). After a merge these are commits
+   * made on the part branch since; before it, the part's work.
+   */
+  private async onlyOnBranch(
+    git: SplitGitPort,
+    root: string,
+    part: SplitPart,
+    parts: readonly SplitPart[],
+  ): Promise<string[]> {
+    const commits = await git.commitsOnlyOn(
+      root,
+      part.branch,
+      parts.map((p) => p.branch),
+    );
+    return commits.map((c) => `${c.commit.slice(0, 12)} ${sanitizeLine(c.subject, 120)}`);
+  }
+
+  /**
+   * What `abort` would delete: work in the parts' worktrees that is not on their branches and,
+   * unless the branches are kept, commits only the part branches have.
+   */
+  async abortLoses(
+    splitId: string,
+    options: { keepBranches?: boolean } = {},
+  ): Promise<SplitUnmergedWork[]> {
+    const split = this.k.store.splits.get(splitId);
+    const root = this.projects.byId(split.projectId).root;
+    const git = this.git();
+    const parts = this.k.store.splits.parts(split.id);
+    const out: SplitUnmergedWork[] = [];
+    for (const part of parts) {
+      const paths = await this.notOnBranch(git, root, part);
+      const commits = options.keepBranches ? [] : await this.onlyOnBranch(git, root, part, parts);
+      if (paths.length === 0 && commits.length === 0) continue;
+      out.push({
+        part: part.key,
+        title: part.title,
+        paths,
+        ...(commits.length > 0 ? { commits } : {}),
+      });
+    }
+    return out;
+  }
+
   /** The latest merge check of a split. */
   latestMergeCheck(split: Split): Run | null {
     return this.k.store.runs.latestWithInput(split.projectId, 'shadow_merge', 'splitId', split.id);
@@ -655,17 +711,29 @@ export class SplitService {
     const root = this.projects.byId(split.projectId).root;
     const git = this.k.ports.git.split;
     const parts: SplitPartStatus[] = [];
-    for (const part of this.k.store.splits.parts(split.id)) {
+    const all = this.k.store.splits.parts(split.id);
+    for (const part of all) {
       const task = this.k.store.tasks.get(part.taskId);
       const session = this.partSession(part, task);
       let filesChanged: string[] = [];
       let uncommitted: string[] = [];
+      let unmergedCommits: string[] = [];
       if (git && split.status !== 'aborted' && existsSync(part.worktree)) {
         try {
           filesChanged = await git.changedSince(root, part.worktree, split.baseCommit);
           uncommitted = await this.notOnBranch(git, root, part);
         } catch (err) {
           this.k.logger.warn('split status: could not diff a worktree', {
+            part: part.key,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      if (git && split.status === 'merged') {
+        try {
+          unmergedCommits = await this.onlyOnBranch(git, root, part, all);
+        } catch (err) {
+          this.k.logger.warn('split status: could not list the commits of a part branch', {
             part: part.key,
             error: err instanceof Error ? err.message : String(err),
           });
@@ -691,6 +759,7 @@ export class SplitService {
         state,
         filesChanged,
         uncommitted,
+        unmergedCommits,
         lastActivityAt: session?.lastSeenAt ?? null,
         conflicts: session
           ? this.k.store.conflicts.list(split.projectId, { sessionId: session.id })
@@ -1000,7 +1069,9 @@ export class SplitService {
    * briefs, closes the parts' intents and tasks and marks the split aborted; the contract
    * decisions of an aborted split are archived. A branch the user has checked out somewhere is
    * kept and reported. A merged split only loses its worktrees and part branches: it stays merged
-   * and keeps its integration branch.
+   * and keeps its integration branch, and work the merged branch does not have (uncommitted, or
+   * committed on a part branch after the merge) is only deleted with `discardUncommitted`. If git
+   * cannot say what would be deleted, nothing is, unless `discardUncommitted` is set.
    */
   async abort(
     splitId: string,
@@ -1013,11 +1084,20 @@ export class SplitService {
     const git = this.git();
     let discarded: SplitUnmergedWork[] = [];
     try {
-      discarded = await this.unmergedWork(split.id);
+      discarded = await this.abortLoses(split.id, { keepBranches: options.keepBranches === true });
     } catch (err) {
-      this.k.logger.warn('split abort: could not look for uncommitted work', {
+      const error = err instanceof Error ? err.message : String(err);
+      // Not knowing what would be lost is no reason to delete it: only an explicit discard goes on.
+      if (!options.discardUncommitted) {
+        throw new MindlyError(
+          'unavailable',
+          `could not check the parts for work an abort would delete, so nothing was removed: ${sanitizeLine(error, 300)}`,
+          { details: { lossCheckFailed: true } },
+        );
+      }
+      this.k.logger.warn('split abort: could not look for work it deletes', {
         splitId: split.id,
-        error: err instanceof Error ? err.message : String(err),
+        error,
       });
     }
     // Cleaning up after a merge is expected to lose nothing: work the merge did not take is
@@ -1025,9 +1105,7 @@ export class SplitService {
     if (split.status === 'merged' && discarded.length > 0 && !options.discardUncommitted) {
       throw new MindlyError(
         'conflict',
-        `the merged branch does not have the uncommitted work of ${discarded
-          .map((w) => `"${w.title}" (${describePaths(w.paths)})`)
-          .join('; ')}`,
+        `the merged branch does not have the work of ${discarded.map(describeWork).join('; ')}`,
         { details: { uncommitted: discarded } },
       );
     }
@@ -1190,6 +1268,19 @@ export class SplitService {
       ttlMs: 24 * 60 * 60_000,
     });
   }
+}
+
+/** `"API" (not committed: a.ts; 2 commits only on its branch: 1a2b3c4d5e6f Add plans, …)`. */
+function describeWork(w: SplitUnmergedWork): string {
+  const what: string[] = [];
+  if (w.paths.length > 0) what.push(`not committed: ${describePaths(w.paths)}`);
+  const commits = w.commits ?? [];
+  if (commits.length > 0) {
+    what.push(
+      `${commits.length >= 50 ? 'at least 50 commits' : commits.length === 1 ? '1 commit' : `${commits.length} commits`} only on its branch: ${describePaths(commits)}`,
+    );
+  }
+  return `"${w.title}" (${what.join('; ')})`;
 }
 
 /** Up to three paths, then how many more. */

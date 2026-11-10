@@ -162,6 +162,7 @@ interface StatusJson {
     state: string;
     filesChanged: string[];
     uncommitted: string[];
+    unmergedCommits: string[];
     session: { id: string } | null;
   }[];
   mergeCheck: { status: string; result: { clean: boolean; conflictedPaths: string[] } } | null;
@@ -592,7 +593,7 @@ describe('split status, merge and abort (acceptance 4)', () => {
     // Cleaning up would delete it: -y alone refuses, --discard is the way to say so.
     const cleanup = await cli(sb, ['split', 'abort', '--yes']);
     expect(cleanup.code).toBe(1);
-    expect(cleanup.stderr).toContain('does not have the uncommitted work of "Billing page"');
+    expect(cleanup.stderr).toContain('does not have the work of "Billing page" (not committed:');
     expect(cleanup.stderr).toContain('src/app/billing.ts');
     expect(cleanup.stderr).toContain('mindly split abort --discard');
     expect(existsSync(join(partDir(sb, 'page'), 'src/app/billing.ts'))).toBe(true);
@@ -601,6 +602,63 @@ describe('split status, merge and abort (acceptance 4)', () => {
     expect(discard.stdout).toContain('Uncommitted work was removed');
     expect(discard.stdout).toContain('Part "Billing page": src/app/billing.ts');
     expect(existsSync(worktreeRoot(sb))).toBe(false);
+    expect(branches(sb)).toEqual(['mindly/billing/integration']);
+  });
+
+  it('abort after a merge keeps commits a part made on its branch since', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'api'), 'src/api/plans.ts', 'export const plans = 1;\n');
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    // The page agent keeps working after the merge and commits on its part branch.
+    commitIn(partDir(sb, 'page'), 'src/app/late.ts', 'export const late = 1;\n');
+    const late = git(partDir(sb, 'page'), 'rev-parse', 'HEAD').trim();
+
+    const s = await statusJson(sb);
+    expect(s.parts.map((p) => p.uncommitted)).toEqual([[], [], []]);
+    expect(s.parts.map((p) => p.unmergedCommits)).toEqual([
+      [],
+      [],
+      [`${late.slice(0, 12)} work in src/app/late.ts`],
+    ]);
+    const status = await cli(sb, ['split', 'status']);
+    expect(status.stdout).toMatch(/1\s+commit\s+not\s+merged/);
+    expect(status.stdout).toContain(`cd ${partDir(sb, 'page')}`);
+    expect(status.stdout).not.toContain('mindly split abort');
+
+    const abort = await cli(sb, ['split', 'abort', '--yes']);
+    expect(abort.code).toBe(1);
+    expect(abort.stderr).toContain(
+      `does not have the work of "Billing page" (1 commit only on its branch: ${late.slice(0, 12)} work in src/app/late.ts)`,
+    );
+    expect(abort.stderr).toContain('--keep-branches');
+    expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(late);
+    expect(existsSync(partDir(sb, 'page'))).toBe(true);
+
+    // Merged into the integration branch, the commit is safe and the cleanup goes through.
+    const integration = join(tempDir('syn-split-int-'), 'integration');
+    git(sb.repo, 'worktree', 'add', '-q', integration, 'mindly/billing/integration');
+    git(integration, 'merge', '-q', '--no-edit', 'mindly/billing/page');
+    git(sb.repo, 'worktree', 'remove', '--force', integration);
+    const ok = await cli(sb, ['split', 'abort', '--yes']);
+    expect(ok.stderr).toBe('');
+    expect(ok.code).toBe(0);
+    expect(branches(sb)).toEqual(['mindly/billing/integration']);
+    expect(git(sb.repo, 'merge-base', '--is-ancestor', late, 'mindly/billing/integration')).toBe(
+      '',
+    );
+  });
+
+  it('abort after a merge removes commits only on a part branch with --discard', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    commitIn(partDir(sb, 'page'), 'src/app/late.ts', 'export const late = 1;\n');
+    const r = await cli(sb, ['split', 'abort', '--yes', '--discard']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('Work no other branch has was removed');
+    expect(r.stdout).toContain('Part "Billing page": 1 commit only on its branch:');
     expect(branches(sb)).toEqual(['mindly/billing/integration']);
   });
 

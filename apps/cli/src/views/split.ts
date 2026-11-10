@@ -121,6 +121,8 @@ export function renderSplitStatus(sc: Screen, r: SplitStatusReport): void {
       const facts = [partStateWord(p.state)];
       if (p.filesChanged.length) facts.push(`${count(p.filesChanged.length, 'file')} changed`);
       if (p.uncommitted.length) facts.push(`${p.uncommitted.length} not committed`);
+      if (p.unmergedCommits.length)
+        facts.push(`${count(p.unmergedCommits.length, 'commit')} not merged`);
       if (p.lastActivityAt) facts.push(`active ${relativeTime(p.lastActivityAt, sc.now)}`);
       if (p.conflicts.length) facts.push(`${count(p.conflicts.length, 'conflict')}`);
       const details = [
@@ -197,11 +199,20 @@ export function renderMergeCheck(sc: Screen, run: Run): void {
     sc.note('No checks configured in .mindly/config.json.', 2);
 }
 
-/** `"API" (src/api/a.ts, src/api/b.ts and 3 more)`. */
+/** `Part "API": src/api/a.ts, src/api/b.ts and 3 more; 2 commits only on its branch: …`. */
 export function unmergedLine(w: SplitUnmergedWork): string {
-  const shown = w.paths.slice(0, 3).map((p) => clean(p, 120));
-  const more = w.paths.length - shown.length;
-  return `Part "${clean(w.title, 60)}": ${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
+  const list = (items: readonly string[]): string => {
+    const shown = items.slice(0, 3).map((p) => clean(p, 120));
+    const more = items.length - shown.length;
+    return `${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
+  };
+  const what: string[] = [];
+  if (w.paths.length > 0) what.push(list(w.paths));
+  const commits = w.commits ?? [];
+  if (commits.length > 0) {
+    what.push(`${count(commits.length, 'commit')} only on its branch: ${list(commits)}`);
+  }
+  return `Part "${clean(w.title, 60)}": ${what.join('; ')}`;
 }
 
 const COMMIT_WHY = 'commit the work there on the part branch: the merge only takes committed work';
@@ -210,16 +221,20 @@ function nextSteps(r: SplitStatusReport): Step[] {
   const { split, parts } = r;
   const uncommitted = parts.filter((p) => p.uncommitted.length > 0);
   if (split.status === 'merged') {
+    const behind = parts.filter((p) => p.uncommitted.length > 0 || p.unmergedCommits.length > 0);
     return [
       {
         cmd: `git log --oneline ${split.integrationBranch ?? ''}`.trim(),
         why: 'review the merged branch and open a PR from it',
       },
       // Removing the worktrees would delete work the merged branch does not have.
-      ...(uncommitted.length > 0
-        ? uncommitted.slice(0, 3).map((p) => ({
+      ...(behind.length > 0
+        ? behind.slice(0, 3).map((p) => ({
             cmd: `cd ${p.part.worktree}`,
-            why: 'this part has work that is not in the merged branch; commit or copy it before removing the worktrees',
+            why:
+              p.uncommitted.length > 0
+                ? 'this part has work that is not in the merged branch; commit or copy it before removing the worktrees'
+                : 'this part has commits that are not in the merged branch; merge them before removing its branch',
           }))
         : [
             {
@@ -300,8 +315,9 @@ export function renderAborted(sc: Screen, a: SplitAbortResult): void {
   );
   if (a.keptBranches.length) sc.note(`Branches kept: ${a.keptBranches.join(', ')}`, 2);
   if (a.discarded.length > 0) {
+    const commits = a.discarded.some((w) => (w.commits ?? []).length > 0);
     sc.text(
-      `${sc.mark('warn')} Uncommitted work was removed with ${a.discarded.length === 1 ? 'a worktree' : 'the worktrees'}:`,
+      `${sc.mark('warn')} ${commits ? 'Work no other branch has was removed:' : `Uncommitted work was removed with ${a.discarded.length === 1 ? 'a worktree' : 'the worktrees'}:`}`,
       2,
     );
     for (const w of a.discarded) sc.text(unmergedLine(w), 4);
