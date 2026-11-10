@@ -500,6 +500,37 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only here\n');
   });
 
+  it('keeps a bare repository whose objects folder holds a tracked placeholder', async () => {
+    const sb = await splitSandbox((s) => {
+      // A fixture remote kept as an empty skeleton; git makes the rest at test time.
+      write(s.repo, '.gitignore', 'fixtures/remote.git/\n');
+      write(s.repo, 'fixtures/remote.git/objects/.gitkeep', '');
+      git(s.repo, 'add', '-f', 'fixtures/remote.git/objects/.gitkeep');
+    });
+    const page = partDir(sb, 'page');
+    const bare = join(page, 'fixtures/remote.git');
+    git(bare, 'init', '-q', '--bare', '-b', 'main');
+    const wt = join(tempDir('r10-wt-'), 'c');
+    repoAt(wt, { 'new.ts': 'hours of work\n' });
+    git(wt, 'push', '-q', bare, 'main');
+    rmSync(wt, { recursive: true, force: true });
+    await keptFor(sb, 'fixtures/remote.git');
+    expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
+  });
+
+  it('keeps a bare repository made in a folder with tracked objects/', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, 'data/objects/item.json', '{}\n'));
+    const page = partDir(sb, 'page');
+    const bare = join(page, 'data');
+    git(bare, 'init', '-q', '--bare', '-b', 'main');
+    const wt = join(tempDir('r10-wt-'), 'c');
+    repoAt(wt, { 'new.ts': 'hours of work\n' });
+    git(wt, 'push', '-q', bare, 'main');
+    rmSync(wt, { recursive: true, force: true });
+    await keptFor(sb, 'data', ['--keep-branches']);
+    expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
+  });
+
   it('keeps a bare clone git accepts, whatever its HEAD looks like', async () => {
     const origin = tempDir('r10-origin-');
     repoAt(origin, { 'only.ts': 'x\n' });

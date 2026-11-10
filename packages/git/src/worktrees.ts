@@ -352,22 +352,34 @@ function noteGitDirParts(path: string, heads: Set<string>, objects: Set<string>)
 
 /**
  * True when `dir` (under `root`, not the top level), which holds an untracked or ignored entry
- * named `HEAD` (as the caller saw), may be a git directory: it also has an entry named `objects`
- * that is not tracked, of any kind (a folder, a link), listed or found by one `lstat`. Nothing
- * is read and neither entry's kind or size is checked: git accepts a `HEAD` that is a link or a
- * long ref, and refs may all be in `packed-refs`. Missing one loses its history; taking a folder
- * for one only asks for it to be moved out.
+ * named `HEAD` (as the caller saw), may be a git directory: it also has an entry named `objects`,
+ * of any kind (a folder, a link). Untracked or ignored entries listed under or at `objects`
+ * always count (`listedObjects`). A tracked `objects` rules it out only when nothing such is
+ * listed and it is on disk what was tracked: a tracked folder still a folder (`trackedFolders`),
+ * a tracked file still not a folder (`trackedFiles`). Nothing is read and neither entry's kind
+ * or size is otherwise checked: git accepts a `HEAD` that is a link or a long ref, and refs may
+ * all be in `packed-refs`. Missing one loses its history; taking a folder for one only asks for
+ * it to be moved out.
  */
 function isGitDir(
   root: string,
   dir: string,
   listedObjects: ReadonlySet<string>,
-  trackedObjects: ReadonlySet<string>,
+  trackedFolders: ReadonlySet<string>,
+  trackedFiles: ReadonlySet<string>,
 ): boolean {
   if (dir === '') return false;
+  if (listedObjects.has(dir)) return true;
   const objects = `${dir}/objects`;
-  if (trackedObjects.has(objects)) return false;
-  return listedObjects.has(dir) || existsOrLink(join(root, objects));
+  let st: Stats;
+  try {
+    st = lstatSync(join(root, objects));
+  } catch {
+    return false;
+  }
+  if (trackedFolders.has(objects)) return !st.isDirectory();
+  if (trackedFiles.has(objects)) return st.isDirectory();
+  return true;
 }
 
 /** How an uninitialised submodule folder that holds files is named in `gitData`. */
@@ -498,21 +510,20 @@ export async function worktreeScan(
   // The index: submodules, and every folder that holds a tracked file.
   const gitlinks: string[] = [];
   const tracked = new Set<string>();
-  // Tracked entries named `objects` (files, links), beside the tracked folders.
-  const trackedObjects = new Set<string>();
+  // Tracked entries named `objects` (files, links, gitlinks).
+  const trackedObjectFiles = new Set<string>();
   await runGitRecords(['ls-files', '-z', '-s'], opts, (rec) => {
     const path = rec.slice(rec.indexOf('\t') + 1);
-    if (path === 'objects' || path.endsWith('/objects')) trackedObjects.add(path);
+    if (path === 'objects' || path.endsWith('/objects')) trackedObjectFiles.add(path);
     if (rec.startsWith('160000 ')) gitlinks.push(path);
     else addFolders(path, tracked);
     return false;
   });
-  for (const dir of tracked) {
-    listedIn.add(dir);
-    if (dir === 'objects' || dir.endsWith('/objects')) trackedObjects.add(dir);
-  }
+  for (const dir of tracked) listedIn.add(dir);
   // A git directory (a `--separate-git-dir`, a bare clone): its `HEAD` is a listed entry.
-  for (const dir of heads) if (isGitDir(root, dir, objects, trackedObjects)) found.add(dir);
+  for (const dir of heads) {
+    if (isGitDir(root, dir, objects, tracked, trackedObjectFiles)) found.add(dir);
+  }
   // One `lstat` per folder named: a `.git` there, whatever git makes of it.
   for (const dir of listedIn) if (existsOrLink(join(root, dir, '.git'))) found.add(dir);
   for (const path of gitlinks) if (existsOrLink(join(root, path, '.git'))) found.add(path);
