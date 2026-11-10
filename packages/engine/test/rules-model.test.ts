@@ -2,8 +2,9 @@ import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { defaultUserConfig, type Logger, type UserConfig } from '@mindly/core';
+import { defaultUserConfig, matchesGlob, type Logger, type UserConfig } from '@mindly/core';
 import { Mindly, type LlmCallOptions, type LlmPort } from '../src/index.js';
+import { ruleTitle, scopeCovers, storedTitle } from '../src/memory/rules.js';
 import { event, FakeClock, fakeGit } from './helpers.js';
 
 type Verdict = Awaited<ReturnType<LlmPort['classifyCorrection']>>;
@@ -133,6 +134,38 @@ describe('rules confirmed by the model', () => {
       expect(after?.trust).toBe('approved');
       expect(after?.scope.paths).toEqual(['src/a/b/**']);
     }
+  });
+
+  it('keeps the scope of an approved rule whose title holds redacted text', async () => {
+    let globs = ['src/a/**'];
+    const model = fakeModel(async () => ({
+      isRule: true,
+      rule: 'x',
+      scopeGlobs: globs,
+      confidence: 0.5,
+    }));
+    const p = open(model.port, (c) => {
+      c.redaction.extraPatterns = ['ACME-[0-9]{4}'];
+    });
+    const sentence = 'No, use ACME-1234 instead of npm.';
+    const [first] = await say(p, sentence);
+    // Looked up the way it is stored.
+    expect(first?.title).toBe(storedTitle(ruleTitle(sentence), ['ACME-[0-9]{4}']));
+    p.mindly.memory.approve(first!.id);
+    for (const g of [['nothing-matches/**'], ['**']]) {
+      globs = g;
+      const [after] = await say(p, sentence);
+      expect(after?.id).toBe(first?.id);
+      expect(after?.trust).toBe('approved');
+      expect(after?.scope.paths).toEqual(['src/a/**']);
+    }
+  });
+
+  it('a brace holding .. still only matches inside the folder it names', () => {
+    // The glob matcher sees project-relative paths only, so the alternative cannot reach outside.
+    expect(scopeCovers(['src/**'], 'src/{x,../lib}/**')).toBe(true);
+    expect(matchesGlob('lib/a.ts', 'src/{x,../lib}/**')).toBe(false);
+    expect(matchesGlob('src/lib/a.ts', 'src/{x,../lib}/**')).toBe(false);
   });
 
   it('drops a sentence the model says is not a rule', async () => {

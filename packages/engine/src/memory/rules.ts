@@ -12,7 +12,17 @@ import {
   type InstructionFile,
   type InstructionRule,
 } from './instructions.js';
-import type { MemoryService } from './service.js';
+import { MAX_TITLE, type MemoryService } from './service.js';
+
+/**
+ * The title a memory is stored and looked up under: what `MemoryService.remember` does to a
+ * title before it looks for an existing memory (redaction with the user's extra patterns, then
+ * one sanitised line). Looking a memory up by its raw title misses one whose title held anything
+ * redacted.
+ */
+export function storedTitle(title: string, extraPatterns: readonly string[]): string {
+  return sanitizeLine(redactText(title, { extraPatterns }), MAX_TITLE);
+}
 
 /** What importing the project's instruction files would do. */
 export interface InstructionImportPlan {
@@ -251,7 +261,12 @@ export class RuleService {
    */
   private modelScope(projectId: string, title: string, suggested: readonly string[]): string[] {
     if (suggested.length === 0) return [];
-    const existing = this.memory.findSameTitle(projectId, 'rule', title, null);
+    const existing = this.memory.findSameTitle(
+      projectId,
+      'rule',
+      storedTitle(title, this.k.config.redaction.extraPatterns),
+      null,
+    );
     if (!existing) return [...suggested];
     const decided =
       existing.trust !== 'proposed' ||
