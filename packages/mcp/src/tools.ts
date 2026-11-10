@@ -263,12 +263,19 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
             );
           }
           const scope = await sessions.resolve();
+          // Acting as the one window there is, a current task the call sets (a claim, a handoff
+          // it picks up) is the server's own doing.
+          const currentOf = () =>
+            scope.ownWrite ? mindly.store.sessions.find(scope.session.id)?.currentTaskId : null;
+          const before = currentOf();
           // The one gate between a call and the state of a window this server may not be: on a
           // guess, a tool runs its guest handler unless it touches nothing of the session's own.
           const result =
             scope.guess && config.onGuess !== 'shared'
               ? await config.onGuess(parsed.data, scope as GuessCallScope)
               : await handler(parsed.data, scope);
+          const after = currentOf();
+          if (after && after !== before) scope.ownWrite?.(after);
           // A memory stored on a guess is named in the server's handoffs (its source is the
           // guessed session, so it cannot be found by session).
           const stored = (result.structuredContent as { memory?: { id?: unknown } } | undefined)
@@ -719,7 +726,9 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         },
         scope.session,
       );
+      // The server's own write: a task it tracks keeps the stamp of it, on a guess or not.
       if (own) guess?.note('task', t.id);
+      scope.ownWrite?.(t.id);
       if (lost) {
         guess?.disown(t.id);
         return ok(
@@ -768,6 +777,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
     (args, scope) => {
       claimable(args.id, scope);
       const t = mindly.tasks.claim(args.id, scope.session);
+      scope.ownWrite?.(t.id);
       return ok(`Claimed task ${t.id}: ${safeLine(t.title, 200)}.`, { task: taskSummary(t) });
     },
   );

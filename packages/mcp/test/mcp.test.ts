@@ -1915,6 +1915,61 @@ describe('telling windows of one agent apart', () => {
       expect(a.mindly.store.sessions.get(sessB).currentTaskId).toBe(id);
     });
 
+    /**
+     * Nothing can be read of the process table. The server guesses at `win` while a second window
+     * runs and takes a task up; then the second window closes (the guess is the one window there
+     * is), and later a third one opens (a guess at arm's length again).
+     */
+    async function soleInBetween() {
+      const h = await harness();
+      await h.call('mindly_status');
+      await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win', 'session_start'));
+      const project = await h.mindly.projects.resolve(h.root);
+      const win = h.mindly.store.sessions.findByExternal(project.project.id, 'claude-code', 'win')!;
+      expect(sid(await h.call('mindly_status'))).toBe(win.id);
+      await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win-2', 'session_start'));
+      const made = await h.call('mindly_task_create', { title: 'server task', plan: ['a', 'b'] });
+      const id = (made.structured?.['task'] as { id: string }).id;
+      expect((await h.call('mindly_tasks', { mine: true })).text).toContain('server task');
+      await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win-2', 'session_end'));
+      const reopen = async () => {
+        await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win-3', 'session_start'));
+        expect(sid(await h.call('mindly_status'))).toBe(win.id);
+      };
+      return { h, win, id, reopen };
+    }
+
+    it('keeps a task its own that it updated while the guess was the one window there is', async () => {
+      const { h, id, reopen } = await soleInBetween();
+      const step = await h.call('mindly_task_update', {
+        id,
+        plan: [
+          { text: 'a', done: true },
+          { text: 'b', done: false },
+        ],
+      });
+      expect(step.text).not.toContain('no longer yours');
+      await reopen();
+      expect((await h.call('mindly_tasks', { mine: true })).text).toContain('server task');
+      expect((await h.call('mindly_context')).text).toMatch(/Your open tasks[\s\S]*server task/);
+      const upd = await h.call('mindly_task_update', { id, blockers: ['x'] });
+      expect(upd.text).not.toContain('no longer yours');
+      expect((await h.call('mindly_tasks', { mine: true })).text).toContain('server task');
+    });
+
+    it('keeps a task its own that it claimed while the guess was the one window there is', async () => {
+      const { h, win, id, reopen } = await soleInBetween();
+      expect((await h.call('mindly_task_claim', { id })).text).toMatch(/^Claimed/);
+      // Acting as the one window there is, the claim made it that session's current task.
+      expect(h.mindly.store.sessions.get(win.id).currentTaskId).toBe(id);
+      await reopen();
+      expect((await h.call('mindly_tasks', { mine: true })).text).toContain('server task');
+      const again = await h.call('mindly_task_claim', { id });
+      expect(again.text).toMatch(/^Claimed/);
+      const upd = await h.call('mindly_task_update', { id, blockers: ['x'] });
+      expect(upd.text).not.toContain('no longer yours');
+    });
+
     it('files a handoff in its own name on a guess, so it never picks it up itself', async () => {
       const a = await harness(windowA);
       const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);

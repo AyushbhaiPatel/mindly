@@ -64,6 +64,12 @@ export interface CallScope {
   session: Session;
   /** Present while the server speaks for a session it only guessed at. */
   guess?: GuessScope;
+  /**
+   * Present while the server acts as a session it only guessed at that is the one window there
+   * is: tells it that this call wrote task `taskId` (and perhaps made it the session's current
+   * task) in its own right, so that a task it tracks from an earlier guess stays its own.
+   */
+  ownWrite?: (taskId: string) => void;
 }
 
 /** What a call made on a guessed session records of its own work. */

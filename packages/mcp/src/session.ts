@@ -81,6 +81,11 @@ interface ServerWork {
   currentTask: string | null;
   /** Memories it recorded: they stay where they are, and are named in its handoffs. */
   memories: Set<string>;
+  /**
+   * Current tasks it set itself, by session, while acting as a guess that was the one window
+   * there is: such a pointer does not tell that the session's window took the task up.
+   */
+  currents: Map<string, string>;
 }
 
 /** Most rows a server records while on a guess; past it, new rows stay where they are made. */
@@ -484,7 +489,10 @@ export class SessionResolver {
       }
       this.carryWork(session.id, this.bound.sure);
       const now = store.sessions.get(this.bound.id);
-      if (this.bound.sure || (await this.sole(project, now))) return { project, session: now };
+      if (this.bound.sure) return { project, session: now };
+      if (await this.sole(project, now)) {
+        return { project, session: now, ownWrite: (taskId) => this.ownWrite(now.id, taskId) };
+      }
       return this.guessScope(project, now);
     }
 
@@ -569,7 +577,12 @@ export class SessionResolver {
     // Looked up when used, not now: by the time a slow call notes what it wrote, the server may
     // have moved on and settled what it had (and the row then goes after it from where it is).
     const work = (): ServerWork =>
-      (this.work ??= { rows: new Map(), currentTask: null, memories: new Set() });
+      (this.work ??= {
+        rows: new Map(),
+        currentTask: null,
+        memories: new Set(),
+        currents: new Map(),
+      });
     const at = session.id;
     const owns = (id: string): boolean => {
       const row = this.work?.rows.get(`task:${id}`);
@@ -664,9 +677,39 @@ export class SessionResolver {
     const out = new Set<string>();
     for (const s of this.mindly.store.sessions.listLive(projectId, LIVE_WINDOW_MS)) {
       if (s.status === 'ended' || s.id === ownId || s.externalId === this.externalId) continue;
-      if (s.currentTaskId) out.add(s.currentTaskId);
+      // A current task this server set itself, acting as that session, is not the window's doing.
+      if (s.currentTaskId && this.work?.currents.get(s.id) !== s.currentTaskId) {
+        out.add(s.currentTaskId);
+      }
     }
     return out;
+  }
+
+  /**
+   * A call made while the server acted as the guessed session `sessionId` (the one window there
+   * is) wrote task `taskId`. When it is a task the server tracks from a guess, this was the
+   * server's own write: its stamp is taken again, and a current task the call set is the
+   * server's doing, not the window's.
+   */
+  private ownWrite(sessionId: string, taskId: string): void {
+    const work = this.work;
+    const row = work?.rows.get(`task:${taskId}`);
+    if (!work || !row) return;
+    const store = this.mindly.store;
+    try {
+      const task = store.tasks.find(taskId);
+      const stamp = store.sessions.rowStamp('task', taskId);
+      if (!task || !stamp) return;
+      const at = task.ownerSessionId === sessionId ? sessionId : row.at;
+      work.rows.set(`task:${taskId}`, { ...row, at, ...stamp });
+      if (store.sessions.find(sessionId)?.currentTaskId === taskId) {
+        work.currents.set(sessionId, taskId);
+      }
+    } catch (err) {
+      this.logger?.warn('mcp work not recorded', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
