@@ -40,7 +40,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 
 const RUNNER_CACHES = [/\/_npx\//, /\/dlx[-/]/, /\/\.bun\/install\/cache\//, /\/bunx-[^/]+\//];
 
@@ -406,22 +406,20 @@ const VERSIONED = /[\\/](v?\d+\.\d+\.\d+|Cellar|fnm_multishells)[\\/]/;
 /**
  * The path to record for the Node running now. `process.execPath` is the resolved binary, which
  * for Homebrew, nvm or fnm names the version (`Cellar/node/22.x/bin/node`) and disappears with
- * the next upgrade. A stable path that resolves to the same binary is preferred: a well-known
- * location first (agents started from a GUI may not have the user's PATH), then `node` on PATH.
+ * the next upgrade. A well-known location that resolves to the same binary is preferred.
+ *
+ * PATH is deliberately not searched: it differs between a terminal, a GUI-launched agent and a
+ * test harness, so the recorded command would change with it. Then `doctor`, `split` and `init`
+ * itself, comparing the configs with the command they would write, would see agents connected
+ * from another shell as not connected.
  */
 export function stableNode(
-  env: NodeJS.ProcessEnv,
   execPath: string = process.execPath,
   wellKnown: readonly string[] = STABLE_NODES,
 ): string {
   if (process.platform === 'win32') return execPath;
   const target = real(execPath);
-  const onPath = (env['PATH'] ?? '')
-    .split(delimiter)
-    .filter((d) => isAbsolute(d))
-    .slice(0, 256)
-    .map((d) => join(d, 'node'));
-  for (const candidate of [...wellKnown, ...onPath]) {
+  for (const candidate of wellKnown) {
     if (VERSIONED.test(candidate)) continue;
     try {
       accessSync(candidate, constants.X_OK);

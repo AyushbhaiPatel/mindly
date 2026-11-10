@@ -118,15 +118,21 @@ describe('the command recorded by init', () => {
     const home = tempDir('mindly-home-');
     const env = { PATH: '', MINDLY_HOME: home };
     const tree = runnerTree(npxTree())!;
-    const expected = [stableNode(env), launcherPath(home)];
+    const expected = [stableNode(), launcherPath(home)];
     expect(await installCommand(env, join(tree.root, tree.entry))).toEqual(expected);
     const copied = await ensureCopy(home, '0.5.0', tree);
     expect(await installCommand(env, copied)).toEqual(expected);
   });
 
+  it('is the same whatever PATH holds, so agents connected from another shell stay connected', async () => {
+    const dir = tempDir('mindly-path-node-');
+    symlinkSync(process.execPath, join(dir, 'node'));
+    expect(await installCommand({ PATH: dir })).toEqual(await installCommand({ PATH: '' }));
+  });
+
   it('from an installed package is Node running that package', async () => {
     const command = await installCommand({ PATH: '' });
-    expect(command[0]).toBe(stableNode({ PATH: '' }));
+    expect(command[0]).toBe(stableNode());
     expect(realpathSync(command[0] as string)).toBe(realpathSync(process.execPath));
     expect(inRunnerCache(command[1] as string)).toBe(false);
   });
@@ -308,8 +314,7 @@ describe('Node path', () => {
 
   it('prefers a stable path that resolves to the running Node over the versioned one', () => {
     const { keg, link } = brew();
-    expect(stableNode({ PATH: '' }, keg, [link])).toBe(link);
-    expect(stableNode({ PATH: dirname(link) }, keg, [])).toBe(link);
+    expect(stableNode(keg, [link])).toBe(link);
   });
 
   it('keeps the running path when no stable one leads to it', () => {
@@ -317,8 +322,8 @@ describe('Node path', () => {
     const other = join(root, 'other', 'node');
     file(other, '#!/bin/sh\n');
     chmodSync(other, 0o755);
-    expect(stableNode({ PATH: dirname(other) }, keg, [])).toBe(keg);
-    expect(stableNode({ PATH: dirname(keg) }, keg, [])).toBe(keg);
+    expect(stableNode(keg, [other])).toBe(keg);
+    expect(stableNode(keg, [])).toBe(keg);
   });
 });
 

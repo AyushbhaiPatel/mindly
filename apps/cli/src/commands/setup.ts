@@ -214,11 +214,11 @@ export async function installCommand(
 ): Promise<string[]> {
   // Checked first: npx puts its cache's `.bin` on PATH, so the `mindly` found there is the cache.
   const kept = keptLaunch(env, entry);
-  if (kept !== null) return [stableNode(env), launcherPath(kept.home)];
+  if (kept !== null) return [stableNode(), launcherPath(kept.home)];
   const running = process.argv[1];
   const global = await onPath('mindly', env);
   if (global && running && sameFile(global, running)) return [global];
-  return [stableNode(env), entry];
+  return [stableNode(), entry];
 }
 
 /**
