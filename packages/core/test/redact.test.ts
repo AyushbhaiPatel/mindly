@@ -261,6 +261,29 @@ describe('redact', () => {
     ['$HTTPIE -a admin:PW x.test', 'PW'],
     ['http POST https://x.test\n  -a admin:PW', 'PW'],
     ['sudo -u deploy http POST https://x.test\n  --auth admin:PW', 'PW'],
+    // A token for httpie's or xh's bearer auth, and a clustered -a.
+    ['http -A bearer -a PW https://api.example.com/me', 'PW'],
+    ['http --auth-type=bearer --auth=PW https://api.example.com/me', 'PW'],
+    ['http --auth-type bearer -a PW https://api.example.com/me', 'PW'],
+    ['http -a PW -A jwt https://api.example.com/me', 'PW'],
+    ['xh -A bearer -a PW https://api.example.com/me', 'PW'],
+    ['xh --bearer PW https://api.example.com/me', 'PW'],
+    ['xh --bearer=PW https://api.example.com/me', 'PW'],
+    ['http -va admin:PW https://api.example.com/me', 'PW'],
+    ['xh -va admin:PW https://api.example.com/me', 'PW'],
+    ['http -vaadmin:PW https://api.example.com/me', 'PW'],
+    // Authorization headers as httpie items and curl -H values.
+    ['http POST https://x.test Authorization:"Bearer PW"', 'PW'],
+    ['xh https://x.test Authorization:PW', 'PW'],
+    ["http https://x.test 'Proxy-Authorization:Basic PW'", 'PW'],
+    ['curl -H Authorization:"Bearer PW" https://x.test', 'PW'],
+    ['curl --header="Authorization: Token PW" https://x.test', 'PW'],
+    ['curl -HAuthorization:PW https://x.test', 'PW'],
+    // A quoted argument is one word: an ssh inside it is not a command.
+    ['curl -d \'{"cmd":"ssh db01"}\' -su me@corp.example:PW https://x.test', 'PW'],
+    // Lines of a here-document are read as lines of their own.
+    ["bash <<'EOF'\ncurl -u admin:PW https://x.test\nEOF", 'PW'],
+    ["cat <<EOF\ndon't stop\ncurl -u admin:PW https://x.test\nEOF", 'PW'],
     // An ssh or sftp that is a quoted string or an option's value is not a command.
     ["curl -d 'ssh' -su me@example.com:PW https://x.test", 'PW'],
     ['curl --proto-default sftp -su me@example.com:PW example.com/file', 'PW'],
@@ -357,6 +380,13 @@ describe('redact', () => {
     'wget http://x.test -a logs:file.txt',
     'curl http://x.test -a old:new',
     'python3 -m http.server -a 0.0.0.0:8000',
+    // A user name alone is not a secret: the client asks for the password.
+    'http -a admin https://x.test',
+    'http -A basic -a admin https://x.test',
+    'curl -u admin https://x.test',
+    'curl -H "Authorization: Bearer $TOKEN" https://x.test',
+    'curl -H "Accept: text/plain" https://x.test',
+    'http https://x.test Accept:application/json',
     'docker run -e URL=$HTTP_TOOL_URL -u app:staff image',
     'sudo -u deploy docker run image\n    -u app:staff',
     'sudo -n docker run image\n    -u app:staff',
@@ -409,6 +439,38 @@ describe('redact', () => {
     expect(fastest(log)).toBeLessThan(100);
     const env = `env ${'-u X '.repeat(6)}timeout -s KILL 30 `;
     expect(fastest(`${env.repeat(400)}curl x\n  -u admin:pw\n`)).toBeLessThan(50);
+  });
+
+  it('reads a long quoted body as one argument', () => {
+    // A body over 2,000 characters that mentions ssh once hid the -u after it.
+    const log = 'ERROR backup_runner exitcode=12 retrying_in_300s\\n';
+    const body = `{"fields":{"description":"${log.repeat(6)}To reproduce, ssh into db01:\\n${log.repeat(34)}"}}`;
+    const command = `curl -X POST https://x.test/rest/api/2/issue -d '${body}' -sSu me@corp.example:hunter2SecretValue9`;
+    expect(command.length).toBeGreaterThan(2_000);
+    expect(redact(command).text).not.toContain('hunter2SecretValue9');
+  });
+
+  it.each([
+    ['clustered user flags after one curl', `curl ${' -su @:x'.repeat(31_250)}`],
+    ['user flags without a client', '-u a:b -u a: -ua:b -a a:b -a a: -aa:b\n'],
+    ['one long curl line', `curl ${' -u a:bcd'.repeat(28_000)}`],
+    ['curl lines', 'curl -u a:bcd x\n'],
+    ['wrapped lines', 'curl x\n  -u a:bcd\n'],
+    ['quoted bodies', 'curl -d "a b" -u a:bcd '],
+    ['nested commands', 'sh -c "curl -u a:bcd x" '],
+    ['commands nested twice', `sh -c "ssh h 'curl -u a:bcd x'" `],
+    ['unclosed quotes', "curl ' -u a:b\n"],
+    ['httpie items', 'http -va a:b -A bearer -a tok Authorization:x '],
+    ['remote-copy words', 'curl rsync -su a@b:/c '],
+  ])('reads 250 KB of %s in under 100 ms', (_name, unit) => {
+    const text = unit.length > 250_000 ? unit : unit.repeat(Math.ceil(250_000 / unit.length));
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const started = performance.now();
+      redact(text);
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(best).toBeLessThan(100);
   });
 
   it('does not redact 2,500 user:group arguments any differently from the first', () => {
