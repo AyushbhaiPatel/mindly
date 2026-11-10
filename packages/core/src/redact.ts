@@ -175,17 +175,19 @@ const CLIENT_NAMES = 'curlie|aria2c|lftp|hurl|httpstat|httpie';
  * non-word character, with or without a directory or `.exe` (`!curl`, `C:\me>curl`,
  * `/usr/bin/curl`, `CURL.EXE`), including builds such as `curl_chrome116` or
  * `curl-impersonate`; or a variable that holds one. A variable counts when its name is a client
- * name, alone or with a short affix (`$CURL`, `${CURL_BIN}`, `$MY_WGET`), never a setting that
- * only mentions one (`$HTTP_PORT`, `$HTTP_PROXY`); an assignment counts when its name starts
- * with one (`CURL_OPTS="..."`, not `use_curl=1`). A client behind a shell function or alias
- * defined elsewhere is not recognised.
+ * name, alone or with an affix (`$CURL`, `${CURL_BIN}`, `$CURL_IMPERSONATE`, `$MY_WGET`), or
+ * names an HTTP client or command (`$HTTP_CLIENT`, `$HTTP_CMD`), never a setting that only
+ * mentions one (`$HTTP_PORT`, `$HTTP_PROXY`); an assignment counts when its name starts with one
+ * (`CURL_OPTS="..."`, not `use_curl=1`). A client behind a shell function or alias defined
+ * elsewhere is not recognised.
  */
 const HTTP_CLIENT_SOURCE = [
   '(?<![\\p{L}\\p{N}_])(?:',
   // A program name; after `$` or `${` it is a variable, judged by the next alternative.
   `(?<![$\\{])(?:curl(?:[-_][A-Za-z0-9_-]{1,40}|\\d{1,4})?|wget2?|ab|${CLIENT_NAMES})`,
   '(?:\\.exe)?(?![\\p{L}\\p{N}_])',
-  `|\\$\\{?(?:[A-Za-z0-9]{1,8}_)?(?:curl|wget|${CLIENT_NAMES})(?:_(?!proxy\\b)[A-Za-z0-9]{1,8})?\\}?(?![A-Za-z0-9_])`,
+  `|\\$\\{?(?:[A-Za-z0-9]{1,16}_)?(?:curl|wget|${CLIENT_NAMES})(?:_(?!proxy\\b)[A-Za-z0-9]{1,16})?\\}?(?![A-Za-z0-9_])`,
+  '|\\$\\{?(?:[A-Za-z0-9]{1,16}_)?https?_?(?:client|cmd|command|bin|tool)\\}?(?![A-Za-z0-9_])',
   '|(?:curl|wget)(?:_[A-Za-z0-9]{1,12})?=',
   ')',
 ].join('');
@@ -193,10 +195,23 @@ const HTTP_CLIENT_SOURCE = [
 const HTTP_CLIENT = new RegExp(HTTP_CLIENT_SOURCE, 'iu');
 
 /**
- * A line whose first word is an HTTP client, after an optional shell prompt (`$ curl ...`): the
- * start of a command that may be wrapped over indented option lines.
+ * Commands that run another command, with their options, a number (`timeout 10`) or a variable
+ * assignment (`env A=1`) between them and it: `sudo curl`, `time curl`, `nice -n 5 curl`.
  */
-const CLIENT_LINE = new RegExp(`[ \\t]*(?:[$>%#][ \\t]+)?${HTTP_CLIENT_SOURCE}`, 'iuy');
+const RUNNER_PREFIX =
+  '(?:(?:sudo|doas|time|env|nice|ionice|nohup|command|exec|timeout|stdbuf|caffeinate|chronic)' +
+  '(?:[ \\t]+(?:-[^\\s]{0,40}|\\d{1,6}[smhd]?)){0,8}[ \\t]+' +
+  '|[A-Za-z_][A-Za-z0-9_]{0,40}=[^\\s]{0,200}[ \\t]+){0,6}';
+
+/**
+ * A line whose command is an HTTP client, after an optional shell prompt and runner (`$ curl`,
+ * `sudo curl`, `env A=1 curl`): the start of a command that may be wrapped over indented option
+ * lines.
+ */
+const CLIENT_LINE = new RegExp(
+  `[ \\t]*(?:[$>%#][ \\t]+)?${RUNNER_PREFIX}${HTTP_CLIENT_SOURCE}`,
+  'iuy',
+);
 
 /** curl's short options that take no value, so they can come before `u` in one cluster. */
 const CURL_FLAG_CLUSTER = '[0-6aBfGgIijJkLlMNnOpqRsSvVZ#]{0,10}';
@@ -325,7 +340,17 @@ function clientBeforeFlag(flagGroup: string, at: MatchContext): boolean {
 }
 
 /** Programs whose short-flag clusters take a `user@host:/path` target, not credentials. */
-const REMOTE_COPY = /(?<![\p{L}\p{N}_-])(?:rsync|scp|sftp|ssh|rclone)(?![\p{L}\p{N}_-])/iu;
+const REMOTE_COPY =
+  /^["']?(?:(?:\/|\.{1,2}\/|~\/)[\w./-]{0,200}\/)?(?:rsync|scp|sftp|ssh|rclone)["']?$/i;
+
+/**
+ * True when a remote-copy program is run as a command word in `words`: a whole argument, alone
+ * or as an executable path (`/usr/bin/rsync`). A URL or path that only mentions one
+ * (`https://ssh.example.com/api`, `/user/ssh/keys`) does not count.
+ */
+function namesRemoteCopy(words: string): boolean {
+  return words.split(/[\s;&|()]+/).some((w) => REMOTE_COPY.test(w));
+}
 
 /**
  * Skip for the `-u name:value` rules: not in an HTTP client's command, or not a literal secret.
@@ -343,7 +368,7 @@ function isNotHttpCredentials(groups: readonly string[], at: MatchContext): bool
   if (client === -1) return true;
   const cluster = /^[\s"']?-[^-\s"'=]{2,}/.test(flag);
   if (cluster && (name.includes('@') || value.startsWith('/'))) {
-    return REMOTE_COPY.test(at.text.slice(client, pos));
+    return namesRemoteCopy(at.text.slice(client, pos));
   }
   return false;
 }

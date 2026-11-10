@@ -226,6 +226,22 @@ describe('redact', () => {
     ['curl https://x.test -d "line1 \\\nx && y" -u admin:PW', 'PW'],
     // A wrapped command after a prompt, and after an option line.
     ['$ curl https://x.test\n    -u admin:PW', 'PW'],
+    // A wrapped command whose client runs under sudo, time, env and the like.
+    ['sudo curl https://api.example.com/v1/items\n    -u admin:PW', 'PW'],
+    ['time curl https://api.example.com/v1/items\n    -u admin:PW', 'PW'],
+    ['env NO_COLOR=1 curl https://x.test\n    -u admin:PW', 'PW'],
+    ['NO_COLOR=1 curl https://x.test\n    -u admin:PW', 'PW'],
+    ['nice -n 5 curl https://x.test\n    -u admin:PW', 'PW'],
+    ['timeout 10 curl https://x.test\n    -u admin:PW', 'PW'],
+    ['$ sudo -E command curl https://x.test\n    --user admin:PW', 'PW'],
+    // A URL or path that mentions ssh or rsync is not a remote-copy command.
+    ['curl https://ssh.example.com/api -su me@example.com:PW', 'PW'],
+    ['curl https://code.example.com/user/ssh/keys -su me@example.com:PW', 'PW'],
+    ['curl -o /tmp/rsync.tar.gz https://x.test -su me@example.com:PW', 'PW'],
+    // Variables with a longer affix, or named as an HTTP client.
+    ['$HTTP_CLIENT -u admin:PW https://x.test', 'PW'],
+    ['${HTTPS_CMD} -u admin:PW https://x.test', 'PW'],
+    ['$CURL_IMPERSONATE -u admin:PW https://x.test', 'PW'],
     ['curl https://x.test\n  --data a=1\n  --header "X: y"\n  -u admin:PW', 'PW'],
   ])('redacts a secret passed as a command-line argument: %s', (template, placeholder) => {
     const secret = placeholder.replace('PW', 'hunter2SecretValue9');
@@ -296,6 +312,12 @@ describe('redact', () => {
     // An rsync, scp or ssh after the client owns its cluster and target.
     'curl https://x.test then rsync -avu user@host:/data/ .',
     'curl -O https://x.test/f && scp -ru deploy@host:/srv/app .',
+    'curl https://x.test then /usr/bin/rsync -avu user@host:/data/ .',
+    // A runner in front of another program does not make its wrapped options curl's.
+    'sudo docker run image\n    -u app:staff',
+    'time make build\n    -u 1000:1000',
+    // An HTTP setting is not a client.
+    'docker run -e PORT=$HTTP_PORT_NUMBER -u app:staff image',
     // A variable that only mentions http or curl is not a client.
     'docker run -p $HTTP_PORT:80 -u 1000:1000 image',
     'docker run -p ${HTTPS_PORT}:443 -u app:staff image',
@@ -385,6 +407,8 @@ describe('redact', () => {
     ['many wrapped lines', 'curl x\n  -u a:bcd\n'.repeat(62_000)],
     ['many commands', 'curl x; a -u a:bcd\n'.repeat(52_000)],
     ['many ampersands', 'curl x&y & -u a:bcd '.repeat(48_000)],
+    ['many runner lines', 'sudo -E -n nice -n 5 x\n  -u a:bcd\n'.repeat(6_000)],
+    ['one long runner line', `sudo ${'-a '.repeat(70_000)}\n  -u a:bcd`],
     ['unclosed quotes', 'password="'.repeat(20_000)],
   ])('stays fast on %s', (_name, input) => {
     expect(input.length).toBeGreaterThanOrEqual(190_000);
