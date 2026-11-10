@@ -1,6 +1,7 @@
 import {
   describeError,
   fingerprint,
+  matchesAnyGlob,
   sanitizeLine,
   type Conflict,
   type EventType,
@@ -36,6 +37,8 @@ export const SAVE_WINDOW_MS: Readonly<Record<SaveKind, number>> = {
   check_broken_early: 24 * HOUR,
   limit_handoff: 24 * HOUR,
 };
+
+const ALL_KINDS = Object.keys(SAVE_WINDOW_MS) as SaveKind[];
 
 /** Tool calls of a session as the hook handler records them (`pre_tool`, `post_tool`). */
 const TOOL_TYPES: readonly EventType[] = ['tool.before', 'tool.after'];
@@ -158,7 +161,9 @@ export class SavesService {
         refs: { intentId, ...(text(o.conflictId) ? { conflictId: o.conflictId as string } : {}) },
       });
     }
-    const paths = strings(p.paths, 20);
+    // A call is denied as a whole when one of its files is protected. The save is about the
+    // protected files only: the rest of the call may be written later without breaking the rule.
+    const paths = ruleId ? this.protectedBy(ruleId, strings(p.paths, 50)).slice(0, 20) : [];
     if (ruleId && paths.length > 0) {
       this.record(e, {
         kind: 'rule_enforced',
@@ -181,6 +186,21 @@ export class SavesService {
         fingerprint: fingerprint('mistake_avoided', mistakes[0], command),
         refs: { memoryId: mistakes[0] as string, command, ...(line ? { commandLine: line } : {}) },
       });
+    }
+  }
+
+  /**
+   * The paths of a denied call that the rule's scope covers. When the rule cannot be read any more
+   * (or its scope names none of them), every path of the call is kept, as the denial reported it.
+   */
+  private protectedBy(ruleId: string, paths: string[]): string[] {
+    const rule = this.k.store.memories.find(ruleId);
+    if (!rule || rule.scope.paths.length === 0) return paths;
+    try {
+      const covered = paths.filter((p) => matchesAnyGlob(p, rule.scope.paths));
+      return covered.length > 0 ? covered : paths;
+    } catch {
+      return paths;
     }
   }
 
@@ -300,6 +320,19 @@ export class SavesService {
     const helped = this.k.store.sessions.find(e.sessionId);
     if (!helped) return;
     const now = this.k.clock.now();
+    // What the helped session is working on: read once, on the first impact delivery.
+    let working: Set<string> | null = null;
+    const workingOn = (): Set<string> => {
+      if (working) return working;
+      working = new Set<string>();
+      for (const i of this.k.store.intents.activeForSession(helped.id)) {
+        for (const f of i.targets.files) working.add(f);
+      }
+      for (const c of this.k.store.fileChanges.forSession(helped.id, now - 2 * HOUR)) {
+        working.add(c.path);
+      }
+      return working;
+    };
     for (const id of strings(e.payload.ids, 50)) {
       const d = this.k.store.deliveries.find(id);
       if (!d || d.kind !== 'impact' || !d.dedupeKey) continue;
@@ -308,13 +341,7 @@ export class SavesService {
       if (!conflict || conflict.kind !== 'impact' || conflict.status === 'dismissed') continue;
       const changedFile = conflict.paths[0];
       if (changedFile === undefined) continue;
-      const mine = new Set<string>();
-      for (const i of this.k.store.intents.activeForSession(helped.id)) {
-        for (const f of i.targets.files) mine.add(f);
-      }
-      for (const c of this.k.store.fileChanges.forSession(helped.id, now - 2 * HOUR)) {
-        mine.add(c.path);
-      }
+      const mine = workingOn();
       let told = conflict.paths.slice(1).filter((p) => mine.has(p));
       if (told.length === 0 && mine.has(changedFile)) told = [changedFile];
       if (told.length === 0) continue;
@@ -742,9 +769,14 @@ export class SavesService {
 
   /** Caught saves of a project, optionally of one kind and helped session (indexed by status). */
   private caughtOf(projectId: string, kind: SaveKind | null, sessionId: string | null): Save[] {
-    return this.k.store.saves
-      .list(projectId, { statuses: ['caught'], ...(kind ? { kinds: [kind] } : {}), limit: 500 })
-      .filter((s) => sessionId === null || s.sessionIds[0] === sessionId);
+    if (sessionId !== null) {
+      return this.k.store.saves.caughtFor(projectId, sessionId, kind ? [kind] : ALL_KINDS, 500);
+    }
+    return this.k.store.saves.list(projectId, {
+      statuses: ['caught'],
+      ...(kind ? { kinds: [kind] } : {}),
+      limit: 500,
+    });
   }
 
   /** Caught or confirmed saves about a conflict. */
