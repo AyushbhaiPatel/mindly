@@ -5,7 +5,8 @@ import { createServer, type AddressInfo, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
-import { MAX_LIVE_SOCKETS, probeDaemonPort, startDaemon, type Daemon } from '../src/index.js';
+import { probeDaemonPort } from '@mindly/core';
+import { MAX_LIVE_SOCKETS, startDaemon, type Daemon } from '../src/index.js';
 import { fakeRunners, repo, seedSession, tempDir } from './helpers.js';
 
 let daemon: Daemon | null = null;
@@ -16,8 +17,12 @@ afterEach(async () => {
   daemon = null;
 });
 
-async function start(home = tempDir('mindly-live-home-')): Promise<Daemon> {
+async function start(
+  home = tempDir('mindly-live-home-'),
+  options: { force?: boolean } = {},
+): Promise<Daemon> {
   daemon = await startDaemon({
+    ...options,
     home,
     env: { MINDLY_HOME: home },
     port: 0,
@@ -129,12 +134,39 @@ describe('daemon lifecycle', () => {
     try {
       expect(await probeDaemonPort(port, 300)).toBe('silent');
       // An ephemeral port would let a second daemon listen: it must not get that far.
-      await expect(start(home)).rejects.toThrow(/not answering/);
+      await expect(start(home)).rejects.toThrow(
+        /holds port \d+ and is not answering: it may be a busy Mindly daemon or another program/,
+      );
       expect(readFileSync(statePath, 'utf8')).toBe(state);
+      // Asked to, it starts anyway and takes over the state file.
+      const d = await start(home, { force: true });
+      expect(JSON.parse(readFileSync(statePath, 'utf8'))).toMatchObject({ port: d.port });
+      expect(await probeDaemonPort(d.port)).toBe('daemon');
     } finally {
       for (const socket of held) socket.destroy();
       busy.close();
       await once(busy, 'close');
+    }
+  });
+
+  it('starts when another program on the recorded port hangs up on it', async () => {
+    const home = tempDir('mindly-live-home-');
+    // Not HTTP at all: resets every connection, as many programs do with input they do not know.
+    const other = createServer((socket) => socket.resetAndDestroy()).listen(0, '127.0.0.1');
+    await once(other, 'listening');
+    const port = (other.address() as AddressInfo).port;
+    try {
+      expect(await probeDaemonPort(port)).toBe('absent');
+      writeFileSync(
+        join(home, 'daemon.json'),
+        JSON.stringify({ pid: process.pid, port, startedAt: 1, version: '0.0.1' }),
+      );
+      const d = await start(home);
+      expect(JSON.parse(readFileSync(join(home, 'daemon.json'), 'utf8'))).toMatchObject({
+        port: d.port,
+      });
+    } finally {
+      other.close();
     }
   });
 

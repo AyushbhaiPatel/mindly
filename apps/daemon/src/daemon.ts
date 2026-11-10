@@ -1,12 +1,13 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import {
+  describeError,
+  type HomePaths,
+  homePaths,
+  type Logger,
   MINDLY_VERSION,
   MindlyError,
-  describeError,
-  homePaths,
+  probeDaemonPort,
   writeJsonFile,
-  type HomePaths,
-  type Logger,
 } from '@mindly/core';
 import type { Mindly } from '@mindly/engine';
 import { createRunners, type RunnerPort } from '@mindly/runners';
@@ -58,6 +59,11 @@ export interface DaemonOptions {
   dashboardDir?: string | null;
   /** Run background jobs (default true). */
   jobs?: boolean;
+  /**
+   * Start even when the recorded daemon's port is held open without an answer. The recorded
+   * process is never signalled; if it is a daemon on the same port, `listen()` still fails.
+   */
+  force?: boolean;
   /** Headless agent runners (default `createRunners()`); injectable for tests. */
   runners?: RunnerPort;
   /** Options passed to `openMindly` (e.g. `disableNotify`). */
@@ -116,50 +122,13 @@ export function readDaemonState(path: string): DaemonState | null {
   }
 }
 
-const HEALTH_TIMEOUT_MS = 2000;
-
-/**
- * What is on a port a `daemon.json` names:
- * - `daemon`: a Mindly daemon answers `GET /api/health`;
- * - `absent`: no Mindly daemon can be there: the connection is refused, or something answers
- *   that is clearly not Mindly;
- * - `silent`: something holds the port and does not answer in time. That may be a daemon busy
- *   with a long job or a loaded machine, so it never counts as gone.
- */
-export type PortOwner = 'daemon' | 'absent' | 'silent';
-
-/** Asks `port` who is there (see {@link PortOwner}). Never throws. */
-export async function probeDaemonPort(
-  port: number,
-  timeoutMs = HEALTH_TIMEOUT_MS,
-): Promise<PortOwner> {
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) return 'absent';
-  let res: Response;
-  try {
-    res = await fetch(`http://${DAEMON_HOST}:${port}/api/health`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (err) {
-    const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
-    return code === 'ECONNREFUSED' ? 'absent' : 'silent';
-  }
-  // A full HTTP answer came back, so whoever is there is not stuck: it is Mindly or it is not.
-  try {
-    if (!res.ok) return 'absent';
-    const body = (await res.json()) as { ok?: unknown; version?: unknown } | null;
-    return body?.ok === true && typeof body.version === 'string' ? 'daemon' : 'absent';
-  } catch (err) {
-    return (err as { name?: unknown } | null)?.name === 'TimeoutError' ? 'silent' : 'absent';
-  }
-}
-
 /**
  * Builds a daemon without listening: opens Mindly, loads or creates the token, builds the HTTP
  * app. Refuses to proceed when `daemon.json` names a live process, unless that file is provably
  * left over: after a crash or a restart its PID can belong to another program, and then nothing
- * (or something that is not Mindly) is on the recorded port. Only that proves it. A port that is
- * held but does not answer may be a daemon blocked for a while, and starting a second one next to
- * it would cancel its runs and schedule the same jobs on the same database.
+ * of Mindly's is on the recorded port (see `probeDaemonPort`). A port that is held open without
+ * an answer may be a daemon blocked for a while, and starting a second one next to it would
+ * cancel its runs and schedule the same jobs on the same database; that needs `force`.
  *
  * The port is `daemon.port` from the config (7878 unless changed) or `options.port`; tests and
  * embedders may pass 0 for an ephemeral one. So two daemons do not always compete for one port,
@@ -182,15 +151,20 @@ export async function createDaemon(options: DaemonOptions = {}): Promise<Daemon>
     const existing = readDaemonState(paths.daemonState);
     if (existing && pidAlive(existing.pid)) {
       const owner = await probeDaemonPort(existing.port);
-      if (owner !== 'absent') {
+      if (owner === 'daemon') {
         throw new MindlyError(
           'conflict',
-          owner === 'daemon'
-            ? `a Mindly daemon is already running (pid ${existing.pid}, port ${existing.port})`
-            : `a Mindly daemon seems to be running but is not answering (pid ${existing.pid}, port ${existing.port}); wait for it, or stop that process first`,
+          `a Mindly daemon is already running (pid ${existing.pid}, port ${existing.port})`,
+        );
+      }
+      if (owner === 'silent' && options.force !== true) {
+        throw new MindlyError(
+          'conflict',
+          `process ${existing.pid} holds port ${existing.port} and is not answering: it may be a busy Mindly daemon or another program (start with --force to discard the recorded state)`,
         );
       }
       mindly.kernel.logger.warn('ignoring a stale daemon.json', {
+        forced: owner === 'silent',
         pid: existing.pid,
         port: existing.port,
       });

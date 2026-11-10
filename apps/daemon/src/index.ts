@@ -8,7 +8,6 @@ export {
   createDaemon,
   DAEMON_HOST,
   pidAlive,
-  probeDaemonPort,
   readDaemonState,
   registerJobs,
   SHUTDOWN_GRACE_MS,
@@ -17,7 +16,6 @@ export {
   type Daemon,
   type DaemonOptions,
   type DaemonState,
-  type PortOwner,
 } from './daemon.js';
 export {
   AuthState,

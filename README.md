@@ -367,7 +367,7 @@ mindly replay --prompt "…" --agents claude-code,codex
 ```bash
 mindly init | uninstall | doctor
 mindly config get|set|unset <key> [value]
-mindly daemon start|stop|status
+mindly daemon start [--force] | stop | status
 mindly export | forget --project
 ```
 

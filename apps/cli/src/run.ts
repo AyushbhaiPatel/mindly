@@ -152,6 +152,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .command('start')
     .description('Start the daemon (in the background unless --foreground)')
     .option('--foreground', 'run in this terminal')
+    .option(
+      '--force',
+      'start even when the recorded process holds its port without answering (that process is left alone)',
+    )
     .action(
       act((o: object) => async (out) => (await import('./commands/daemon.js')).daemonStart(out, o)),
     );

@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   cpSync,
@@ -931,59 +931,109 @@ describe('doctor, config, export, misc', () => {
 
   it('daemon status and stop point to start when daemon.json outlived its daemon', async () => {
     const sb = sandbox();
-    // A live process that is not a Mindly daemon, and a port nothing listens on.
-    const probe = createServer().listen(0, '127.0.0.1');
-    await once(probe, 'listening');
-    const port = (probe.address() as AddressInfo).port;
-    probe.close();
-    await once(probe, 'close');
     mkdirSync(sb.mindlyHome, { recursive: true });
-    writeFileSync(
-      join(sb.mindlyHome, 'daemon.json'),
-      JSON.stringify({ pid: process.pid, port, startedAt: 1, version: '0.0.1' }),
-    );
-    const status = await cli(sb, ['daemon', 'status']);
-    expect(status.code).toBe(0);
-    expect(status.stdout).toContain("Mindly's background service is not running.");
-    expect(status.stdout).toContain('left over from an earlier run');
-    expect(status.stdout).toContain('mindly daemon start');
-    expect(status.stdout).not.toContain('mindly daemon stop');
-    const stop = await cli(sb, ['daemon', 'stop']);
-    expect(stop.code).toBe(0);
-    expect(stop.stdout).toContain('nothing to stop');
-    expect(stop.stdout).toContain('mindly daemon start replaces it');
+    const stateFile = join(sb.mindlyHome, 'daemon.json');
+    // The recorded PID belongs to a live program that is not a Mindly daemon.
+    const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+      stdio: 'ignore',
+    });
+    await once(bystander, 'spawn');
+    // On the recorded port: nothing at all, then a program that resets what it does not know.
+    const closed = createServer().listen(0, '127.0.0.1');
+    await once(closed, 'listening');
+    const closedPort = (closed.address() as AddressInfo).port;
+    closed.close();
+    await once(closed, 'close');
+    const resetting = createServer((socket) => socket.resetAndDestroy()).listen(0, '127.0.0.1');
+    await once(resetting, 'listening');
+    try {
+      for (const port of [closedPort, (resetting.address() as AddressInfo).port]) {
+        writeFileSync(
+          stateFile,
+          JSON.stringify({ pid: bystander.pid, port, startedAt: 1, version: '0.0.1' }),
+        );
+        const status = await cli(sb, ['daemon', 'status']);
+        expect(status.code).toBe(0);
+        expect(status.stdout).toContain("Mindly's background service is not running.");
+        expect(status.stdout).toContain('left over from an earlier run');
+        expect(status.stdout).toContain('mindly daemon start');
+        expect(status.stdout).not.toContain('mindly daemon stop');
+        expect(status.stdout).not.toContain('kill');
+        const stop = await cli(sb, ['daemon', 'stop']);
+        expect(stop.code).toBe(0);
+        expect(stop.stdout).toContain('nothing to stop');
+        expect(stop.stdout).toContain('mindly daemon start replaces it');
+      }
+      // Nothing was signalled.
+      await new Promise((r) => setTimeout(r, 100));
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
+    } finally {
+      resetting.close();
+      bystander.kill('SIGKILL');
+    }
   });
 
-  it('a service that holds its port without answering is busy, not gone', async () => {
+  it('a process that holds the port without answering is neither signalled nor replaced', async () => {
     const sb = sandbox();
-    // Accepts connections and never answers, like a daemon stuck in a long job.
+    // An ephemeral port for the service this test starts in the end.
+    expect((await cli(sb, ['config', 'set', 'daemon.port', '0'])).code).toBe(0);
+    const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+      stdio: 'ignore',
+    });
+    await once(bystander, 'spawn');
+    // Accepts connections and never answers: a busy service, or any other program.
     const held: Socket[] = [];
     const server = createServer((socket) => held.push(socket)).listen(0, '127.0.0.1');
     await once(server, 'listening');
     const port = (server.address() as AddressInfo).port;
+    const stateFile = join(sb.mindlyHome, 'daemon.json');
+    const state = JSON.stringify({ pid: bystander.pid, port, startedAt: 1, version: '0.0.1' });
+    writeFileSync(stateFile, state);
+    let started = false;
     try {
-      mkdirSync(sb.mindlyHome, { recursive: true });
-      const stateFile = join(sb.mindlyHome, 'daemon.json');
-      const state = JSON.stringify({ pid: process.pid, port, startedAt: 1, version: '0.0.1' });
-      writeFileSync(stateFile, state);
       const status = await cli(sb, ['daemon', 'status']);
       expect(status.code).toBe(0);
-      expect(status.stdout).toContain(`holds port ${port} but is not answering`);
-      expect(status.stdout).toContain('It may be busy');
+      expect(status.stdout).toContain(`holds port ${port} and is not answering`);
+      expect(status.stdout).toContain('busy, or another program');
+      expect(status.stdout).toContain('mindly daemon start --force');
+      expect(status.stdout).not.toContain('kill');
       expect(status.stdout).not.toContain('left over');
-      // Neither stopped (the PID is not provably ours) nor replaced by a second service.
+
       const stop = await cli(sb, ['daemon', 'stop']);
       expect(stop.code).toBe(1);
-      expect(stop.stderr).toContain('it may be busy');
+      expect(stop.stderr).toContain('is not answering');
+      expect(stop.stderr).not.toContain('kill');
       const start = await cli(sb, ['daemon', 'start']);
       expect(start.code).toBe(1);
-      expect(start.stderr).toContain('it may be busy');
+      expect(start.stderr).toContain('busy, or another program');
+      expect(start.stderr).toContain('mindly daemon start --force');
       expect(readFileSync(stateFile, 'utf8')).toBe(state);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
+
+      // Asked to, a new service starts; the recorded process is still left alone.
+      const forced = await cli(sb, ['daemon', 'start', '--force']);
+      started = forced.code === 0;
+      expect(forced.stderr).toBe('');
+      expect(forced.code).toBe(0);
+      const now = json<{ pid: number; port: number }>(readFileSync(stateFile, 'utf8'));
+      expect(now.pid).not.toBe(bystander.pid);
+      expect(now.port).not.toBe(port);
+      expect(
+        json<{ running: boolean }>((await cli(sb, ['daemon', 'status', '--json'])).stdout),
+      ).toMatchObject({ running: true });
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
     } finally {
+      if (started) await cli(sb, ['daemon', 'stop']);
       for (const socket of held) socket.destroy();
       server.close();
+      bystander.kill('SIGKILL');
     }
-  });
+    expect(existsSync(stateFile)).toBe(false);
+  }, 60_000);
 
   it('exit codes: usage 2, help 0', async () => {
     const sb = sandbox();
