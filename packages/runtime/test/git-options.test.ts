@@ -34,6 +34,9 @@ const LOCAL_PEM = 'echo local > certs/server.pem';
 const PEM = ['**/*.pem'];
 const VENDOR = ['vendor/**'];
 const covered = (rel: string) => rel.endsWith('.pem') || rel.startsWith('vendor/');
+const EXT = `'touch certs/new.pem; true'`;
+const AHEAD =
+  'git checkout -q -b ahead && echo k9 > certs/server.pem && git commit -qam k9 && git checkout -q main && git config receive.denyCurrentBranch updateInstead';
 const HOOK =
   "mkdir -p hk && printf '#!/bin/sh\\necho hook > certs/server.pem\\n' > hk/pre-commit && chmod +x hk/pre-commit";
 
@@ -270,6 +273,67 @@ const cases: {
     command: 'git bisect start HEAD v1 && git bisect run rm certs/server.pem',
     want: ['deny'],
   },
+  // Variables set by code run in this shell, or read into it.
+  {
+    name: 'export inside eval',
+    command: `eval "export GIT_EXTERNAL_DIFF=${EXT}"; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'set -a, then an assignment inside eval',
+    command: `set -a; eval "GIT_EXTERNAL_DIFF=${EXT}"; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'export inside a DEBUG trap',
+    command: `trap "export GIT_EXTERNAL_DIFF=${EXT}" DEBUG; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'source of a process substitution',
+    command: `source <(echo "export GIT_EXTERNAL_DIFF=${EXT}"); git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'set -a, then an assignment',
+    command: `set -a; GIT_EXTERNAL_DIFF=${EXT}; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'declare -x',
+    command: `declare -x GIT_EXTERNAL_DIFF=${EXT}; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'HOME set without export, already in the environment',
+    prep: `${HOOK} && mkdir -p fakehome && printf '[core]\\n\\thooksPath = hk\\n' > fakehome/.gitconfig`,
+    command: 'HOME=fakehome; git commit -q --allow-empty -m x',
+    want: ['warn', 'deny'],
+  },
+  // `NAME+=value` sets a variable as `NAME=value` does.
+  {
+    name: 'NAME+= before git',
+    command: `GIT_EXTERNAL_DIFF+=${EXT} git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'export NAME+=',
+    command: `export GIT_EXTERNAL_DIFF+=${EXT}; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'NAME+= before a git command that names the file',
+    prep: LOCAL_PEM,
+    command: 'X+=1 git checkout v1 -- certs/server.pem',
+    want: ['deny'],
+  },
+  // A value read as the destination of a push into a working tree.
+  {
+    name: 'push --recurse-submodules <value> into a working tree',
+    prep: AHEAD,
+    command: 'git push --recurse-submodules no . ahead:main',
+    want: ['warn', 'deny'],
+  },
 ];
 
 /** Commands that write no covered file: never blocked, and not warned about. */
@@ -310,6 +374,16 @@ const quiet: { name: string; prep?: string; command: string }[] = [
   { name: 'fetch with a server option', command: 'git fetch -q -o x . v1:refs/tags/again || true' },
   { name: 'config of a file of its own', command: 'git config -f tool.ini core.hooksPath x' },
   { name: 'submodule status', command: 'git submodule status' },
+  { name: 'status after a shell variable', command: 'msg=fix; git status' },
+  {
+    name: 'commit with a message from a shell variable',
+    prep: LOCAL_PEM,
+    command: 'msg="fix"; git commit -qam "$msg"',
+  },
+  {
+    name: 'an export in a subshell or a pipeline stays there',
+    command: `(export GIT_EXTERNAL_DIFF=${EXT}); export GIT_PAGER=x | true; git status`,
+  },
 ];
 
 describe('git commands that write a covered file through an option or a setting', () => {
@@ -345,4 +419,32 @@ describe('git commands that write a covered file through an option or a setting'
       }
     });
   }
+});
+
+describe('git commands read without false warnings or slow reading', () => {
+  it('clone with harmless aliases of its options is not warned about', async () => {
+    const g = setUp(PEM);
+    try {
+      for (const flags of ['--recurse-submodules', '--recursive', '--ipv4', '-4 --no-recursive']) {
+        const r = await g.shell(`git clone ${flags} https://github.com/o/r.git`);
+        expect(verdictOf(r), flags).toBe('allow');
+      }
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('a clone or submodule source of 200,000 characters is read in good time', async () => {
+    const g = setUp(PEM);
+    try {
+      for (const sub of ['clone', 'submodule add']) {
+        const command = `git ${sub} https://e.invalid${'/'.repeat(199_950)}x`;
+        const t0 = Date.now();
+        await g.shell(command);
+        expect(Date.now() - t0, sub).toBeLessThan(1000);
+      }
+    } finally {
+      g.mindly.close();
+    }
+  });
 });
