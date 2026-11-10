@@ -531,6 +531,73 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
   });
 
+  /** A commit made in a clone of `bare` and pushed only to it. */
+  function pushOnlyCopy(bare: string): void {
+    const wt = join(tempDir('r10-wt-'), 'c');
+    repoAt(wt, { 'new.ts': 'hours of work\n' });
+    git(wt, 'push', '-q', bare, 'main');
+    rmSync(wt, { recursive: true, force: true });
+  }
+
+  it('keeps a bare repository made over a tracked HEAD and objects placeholder', async () => {
+    const sb = await splitSandbox((s) => {
+      write(s.repo, '.gitignore', 'fixtures/remote.git/\n');
+      write(s.repo, 'fixtures/remote.git/HEAD', 'ref: refs/heads/main\n');
+      write(s.repo, 'fixtures/remote.git/objects/.gitkeep', '');
+      git(s.repo, 'add', '-f', 'fixtures/remote.git/HEAD', 'fixtures/remote.git/objects/.gitkeep');
+    });
+    const bare = join(partDir(sb, 'page'), 'fixtures/remote.git');
+    git(bare, 'init', '-q', '--bare', '-b', 'main');
+    pushOnlyCopy(bare);
+    await keptFor(sb, 'fixtures/remote.git');
+    expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
+  });
+
+  it('keeps a bare repository whose objects is a tracked link', async () => {
+    const sb = await splitSandbox((s) => {
+      write(s.repo, '.gitignore', 'remote.git/\nstore/\n');
+      write(s.repo, 'store/.gitkeep', '');
+      mkdirSync(join(s.repo, 'remote.git'), { recursive: true });
+      symlinkSync('../store', join(s.repo, 'remote.git/objects'));
+      git(s.repo, 'add', '-f', 'store/.gitkeep', 'remote.git/objects');
+    });
+    const bare = join(partDir(sb, 'page'), 'remote.git');
+    git(bare, 'init', '-q', '--bare', '-b', 'main');
+    pushOnlyCopy(bare);
+    await keptFor(sb, 'remote.git');
+    expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
+  });
+
+  it('keeps a bare repository over a tracked HEAD, confirmed on the terminal or not', async () => {
+    const sb = await splitSandbox((s) =>
+      write(s.repo, 'fixtures/remote.git/HEAD', 'ref: refs/heads/main\n'),
+    );
+    const page = partDir(sb, 'page');
+    const bare = join(page, 'fixtures/remote.git');
+    git(bare, 'init', '-q', '--bare', '-b', 'main');
+    pushOnlyCopy(bare);
+    await keptFor(sb, 'fixtures/remote.git');
+    // Its files are listed as not committed, and a yes on the terminal does not delete them.
+    const r = await cli(sb, ['split', 'abort'], { answers: ['y'] });
+    expect(r.code).toBe(1);
+    expect(existsSync(page)).toBe(true);
+    expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
+  });
+
+  it('keeps a bare repository whose objects arrive only as a pack, beside a tracked placeholder', async () => {
+    const sb = await splitSandbox((s) => {
+      write(s.repo, '.gitignore', 'fx/remote.git/\n');
+      write(s.repo, 'fx/remote.git/objects/pack/.gitkeep', '');
+      git(s.repo, 'add', '-f', 'fx/remote.git/objects/pack/.gitkeep');
+    });
+    const bare = join(partDir(sb, 'page'), 'fx/remote.git');
+    git(bare, 'init', '-q', '--bare', '-b', 'main');
+    pushOnlyCopy(bare);
+    git(bare, 'repack', '-a', '-d', '-q');
+    git(bare, 'pack-refs', '--all');
+    await keptFor(sb, 'fx/remote.git');
+  });
+
   it('keeps a bare clone git accepts, whatever its HEAD looks like', async () => {
     const origin = tempDir('r10-origin-');
     repoAt(origin, { 'only.ts': 'x\n' });

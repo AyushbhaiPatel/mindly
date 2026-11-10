@@ -514,23 +514,33 @@ describe('worktrees', () => {
     expect((await worktreeScan(path)).gitData).toEqual(['.repos/empty.git', '.repos/lib.git']);
   });
 
-  it('lets a tracked objects rule a folder out only while it is all there is and as tracked', async () => {
+  it('counts a git directory only when something in it is not tracked', async () => {
     const root = makeRepo({
       'a/objects/x.json': '{}\n',
       'b/objects/x.json': '{}\n',
       'c/objects': 'a file\n',
       'd/objects': 'a file\n',
+      // Fully tracked, HEAD included: everything in it is in a commit.
+      'e/HEAD': 'ref: refs/heads/main\n',
+      'e/objects/x.json': '{}\n',
+      'e/refs/heads/main': '0000\n',
     });
+    const sha = git(root, 'rev-parse', 'HEAD').trim();
+    // An uninitialised submodule named objects (an empty folder on disk).
+    git(root, 'update-index', '--add', '--cacheinfo', `160000,${sha},v/objects`);
+    git(root, 'commit', '-q', '-m', 'sub');
     const path = join(tempDir(), 'part');
     await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
-    for (const d of ['a', 'b', 'c', 'd']) write(path, `${d}/HEAD`, 'ref: refs/heads/main\n');
+    for (const d of ['a', 'b', 'c', 'd', 'v']) write(path, `${d}/HEAD`, 'ref: refs/heads/main\n');
     // a: only the tracked file under objects/; b: an untracked one too.
     write(path, 'b/objects/ab/cdef', 'x');
-    // c: still the tracked file; d: a folder now where the tracked file was (empty folders only,
-    // as `git init --bare` leaves, which git lists nowhere).
+    // c: objects a file, not a folder; d: an empty folder now where the tracked file was.
     rmSync(join(path, 'd/objects'));
     mkdirSync(join(path, 'd/objects/pack'), { recursive: true });
-    expect((await worktreeScan(path)).gitData).toEqual(['b', 'd']);
+    expect((await worktreeScan(path)).gitData).toEqual(['b']);
+    // Something new in e, beside its tracked HEAD: now it counts.
+    write(path, 'e/config', '[core]\n');
+    expect((await worktreeScan(path)).gitData).toEqual(['b', 'e']);
   });
 
   it('takes any HEAD beside an untracked objects for a git directory, as git would', async () => {
