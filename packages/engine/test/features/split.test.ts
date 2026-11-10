@@ -779,6 +779,49 @@ describe('split through hook events', () => {
     expect((await start('api-4', 'startup')).context ?? '').not.toContain('Your part of the split');
   });
 
+  it('briefs an agent that takes over a part after a usage limit', async () => {
+    const { mindly, svc, pid, clock } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      strict: true,
+      connectedAgents: null,
+    });
+    const api = created.parts[0]!;
+    const first = await mindly.hooks.handle(
+      event(api.worktree, 'claude-code', 'cc-1', 'session_start'),
+    );
+    expect(first.context).toContain('Your part of the split');
+    clock.advance(1000);
+    await mindly.hooks.handle(
+      event(api.worktree, 'claude-code', 'cc-1', 'prompt', { prompt: 'go' }),
+    );
+    clock.advance(1000);
+    await mindly.hooks.handle(
+      event(api.worktree, 'claude-code', 'cc-1', 'stop', {
+        lastMessage: 'Claude usage limit reached. Your limit will reset at 3pm.',
+      }),
+    );
+    expect(mindly.store.handoffs.list(pid).filter((h) => h.reason === 'rate_limit')).toHaveLength(
+      1,
+    );
+    // The agent that takes over is started in the part's worktree: it gets the handoff and the
+    // part's brief, both.
+    const next = await mindly.hooks.handle(event(api.worktree, 'codex', 'cx-2', 'session_start'));
+    expect(next.context).toContain('Handoff for you');
+    expect(next.context).toContain('Your part of the split');
+    expect(next.context).toContain('Files you own (edit only these): src/api/**');
+    expect(next.context).toContain('GET /billing');
+    expect(next.context).toContain('Commit your work in this worktree on its branch');
+    const packet = mindly.store.contextPackets.forSession(
+      mindly.store.sessions.findByExternal(pid, 'codex', 'cx-2')!.id,
+      1,
+    )[0]!;
+    expect(packet.tokensUsed).toBeLessThanOrEqual(packet.tokenBudget);
+  });
+
   it('says which parts a merge check could not look at', async () => {
     const { svc, pid } = await setup();
     const created = await svc.create({

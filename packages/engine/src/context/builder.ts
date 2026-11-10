@@ -56,8 +56,12 @@ export class ContextBuilder {
     const pid = project.project.id;
     const cands: Candidate[] = [];
 
-    const handoff = this.claimHandoff(session) ?? this.splitBriefAgain(session);
+    // An agent taking over in a part's worktree (a usage-limit handoff) needs the part's brief
+    // as well: which files it owns, the shared contract and the branch to commit on.
+    const handoff = this.claimHandoff(session);
+    const brief = handoff?.packet.split ? null : this.splitBriefAgain(session);
     if (handoff) cands.push(...this.handoffCandidates(handoff));
+    if (brief) cands.push(...this.handoffCandidates(brief, handoff !== null));
 
     cands.push(...this.deliveryCandidates(session, 1));
 
@@ -399,11 +403,12 @@ export class ContextBuilder {
     return h;
   }
 
-  private handoffCandidates(h: Handoff): Candidate[] {
+  /** `compact`: a shorter split brief, shown next to a handoff that already carries the goal. */
+  private handoffCandidates(h: Handoff, compact = false): Candidate[] {
     if (h.packet.split) {
       const split = this.k.store.splits.find(h.packet.split.splitId);
       const contract = split ? contractLines(liveContract(this.k.store, split)) : [];
-      return [splitBriefCandidate(h, h.packet.split, contract)];
+      return [splitBriefCandidate(h, h.packet.split, contract, compact)];
     }
     const from = this.k.store.sessions.find(h.fromSessionId);
     const who = from ? sessionLabel(from) : 'another agent';
@@ -552,11 +557,16 @@ export class ContextBuilder {
 }
 
 /** The brief of a split part, rendered as the first section of the session. */
-function splitBriefCandidate(h: Handoff, brief: HandoffSplitBrief, contract: string[]): Candidate {
+function splitBriefCandidate(
+  h: Handoff,
+  brief: HandoffSplitBrief,
+  contract: string[],
+  compact = false,
+): Candidate {
   const globs = (g: readonly string[]): string => g.map((x) => sanitizeLine(x, 160)).join(', ');
   const lines = [
     `You are working on part "${sanitizeLine(brief.title, 120)}" of the split "${sanitizeLine(brief.goal, 300)}" in this worktree (branch ${sanitizeLine(h.packet.branch ?? '', 120)}). Other agents work on the other parts in their own worktrees.`,
-    `Your part: ${sanitizeForContext(h.packet.goal, 3000).replace(/\n/g, ' ')}`,
+    `Your part: ${sanitizeForContext(h.packet.goal, compact ? 600 : 3000).replace(/\n/g, ' ')}`,
     `Files you own (edit only these): ${globs(brief.owns)}`,
   ];
   if (brief.reads.length) lines.push(`Files you may read for context: ${globs(brief.reads)}`);
