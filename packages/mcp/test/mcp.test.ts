@@ -1823,6 +1823,29 @@ describe('telling windows of one agent apart', () => {
       expect(own.text).toMatch(/Your open tasks[\s\S]*window A private task/);
     });
 
+    it('stops calling a task its own on a guess once another session has taken it', async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      const made = await b.call('mindly_task_create', { title: 'B work' });
+      const id = (made.structured?.['task'] as { id: string }).id;
+      expect((await b.call('mindly_context')).text).toMatch(/Your open tasks[\s\S]*B work/);
+      expect((await b.call('mindly_tasks', { mine: true })).text).toContain('B work');
+      // Another agent claims the task: it is that agent's now, not the server's.
+      await a.mindly.hooks.handle(hook(a.root, 'codex', 'other', 'session_start'));
+      const other = a.mindly.store.sessions.findByExternal(projectOf(a, sessA), 'codex', 'other')!;
+      a.mindly.tasks.claim(id, other);
+      const out = await b.call('mindly_context');
+      expect(sid(out)).toBe(sessA);
+      expect(out.text).not.toMatch(/Your open tasks[\s\S]*B work/);
+      const mine = await b.call('mindly_tasks', { mine: true });
+      expect(mine.text).not.toContain('B work');
+      expect(mine.structured?.['tasks']).toEqual([]);
+      // It is still listed among the project's tasks.
+      expect((await b.call('mindly_tasks')).text).toContain('B work');
+    });
+
     it('files a handoff in its own name on a guess, so it never picks it up itself', async () => {
       const a = await harness(windowA);
       const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);

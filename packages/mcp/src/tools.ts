@@ -174,6 +174,15 @@ function takeUpOnGuess(mindly: Mindly, scope: CallScope, taskId: string): Task {
   return task;
 }
 
+/**
+ * True when `task` is the server's own while it speaks for a session it only guessed at: it took
+ * the task up itself and the task is still with that session (where its work lives until it is
+ * home), not taken since by anyone else.
+ */
+function ownOnGuess(guess: GuessScope, task: Task): boolean {
+  return task.ownerSessionId === guess.sessionId && guess.wrote('task', task.id);
+}
+
 /** Tools whose result names a memory they stored. */
 const MEMORY_TOOLS = new Set(['mindly_remember', 'mindly_record_mistake']);
 
@@ -759,8 +768,9 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         limit: z.number().int().min(1).max(100).optional(),
       }),
       annotations: READ_ONLY,
-      // "Mine" is what the server took up itself, not the tasks of the window it guessed at.
-      onGuess: (args, scope) => listTasks(args, scope, (t) => scope.guess.wrote('task', t.id)),
+      // "Mine" is what the server took up itself and still has, not the tasks of the window it
+      // guessed at nor a task someone has since taken.
+      onGuess: (args, scope) => listTasks(args, scope, (t) => ownOnGuess(scope.guess, t)),
     },
     (args, scope) => listTasks(args, scope, null),
   );

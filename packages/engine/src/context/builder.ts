@@ -477,8 +477,9 @@ export class ContextBuilder {
   }
 
   /**
-   * The session's unfinished tasks, newest first. For a guest, only the ones it took up itself,
-   * wherever they are now: the session's own are another window's as far as it can tell.
+   * The session's unfinished tasks, newest first. For a guest, only the ones it took up itself
+   * and that are still with the session (where a guest's work lives): the session's other tasks
+   * are another window's as far as it can tell, and a task someone has since taken is theirs.
    */
   private ownTasks(session: Session): Task[] {
     const guest = this.guests.get(session.id);
@@ -487,7 +488,7 @@ export class ContextBuilder {
     if (!owns) return [];
     return this.k.store.tasks
       .list(session.projectId, { statuses: ['open', 'in_progress', 'blocked'] })
-      .filter((t) => owns(t.id))
+      .filter((t) => t.ownerSessionId === session.id && owns(t.id))
       .slice(0, 20);
   }
 
