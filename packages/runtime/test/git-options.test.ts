@@ -74,6 +74,12 @@ const TEST_V = BASH_MAJOR >= 42;
 const has = (program: string): boolean => works(`command -v ${program}`);
 const CO = 'git checkout -q v1 -- certs/server.pem';
 const ENV_SPLIT = works("env -S 'true'");
+/** GNU `ln` takes abbreviated long options; BSD `ln` (macOS) does not. */
+const LN_LONG = works('d=$(mktemp -d) && ln --sy "$d" "$d/l" && rm -rf "$d"');
+/** bash 3.2 cannot parse a `case` inside `$(…)`. */
+const CASE_IN_SUBST = works('echo "$(case x in x) true;; esac)" >/dev/null');
+/** util-linux `script` takes `-c`; BSD `script` (macOS) does not. */
+const SCRIPT_C = works('script -qec true /dev/null');
 /** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
 const FIVE_HOME = `${HOOK} && mkdir -p 5 && printf '[core]\\n\\thooksPath = hk\\n' > 5/.gitconfig`;
 /** A program run instead of git once `git` is hashed to it. */
@@ -869,6 +875,7 @@ const notReadFully: {
     scopes: VENDOR,
     prep: VENDOR_FILE,
     command: 'ln --sy vendor c && cd c && git rm -q x',
+    runs: LN_LONG,
   },
   {
     name: 'a link copied with cp -P, then cd into it',
@@ -908,12 +915,16 @@ const notReadFully: {
     command: `printf -v 'a[$(case x in x) ${CO};; esac)]' x`,
     runs: PRINTF_ELEMENT,
   },
-  { name: 'a substitution holding a case', command: `echo "$(case x in x) ${CO};; esac)"` },
+  {
+    name: 'a substitution holding a case',
+    command: `echo "$(case x in x) ${CO};; esac)"`,
+    runs: CASE_IN_SUBST,
+  },
   { name: 'git through a variable', command: 'GIT=git; $GIT reset -q --hard v1' },
   {
     name: 'git run by script -c',
     command: "script -qec 'git reset -q --hard v1' /dev/null",
-    runs: has('script'),
+    runs: SCRIPT_C,
   },
   { name: 'a substitution in a default value', command: `echo "\${x:-'$(${CO})'}"` },
 ];
