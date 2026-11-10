@@ -7,10 +7,11 @@
  * misses the secret.
  *
  * Redaction therefore looks for secrets in several copies of the text (without these characters,
- * with each of them turned into a space, and mixes of the two, see `CopyMode`), and replaces what
- * any of them finds in the original text, which otherwise keeps every character it had: a joiner
- * in an emoji, a Persian zero-width non-joiner, a variation selector, or the bidi override a code
- * review must see.
+ * with each of them turned into a space, mixes of the two, and one where each run between word
+ * characters is a mark that the patterns read past, see `CopyMode`), and replaces what any of them
+ * finds in the original text, which otherwise keeps every character it had: a joiner in an emoji,
+ * a Persian zero-width non-joiner, a variation selector, or the bidi override a code review must
+ * see.
  */
 
 const HIDDEN =
@@ -29,11 +30,13 @@ export function withoutHiddenChars(text: string): string {
 
 /**
  * A copy of a text made for matching, and where its units come from in the original. The copy is
- * made of segments, in order: a stretch of the original kept as it is, or one space standing for
- * a run of hidden characters. Segment `k` starts at unit `copyAt[k]` of the copy and at
- * `originalAt[k]` of the original; a space segment ends at `originalEnd[k]`, a kept one has -1.
+ * made of segments, in order: a stretch of the original kept as it is, or one space (or `MARK`)
+ * standing for a run of hidden characters. Segment `k` starts at unit `copyAt[k]` of the copy and
+ * at `originalAt[k]` of the original; a space or mark segment ends at `originalEnd[k]`, a kept one
+ * has -1. `mode` is how the copy was made.
  */
 export interface MatchCopy {
+  mode: CopyMode;
   text: string;
   copyAt: Int32Array;
   originalAt: Int32Array;
@@ -45,18 +48,37 @@ export interface MatchCopy {
  * `space` turns every run into one space. The others decide only for a run between two word
  * characters (a run elsewhere is dropped, which changes no word boundary): within a word made of
  * word characters and such runs, `first` turns its first run into a space, `last` its last one,
- * `ends` both, and the runs inside are dropped. A secret glued to a word by one hidden character
- * and split by another is found in one of these.
+ * `ends` both, and the runs inside are dropped. `mark` turns every run between two word characters
+ * into `MARK`, which is no word character, so a word boundary holds on both sides of it, and which
+ * the patterns run on this copy pass over inside a secret (see `allowMarks` in redact.ts): a
+ * secret split inside and glued to words on either side, however many runs there are, is found
+ * in this one copy.
  */
-export type CopyMode = 'removed' | 'space' | 'first' | 'last' | 'ends';
+export type CopyMode = 'removed' | 'space' | 'first' | 'last' | 'ends' | 'mark';
 
 /** Every way of making a copy for matching, in the order `redact` uses them. */
-export const COPY_MODES: readonly CopyMode[] = ['removed', 'space', 'first', 'last', 'ends'];
+export const COPY_MODES: readonly CopyMode[] = [
+  'removed',
+  'space',
+  'first',
+  'last',
+  'ends',
+  'mark',
+];
+
+/**
+ * The character a `mark` copy puts for a run of hidden characters between word characters: a
+ * private-use character, which is neither hidden nor a word character. A text that already holds
+ * it gets no `mark` copy.
+ */
+export const MARK = '\uE000';
 
 /** A run of hidden characters, and where it sits among word characters. */
 interface Run {
   start: number;
   end: number;
+  /** Between two word characters. */
+  inner: boolean;
   /** The first (and/or last) run between word characters within its word. */
   first: boolean;
   last: boolean;
@@ -75,7 +97,15 @@ function hiddenRuns(original: string): Run[] {
   for (let m = re.exec(original); m !== null; m = re.exec(original)) {
     const last = runs[runs.length - 1];
     if (last && last.end === m.index) last.end = m.index + m[0].length;
-    else runs.push({ start: m.index, end: m.index + m[0].length, first: false, last: false });
+    else {
+      runs.push({
+        start: m.index,
+        end: m.index + m[0].length,
+        inner: false,
+        first: false,
+        last: false,
+      });
+    }
   }
   // Group the runs between two word characters by the word they sit in.
   let group: Run[] = [];
@@ -98,6 +128,7 @@ function hiddenRuns(original: string): Run[] {
       if (!isWordUnit(original.charCodeAt(o))) sameWord = false;
     }
     if (!inner || !sameWord) close();
+    r.inner = inner;
     if (inner) group.push(r);
     prevEnd = r.end;
   }
@@ -117,6 +148,8 @@ function spaced(r: Run, mode: CopyMode): boolean {
       return r.last;
     case 'ends':
       return r.first || r.last;
+    case 'mark':
+      return false;
   }
 }
 
@@ -140,11 +173,13 @@ function buildCopy(original: string, runs: readonly Run[], mode: CopyMode): Matc
   };
   for (const r of runs) {
     segment(from, -1, original.slice(from, r.start));
-    if (spaced(r, mode)) segment(r.start, r.end, ' ');
+    if (mode === 'mark' && r.inner) segment(r.start, r.end, MARK);
+    else if (spaced(r, mode)) segment(r.start, r.end, ' ');
     from = r.end;
   }
   segment(from, -1, original.slice(from));
   return {
+    mode,
     text: parts.join(''),
     copyAt: copyAt.subarray(0, k),
     originalAt: originalAt.subarray(0, k),
@@ -152,7 +187,7 @@ function buildCopy(original: string, runs: readonly Run[], mode: CopyMode): Matc
   };
 }
 
-/** The stretch of the original that unit `u` of `copy` stands for. */
+/** The stretch of the original that unit `u` of `copy` stands for: a whole run for a space or mark. */
 function unitInOriginal(copy: MatchCopy, u: number): [number, number] {
   let lo = 0;
   let hi = copy.copyAt.length - 1;
@@ -173,7 +208,8 @@ export function matchCopy(original: string, mode: CopyMode): MatchCopy {
 
 /**
  * Every distinct copy of `original` for matching, one per `COPY_MODES` entry that differs, made
- * one at a time as they are asked for.
+ * one at a time as they are asked for. The `mark` copy is made only when a run sits between word
+ * characters, and never for a text that holds `MARK` itself.
  */
 export function* matchCopies(original: string): Generator<MatchCopy> {
   const runs = hiddenRuns(original);
@@ -183,6 +219,7 @@ export function* matchCopies(original: string): Generator<MatchCopy> {
   // Without runs between word characters the mixed copies are the copy without hidden
   // characters; with only one such run per word, all three are the same.
   if (mixed) modes.push(...(multi ? (['first', 'last', 'ends'] as const) : (['ends'] as const)));
+  if (mixed && !original.includes(MARK)) modes.push('mark');
   for (const m of modes) yield buildCopy(original, runs, m);
 }
 

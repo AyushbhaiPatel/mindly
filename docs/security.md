@@ -101,8 +101,11 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   available to agents over MCP, and is never included in a saves card.
 - Characters that render as nothing (zero-width and format characters, tag characters,
   variation selectors) and control characters cannot hide a secret: it is looked for in copies
-  of the text with those characters removed, turned into spaces, or a mix of the two, and replaced
-  in the original together with any such characters inside it. Redaction changes nothing else:
+  of the text with those characters removed, turned into spaces, or a mix of the two, and in one
+  where the token patterns (API keys, access tokens, JWTs) read past a run of them between letters
+  or digits and count it as a word boundary, so a key split inside and glued to words on either
+  side is still found. What any copy finds is replaced in the original together with any such
+  characters inside it. Redaction changes nothing else:
   a stored prompt, or a prompt passed to an agent or a model, keeps the user's own characters
   (emoji joiners, a Persian zero-width non-joiner, bidi controls in a diff under review). Text that
   one agent's work puts in front of another agent (shared context, memories, coordination

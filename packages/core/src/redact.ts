@@ -1,4 +1,5 @@
 import {
+  MARK,
   hasHiddenChars,
   matchCopies,
   matchCopy,
@@ -114,6 +115,8 @@ const RULES: Rule[] = [
     kind: 'url_credentials',
     re: /\b([a-z][a-z0-9+.-]{1,20}:\/\/[^\s:/@]{1,200}:)[^\s@/]{1,200}@/gi,
     replace: `$1${REDACTED}@`,
+    // A password an earlier rule already replaced (`https://bot:ghp_...@`) is left as it is.
+    skip: (g) => (g[0] ?? '').slice((g[1] ?? '').length, -1) === REDACTED,
   },
   {
     kind: 'assignment',
@@ -151,28 +154,149 @@ function compileExtra(source: string): RegExp | null {
   return re;
 }
 
-function redactVisible(input: string, options: RedactOptions = {}): RedactionResult {
+/**
+ * `source` (a pattern of `RULES`) for a `mark` copy: every character it matches may be followed
+ * by `MARK`, which no character it matches can be, so a secret split by marks is read as one and
+ * a word boundary holds next to a mark. The patterns are plain enough (characters, classes,
+ * groups, quantifiers and `\b`) for this to be read off their source.
+ */
+function allowMarks(source: string): string {
+  const mark = '\\uE000';
+  let out = '';
+  const atom = (x: string): void => {
+    out += `(?:(?!${mark})${x}${mark}??)`;
+  };
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i] ?? '';
+    if (c === '\\') {
+      const escape = source.slice(i, i + 2);
+      if (escape === '\\b' || escape === '\\B') out += escape;
+      else atom(escape);
+      i += 2;
+    } else if (c === '[') {
+      let j = i + 1;
+      if (source[j] === '^') j++;
+      if (source[j] === ']') j++;
+      while (j < source.length && source[j] !== ']') j += source[j] === '\\' ? 2 : 1;
+      atom(source.slice(i, j + 1));
+      i = j + 1;
+    } else if (c === '(') {
+      const open = /^\((?:\?(?::|<?[=!]|<[A-Za-z]\w*>))?/.exec(source.slice(i, i + 40))?.[0] ?? '(';
+      out += open;
+      i += open.length;
+    } else if (c === '{') {
+      const close = source.indexOf('}', i);
+      out += source.slice(i, close + 1);
+      i = close + 1;
+    } else if (')|?*+^$'.includes(c)) {
+      out += c;
+      i++;
+    } else {
+      atom(c);
+      i++;
+    }
+  }
+  return out;
+}
+
+let markedRules: Rule[] | null = null;
+
+/**
+ * Rules whose secret is a token bounded by word boundaries (`\bghp_...\b`): those a hidden
+ * character next to it or inside it can hide. The others (assignments, URLs, headers, key blocks,
+ * user patterns) are read in the other copies.
+ */
+const TOKEN_KINDS = new Set([
+  'anthropic_key',
+  'openai_key',
+  'aws_access_key',
+  'github_token',
+  'github_pat',
+  'gitlab_token',
+  'slack_token',
+  'stripe_key',
+  'google_api_key',
+  'npm_token',
+  'pypi_token',
+  'jwt',
+]);
+
+/** The token rules of `RULES`, for a `mark` copy (see `allowMarks`). */
+function rulesForMarks(): Rule[] {
+  markedRules ??= RULES.filter((rule) => TOKEN_KINDS.has(rule.kind)).map((rule) => ({
+    ...rule,
+    re: new RegExp(allowMarks(rule.re.source), rule.re.flags),
+  }));
+  return markedRules;
+}
+
+/** `text` with the marks at its start and end that `match` has and `text` lost put back. */
+function keepMarks(match: string, text: string): string {
+  let lead = 0;
+  while (match[lead] === MARK) lead++;
+  let trail = 0;
+  while (trail < match.length - lead && match[match.length - 1 - trail] === MARK) trail++;
+  let out = text;
+  if (lead > 0 && !out.startsWith(MARK.repeat(lead))) out = MARK.repeat(lead) + out;
+  if (trail > 0 && !out.endsWith(MARK.repeat(trail))) out += MARK.repeat(trail);
+  return out;
+}
+
+/** The replacements one pass of a pattern made, in the offsets of that pass's input. */
+interface Pass {
+  input: string;
+  edits: { at: number; len: number; text: string }[];
+}
+
+/**
+ * Set while `redact` needs to know where replacements were made: each `apply` that changes the
+ * text adds one pass, made from that call's own input.
+ */
+let recording: Pass[] | null = null;
+
+/**
+ * Redacts `input` with every rule. `marked` reads it as a `mark` copy, with the token rules only:
+ * marks are passed over inside a secret and kept around it.
+ */
+function redactVisible(
+  input: string,
+  options: RedactOptions = {},
+  marked = false,
+): RedactionResult {
   let text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
   let count = 0;
   const kinds = new Set<string>();
 
   const apply = (kind: string, re: RegExp, replace: string, skip?: Rule['skip']): void => {
     re.lastIndex = 0;
+    const pass: Pass | null = recording ? { input: text, edits: [] } : null;
     text = text.replace(re, (...args: unknown[]) => {
       // Do not double-count already-redacted values.
       const match = String(args[0]);
       if (match.endsWith(REDACTED) || match === REDACTED) return match;
-      if (skip?.(args.map((a) => (typeof a === 'string' ? a : '')))) return match;
+      // The match and its groups come before the offset; the whole input comes after it.
+      const at = args.findIndex((a) => typeof a === 'number');
+      const groups = args
+        .slice(0, at)
+        .map((a) => (typeof a !== 'string' ? '' : marked ? a.split(MARK).join('') : a));
+      if (skip?.(groups)) return match;
+      let out = replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? ''));
+      if (marked) out = keepMarks(match, out);
+      // A replacement that changes nothing is no redaction.
+      if (out === match) return match;
       count++;
       kinds.add(kind);
-      return noteEdit(
-        args,
-        replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? '')),
-      );
+      pass?.edits.push({ at: args[at] as number, len: match.length, text: out });
+      return out;
     });
+    if (pass && pass.edits.length > 0) recording?.push(pass);
   };
 
-  for (const rule of RULES) apply(rule.kind, rule.re, rule.replace, rule.skip);
+  for (const rule of marked ? rulesForMarks() : RULES) {
+    apply(rule.kind, rule.re, rule.replace, rule.skip);
+  }
+  if (marked) return { text, count, kinds: [...kinds] };
   for (const source of options.extraPatterns ?? []) {
     const re = compileExtra(source);
     if (re) apply('custom', re, REDACTED);
@@ -227,39 +351,11 @@ export const DEFAULT_DENY_PATHS: readonly string[] = [
   '**/service-account*.json',
 ];
 
-/** The replacements one pass of a pattern made, in the offsets of that pass's input. */
-interface Pass {
-  input: string;
-  edits: { at: number; len: number; text: string }[];
-}
-
-/** Set while `redact` needs to know where replacements were made. */
-let recording: Pass[] | null = null;
-
-/**
- * Notes a replacement (from the callback of a `String.replace`: its arguments, and the text put
- * in). Every change `redactVisible` makes must go through here, or `redact` cannot place it.
- */
-function noteEdit(args: readonly unknown[], text: string): string {
-  if (recording) {
-    const i = args.findIndex((a) => typeof a === 'number');
-    const input = args[i + 1];
-    if (i > 0 && typeof input === 'string') {
-      let pass = recording[recording.length - 1];
-      if (!pass || pass.input !== input) {
-        pass = { input, edits: [] };
-        recording.push(pass);
-      }
-      pass.edits.push({ at: args[i] as number, len: String(args[0]).length, text });
-    }
-  }
-  return text;
-}
-
 /**
  * Where, in `copy`, the replacements of `passes` were made: one span per replaced secret, with
  * the text that took its place. A kept prefix or suffix (a variable name, an `@`) is not part of
- * the span. Null when the passes do not lead from `copy` to `result` (a change was not noted).
+ * the span. Null when the passes do not lead from `copy` to `result`, which every change going
+ * through `apply` rules out.
  */
 function replacedSpans(copy: string, passes: readonly Pass[], result: string): Span[] | null {
   let text = copy;
@@ -323,12 +419,13 @@ function replacedSpans(copy: string, passes: readonly Pass[], result: string): S
 function redactTraced(
   text: string,
   options: RedactOptions,
+  marked: boolean,
 ): { result: RedactionResult; spans: Span[] | null } {
   const passes: Pass[] = [];
   recording = passes;
   let result: RedactionResult;
   try {
-    result = redactVisible(text, options);
+    result = redactVisible(text, options, marked);
   } finally {
     recording = null;
   }
@@ -339,8 +436,9 @@ function redactTraced(
  * Replaces the secrets in `input` and keeps every other character. Characters that render as
  * nothing and control characters can hide a secret (inside it) or hide a word boundary (next to
  * it), so secrets are looked for in several copies: without those characters, with each turned
- * into a space, and mixes of the two (see `CopyMode`). What any finds is replaced in `input`, the
- * hidden characters inside a secret included; everything else is returned as it was.
+ * into a space, mixes of the two, and one where the patterns read past them (see `CopyMode`). What
+ * any finds is replaced in `input`, the hidden characters inside a secret included; everything
+ * else is returned as it was.
  */
 export function redact(input: string, options: RedactOptions = {}): RedactionResult {
   let text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
@@ -351,7 +449,7 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
   for (let round = 0; round < MAX_HIDDEN_ROUNDS; round++) {
     const spans: Span[] = [];
     for (const copy of matchCopies(text)) {
-      const { result, spans: found } = redactTraced(copy.text, options);
+      const { result, spans: found } = redactTraced(copy.text, options, copy.mode === 'mark');
       if (found === null) return untraced(text, options);
       for (const k of result.kinds) kinds.add(k);
       for (const f of found) {
@@ -396,16 +494,10 @@ function isLowSurrogate(text: string, o: number): boolean {
 const MAX_HIDDEN_ROUNDS = 4;
 
 /**
- * Used only when a replacement was made that `noteEdit` did not see, so its place in the original
- * is not known. The copy without hidden characters is redacted; when another copy finds more
- * than that one, none of the text is kept.
+ * Used only if a copy's replacements could not be placed in the original, which `apply` recording
+ * every change it makes rules out. The copy without hidden characters is returned redacted: it
+ * loses the hidden characters but keeps the text readable, rather than replacing all of it.
  */
 function untraced(text: string, options: RedactOptions): RedactionResult {
-  const removed = redactVisible(matchCopy(text, 'removed').text, options);
-  for (const copy of matchCopies(text)) {
-    const other = redactVisible(copy.text, options);
-    if (other.count > removed.count)
-      return { text: REDACTED, count: other.count, kinds: other.kinds };
-  }
-  return removed;
+  return redactVisible(matchCopy(text, 'removed').text, options);
 }
