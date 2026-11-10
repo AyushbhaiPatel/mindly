@@ -78,8 +78,48 @@ const AUTH_SCHEME =
 /** Schemes whose credentials are `name=value` parameters: Digest, AWS Signature Version 4. */
 const PARAM_SCHEMES = new Set(['digest', 'aws4-hmac-sha256']);
 
-/** One `name=value` parameter of such a scheme, with the quotes around its value. */
-const AUTH_PARAM = /[\s,]*([A-Za-z][\w-]{0,40})=(\\?["']?)([^\s,"'\\]*)/y;
+/** The name of one `name=value` parameter of such a scheme, with its `=`. */
+const AUTH_PARAM_NAME = /([A-Za-z][\w-]{0,40})=/y;
+
+/**
+ * The value of a parameter that starts at `at`: `from`..`to` without its quotes, and where reading
+ * goes on. A value in quotes (`"..."`, or `\"...\"` inside a quoted argument) runs to the same
+ * quote, escaped as it was opened, spaces and commas included; any other runs to a space, comma,
+ * quote or backslash. `unclosed` holds, per kind of quote, the end of a line on which a search for
+ * its closing quote already failed: a later one on that line fails too, so a line is searched at
+ * most once per kind.
+ */
+function paramValue(
+  text: string,
+  at: number,
+  lineEnd: number,
+  unclosed: Map<string, number>,
+): { from: number; to: number; next: number } {
+  let open = at;
+  while (open < lineEnd && text[open] === '\\') open++;
+  const q = text[open] ?? '';
+  if (q === '"' || q === "'") {
+    const escaped = open > at;
+    const kind = escaped ? `\\${q}` : q;
+    if (unclosed.get(kind) !== lineEnd) {
+      for (let p = open + 1; p < lineEnd; p++) {
+        if (text[p] !== q || (escaped && text[p - 1] !== '\\')) continue;
+        let to = p;
+        while (escaped && to > open + 1 && text[to - 1] === '\\') to--;
+        return { from: open + 1, to, next: p + 1 };
+      }
+      unclosed.set(kind, lineEnd);
+    }
+    at = open + 1;
+  }
+  let to = at;
+  while (to < lineEnd) {
+    const c = text[to] ?? '';
+    if (isSpace(c) || c === ',' || isQuoting(c)) break;
+    to++;
+  }
+  return { from: at, to, next: to };
+}
 
 /** Parameters whose values are secrets or prove one: the rest (`username`, `uri`) are kept. */
 const SECRET_PARAMS = new Set(['response', 'nonce', 'cnonce', 'opaque', 'signature', 'password']);
@@ -300,6 +340,10 @@ function closingQuote(text: string, at: number, lineEnd: number): number {
 /** Collects the parts of a text to redact. */
 class Finder {
   readonly edits: { from: number; to: number }[] = [];
+  /** Where the last list of Digest or AWS Signature parameters read ended. */
+  private paramsEnd = -1;
+  /** Per kind of quote, the end of a line where a parameter's quote was found not to close. */
+  private readonly unclosed = new Map<string, number>();
 
   constructor(
     private readonly text: string,
@@ -389,29 +433,46 @@ class Finder {
   }
 
   /**
-   * Digest and AWS Signature parameters from `at`: the values of the secret ones. False when
-   * there are no parameters, so the value is read as a token.
+   * Digest and AWS Signature parameters from `at`: the values of the secret ones. A quoted value
+   * runs to its closing quote, spaces included (`realm="Restricted Area"`), and a run that is no
+   * parameter is passed over. The list ends at the end of the line, at a quote that closes the
+   * argument the header is in, or at an option. False when there are no parameters, so the value
+   * is read as a token.
+   *
+   * A header inside a list already read (`x=-HAuthorization:Digest ...`) was read with it, so no
+   * stretch of a line is read twice and the work stays linear.
    */
   private params(at: number, lineEnd: number): boolean {
+    if (at < this.paramsEnd) return true;
+    const text = this.text;
     let k = at;
     let found = false;
-    for (;;) {
-      AUTH_PARAM.lastIndex = k;
-      const m = AUTH_PARAM.exec(this.text);
-      if (m === null || m.index + m[0].length > lineEnd || m[0].length === 0) return found;
-      found = true;
-      const end = m.index + m[0].length;
-      const value = m[3] ?? '';
-      if (SECRET_PARAMS.has((m[1] ?? '').toLowerCase())) this.push(end - value.length, end);
-      // The closing quote of a quoted value.
-      k = end;
-      while (
-        k < lineEnd &&
-        (this.text[k] === '"' || this.text[k] === "'" || this.text[k] === '\\')
-      ) {
-        k++;
+    while (k < lineEnd) {
+      while (k < lineEnd && (isSpace(text[k] ?? '') || text[k] === ',')) k++;
+      const c = text[k] ?? '';
+      if (k >= lineEnd || isQuoting(c) || c === '`' || c === '-') break;
+      AUTH_PARAM_NAME.lastIndex = k;
+      const name = AUTH_PARAM_NAME.exec(text);
+      if (name === null || k + name[0].length > lineEnd) {
+        // Not a parameter: passed over to the next space or comma, or to a quote, which may
+        // close the argument the header is in.
+        while (
+          k < lineEnd &&
+          !isSpace(text[k] ?? '') &&
+          text[k] !== ',' &&
+          !isQuoting(text[k] ?? '')
+        ) {
+          k++;
+        }
+        continue;
       }
+      found = true;
+      const { from, to, next } = paramValue(text, k + name[0].length, lineEnd, this.unclosed);
+      if (SECRET_PARAMS.has((name[1] ?? '').toLowerCase())) this.push(from, to);
+      k = next;
     }
+    if (found) this.paramsEnd = k;
+    return found;
   }
 
   /** Reads the value of an option at `runStart` whose value is `from`..`to`. */

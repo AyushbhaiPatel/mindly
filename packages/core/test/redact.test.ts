@@ -322,6 +322,16 @@ describe('redact', () => {
       'curl -H \'Authorization: Digest username="u", realm="r", nonce="PW", response="PW"\' x',
       'PW',
     ],
+    // A quoted value with spaces does not end the list: the secrets after it are still found.
+    [
+      'curl -H \'Authorization: Digest username="u", realm="Restricted Area", response="PW"\' x',
+      'PW',
+    ],
+    ['curl -H \'Authorization: Digest username="John Doe", realm="r", response="PW"\' x', 'PW'],
+    [
+      'curl -H "Authorization: Digest username=\\"u\\", realm=\\"Restricted Area\\", response=\\"PW\\"" x',
+      'PW',
+    ],
     // -H at the end of a cluster, and the credential syntax of ab and lftp.
     ['curl -sH "Authorization: PW" https://x.test', 'PW'],
     ["curl -sSH 'Authorization: Digest PW' https://x.test", 'PW'],
@@ -575,6 +585,16 @@ describe('redact', () => {
     expect(redactText(input.replace('PW', pw))).toBe(output.replace('[R]', REDACTED));
   });
 
+  it('redacts only the secret Digest parameters, after a quoted value with spaces too', () => {
+    const header = (nonce: string, response: string): string =>
+      `curl -H 'Authorization: Digest username="John Doe", realm="Restricted Area", ` +
+      `nonce="${nonce}", uri="/dir/index.html", qop=auth, nc=00000001, ` +
+      `response="${response}"' https://x.test`;
+    expect(
+      redactText(header('dcd98b7102dd2f0e8b11d0f600bfb0c093', '6629fae49393a05397450978507c4ef1')),
+    ).toBe(header(REDACTED, REDACTED));
+  });
+
   it('reads a long quoted body as one argument', () => {
     // A body over 2,000 characters that mentions ssh once hid the -u after it.
     const log = 'ERROR backup_runner exitcode=12 retrying_in_300s\\n';
@@ -600,6 +620,15 @@ describe('redact', () => {
     ['ab words', 'ab '],
     ['prose naming wget', 'Use wget to fetch the file and then unpack it into the build dir.\n'],
     ['remote-copy words', 'curl rsync -su a@b:/c '],
+    // Each value holds the next header: a list read again per header took seconds.
+    [
+      'Digest headers glued into parameter values',
+      `curl ${'x=-HAuthorization:Digest '.repeat(10_001)}`,
+    ],
+    [
+      'Digest parameters with unclosed quotes',
+      `curl ${'-HAuthorization:Digest a="x b=\'y '.repeat(7_500)}`,
+    ],
   ])('reads 250 KB of %s in under 100 ms', (_name, unit) => {
     const text = unit.length > 250_000 ? unit : unit.repeat(Math.ceil(250_000 / unit.length));
     let best = Infinity;
