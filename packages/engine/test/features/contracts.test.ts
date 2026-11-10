@@ -239,6 +239,46 @@ describe('executable memory', () => {
     ).toHaveLength(1);
   });
 
+  it('keeps the last pass of a contract that had nothing remembered yet', async () => {
+    const { root, mindly, pid, cc, write, memory, contracts } = await withDecision();
+    const spec = { path: 'src/auth.ts', pattern: 'role:' };
+    const c = contracts.create(memory.id, 'pattern_present', spec, USER);
+    expect(c.state).toBe('passing');
+    // A contract as it was stored before its last pass or fail was kept apart from its state.
+    mindly.store.db.prepare("DELETE FROM kv WHERE key LIKE 'contract:conclusive:%'").run();
+    expect(mindly.store.contracts.lastConclusive(c.id)).toBeUndefined();
+
+    write('src/auth.ts', `// ${'x'.repeat(600 * 1024)}\n`);
+    expect(contracts.run(mindly.store.contracts.get(c.id), root, cc).state).toBe('error');
+    expect(mindly.store.contracts.lastConclusive(c.id)).toBe('passing');
+    for (let i = 0; i < 2500; i++) {
+      mindly.store.events.append({
+        projectId: pid,
+        sessionId: null,
+        type: 'contract.result',
+        payload: { contractId: `other-${i % 40}`, state: 'passing', previous: 'passing' },
+      });
+    }
+    write('src/auth.ts', 'export const nothing = 1;\n');
+    expect(contracts.run(mindly.store.contracts.get(c.id), root, cc).state).toBe('failing');
+    expect(
+      mindly.store.conflicts.list(pid).filter((x) => x.kind === 'contract_broken'),
+    ).toHaveLength(1);
+  });
+
+  it('remembers nothing for a contract that is gone when its result arrives', async () => {
+    const { mindly, memory, contracts } = await withDecision();
+    const c = contracts.create(memory.id, 'file_exists', { path: 'src/auth.ts' }, USER);
+    mindly.store.db.prepare('DELETE FROM contracts WHERE id = ?').run(c.id);
+    mindly.store.contracts.pruneConclusive();
+    for (const state of ['passing', 'error'] as const) {
+      expect(codeOf(() => mindly.store.contracts.recordResult(c.id, state, null))).toBe(
+        'not_found',
+      );
+      expect(mindly.store.contracts.lastConclusive(c.id)).toBeUndefined();
+    }
+  });
+
   it('reads the event log at most once for a contract that never passed or failed', async () => {
     const { mindly, memory, contracts } = await withDecision();
     const c = contracts.create(memory.id, 'command', { argv: ['pnpm', 'test'] }, USER);

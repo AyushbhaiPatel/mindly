@@ -16,7 +16,18 @@ import {
   type RunStatus,
   type Snapshot,
 } from '@mindly/core';
-import { json, limit, num, numOrNull, str, strOrNull, toJson, type Db, type Row } from '../db.js';
+import {
+  json,
+  limit,
+  num,
+  numOrNull,
+  str,
+  strOrNull,
+  toJson,
+  transaction,
+  type Db,
+  type Row,
+} from '../db.js';
 
 // ---------------------------------------------------------------------------------------------
 // Context packets (Context X-Ray)
@@ -320,12 +331,34 @@ export class ContractRepo {
     ).map(toContract);
   }
 
+  /**
+   * Stores a result and keeps the contract's last passing/failing one (see `lastConclusive`), in
+   * one transaction. A passing or failing result is remembered as it is. Before any other result
+   * replaces a passing or failing state that was never remembered (a contract last run before
+   * this was kept), that state is remembered first, so it is not lost with the row's `state`.
+   * Throws `not_found`, writing nothing, for a contract that no longer exists.
+   */
   recordResult(id: string, state: ContractState, message: string | null): Contract {
-    this.db
-      .prepare('UPDATE contracts SET state = ?, last_message = ?, last_run_at = ? WHERE id = ?')
-      .run(state, message, this.clock.now(), id);
-    if (state === 'passing' || state === 'failing') this.setLastConclusive(id, state);
-    return this.get(id);
+    return transaction(this.db, () => {
+      const now = this.clock.now();
+      const conclusive = state === 'passing' || state === 'failing';
+      if (!conclusive) {
+        this.db
+          .prepare(
+            `INSERT INTO kv (key, value, updated_at)
+               SELECT ?, json_quote(state), ? FROM contracts
+               WHERE id = ? AND state IN ('passing', 'failing')
+             ON CONFLICT (key) DO NOTHING`,
+          )
+          .run(conclusiveKey(id), now, id);
+      }
+      const res = this.db
+        .prepare('UPDATE contracts SET state = ?, last_message = ?, last_run_at = ? WHERE id = ?')
+        .run(state, message, now, id);
+      if (Number(res.changes) === 0) throw notFound('contract', id);
+      if (conclusive) this.setLastConclusive(id, state);
+      return this.get(id);
+    });
   }
 
   /**
