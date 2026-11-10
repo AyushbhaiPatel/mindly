@@ -10,9 +10,8 @@ import './quiet-warnings.js';
  */
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  const [{ quietOnClosedPipe }, { failsOpen, loadSqliteWithFts5, nodeProblem }] = await Promise.all(
-    [import('./closed-pipe.js'), import('./node-check.js')],
-  );
+  const [{ quietOnClosedPipe, whileRunning }, { failsOpen, loadSqliteWithFts5, nodeProblem }] =
+    await Promise.all([import('./closed-pipe.js'), import('./node-check.js')]);
   quietOnClosedPipe();
   const problem = await nodeProblem(argv, {
     version: process.version,
@@ -37,7 +36,10 @@ async function main(): Promise<void> {
     return;
   }
   const [{ processIo }, { run }] = await Promise.all([import('./io.js'), import('./run.js')]);
+  // Cut off by a closed pipe before it finishes, a command has not succeeded; hooks still fail open.
+  whileRunning(failsOpen(argv) ? 0 : 1);
   const code = await run(argv, processIo());
+  whileRunning(null);
   if (argv[0] === 'hook') {
     process.stdout.write('', () => process.exit(code));
     return;
