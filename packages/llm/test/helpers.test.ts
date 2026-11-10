@@ -129,3 +129,47 @@ describe('compressContext', () => {
     expect(await createLlmHelpers(new NoneProvider()).compressContext(['a'], 100)).toBeNull();
   });
 });
+
+describe('fail-soft helpers report why they gave no answer', () => {
+  it('tells the caller the reason without the prompt', async () => {
+    const reasons: string[] = [];
+    const helpers = createLlmHelpers(
+      new FakeProvider(new MindlyError('unavailable', 'openai request failed with HTTP 400')),
+    );
+    const out = await helpers.classifyCorrection('use secret-thing-123 instead', {
+      onFailure: (r) => reasons.push(r),
+    });
+    expect(out).toBeNull();
+    expect(reasons).toEqual(['openai request failed with HTTP 400']);
+  });
+
+  it('says "out of time" when the caller ended the call', async () => {
+    const reasons: string[] = [];
+    const controller = new AbortController();
+    controller.abort();
+    const helpers = createLlmHelpers(new FakeProvider(new MindlyError('unavailable', 'aborted')));
+    await helpers.classifyCorrection('x', {
+      signal: controller.signal,
+      onFailure: (r) => reasons.push(r),
+    });
+    expect(reasons).toEqual(['out of time']);
+  });
+
+  it('reports a reply that is not the expected JSON', async () => {
+    const reasons: string[] = [];
+    const helpers = createLlmHelpers(new FakeProvider('I think so'));
+    await helpers.classifyCorrection('x', { onFailure: (r) => reasons.push(r) });
+    expect(reasons).toEqual(['the model did not answer in the expected form']);
+  });
+
+  it('passes the per-call redaction patterns and signal to the provider', async () => {
+    const provider = new FakeProvider('{}');
+    const controller = new AbortController();
+    await createLlmHelpers(provider).classifyCorrection('x', {
+      signal: controller.signal,
+      redactPatterns: ['ACME-[0-9]+'],
+    });
+    expect(provider.requests[0]?.redactPatterns).toEqual(['ACME-[0-9]+']);
+    expect(provider.requests[0]?.signal).toBe(controller.signal);
+  });
+});

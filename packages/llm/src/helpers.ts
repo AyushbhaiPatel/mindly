@@ -1,4 +1,4 @@
-import { sanitizeForContext, sanitizeLine, truncate } from '@mindly/core';
+import { isMindlyError, sanitizeForContext, sanitizeLine, truncate } from '@mindly/core';
 import { z } from 'zod';
 import type { LlmProvider } from './types.js';
 
@@ -29,7 +29,23 @@ export interface ContradictionResult {
 
 /** Per-call options for the helpers. */
 export interface HelperOptions {
+  /** Ends the call; the helper then returns `null`. */
   signal?: AbortSignal | undefined;
+  /** Redaction patterns on top of the built-in ones (the user's `redaction.extraPatterns`). */
+  redactPatterns?: readonly string[] | undefined;
+  /**
+   * Hears why a call gave no answer, as a short reason that holds no key, prompt or reply. The
+   * helpers stay fail-soft; this is only so a caller can log that the model is not working.
+   */
+  onFailure?: ((reason: string) => void) | undefined;
+}
+
+/** Why a model call gave no answer, safe to log. */
+function failureReason(err: unknown, signal: AbortSignal | undefined): string {
+  if (signal?.aborted) return 'out of time';
+  // Provider errors are written so their messages never hold a key, a header or the request.
+  if (isMindlyError(err)) return err.message;
+  return 'model call failed';
 }
 
 const DATA_GUARD =
@@ -70,10 +86,13 @@ async function runJson<T>(
       temperature: 0,
     };
     if (options.signal) req.signal = options.signal;
+    if (options.redactPatterns?.length) req.redactPatterns = options.redactPatterns;
     const res = await provider.complete(req);
     const parsed = schema.safeParse(extractJsonObject(res.text));
+    if (!parsed.success) options.onFailure?.('the model did not answer in the expected form');
     return parsed.success ? parsed.data : null;
-  } catch {
+  } catch (err) {
+    options.onFailure?.(failureReason(err, options.signal));
     return null;
   }
 }
@@ -218,20 +237,51 @@ export async function compressContext(
   return sanitizeForContext(out.text, budget * 4);
 }
 
-/** The helpers bound to one provider. */
+/** The helpers bound to one provider. Per-call options are added to the bound ones. */
 export interface LlmHelpers {
-  classifyCorrection(prompt: string): Promise<CorrectionClassification | null>;
-  summarizeTurn(input: TurnSummaryInput): Promise<string | null>;
-  detectContradiction(a: string, b: string): Promise<ContradictionResult | null>;
-  compressContext(items: string[], tokenBudget: number): Promise<string | null>;
+  classifyCorrection(
+    prompt: string,
+    options?: HelperOptions,
+  ): Promise<CorrectionClassification | null>;
+  summarizeTurn(input: TurnSummaryInput, options?: HelperOptions): Promise<string | null>;
+  detectContradiction(
+    a: string,
+    b: string,
+    options?: HelperOptions,
+  ): Promise<ContradictionResult | null>;
+  compressContext(
+    items: string[],
+    tokenBudget: number,
+    options?: HelperOptions,
+  ): Promise<string | null>;
+}
+
+function mergeOptions(bound: HelperOptions, call: HelperOptions | undefined): HelperOptions {
+  if (!call) return bound;
+  const signals = [bound.signal, call.signal].filter((s): s is AbortSignal => s !== undefined);
+  const patterns = [...(bound.redactPatterns ?? []), ...(call.redactPatterns ?? [])];
+  const listeners = [bound.onFailure, call.onFailure].filter(
+    (f): f is (reason: string) => void => f !== undefined,
+  );
+  return {
+    signal: signals.length > 1 ? AbortSignal.any(signals) : signals[0],
+    redactPatterns: patterns,
+    onFailure: listeners.length
+      ? (reason) => {
+          for (const f of listeners) f(reason);
+        }
+      : undefined,
+  };
 }
 
 /** Binds the fail-soft helpers to `provider`. */
 export function createLlmHelpers(provider: LlmProvider, options: HelperOptions = {}): LlmHelpers {
   return {
-    classifyCorrection: (prompt) => classifyCorrection(provider, prompt, options),
-    summarizeTurn: (input) => summarizeTurn(provider, input, options),
-    detectContradiction: (a, b) => detectContradiction(provider, a, b, options),
-    compressContext: (items, budget) => compressContext(provider, items, budget, options),
+    classifyCorrection: (prompt, o) =>
+      classifyCorrection(provider, prompt, mergeOptions(options, o)),
+    summarizeTurn: (input, o) => summarizeTurn(provider, input, mergeOptions(options, o)),
+    detectContradiction: (a, b, o) => detectContradiction(provider, a, b, mergeOptions(options, o)),
+    compressContext: (items, budget, o) =>
+      compressContext(provider, items, budget, mergeOptions(options, o)),
   };
 }

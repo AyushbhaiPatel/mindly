@@ -6,6 +6,7 @@ import {
   OllamaProvider,
   OpenAIProvider,
   createProvider,
+  retryAfterMs,
   type FetchLike,
 } from '../src/index.js';
 
@@ -298,5 +299,76 @@ describe('createProvider', () => {
     );
     await p.complete({ system: '', prompt: 'x', maxTokens: 5 });
     expect(JSON.parse(String(calls[0]?.init.body))).toMatchObject({ model: 'claude-sonnet-4-5' });
+  });
+});
+
+describe('extra redaction patterns per request', () => {
+  it('redacts the request and the reply with the patterns the caller passes', async () => {
+    const { fetchImpl, calls } = recordingFetch([
+      () => jsonResponse({ content: [{ type: 'text', text: 'see ACME-INTERNAL-777' }] }),
+    ]);
+    const p = new AnthropicProvider({ fetchImpl, env, ...fast });
+    const res = await p.complete({
+      system: 's',
+      prompt: 'No, use ACME-INTERNAL-424242 instead of npm.',
+      maxTokens: 5,
+      redactPatterns: ['ACME-INTERNAL-[0-9]+'],
+    });
+    expect(String(calls[0]?.init.body)).not.toContain('ACME-INTERNAL-424242');
+    expect(res.text).not.toContain('ACME-INTERNAL-777');
+  });
+});
+
+describe('OpenAI reasoning models', () => {
+  const openaiOk = (): Response => jsonResponse({ choices: [{ message: { content: 'ok' } }] });
+
+  it('sends no temperature and a larger output allowance to o-series and gpt-5 models', async () => {
+    for (const model of ['o3-mini', 'o4-mini', 'gpt-5', 'gpt-5-mini']) {
+      const { fetchImpl, calls } = recordingFetch([openaiOk]);
+      const p = new OpenAIProvider({ fetchImpl, env, model, ...fast });
+      await p.complete({ system: 's', prompt: 'x', maxTokens: 300, temperature: 0 });
+      const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>;
+      expect(body.temperature, model).toBeUndefined();
+      expect(body.max_completion_tokens, model).toBeGreaterThanOrEqual(4096);
+    }
+  });
+
+  it('keeps the temperature for other models', async () => {
+    const { fetchImpl, calls } = recordingFetch([openaiOk]);
+    const p = new OpenAIProvider({ fetchImpl, env, ...fast });
+    await p.complete({ system: 's', prompt: 'x', maxTokens: 300, temperature: 0 });
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>;
+    expect(body.temperature).toBe(0);
+    expect(body.max_completion_tokens).toBe(300);
+  });
+});
+
+describe('Retry-After', () => {
+  const limited = (after: string) => (): Response =>
+    new Response('{}', { status: 429, headers: { 'retry-after': after } });
+
+  it('does not retry when the server asks for a longer pause than is worth waiting', async () => {
+    const { fetchImpl, calls } = recordingFetch([limited('3600'), anthropicOk]);
+    const p = new AnthropicProvider({ fetchImpl, env, ...fast });
+    const err = await rejection(p.complete({ system: '', prompt: 'x', maxTokens: 5 }));
+    expect(isMindlyError(err, 'unavailable')).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('waits as asked when the pause is short', async () => {
+    const { fetchImpl, calls } = recordingFetch([limited('0'), anthropicOk]);
+    const p = new AnthropicProvider({ fetchImpl, env, ...fast });
+    await expect(p.complete({ system: '', prompt: 'x', maxTokens: 5 })).resolves.toMatchObject({
+      text: 'hello',
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('reads delay-seconds and HTTP dates', () => {
+    expect(retryAfterMs('3')).toBe(3000);
+    expect(retryAfterMs(null)).toBeNull();
+    expect(retryAfterMs('soon')).toBeNull();
+    const now = Date.parse('2026-01-01T00:00:00Z');
+    expect(retryAfterMs('Thu, 01 Jan 2026 00:00:10 GMT', now)).toBe(10_000);
   });
 });

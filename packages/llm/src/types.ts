@@ -8,6 +8,8 @@ export interface CompletionRequest {
   maxTokens: number;
   temperature?: number;
   signal?: AbortSignal;
+  /** Redaction patterns to apply on top of the provider's own, to this request and its reply. */
+  redactPatterns?: readonly string[];
 }
 
 /** Completion output. `text` is untrusted model output that has already been sanitised. */
