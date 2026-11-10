@@ -19,6 +19,7 @@ import { contractsTick } from './jobs/contracts.js';
 import {
   checkpointPruneTick,
   housekeepingTick,
+  notifyOutboxTick,
   selfHealingTick,
   standupTick,
   trackSurvivalTick,
@@ -319,6 +320,14 @@ export function registerJobs(jobs: JobContext): void {
   });
   if (config.standup.time) {
     scheduler.every({ name: 'standup', intervalMs: MINUTE, run: () => standupTick(jobs) });
+  }
+  if (config.notify.channels.length > 0) {
+    scheduler.every({
+      name: 'notify-outbox',
+      intervalMs: 20_000,
+      initialDelayMs: 5_000,
+      run: () => notifyOutboxTick(jobs),
+    });
   }
   if (config.failover.autoLaunch) {
     scheduler.every({ name: 'failover', intervalMs: 30_000, run: () => failoverTick(jobs) });

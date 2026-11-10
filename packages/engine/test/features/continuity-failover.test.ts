@@ -6,6 +6,7 @@ import {
   detectRateLimit,
   failoverService,
   MAX_TRANSCRIPT_TAIL_BYTES,
+  notifyOutbox,
   readTranscriptTail,
   type Mindly,
 } from '../../src/index.js';
@@ -93,6 +94,11 @@ describe('rate-limit failover', () => {
         .map((e) => e.payload.signature),
     ).toEqual(['claude.usage_limit_reached']);
 
+    // The hook does not wait for the pager: the page is written down, and sent when the outbox
+    // is flushed (by the daemon, or by the hook process once the agent has its answer).
+    expect(sent).toHaveLength(0);
+    expect(notifyOutbox(mindly).hasDue()).toBe(true);
+    expect(await notifyOutbox(mindly).flush()).toEqual({ delivered: 1, waiting: 0, dropped: 0 });
     expect(sent).toHaveLength(1);
     expect(sent[0]!.trigger).toBe('rate_limited');
     expect(sent[0]!.body).toContain('handoff ready for codex');
@@ -104,6 +110,7 @@ describe('rate-limit failover', () => {
       event(root, 'claude-code', 'cc', 'stop', { transcriptPath: transcript }),
     );
     expect(mindly.store.handoffs.list(pid)).toHaveLength(1);
+    await notifyOutbox(mindly).flush();
     expect(sent).toHaveLength(1);
 
     // The next Codex session picks it up at session start.
