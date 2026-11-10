@@ -312,6 +312,8 @@ export class HookHandler {
       if (guard.deny) {
         return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: guard.deny, context: built.text };
       }
+      // A rescan that takes this edit before the post-tool hook can only come after this point.
+      this.d.checkpoints.noteWriteStart(session.id, paths);
       return { ...EMPTY_HOOK_RESULT, context: built.text };
     }
     if (tool.shell && tool.command) {
@@ -360,6 +362,7 @@ export class HookHandler {
     const tool = evt.tool;
     if (!tool) return EMPTY_HOOK_RESULT;
     this.k.store.sessions.touch(session.id);
+    const started = tool.writes ? this.d.checkpoints.takeWriteStart(session.id) : null;
     // Only sessions with a save waiting for evidence record their tool calls: one indexed query,
     // no memory lookups (whether a warned command ran again is told by the pending save itself).
     const pending = this.k.store.saves.caughtFor(
@@ -408,6 +411,10 @@ export class HookHandler {
       order: 'desc',
       limit: 1,
     })[0];
+    // The working tree the edit is made in: a rescan credits the edit only to that tree's steps.
+    const worktree = this.d.checkpoints.enabled
+      ? await this.d.checkpoints.worktreeOf(evt.cwd)
+      : null;
     const changed: ChangedFile[] = [];
     let firstChangeId: string | null = null;
     for (const edit of tool.edits.slice(0, 50)) {
@@ -425,6 +432,7 @@ export class HookHandler {
         addedLines: countLines(edit.addedText),
         removedLines: countLines(edit.removedText),
         promptEventId: promptEvent?.id ?? null,
+        worktree,
       });
       firstChangeId ??= recorded.id;
       changed.push({
@@ -448,6 +456,7 @@ export class HookHandler {
       tool: tool.name,
       fileChangeId: firstChangeId,
       promptEventId: promptEvent?.id ?? null,
+      started,
     });
     for (const c of changed) this.d.intents.checkRecentEditors(session, c.path);
     await this.d.bus.emit('files.changed', {

@@ -8,7 +8,7 @@ import { setup } from './helpers.js';
 
 const DAY = 86_400_000;
 const DOWNGRADE =
-  'DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines;';
+  'ALTER TABLE file_changes DROP COLUMN worktree; DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines;';
 
 function change(
   store: Store,
@@ -81,7 +81,6 @@ describe('line survival schema (v5)', () => {
       branch: 'main',
       transcriptPath: null,
     }).session;
-    old.db.exec(`${DOWNGRADE} PRAGMA user_version = 4;`);
     const c = old.fileChanges.record({
       projectId: project.id,
       sessionId: session.id,
@@ -92,6 +91,7 @@ describe('line survival schema (v5)', () => {
       removedLines: 0,
       promptEventId: null,
     });
+    old.db.exec(`${DOWNGRADE} PRAGMA user_version = 4;`);
     const run = old.runs.create({ projectId: project.id, kind: 'bisect', title: 'b', input: {} });
     expect(tables(old)).not.toContain('line_survival');
     old.close();
@@ -103,8 +103,9 @@ describe('line survival schema (v5)', () => {
     expect(store.fileChanges.findByHash(project.id, 'src/api/a.ts', 'h2').map((x) => x.id)).toEqual(
       [c.id],
     );
-    // Edits from before v5 have no tracked lines.
+    // Edits from before v5 have no tracked lines, and from before v7 no working tree.
     expect(store.track.hashes(c.id)).toEqual([]);
+    expect(store.fileChanges.forPath(project.id, 'src/api/a.ts')[0]?.worktree).toBeNull();
     expect(store.runs.get(run.id).kind).toBe('bisect');
     expect(store.sessions.get(session.id).agentKind).toBe('codex');
     store.close();

@@ -311,10 +311,16 @@ describe('checkpoints through hooks', () => {
   });
 
   it('credits a step a rescan took first to the agent, as a gap when it holds more', async () => {
-    const { root, mindly, fake, rows } = make();
+    const { root, clock, mindly, fake, rows } = make();
     await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
-    const prompt = () =>
-      mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'something else' }));
+    const prompt = async () => {
+      clock.advance(10);
+      await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'something else' }));
+    };
+    const write = () =>
+      mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'a') }),
+      );
     const lateEdit = () => {
       fake.state.alreadyTaken = true;
       return mindly.hooks.handle(
@@ -322,12 +328,14 @@ describe('checkpoints through hooks', () => {
       );
     };
     // Another session's prompt rescans between the write and its hook: the step is the edit.
+    await write();
     fake.state.rescanChanges = ['src/auth.ts'];
     await prompt();
     expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', gap: false });
     await lateEdit();
     expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'agent', tool: 'Edit', gap: false });
     // The same race, but the rescan also picked up a file nobody's edit explains.
+    await write();
     fake.state.rescanChanges = ['src/auth.ts', 'src/other.ts'];
     await prompt();
     expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside', gap: false });
@@ -339,6 +347,90 @@ describe('checkpoints through hooks', () => {
       paths: ['src/auth.ts', 'src/other.ts'],
     });
     expect(rows()).toHaveLength(3);
+  });
+
+  it('keeps an outside step taken before the write began, or by a write of other paths', async () => {
+    const { root, clock, mindly, fake, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const write = (path: string) =>
+      mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool(path, 'a') }),
+      );
+    const unchangedWrite = () => {
+      fake.state.alreadyTaken = true;
+      return mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'a') }),
+      );
+    };
+    // A hand edit is rescanned into a step; later the agent writes the same content again.
+    fake.state.rescanChanges = ['src/auth.ts'];
+    clock.advance(10);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look' }));
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside' });
+    clock.advance(10);
+    await write('src/auth.ts');
+    clock.advance(10);
+    await unchangedWrite();
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', sessionId: null });
+    // No pre-tool hook was seen for this write: when it began cannot be told.
+    await unchangedWrite();
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', sessionId: null });
+    // The pre-tool hook named another file than the one written.
+    await write('src/other.ts');
+    fake.state.rescanChanges = ['src/auth.ts'];
+    clock.advance(10);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look again' }));
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside' });
+    await unchangedWrite();
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside', sessionId: null });
+  });
+
+  it('credits a rescan only with edits recorded in its working tree', async () => {
+    const { root, clock, mindly, fake, pid, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const session = mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!;
+    const record = (worktree: string | null | undefined) => {
+      clock.advance(10);
+      mindly.store.fileChanges.record({
+        projectId: pid(),
+        sessionId: session.id,
+        path: 'src/auth.ts',
+        tool: 'Edit',
+        hunkHashes: [],
+        addedLines: 1,
+        removedLines: 0,
+        promptEventId: null,
+        ...(worktree === undefined ? {} : { worktree }),
+      });
+    };
+    const rescan = async () => {
+      fake.state.rescanChanges = ['src/auth.ts'];
+      clock.advance(10);
+      await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'go' }));
+      return rows().at(-1)!;
+    };
+    // An edit recorded in another working tree, while the session now runs here.
+    record(`${root}-feature`);
+    expect(await rescan()).toMatchObject({ kind: 'outside', sessionId: null, gap: false });
+    // An edit recorded before its working tree was kept: it may be here, so nobody is blamed.
+    record(undefined);
+    expect(await rescan()).toMatchObject({ kind: 'outside', sessionId: null, gap: true });
+    record(null);
+    record(root);
+    expect(await rescan()).toMatchObject({ kind: 'agent', sessionId: session.id, gap: true });
+    record(root);
+    expect(await rescan()).toMatchObject({ kind: 'agent', sessionId: session.id, gap: false });
+  });
+
+  it('records the working tree of every agent edit', async () => {
+    const { root, mindly, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'x') }),
+    );
+    expect(mindly.store.fileChanges.forPath(pid(), 'src/auth.ts')[0]).toMatchObject({
+      worktree: root,
+    });
   });
 
   it('records nothing when checkpoints are disabled', async () => {

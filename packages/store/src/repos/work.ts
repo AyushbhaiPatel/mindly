@@ -318,6 +318,7 @@ function toFileChange(r: Row, hashes: string[]): FileChange {
     addedLines: num(r, 'added_lines'),
     removedLines: num(r, 'removed_lines'),
     promptEventId: strOrNull(r, 'prompt_event_id'),
+    worktree: strOrNull(r, 'worktree'),
     createdAt: num(r, 'created_at'),
   };
 }
@@ -333,7 +334,10 @@ export class FileChangeRepo {
    * `mindly track` measures survival over); `hunkHashes` also hold fragments, for provenance.
    */
   record(
-    input: Omit<FileChange, 'id' | 'createdAt'> & { lineHashes?: readonly string[] },
+    input: Omit<FileChange, 'id' | 'createdAt' | 'worktree'> & {
+      worktree?: string | null;
+      lineHashes?: readonly string[];
+    },
   ): FileChange {
     const now = this.clock.now();
     const id = uuidv7(now);
@@ -343,7 +347,7 @@ export class FileChangeRepo {
       this.db
         .prepare(
           `INSERT INTO file_changes (id, project_id, session_id, path, tool, added_lines, removed_lines,
-             prompt_event_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             prompt_event_id, worktree, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -354,6 +358,7 @@ export class FileChangeRepo {
           input.addedLines,
           input.removedLines,
           input.promptEventId,
+          input.worktree ?? null,
           now,
         );
       const stmt = this.db.prepare(
@@ -377,6 +382,7 @@ export class FileChangeRepo {
       addedLines: input.addedLines,
       removedLines: input.removedLines,
       promptEventId: input.promptEventId,
+      worktree: input.worktree ?? null,
       createdAt: now,
     };
   }

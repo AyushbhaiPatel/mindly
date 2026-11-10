@@ -176,7 +176,7 @@ describe('readGlance', () => {
   it('refuses a database a writer has not migrated to v2 yet, without changing it', () => {
     const { path, store } = fixture();
     store.db.exec(
-      'DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines; DROP TABLE saves; PRAGMA user_version = 1;',
+      'ALTER TABLE file_changes DROP COLUMN worktree; DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines; DROP TABLE saves; PRAGMA user_version = 1;',
     );
     store.close();
     const before = readFileSync(path);

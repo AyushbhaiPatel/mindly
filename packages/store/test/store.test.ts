@@ -256,6 +256,30 @@ describe('intents and file changes', () => {
     expect(store.fileChanges.findByHash(project.id, 'src/a.ts', 'h2')[0]?.sessionId).toBe(a.id);
     expect(store.fileChanges.otherEditors(project.id, b.id, 'src/a.ts', 0)).toEqual([a.id]);
   });
+
+  it('keeps the working tree a change was made in, null when not given', () => {
+    const { store, project, a } = setup();
+    const base = {
+      projectId: project.id,
+      sessionId: a.id,
+      tool: 'Edit',
+      hunkHashes: [],
+      addedLines: 1,
+      removedLines: 0,
+      promptEventId: null,
+    };
+    expect(store.fileChanges.record({ ...base, path: 'x.ts', worktree: '/wt' }).worktree).toBe(
+      '/wt',
+    );
+    expect(store.fileChanges.record({ ...base, path: 'y.ts' }).worktree).toBeNull();
+    expect(store.fileChanges.forPath(project.id, 'x.ts')[0]?.worktree).toBe('/wt');
+    expect(store.fileChanges.since(project.id, 0).map((c) => [c.path, c.worktree])).toEqual(
+      expect.arrayContaining([
+        ['x.ts', '/wt'],
+        ['y.ts', null],
+      ]),
+    );
+  });
 });
 
 describe('conflicts', () => {
