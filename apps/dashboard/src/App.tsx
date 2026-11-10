@@ -17,7 +17,7 @@ import { HistoryView, type HistorySub } from './views/History';
 import { HomeView } from './views/Home';
 import { MemoryView } from './views/Memory';
 import { SettingsView } from './views/Settings';
-import { formatRoute, parseRoute, projectOfRoute } from './route';
+import { addressWithProject, formatRoute, parseRoute, projectOfRoute } from './route';
 import { GUIDE, PAGES, SUBPAGES, type Page } from './vocab';
 
 const MOCK = import.meta.env.VITE_MINDLY_MOCK === '1';
@@ -311,8 +311,23 @@ function Shell({
 
   const reloadProjects = useCallback(async () => {
     const list = await client.projects();
-    if (list.length > 0) setProjects([...list]);
+    if (list.length === 0) return;
+    setProjects([...list]);
+    // The project on screen may be gone from the list: move to one that exists, as a switch
+    // (its events, sessions, saved choice and address follow from the id).
+    setProjectId((cur) => (list.some((p) => p.id === cur) ? cur : list[0]!.id));
   }, [client]);
+
+  // The address always names the project on screen. On a first visit it names none, and it can
+  // name one that does not exist; either way a copied link would open something else, and Back
+  // after the first switch would have no project to return to. The address is corrected in
+  // place: no history entry, and no hashchange to answer.
+  useEffect(() => {
+    const next = addressWithProject(location.hash, projectId);
+    if (next === null) return;
+    history.replaceState(history.state, '', next);
+    setRoute(readRoute());
+  }, [projectId, route]);
 
   const notify = useCallback((text: string, tone: Toast['tone'] = 'neutral') => {
     const id = Date.now() + Math.random();

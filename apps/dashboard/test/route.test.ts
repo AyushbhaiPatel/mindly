@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalRoute, formatRoute, parseRoute, projectOfRoute } from '../src/route';
+import {
+  addressWithProject,
+  canonicalRoute,
+  formatRoute,
+  parseRoute,
+  projectOfRoute,
+} from '../src/route';
 import { PAGES } from '../src/vocab';
 
 describe('parseRoute', () => {
@@ -82,5 +88,32 @@ describe('projectOfRoute', () => {
     expect(projectOfRoute(params('p=gone'), ids, 'also-gone')).toBe('p1');
     expect(projectOfRoute(params(''), ids, null)).toBe('p1');
     expect(projectOfRoute(params('p=x'), [], 'x')).toBeNull();
+  });
+});
+
+describe('addressWithProject', () => {
+  it('leaves an address that already names the project', () => {
+    expect(addressWithProject('#/home?p=p1', 'p1')).toBeNull();
+    expect(addressWithProject('#/agents?sub=team&p=p1', 'p1')).toBeNull();
+  });
+
+  it('adds the project to an address that names none', () => {
+    expect(addressWithProject('', 'p1')).toBe('#/home?p=p1');
+    expect(addressWithProject('#/memory', 'p1')).toBe('#/memory?p=p1');
+    expect(addressWithProject('#/history?sub=runs', 'p1')).toBe('#/history?sub=runs&p=p1');
+  });
+
+  it('replaces a project that is not the one shown, keeping the page and its section', () => {
+    expect(addressWithProject('#/settings?p=zzz', 'p1')).toBe('#/settings?p=p1');
+    expect(addressWithProject('#/agents?p=gone&sub=split', 'p2')).toBe('#/agents?p=p2&sub=split');
+    expect(addressWithProject('#/constructor?p=zzz', 'p1')).toBe('#/home?p=p1');
+  });
+
+  it('settles after one correction', () => {
+    for (const hash of ['', '#/memory', '#/settings?p=zzz', '#/split', '#/nope?x=1']) {
+      const fixed = addressWithProject(hash, 'p1');
+      expect(fixed).not.toBeNull();
+      expect(addressWithProject(fixed!, 'p1')).toBeNull();
+    }
   });
 });

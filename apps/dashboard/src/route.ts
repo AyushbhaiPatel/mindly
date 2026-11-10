@@ -65,3 +65,14 @@ export function projectOfRoute(
   if (fallback !== null && projectIds.includes(fallback)) return fallback;
   return projectIds[0] ?? null;
 }
+
+/**
+ * The address `hash` should be replaced with so that it names `projectId`, or null when it
+ * already does. The page and the other parameters are kept; an address that names no project,
+ * or another one, gets this one.
+ */
+export function addressWithProject(hash: string, projectId: string): string | null {
+  const r = parseRoute(hash);
+  if (r.params['p'] === projectId) return null;
+  return formatRoute(r.page, { ...r.params, p: projectId });
+}
