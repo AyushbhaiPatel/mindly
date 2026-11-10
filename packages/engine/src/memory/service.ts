@@ -58,8 +58,10 @@ export interface RememberInput {
  *
  * - `kept_rejected`: the user rejected a memory with this title.
  * - `kept_approved`: the user approved a memory with this title.
- * - `kept_user_decision`: the memory is settled in another way: the user pinned, enforced or
- *   archived it, or it was verified against the code (or marked stale). Only the user changes it.
+ * - `kept_user_decision`: the user pinned or enforced the memory. Only the user changes it.
+ *
+ * `updated` from an agent means it changed a memory its own kind proposed. Its trust is worked out
+ * again from the evidence given, as for a new memory, so a verified or stale fact can be corrected.
  * - `kept_other_author`: a different agent proposed a memory with this title.
  *
  * Callers that go on to approve, enforce, announce or link the result must do so only for
@@ -77,17 +79,18 @@ export type RememberOutcome =
 type AgentLock = 'rejected' | 'approved' | 'decided' | 'other_author';
 
 /**
- * Whether `by`, a source other than the user, may change `m`; null when it may. An agent may
- * change only a memory its own kind proposed that is still proposed, active, not enforced and not
- * pinned: anything the user approved, rejected, enforced, pinned or archived is the user's, and a
- * verified or stale memory is settled too. `takesOver` (a repository file restating an agent's
- * proposal) lifts only the author check. The one rule behind both
+ * Whether `by`, a source other than the user, may change `m`; null when it may. Once the user
+ * approved, rejected, pinned, enforced or archived a memory (states only the user sets), it is the
+ * user's. Otherwise the agent kind that proposed it may change it, including when the code has
+ * marked it verified or stale: those say whether its evidence still matches, not that its text is
+ * right, and its author must be able to correct it. `takesOver` (a repository file restating an
+ * agent's proposal) lifts only the author check. The one rule behind both
  * {@link MemoryService.rememberResult} and {@link MemoryService.update}.
  */
 function agentLock(m: Memory, by: MemorySource, takesOver = false): AgentLock | null {
   if (m.trust === 'rejected') return 'rejected';
   if (m.trust === 'approved') return 'approved';
-  if (m.trust !== 'proposed' || m.status !== 'active' || m.enforce || m.pinned) return 'decided';
+  if (m.status !== 'active' || m.enforce || m.pinned) return 'decided';
   return takesOver || sameAuthor(m.source, by) ? null : 'other_author';
 }
 

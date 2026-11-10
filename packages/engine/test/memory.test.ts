@@ -463,8 +463,7 @@ describe('trust layer', () => {
       evidence: [{ path: 'notes.txt', excerpt: 'a line that is going to change soon' }],
       source: { type: 'agent', sessionId: null, agentKind: 'claude-code' },
     });
-    // A verified fact is settled, whoever restates it.
-    expect(other.outcome).toBe('kept_user_decision');
+    expect(other.outcome).toBe('kept_other_author');
     expect(mindly.store.memories.evidenceFor(fact.id).map((e) => e.ref)).toEqual(['src/auth.ts']);
     writeFileSync(join(root, 'notes.txt'), 'changed\n');
     selfHealingOf(mindly).sweep(pid);
@@ -623,28 +622,6 @@ describe('trust layer', () => {
       expect(r.memory).toMatchObject({ body: 'original', version: 1 });
     }
 
-    // The agent's own verified fact.
-    const fact = mindly.memory.remember({
-      ...base,
-      kind: 'fact',
-      title: 'Login returns the admin role',
-      body: 'original',
-      evidence: [{ path: 'src/auth.ts', excerpt: 'return { role: "admin" };' }],
-    });
-    expect(fact.trust).toBe('verified');
-    updateRefused(fact.id);
-    const again = mindly.memory.rememberResult({
-      ...base,
-      kind: 'fact',
-      title: 'Login returns the admin role',
-      body: 'replaced',
-    });
-    expect(again).toMatchObject({
-      outcome: 'kept_user_decision',
-      memory: { body: 'original', trust: 'verified', version: 1 },
-    });
-    expect(mindly.store.memories.evidenceFor(fact.id)).toHaveLength(1);
-
     // Still open: both allow it.
     const open = mindly.memory.remember({ ...base, title: 'Prefer named exports', body: 'v1' });
     expect(restate(open.title)).toMatchObject({ outcome: 'updated', memory: { body: 'replaced' } });
@@ -666,6 +643,68 @@ describe('trust layer', () => {
       trust: 'proposed',
       source: { agentKind: 'codex' },
     });
+  });
+
+  it('lets an agent correct its own verified or stale fact, and nobody else', () => {
+    const { root, mindly, pid } = project();
+    writeFileSync(join(root, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 8080;\n');
+    const base = { projectId: pid, projectRoot: root, kind: 'fact' as const, source: agent };
+    const evidence = [{ path: 'src/server.ts', excerpt: 'PORT_NUMBER_FOR_SERVER = 8080' }];
+    const title = 'The server listens on its port';
+    const fact = mindly.memory.remember({ ...base, title, body: 'listens on 3000', evidence });
+    // Verified only says the excerpt exists, not that the body is right.
+    expect(fact.trust).toBe('verified');
+
+    // Restating re-runs verification: with evidence it stays verified, without it is proposed.
+    expect(
+      mindly.memory.rememberResult({ ...base, title, body: 'listens on 8080', evidence }),
+    ).toMatchObject({
+      outcome: 'updated',
+      memory: { id: fact.id, body: 'listens on 8080', trust: 'verified', version: 2 },
+    });
+    expect(mindly.memory.rememberResult({ ...base, title, body: 'listens on 9090' })).toMatchObject(
+      { outcome: 'updated', memory: { body: 'listens on 9090', trust: 'proposed', version: 3 } },
+    );
+    expect(mindly.memory.update(fact.id, { body: 'listens on 8080' }, agent, null).body).toBe(
+      'listens on 8080',
+    );
+
+    // Stale: its line changed. Its author can still restate it, and it is found again.
+    mindly.memory.rememberResult({ ...base, title, body: 'listens on 8080', evidence });
+    writeFileSync(join(root, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 9090;\n');
+    selfHealingOf(mindly).sweep(pid);
+    expect(mindly.store.memories.get(fact.id).trust).toBe('stale');
+    const fixed = mindly.memory.rememberResult({
+      ...base,
+      title,
+      body: 'listens on 9090',
+      evidence: [{ path: 'src/server.ts', excerpt: 'PORT_NUMBER_FOR_SERVER = 9090' }],
+    });
+    expect(fixed).toMatchObject({
+      outcome: 'updated',
+      memory: { body: 'listens on 9090', trust: 'verified' },
+    });
+
+    // Another agent kind cannot change it, verified or stale.
+    const claude = { type: 'agent' as const, sessionId: null, agentKind: 'claude-code' };
+    for (const trust of ['verified', 'stale'] as const) {
+      mindly.store.memories.update(fact.id, { trust }, agent, 'test');
+      expect(
+        mindly.memory.rememberResult({ ...base, source: claude, title, body: 'listens on 1' })
+          .outcome,
+      ).toBe('kept_other_author');
+      expect(() => mindly.memory.update(fact.id, { body: 'x' }, claude, null)).toThrow(
+        /agents can only change memories they proposed/,
+      );
+      expect(() => mindly.memory.update(fact.id, { status: 'archived' }, claude, null)).toThrow(
+        /agents can only change memories they proposed/,
+      );
+    }
+    expect(mindly.store.memories.get(fact.id).body).toBe('listens on 9090');
+    // Its own author may archive it, stale or not.
+    expect(mindly.memory.update(fact.id, { status: 'archived' }, agent, null).status).toBe(
+      'archived',
+    );
   });
 
   it('requires a file named as evidence to exist', () => {

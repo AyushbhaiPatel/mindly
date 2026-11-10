@@ -127,11 +127,10 @@ function notStored(outcome: RememberOutcome, m: Memory): CallToolResult | null {
         'the user if you think it should be reconsidered.',
     },
     kept_user_decision: {
-      heading: 'Existing settled memory',
+      heading: 'Existing memory the user pinned or enforced',
       text:
-        'Not stored: a memory with this title is settled (the user pinned, enforced or ' +
-        'archived it, or it was verified against the code) and was left unchanged. Propose the ' +
-        'change under a different title or ask the user to edit it.',
+        'Not stored: the user pinned or enforced a memory with this title, so it was left ' +
+        'unchanged. Propose the change under a different title or ask the user to edit it.',
     },
     kept_other_author: {
       heading: 'Existing memory of another agent',
@@ -146,6 +145,21 @@ function notStored(outcome: RememberOutcome, m: Memory): CallToolResult | null {
     outcome,
     memory: memorySummary(m),
   });
+}
+
+/**
+ * The line above a stored memory. When it replaced the agent's own earlier memory with the same
+ * title, it says so, with the trust worked out again from the evidence given this time.
+ */
+function storedIntro(outcome: RememberOutcome, m: Memory): string | undefined {
+  if (outcome !== 'updated') {
+    return m.trust === 'proposed' ? 'Stored as proposed; the user can approve it.' : undefined;
+  }
+  const trust =
+    m.trust === 'verified'
+      ? 'Its evidence was found in the code, so it is marked verified.'
+      : 'It is proposed; the user can approve it.';
+  return `Updated your earlier memory with this title (now version ${m.version}). ${trust}`;
 }
 
 function taskLine(mindly: Mindly, t: Task, now: number): string {
@@ -333,7 +347,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         block(
           [{ heading: 'Stored memory', lines: [memoryItem(m)] }],
           'Stored.',
-          m.trust === 'proposed' ? 'Stored as proposed; the user can approve it.' : undefined,
+          storedIntro(outcome, m),
         ),
         { stored: true, outcome, memory: memorySummary(m) },
       );
@@ -432,11 +446,14 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       });
       const kept = notStored(outcome, m);
       if (kept) return kept;
-      return ok(block([{ heading: 'Recorded pitfall', lines: [memoryItem(m)] }], 'Recorded.'), {
-        stored: true,
-        outcome,
-        memory: memorySummary(m),
-      });
+      return ok(
+        block(
+          [{ heading: 'Recorded pitfall', lines: [memoryItem(m)] }],
+          'Recorded.',
+          storedIntro(outcome, m),
+        ),
+        { stored: true, outcome, memory: memorySummary(m) },
+      );
     },
   );
 

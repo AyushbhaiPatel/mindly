@@ -448,6 +448,48 @@ describe('mindly MCP server', () => {
     expect(h.mindly.store.memories.get(other.id).status).toBe('active');
   });
 
+  it('lets an agent correct its own verified fact and says it was updated', async () => {
+    const h = await harness();
+    writeFileSync(
+      join(h.root, 'src', 'server.ts'),
+      'export const PORT_NUMBER_FOR_SERVER = 8080;\n',
+    );
+    const evidence = [{ path: 'src/server.ts', excerpt: 'PORT_NUMBER_FOR_SERVER = 8080' }];
+    const title = 'The server listens on its port';
+    const first = await h.call('mindly_remember', {
+      kind: 'fact',
+      title,
+      body: 'listens on 3000',
+      evidence,
+    });
+    const id = (first.structured?.['memory'] as { id: string; trust: string }).id;
+    expect(first.structured).toMatchObject({ stored: true, outcome: 'created' });
+    expect((first.structured?.['memory'] as { trust: string }).trust).toBe('verified');
+
+    const fixed = await h.call('mindly_remember', {
+      kind: 'fact',
+      title,
+      body: 'listens on 9090',
+    });
+    expect(fixed.isError).toBe(false);
+    expect(fixed.text).toContain('Updated your earlier memory with this title (now version 2).');
+    expect(fixed.text).toContain('It is proposed; the user can approve it.');
+    expect(fixed.structured).toMatchObject({
+      stored: true,
+      outcome: 'updated',
+      memory: { id, trust: 'proposed', version: 2 },
+    });
+    expect(h.mindly.store.memories.get(id).body).toBe('listens on 9090');
+
+    const codex = await harness({ agentKind: 'codex' }, { root: h.root, mindly: h.mindly });
+    const other = await codex.call('mindly_remember', {
+      kind: 'fact',
+      title,
+      body: 'listens on 1',
+    });
+    expect(other.structured).toMatchObject({ stored: false, outcome: 'kept_other_author' });
+  });
+
   it('does not rewrite its own proposal once the user pinned it', async () => {
     const h = await harness();
     const first = await h.call('mindly_remember', { kind: 'rule', title: 'Use pnpm', body: 'v1' });
@@ -455,7 +497,8 @@ describe('mindly MCP server', () => {
     h.mindly.memory.update(id, { pinned: true }, USER, null);
     const again = await h.call('mindly_remember', { kind: 'rule', title: 'Use pnpm', body: 'v2' });
     expect(again.isError).toBe(false);
-    expect(again.text).toMatch(/Not stored: a memory with this title is settled/);
+    expect(again.text).toMatch(/Not stored: the user pinned or enforced a memory with this title/);
+    expect(again.text).not.toMatch(/Not stored:[^\n]*verified/);
     expect(again.structured).toMatchObject({
       stored: false,
       outcome: 'kept_user_decision',
