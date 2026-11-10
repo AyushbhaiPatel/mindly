@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { cursorAdapter as a } from '../src/index.js';
 import { fixture, must, out, result } from './helpers.js';
@@ -132,6 +135,35 @@ describe('cursor parse', () => {
       a.parse('beforeShellExecution', { ...shell, workspace_roots: roots, cwd: '/somewhere/else' })
         ?.cwd,
     ).toBe('/Users/dev/docs');
+  });
+
+  it('keeps the working directory it reports whenever it exists, comparing real paths', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-cursor-')));
+    const repo = join(base, 'repo');
+    mkdirSync(join(repo, 'packages', 'api'), { recursive: true });
+    mkdirSync(join(repo, 'prisma'), { recursive: true });
+    mkdirSync(join(base, 'scratch'));
+    symlinkSync(repo, join(base, 'link'));
+    const shell = f('beforeShellExecution') as Record<string, unknown>;
+    const at = (roots: string[], cwd: string) =>
+      a.parse('beforeShellExecution', { ...shell, workspace_roots: roots, cwd })?.cwd;
+    // A root deeper than where the command runs: the command's own directory counts.
+    expect(at([join(repo, 'packages', 'api')], repo)).toBe(repo);
+    expect(at([join(repo, 'packages', 'api')], join(repo, 'prisma'))).toBe(join(repo, 'prisma'));
+    // A scratch directory outside every root is where the command runs.
+    expect(at([repo], join(base, 'scratch'))).toBe(join(base, 'scratch'));
+    // A root given through a link holds the real directory.
+    expect(at([join(base, 'link')], join(repo, 'prisma'))).toBe(join(repo, 'prisma'));
+    // A write to a file in a root while the directory is elsewhere is read from that root.
+    const write = f('preToolUse') as Record<string, unknown>;
+    expect(
+      a.parse('preToolUse', {
+        ...write,
+        workspace_roots: [repo],
+        cwd: join(base, 'scratch'),
+        tool_input: { file_path: join(repo, 'prisma', 'a.sql'), contents: 'x' },
+      })?.cwd,
+    ).toBe(repo);
   });
 
   it('returns null without an id or workspace root', () => {
