@@ -403,41 +403,14 @@ function shellInvocation(words: readonly Word[]): {
 const STDIN_PATHS = new Set(['-', '/dev/stdin', '/dev/fd/0', '/proc/self/fd/0']);
 
 /**
- * The text a process substitution prints, when the text shows it: `echo` or `printf` of words
- * that are plain text. Null for anything else.
+ * Code a shell or `source` reads from its input: the code of its own here-string or here-document
+ * when that is plain text. What a pipe feeds it, and a process substitution, are not read as code.
  */
-function printedBy(code: string): string | null {
-  const parsed = parse(code);
-  const only = parsed.commands[0];
-  if (parsed.cut || parsed.commands.length !== 1 || only === undefined) return null;
-  if (only.nested.length > 0 || only.redirects.length > 0) return null;
-  const words = withoutAssignments(only.words);
-  const name = words[0]?.text;
-  if ((name !== 'echo' && name !== 'printf') || words.some((w) => w.dynamic)) return null;
-  let args = words.slice(1);
-  if (name === 'echo') {
-    while (args[0] && /^-[neE]+$/.test(args[0].text)) args = args.slice(1);
-    return args.map((w) => w.text).join(' ');
-  }
-  // printf: a format with no conversion, or `%s\n` printing each word on a line of its own.
-  const [format, ...rest] = args;
-  if (format === undefined) return null;
-  if (format.text === '%s\\n') return rest.map((w) => w.text).join('\n');
-  if (rest.length > 0 || format.text.includes('%')) return null;
-  return format.text.replace(/\\n/g, '\n');
-}
-
-/**
- * Code a shell or `source` reads from its input or from a file the text names: the code when the
- * text shows it (a here-document or here-string that is plain text, what `echo` before a pipe
- * prints, a process substitution that prints plain text), or null when it does not.
- */
-function codeFrom(from: Word | null, stdin: string | null, stdinDynamic: boolean): string | null {
-  if (from === null || (!from.dynamic && STDIN_PATHS.has(from.text))) {
-    return stdin !== null && !stdinDynamic ? stdin : null;
-  }
-  if (from.procSub !== undefined) return printedBy(from.procSub);
-  return null;
+function codeFrom(from: Word | null, stdin: string | null, ctx: GitContext): string | null {
+  if (from !== null && (from.dynamic || !STDIN_PATHS.has(from.text))) return null;
+  return stdin !== null && !(ctx.stdinDynamic ?? false) && !(ctx.stdinPiped ?? false)
+    ? stdin
+    : null;
 }
 
 const SCRIPT_RUNNERS = new Set(['python', 'python3', 'node', 'ruby', 'perl', 'php', 'deno', 'bun']);
@@ -1258,6 +1231,8 @@ interface GitContext {
   timeUp: () => boolean;
   /** What the command reads on its input holds values not known here. */
   stdinDynamic?: boolean;
+  /** What the command reads on its input comes through a pipe. */
+  stdinPiped?: boolean;
 }
 
 const PLAIN_GIT: GitContext = { settings: false, timeUp: () => false };
@@ -1465,7 +1440,7 @@ function classify(
       // it names is not read (it runs in this shell, which taints the line).
       const from = args[0] ?? null;
       if (from === null || from.procSub !== undefined || STDIN_PATHS.has(from.text)) {
-        const code = codeFrom(from, stdin, git.stdinDynamic ?? false);
+        const code = codeFrom(from, stdin, git);
         if (code !== null) return { kind: 'inline', code };
         return { kind: 'unread', why: 'source reads code the text does not show', taints: true };
       }
@@ -1525,7 +1500,7 @@ function classify(
     // The code from its input (`-s`, no script, `/dev/stdin`) or a process substitution.
     const from = shell.s ? null : shell.operand;
     if (from === null || from.procSub !== undefined || STDIN_PATHS.has(from.text)) {
-      const code = codeFrom(from, stdin, git.stdinDynamic ?? false);
+      const code = codeFrom(from, stdin, git);
       return code !== null ? { kind: 'inline', code } : unshown;
     }
     // A script file: what it does is its own, as for a program run by its path.
@@ -2050,6 +2025,60 @@ function builtinTaints(name: string, args: readonly Word[]): boolean {
   }
 }
 
+/** Programs that may put a symbolic link where a later `cd` goes. */
+const LINK_MOVERS = new Set([
+  'mv',
+  'rsync',
+  'tar',
+  'bsdtar',
+  'gtar',
+  'unzip',
+  'cpio',
+  '7z',
+  'install',
+]);
+
+/** Whether a command may make, copy or move a symbolic link. */
+function makesLinks(words: readonly Word[]): boolean {
+  const first = words[0];
+  if (first === undefined || first.dynamic) return false;
+  const name = programName(first);
+  const flags = words.slice(1).filter((w) => w.text.startsWith('-'));
+  if (name === 'ln') {
+    // `-s`, or `--symbolic` as long as it is told (`--sy`).
+    return flags.some((w) => /^-[^-]*s/.test(w.text) || /^--sy/.test(w.text));
+  }
+  if (name === 'cp') {
+    // A link is copied as a link with -P, -d, -a, -R, -r, or made with -s.
+    return flags.some(
+      (w) => /^-[^-]*[sPdaRr]/.test(w.text) || /^--(sy|no-d|ar|rec|R)/.test(w.text),
+    );
+  }
+  if (LINK_MOVERS.has(name)) return true;
+  // git checks out what a revision holds, links too.
+  return (
+    name === 'git' &&
+    ![
+      'status',
+      'log',
+      'diff',
+      'show',
+      'grep',
+      'blame',
+      'ls-files',
+      'rev-parse',
+      'branch',
+      'fetch',
+      'config',
+      'add',
+      'commit',
+      'push',
+      'remote',
+      'tag',
+    ].includes(gitCommand(words).rest[0]?.text ?? '')
+  );
+}
+
 /** Safe builtins whose options may set a variable or run a command, given as any word. */
 const OPTIONED = new Set(['printf', 'print', 'wait', 'jobs', 'umask']);
 
@@ -2058,73 +2087,6 @@ const subscripted = (w: Word): boolean => {
   const at = w.text.indexOf('[');
   return at !== -1 && /\$\(|`/.test(w.text.slice(at));
 };
-
-/** Builtins that read a name as a variable, an array element's subscript being evaluated. */
-const NAMING = new Set([
-  'test',
-  '[',
-  '[[',
-  'printf',
-  'print',
-  'read',
-  'mapfile',
-  'readarray',
-  'declare',
-  'typeset',
-  'local',
-  'readonly',
-  'export',
-  'unset',
-  'getopts',
-  'let',
-  'wait',
-]);
-
-/**
- * The substitutions in the subscripts of names a builtin evaluates (`test -v 'a[$(…)]'`,
- * `printf -v 'a[$(…)]' x`): code the shell runs, though the text quotes it.
- */
-function subscriptCode(words: readonly Word[]): string[] {
-  const name = words[0];
-  if (name === undefined || name.dynamic || !NAMING.has(name.text)) return [];
-  const out: string[] = [];
-  for (const w of words.slice(1)) {
-    if (!subscripted(w)) continue;
-    out.push(...substitutions(w.text.slice(w.text.indexOf('['))));
-  }
-  return out;
-}
-
-/**
- * The words of the program `xargs -I{}` or `parallel` runs, a word holding the string they
- * replace with what they read (`{}`) marked as a value not known here.
- */
-function givenByInput(all: readonly Word[], words: Word[]): Word[] {
-  const at = all.indexOf(words[0] as Word);
-  const before = at === -1 ? [] : all.slice(0, at);
-  let replace: string | null = null;
-  for (let i = 0; i < before.length; i++) {
-    const w = before[i] as Word;
-    const name = programName(w);
-    if (name === 'parallel') replace = '{}';
-    if (name !== 'xargs') continue;
-    for (let j = i + 1; j < before.length; j++) {
-      const o = (before[j] as Word).text;
-      if (o === '-I') replace = before[j + 1]?.text ?? '{}';
-      else if (o.startsWith('-I')) replace = o.slice(2);
-      else if (o === '-i' || o === '--replace') replace = '{}';
-      else if (o.startsWith('-i')) replace = o.slice(2);
-      else if (o.startsWith('--replace=')) replace = o.slice('--replace='.length);
-    }
-  }
-  if (replace === null || replace === '') return words;
-  const r = replace;
-  return words.map((w) =>
-    w.text.includes(r)
-      ? { ...w, dynamic: true, dynamicAt: Math.min(w.dynamicAt ?? Infinity, w.text.indexOf(r)) }
-      : w,
-  );
-}
 
 /**
  * Programs that run the program after them, with the environment and words they are given: their
@@ -3657,6 +3619,11 @@ export interface ShellReading {
    * not the whole answer.
    */
   limit: string | null;
+  /**
+   * False when the line is not one Mindly reads fully (see {@link understoodLine}) and was not
+   * read: its one target is the whole working tree, a possible write.
+   */
+  understood: boolean;
 }
 
 /** What reading a command may know about where it runs. Nothing is looked up here. */
@@ -3679,6 +3646,11 @@ export interface ShellReadOptions {
    * `cd` through one makes where later commands run unknown. Without it, none is.
    */
   linked?: (path: string) => boolean;
+  /**
+   * Read only a line Mindly reads fully; any other stands for a possible write of the whole
+   * working tree, never a certain one.
+   */
+  understoodOnly?: boolean;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3905,6 +3877,13 @@ function readCode(source: string): CodeFinding {
  * in both directions, so a read is not blocked and a plain write is not missed.
  */
 export function readShellWrites(command: string, options: ShellReadOptions = {}): ShellReading {
+  if (options.understoodOnly) {
+    const fully = understanding(command);
+    if (fully !== true) {
+      const unread = unreadLine(options.top ?? null);
+      return typeof fully === 'string' ? { ...unread, limit: fully } : unread;
+    }
+  }
   const reading: Reading = {
     out: new Map(),
     limit: null,
@@ -3918,29 +3897,12 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     later: [],
     deferred: new Set(),
     added: new Set(),
-    read: new Set(),
     splitChars: 0,
-    possibleOnly: false,
     linked: options.linked ?? null,
     linksMade: false,
   };
   collectTargets(command, '', 0, reading);
   if (reading.gitEnv) {
-    // A line that may set what git runs with may also evaluate text as code where the shell
-    // does arithmetic (`printf -v 'a[$(…)]'`, `x='a[$(…)]'; $((x))`): every substitution in it,
-    // quoted or not, is read as code too.
-    // What the shell would not run unless it evaluates it can only warn; each is read once.
-    reading.possibleOnly = true;
-    for (const code of substitutions(command.slice(0, MAX_COMMAND_CHARS), Infinity)) {
-      if (reading.read.has(code)) continue;
-      if (reading.timeUp() || reading.commands > MAX_COMMANDS) {
-        reading.limit ??= 'no time was left to read all of it';
-        break;
-      }
-      reading.read.add(code);
-      collectTargets(code, '', 1, reading);
-    }
-    reading.possibleOnly = false;
     // What git would answer now is not what the commands will do: it is asked nothing, and what
     // each question stands for counts as written. The git commands read before the line was
     // known to be so may change the whole tree too.
@@ -3952,6 +3914,346 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     targets: [...reading.out.values()],
     questions: reading.questions,
     limit: reading.limit,
+    understood: true,
+  };
+}
+
+/** Simple commands a line read fully may hold; one with more is read as not read fully. */
+const MAX_UNDERSTOOD_COMMANDS = 4000;
+
+/** Builtins a line read fully may use, while their words keep them harmless. */
+const UNDERSTOOD_BUILTINS = new Set([
+  'cd',
+  'echo',
+  'printf',
+  'true',
+  'false',
+  ':',
+  'test',
+  '[',
+  'pwd',
+  'exit',
+]);
+
+/** Programs a pipe may feed on a line read fully: they only filter what they are given. */
+const UNDERSTOOD_FILTERS = new Set([
+  'head',
+  'tail',
+  'grep',
+  'egrep',
+  'fgrep',
+  'sort',
+  'uniq',
+  'wc',
+  'cut',
+  'tr',
+  'cat',
+  'less',
+  'more',
+  'jq',
+  'column',
+  'tee',
+]);
+
+/** Programs that run another in front of it, which a line read fully may use. */
+const UNDERSTOOD_LAUNCHERS = new Set([
+  'env',
+  'sudo',
+  'doas',
+  'nice',
+  'nohup',
+  'timeout',
+  'stdbuf',
+  'npx',
+  'pnpx',
+  'bunx',
+]);
+
+/** Keywords around commands that a line read fully may use. */
+const UNDERSTOOD_KEYWORDS = new Set(['if', 'then', 'elif', 'else']);
+
+/** A word that names git, or a text that holds it as a word: a program given it may run it. */
+const NAMES_GIT = /(^|[\s;&|/])git(\s|$)/;
+
+/**
+ * Whether a command line is one Mindly reads fully, and so checks exactly: every part of it is
+ * plain text the reader takes as the shell does. Words of plain characters, single-quoted text,
+ * double-quoted text with no `$`, backtick or backslash; `&&`, `||`, `;` and line ends between
+ * commands; `>`, `>>`, `2>`, `&>` to a plain path, `2>&1`, `</dev/null`; a pipe into a program
+ * that only filters what it is given (`head`, `grep`, `tee` to a plain path, …); assignments
+ * of plain values (one git reads makes git's commands possible changes of the whole tree, as
+ * the reader says); unquoted `*` and `?`, matched against the files that exist; the builtins
+ * `cd`, `echo`, `printf` without `-v`, `true`, `false`, `:`, `test` and `[` without `-v` / `-R`,
+ * `pwd`, `exit`; the keywords of `if`; and programs given plain words, in front of which only
+ * `env` (without `-S`), `sudo`, `nice`, `nohup`, `timeout`, `stdbuf` or `npx` may stand.
+ * Anything else (a `$`, a backtick, a backslash, parentheses, braces, a `[…]` class, `!`, a
+ * here-document or here-string, a process substitution, a background `&`, a function, a loop,
+ * any other builtin, a shell given code, a program not known here given git, more than a few
+ * thousand commands) makes it a line not read fully. One pass over the text.
+ */
+export function understoodLine(command: string): boolean {
+  return understanding(command) === true;
+}
+
+/** Whether a line is read fully; when it is not for its size alone, why (a limit). */
+function understanding(command: string): true | false | string {
+  if (command.length > MAX_COMMAND_CHARS)
+    return `only the first ${MAX_COMMAND_CHARS} characters were read`;
+  const said = { tooMany: false };
+  if (scanLine(command, said)) return true;
+  return said.tooMany ? `more than ${MAX_UNDERSTOOD_COMMANDS} commands` : false;
+}
+
+/** The one pass of {@link understoodLine}; `said.tooMany`: it stopped for the count alone. */
+function scanLine(command: string, said: { tooMany: boolean }): boolean {
+  interface Plain {
+    text: string;
+    quoted: boolean;
+  }
+  const commands: { words: Plain[]; piped: boolean }[] = [];
+  let words: Plain[] = [];
+  let piped = false;
+  let text = '';
+  let quoted = false;
+  let open = false;
+  // A bracket outside quotes is only `[` or `]` as a word of its own (`test`).
+  let bracket = false;
+  const endWord = (): boolean => {
+    if (!open) return true;
+    if (bracket && !(text === '[' || text === ']')) return false;
+    words.push({ text, quoted });
+    text = '';
+    quoted = false;
+    open = false;
+    bracket = false;
+    return true;
+  };
+  const endCommand = (nextPiped: boolean): boolean => {
+    if (!endWord()) return false;
+    // `a ; ; b`, `| x`: an empty command between separators is a syntax the reader does not take.
+    if (words.length === 0 && (nextPiped || piped)) return false;
+    if (words.length > 0) commands.push({ words, piped });
+    // More than are read in good time is not read exactly.
+    if (commands.length > MAX_UNDERSTOOD_COMMANDS) {
+      said.tooMany = true;
+      return false;
+    }
+    words = [];
+    piped = nextPiped;
+    return true;
+  };
+  /** A redirection's target: a plain word after it, read whole. */
+  let target: 'any' | 'null' | null = null;
+  // `*` and `?` are read as the shell matches them, against the files that exist.
+  const plainChar = /[A-Za-z0-9_./:@=+,%^~*?-]/;
+  const s = command;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i] as string;
+    if (c === ' ' || c === '\t') {
+      if (target === null && !endWord()) return false;
+      if (target !== null && open) {
+        if (!endTarget()) return false;
+      }
+      continue;
+    }
+    if (c === '\n' || c === ';') {
+      if (target !== null && !endTarget()) return false;
+      if (c === ';' && s[i + 1] === ';') return false;
+      if (!endCommand(false)) return false;
+      continue;
+    }
+    if (c === "'") {
+      const end = s.indexOf("'", i + 1);
+      if (end === -1) return false;
+      text += s.slice(i + 1, end);
+      quoted = true;
+      open = true;
+      i = end;
+      continue;
+    }
+    if (c === '"') {
+      let end = i + 1;
+      while (end < s.length && s[end] !== '"') {
+        const d = s[end] as string;
+        if (d === '$' || d === '`' || d === '\\') return false;
+        end++;
+      }
+      if (end >= s.length) return false;
+      text += s.slice(i + 1, end);
+      quoted = true;
+      open = true;
+      i = end;
+      continue;
+    }
+    if (c === '&' || c === '|') {
+      if (target !== null && !endTarget()) return false;
+      if (s[i + 1] === c) {
+        if (!endCommand(false)) return false;
+        i++;
+        continue;
+      }
+      if (c === '&' && s[i + 1] === '>') {
+        // `&>file`, `&>>file`.
+        if (!endWord()) return false;
+        i += s[i + 2] === '>' ? 2 : 1;
+        target = 'any';
+        continue;
+      }
+      // A background `&`, `|&`: not taken.
+      if (c === '&' || s[i + 1] === '&') return false;
+      if (!endCommand(true)) return false;
+      continue;
+    }
+    if (c === '>' || c === '<') {
+      if (target !== null) return false;
+      // A file descriptor written right before it (`2>`) is part of the redirection.
+      if (open && !quoted && /^\d+$/.test(text)) {
+        text = '';
+        open = false;
+      } else if (!endWord()) return false;
+      if (c === '<') {
+        if (s[i + 1] === '<' || s[i + 1] === '(' || s[i + 1] === '&' || s[i + 1] === '>')
+          return false;
+        target = 'null';
+        continue;
+      }
+      if (s[i + 1] === '(' || s[i + 1] === '|') return false;
+      if (s[i + 1] === '&') {
+        // `2>&1`, `>&2`: one stream into another.
+        let j = i + 2;
+        while (j < s.length && /\d/.test(s[j] as string)) j++;
+        if (j === i + 2 || (s[j] !== undefined && !/[\s;&|]/.test(s[j] as string))) return false;
+        i = j - 1;
+        continue;
+      }
+      if (s[i + 1] === '>') i++;
+      target = 'any';
+      continue;
+    }
+    if (c === '#' && !open) return false;
+    if (c === '[' || c === ']') {
+      bracket = true;
+      text += c;
+      open = true;
+      continue;
+    }
+    if (plainChar.test(c) || c.charCodeAt(0) > 127 || (c === '#' && open)) {
+      text += c;
+      open = true;
+      continue;
+    }
+    // `$`, a backtick, a backslash, parentheses, braces, a glob, `!`, a control character.
+    return false;
+  }
+  function endTarget(): boolean {
+    if (!open || bracket) return false;
+    if (target === 'null' && text !== '/dev/null') return false;
+    text = '';
+    quoted = false;
+    open = false;
+    target = null;
+    return true;
+  }
+  if (target !== null && !endTarget()) return false;
+  if (!endCommand(false)) return false;
+  return commands.every((cmd) => understoodCommand(cmd.words, cmd.piped));
+}
+
+/** Whether a simple command of plain words is one the reader takes as the shell does. */
+function understoodCommand(
+  all: readonly { text: string; quoted: boolean }[],
+  piped: boolean,
+): boolean {
+  let at = 0;
+  // Keywords of `if` in front of the command; `fi` on its own.
+  while (at < all.length && !all[at]?.quoted && UNDERSTOOD_KEYWORDS.has(all[at]?.text ?? '')) at++;
+  if (at === all.length) return at > 0 || all.length === 0;
+  if (all.length - at === 1 && all[at]?.text === 'fi') return true;
+  let launched = false;
+  for (let guard = 0; guard < 16; guard++) {
+    // Assignments: lower-case, or a harmless upper-case one.
+    while (at < all.length) {
+      const w = all[at] as { text: string; quoted: boolean };
+      // Any name: the reader takes one that may change what git does as it does today.
+      if (w.quoted || !/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w.text)) break;
+      at++;
+    }
+    const first = all[at];
+    if (first === undefined) return !launched;
+    const name = first.text;
+    const args = all.slice(at + 1);
+    if (piped) {
+      // What a pipe feeds: a filter, given plain words.
+      if (!UNDERSTOOD_FILTERS.has(programName(word(name)))) return false;
+      return true;
+    }
+    if (UNDERSTOOD_BUILTINS.has(name)) {
+      if (name === 'printf' && args.some((w) => /^-[^-]*v/.test(w.text))) return false;
+      if ((name === 'test' || name === '[') && args.some((w) => /^-[vR]$/.test(w.text)))
+        return false;
+      return true;
+    }
+    if (Object.hasOwn(SHELL_BUILTINS, name) && name !== 'which') return false;
+    const program = programName(word(name));
+    // Code fed to a shell.
+    if (SHELLS.has(program)) return false;
+    if (Object.hasOwn(LAUNCHERS, program)) {
+      if (!UNDERSTOOD_LAUNCHERS.has(program)) return false;
+      if (program === 'env' && args.some((w) => /^-[^-]*S|^--split-string/.test(w.text)))
+        return false;
+      // Its options, as the reader takes them; then the program it runs.
+      const launcher = LAUNCHERS[program] as { values?: string[]; skip?: number };
+      at++;
+      while (at < all.length) {
+        const o = (all[at] as { text: string }).text;
+        if (o === '--') {
+          at++;
+          break;
+        }
+        if (!o.startsWith('-') || o === '-') break;
+        at += !o.includes('=') && (launcher.values ?? []).includes(o) ? 2 : 1;
+      }
+      at += launcher.skip ?? 0;
+      launched = true;
+      continue;
+    }
+    // A program not known here given git, as a word or in code it is given (`taskset git …`,
+    // `script -c 'git …'`), may run it with settings of its own.
+    if (program !== 'git' && program !== 'echo' && program !== 'printf') {
+      if (args.some((w) => (w.quoted ? NAMES_GIT.test(w.text) : /(^|\/)git$/.test(w.text))))
+        return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * A reading of a line not read fully: what it may write is the whole working tree. git is asked
+ * nothing about it.
+ */
+function unreadLine(top: string | null): ShellReading {
+  return {
+    targets: [
+      {
+        path: top ?? '.',
+        glob: false,
+        dotfiles: false,
+        nocase: false,
+        tree: true,
+        how: 'write',
+        entries: [],
+        sources: [],
+        fallback: null,
+        certain: false,
+        only: null,
+        ifExists: false,
+        touches: ANY_FILE,
+      },
+    ],
+    questions: [],
+    limit: null,
+    understood: false,
   };
 }
 
@@ -3985,12 +4287,8 @@ interface Reading {
   deferred: Set<string>;
   /** What `add` was already given, so a repeat of it costs nothing. */
   added: Set<string>;
-  /** Substitutions already read as code the shell runs. */
-  read: Set<string>;
   /** Characters `env -S` strings gave to read, over the whole line. */
   splitChars: number;
-  /** What is read now is code the shell may not run: its writes are possible, never certain. */
-  possibleOnly: boolean;
   /** Whether a path, placed as targets are, is a symbolic link; null when not asked. */
   linked: ((path: string) => boolean) | null;
   /** A command read so far makes symbolic links (`ln -s`). */
@@ -4109,7 +4407,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // The same word, given the same way from the same place, adds nothing new: a long line of
     // repeats is read in the time of one.
     if (item.entries === undefined) {
-      const flags = `${item.tree ? 't' : ''}${item.certain === false || r.possibleOnly ? 'u' : ''}${item.ifExists ? 'e' : ''}${item.pattern ? 'p' : ''}${item.dotfiles ? 'd' : ''}${item.nocase ? 'c' : ''}`;
+      const flags = `${item.tree ? 't' : ''}${item.certain === false ? 'u' : ''}${item.ifExists ? 'e' : ''}${item.pattern ? 'p' : ''}${item.dotfiles ? 'd' : ''}${item.nocase ? 'c' : ''}`;
       const kinds = item.touches
         ? `${item.touches.tracked ? 't' : ''}${item.touches.untracked ? 'u' : ''}${item.touches.ignored ? 'i' : ''}`
         : '-';
@@ -4125,8 +4423,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           { text: w.text, glob: false },
         ]
       : [{ text: pattern, glob }];
-    // Code the shell may not run (quoted text read on a line that may evaluate it) only warns.
-    const certain = (item.certain ?? true) && !r.possibleOnly;
+    const certain = item.certain ?? true;
     const only = item.only ?? null;
     const how = item.how ?? 'write';
     // No more than are kept are placed.
@@ -4370,16 +4667,10 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // Substitutions run where they are written, before the command that holds them.
     const at = cmd.otherwise && wasCd ? beforeCd : dir;
     wasCd = false;
-    for (const inner of cmd.nested) {
-      if (r.read.size < MAX_COMMANDS) r.read.add(inner);
-      collectTargets(inner, at, depth + 1, r);
-    }
+    for (const inner of cmd.nested) collectTargets(inner, at, depth + 1, r);
     // The shell expands a here-document whose delimiter is not quoted: substitutions in it run.
     if (cmd.stdin !== null && cmd.stdinExpands) {
-      for (const inner of substitutions(cmd.stdin)) {
-        if (r.read.size < MAX_COMMANDS) r.read.add(inner);
-        collectTargets(inner, at, depth + 1, r);
-      }
+      for (const inner of substitutions(cmd.stdin)) collectTargets(inner, at, depth + 1, r);
     }
     const runs = programWords(cmd.words);
     const { chdir } = runs;
@@ -4402,12 +4693,11 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         r.gitEnv = true;
       } else collectTargets(split, here, depth + 1, r);
     }
-    // `xargs -I{} …`, `parallel …`: a word holding the replace string is given by the input.
-    words = givenByInput(cmd.words, words);
     // What the program reads on standard input, when the text shows it: its own here-document,
     // or what an `echo` / `printf` / `cat <<EOF` before the pipe prints.
     let stdin = cmd.stdin;
     let stdinDynamic = cmd.stdinDynamic;
+    const stdinPiped = stdin === null && cmd.piped;
     if (stdin === null && cmd.piped && before !== null) {
       const feeder = programWords(before.words).words;
       const name = feeder[0] && !feeder[0].dynamic ? programName(feeder[0]) : '';
@@ -4431,25 +4721,18 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       }
     }
     before = cmd;
-    // `ln -s`, `cp -s`: a later `cd` may pass through the link it makes.
-    const maker = words[0] && !words[0].dynamic ? programName(words[0]) : '';
-    if (
-      (maker === 'ln' || maker === 'cp') &&
-      words.some(
-        (w) => /^-[^-]*s|^--symbolic/.test(w.text) && !(maker === 'cp' && w.text === '--sparse'),
-      )
-    )
-      r.linksMade = true;
-    // Builtins that evaluate a name as an array element (`test -v 'a[$(…)]'`, `printf -v`,
-    // `read`, `declare`) run the substitutions in its subscript: read as code.
-    for (const code of subscriptCode(words)) collectTargets(code, here, depth + 1, r);
     // A variable set for git, or a line that may set what it runs with (above), may make it do
     // anything to the tree.
     const assigned = cmd.words
       .slice(0, words[0] ? cmd.words.indexOf(words[0]) : cmd.words.length)
       .some((w) => isAssignment(w) && unsafeVariable(w));
     const settings = assigned || r.gitEnv;
-    const verdict = classify(words, stdin, 0, { settings, timeUp: r.timeUp, stdinDynamic });
+    const verdict = classify(words, stdin, 0, {
+      settings,
+      timeUp: r.timeUp,
+      stdinDynamic,
+      stdinPiped,
+    });
     // A program not known here that is given `git` and words after it (`taskset -c 0 git …`,
     // `strace -f git …`) may run git with settings of its own: read from there as git given one.
     const gitAt =
@@ -4613,6 +4896,9 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       // A write inside `.git` itself.
       r.moved = true;
     }
+    // A program that may make or move a symbolic link (`ln -s`, `cp -P` / `-a` / `-R`, `mv`, an
+    // archive unpacked, git checking one out): a later `cd` may pass through it.
+    if (makesLinks(words)) r.linksMade = true;
   }
 }
 

@@ -311,13 +311,22 @@ describe('hook flow', () => {
       'git clean -fdx packages/db',
       'sudo -u root rm packages/db/prisma/migrations/001.sql',
       'cd packages/db && cd - && rm packages/db/prisma/migrations/001.sql',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision, command).toBe('deny');
+      expect(r.reason, command).toContain('Applied migrations are never edited');
+    }
+    // A line Mindly does not read fully (a substitution, code fed to a shell, a class of
+    // characters) is never blocked: a warning names what the rule covers.
+    for (const command of [
       'rm $(pwd)/packages/db/prisma/migrations/001.sql',
       "bash <<'EOF'\nrm packages/db/prisma/migrations/001.sql\nEOF",
       'rm packages/db/prisma/migrations/00[1].sql',
     ]) {
       const r = await shell(command);
-      expect(r.decision, command).toBe('deny');
-      expect(r.reason, command).toContain('Applied migrations are never edited');
+      expect(r.decision, command).toBeNull();
+      expect(r.context, command).toContain('could not read this command fully');
+      expect(r.context, command).toContain('Applied migrations are never edited');
     }
     // Files of unknown names put around it may or may not land in it: worth a warning.
     for (const command of [
@@ -904,10 +913,13 @@ describe('hook flow', () => {
         `cd ~/${name} && sed -i 's/a/b/' src/generated/api.ts`,
         `cd ~ && rm -rf ${name}/src`,
         `echo x > ~/${name}/src/generated/new.ts`,
-        `(cd /tmp && ls); rm src/generated/api.ts`,
       ]) {
         expect((await shell(command)).decision, command).toBe('deny');
       }
+      // A subshell is not read fully: a warning, not a block.
+      const sub = await shell(`(cd /tmp && ls); rm src/generated/api.ts`);
+      expect(sub.decision).toBeNull();
+      expect(sub.context).toContain('could not read this command fully');
       expect((await shell(`rm ~/${name}/src/auth.ts`)).decision).toBeNull();
       expect((await shell('rm ~/elsewhere/src/generated/api.ts')).decision).toBeNull();
       // Another user's home is taken to sit next to this one.

@@ -56,54 +56,31 @@ memory, which is then injected into every other agent.
   lint-staged and the like running on commit), filters, diff drivers and `core.fsmonitor` in the
   repository's config, variables exported before the session, a remote whose URL is a path on
   this machine, and the files a clone from elsewhere brings.
-- What git runs with is read for the whole line by an allowlist, not by following variables: a
-  program run as its own process cannot change this shell; only builtins, keywords and
-  expansions can, and those are a known set. Anything on the line not known to be harmless,
-  anywhere on it and in any shell (before or after the git command, in a function, a group, a
-  subshell, `$( … )`, code run by `eval`, a `trap`, `bash -c` or git itself), makes every git
-  command on it a possible change of the whole tree:
-  - any builtin or keyword but `cd`, `pushd`, `popd`, `dirs`, `echo`, `printf` and `print`
-    without `-v`, `true`, `false`, `:`, `test`, `[`, `pwd`, `wait`, `exit`, `return`, `break`,
-    `continue`, `type`, `which`, `help`, `jobs`, `times`, `umask` without a mask, `for` over a
-    lower-case variable, and `if`, `then`, `elif`, `else`, `fi`, `while`, `until`, `do`, `done`,
-    `case`, `esac`, `{`, `}`, `!`, `time` and `function`. So `export`, `shopt`, `setopt`,
-    `source` and `.`, `eval`, `trap`, `read`, `mapfile`, `let`, `[[`, `alias`, `hash`, `local`,
-    `unset`, `command`, `exec` and the rest count, and so does `set`, strict options included.
-    A harmless one counts too when a word that does not start as plain text may be the option
-    that sets a variable or runs a command (`printf "$o"`, `wait "$pid"`), when `test` or `[` is
-    given `-v` or `-R`, which evaluate a name, and when a word holds a subscript with a
-    substitution in it (`'a[$(…)]'`), which a builtin that reads a name runs;
-  - a word that holds anything but text, `$name`, `${name}`, a special parameter (`$?`, `$@`)
-    or a substitution (whose code is read as part of the line): `${x:=y}`, `${a[i]}`, `${x:1}`,
-    `$(( … ))`, `$[ … ]`, and `(( … ))`;
-  - an assignment to an element (`a[i]=1`), an array (`x=( … )`), or an upper-case or `GIT_*`
-    variable other than locale, time zone, terminal, prompt, author and harmless pager or editor
-    ones, wherever it is given; a lower-case variable with a plain value (`msg=fix`) stays the
-    shell's;
-  - a program whose name is not plain text (`$f x`), a word that is not plain text given to a
-    program that runs another (`env "$v" git …`), `env -S`, and `xargs` or `parallel` running
-    git, which is then read as git given a setting;
-  - a shell, `source` or `eval` given code the text does not show, which is also said as not
-    read: `bash -c "$cmd"`, `bash <<< "$c"`, a here-document with values in it, a shell fed
-    through a pipe by anything but `echo` of plain text (`cat x.sh`, `echo "$c"`), a process
-    substitution that is not such an `echo`, and `xargs -I{} sh -c '{}'`. Code the text does
-    show is read wherever it comes from: `-c` among other options, `-s` with arguments,
-    `/dev/stdin`, a here-string, a quoted here-document, `echo '…' |`, `<(echo '…')`,
-    `flock … -c`. A script a shell is given by its path is not read, as for a program run by
-    its path.
-
-  On such a line every substitution in its text, quoted or not, is read as code too
-  (`printf -v 'a[$(…)]'` runs it), once each; what it writes is only a possible write, a
-  warning and never a block, since the shell may not run it. A program not known here that is
-  given `git` and words after it (`taskset -c 0 git …`, `strace -f git …`) runs git with
-  settings of its own: git is read from there as given a setting. A `cd` (or `git -C`) through
-  a symbolic link, found on disk when the command is checked or made earlier on the line with
-  `ln -s`, makes where later commands run unknown, since `..` and the paths git is given lead
-  elsewhere than the text says: what they write is said as not checked. So a line that exports
-  anything, turns on shell options, reads input into a variable, tests with `[[`, or sets an
-  upper-case variable for any program (`CI=1 npm test && git commit`) gets a warning for each
-  of its git commands when a covered file is there.
-
+- Only a shell command Mindly can read fully is checked exactly, and only such a command is ever
+  blocked. A line is read fully when every part of it is plain: words of plain characters (`*`
+  and `?` included, matched against the files that exist), single-quoted text, double-quoted
+  text without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a
+  plain path (`>`, `>>`, `2>`, `&>`), `2>&1`, `</dev/null`; a pipe into a program that only
+  filters (`head`, `tail`, `grep`, `sort`, `uniq`, `wc`, `cut`, `tr`, `cat`, `less`, `jq`,
+  `column`, and `tee` to a plain path, which counts as a write); assignments of plain values;
+  the builtins `cd`, `echo`, `printf` without `-v`, `true`, `false`, `:`, `test` and `[`
+  without `-v` or `-R`, `pwd` and `exit`; `if`, `then`, `elif`, `else` and `fi`; and programs
+  given plain words, with only `env` (without `-S`), `sudo`, `doas`, `nice`, `nohup`,
+  `timeout`, `stdbuf` or `npx` in front of them. On such a line the paths a command names, the
+  files git writes its output to and the folders it fills are blocked when a rule covers them,
+  and what may change the whole tree is a warning, as described above.
+- Anything else is not read fully: a variable or a substitution (`$VAR`, `$(…)`, a backtick), a
+  backslash, a subshell or group, a function, a loop, a here-document or here-string, a process
+  substitution, code fed to a shell (`bash -c`, `| sh`), any other builtin (`export`, `set`,
+  `source`, `read`, `[[`, …), a `[…]` class or `{a,b}`, `!`, a background `&`, a pipe into a
+  program that does more than filter (`xargs`), a program not known here that is given git
+  (`taskset`, `script -c`), and more than 4,000 commands. Such a line is never blocked, and never
+  let through without a word: whenever a file an enforced rule covers is present in the project,
+  it gets one warning that names the rule and the covered files it may write. What it does is
+  not read at all, so nothing in it is asked of git or decided by other guards. Lines that now
+  warn this way include any line with `$VAR` or `$(…)` (a commit message from a variable, a
+  `cd` to the top of the repository), a loop or a function, a pipe into `xargs`, strict shell
+  options (`set -euo pipefail`), `export`, `source`, `[[ … ]]`, and a shell given code.
 - Rendered memory text is sanitised: control characters stripped, fence/delimiter sequences
   neutralised, length capped.
 

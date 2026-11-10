@@ -661,8 +661,8 @@ const cases: {
     want: ['warn', 'deny'],
   },
   // `test -v` evaluates an element's subscript, running the substitution in it.
-  { name: 'test -v of an element', command: `test -v 'a[$(${CO})]'`, want: ['deny'], runs: TEST_V },
-  { name: '[ -v ] of an element', command: `[ -v 'a[$(${CO})]' ]`, want: ['deny'], runs: TEST_V },
+  { name: 'test -v of an element', command: `test -v 'a[$(${CO})]'`, want: ['warn'], runs: TEST_V },
+  { name: '[ -v ] of an element', command: `[ -v 'a[$(${CO})]' ]`, want: ['warn'], runs: TEST_V },
   // git under a program not known here, which may run it with settings of its own.
   {
     name: 'git reset --hard under taskset',
@@ -693,40 +693,40 @@ const cases: {
     runs: has('taskset'),
   },
   // flock's `-c` runs shell code.
-  { name: 'flock -c', command: `flock lk -c '${CO}'`, want: ['deny'], runs: has('flock') },
+  { name: 'flock -c', command: `flock lk -c '${CO}'`, want: ['warn'], runs: has('flock') },
   // Shell code from a shell's or `source`'s input, a file standing for it, or a process
-  // substitution: read when the text shows it, said as not read when it does not.
+  // substitution: a line not read fully, which only warns.
   {
     name: 'bash -s with arguments, from a here-string',
     command: `bash -s x <<< '${CO}'`,
-    want: ['deny'],
+    want: ['warn'],
   },
   {
     name: 'bash /dev/stdin, from a here-string',
     command: `bash /dev/stdin <<< '${CO}'`,
-    want: ['deny'],
+    want: ['warn'],
   },
   {
     name: 'bash -s with arguments, from a pipe',
     command: `echo '${CO}' | bash -s x`,
-    want: ['deny'],
+    want: ['warn'],
   },
   {
     name: 'bash -s with arguments, from a quoted here-document',
     command: `bash -s x <<'EOF'\n${CO}\nEOF`,
-    want: ['deny'],
+    want: ['warn'],
   },
-  { name: 'bash of a process substitution', command: `bash <(echo '${CO}')`, want: ['deny'] },
+  { name: 'bash of a process substitution', command: `bash <(echo '${CO}')`, want: ['warn'] },
   {
     name: 'source /dev/stdin, from a here-string',
     command: `source /dev/stdin <<< '${CO}'`,
-    want: ['deny'],
+    want: ['warn'],
     runs: BASH4,
   },
   {
     name: 'source of a process substitution',
     command: `source <(echo '${CO}')`,
-    want: ['deny'],
+    want: ['warn'],
     runs: BASH4,
   },
   {
@@ -803,18 +803,6 @@ const quiet: { name: string; prep?: string; command: string }[] = [
   { name: 'config of a file of its own', command: 'git config -f tool.ini core.hooksPath x' },
   { name: 'submodule status', command: 'git submodule status' },
   { name: 'status after a shell variable', command: 'msg=fix; git status' },
-  {
-    name: 'commit with a message from a shell variable',
-    prep: LOCAL_PEM,
-    command: 'msg="fix"; git commit -qam "$msg"',
-  },
-  { name: 'a function that only prints', command: 'f() { echo hi; }; f; git status' },
-  { name: 'a loop that adds files', command: 'for f in src/a.ts; do git add "$f"; done' },
-  {
-    name: 'a commit with a message holding a variable',
-    prep: LOCAL_PEM,
-    command: 'git add -A && git commit -qm "fix $thing"',
-  },
   { name: 'tests, then a commit', command: 'npm test >/dev/null 2>&1 && git commit -qm x' },
   { name: 'status in a folder', prep: 'mkdir -p sub', command: 'cd sub && git status' },
   { name: 'a test of the diff', command: 'if git diff --quiet; then echo ok; fi' },
@@ -861,7 +849,116 @@ describe('git commands that write a covered file through an option or a setting'
  * Commands that write no covered file but hold code the shell does not run (quoted text) on a
  * line that may evaluate text as code: never blocked, perhaps warned about.
  */
-const notBlocked: { name: string; command: string }[] = [
+/** A tracked folder `vendor` that a rule covers, to reach through a link. */
+const VENDOR_FILE = 'mkdir -p vendor && echo a > vendor/x && git add vendor && git commit -qm v';
+
+/**
+ * Lines Mindly does not read fully that write a covered file: a warning, never silence (and
+ * never a block). Links made on the line, code fed to a shell in ways the text does not show
+ * plainly, a `)` of a `case` in a substitution, git run through a variable or by `script`.
+ */
+const notReadFully: {
+  name: string;
+  scopes?: string[];
+  prep?: string;
+  command: string;
+  runs?: boolean;
+}[] = [
+  {
+    name: 'a link made with ln --sy, then cd into it',
+    scopes: VENDOR,
+    prep: VENDOR_FILE,
+    command: 'ln --sy vendor c && cd c && git rm -q x',
+  },
+  {
+    name: 'a link copied with cp -P, then cd into it',
+    scopes: VENDOR,
+    prep: `${VENDOR_FILE} && ln -s vendor l`,
+    command: 'cp -P l c && cd c && git rm -q x',
+  },
+  {
+    name: 'a function that cds, called after a link is made',
+    scopes: VENDOR,
+    prep: VENDOR_FILE,
+    command: 'f() { cd c && git rm -q x; }; ln -s vendor c; f',
+  },
+  {
+    name: 'bash of a process substitution of echo -e',
+    command: "bash <(echo -e 'true\\ngit reset -q --hard v1')",
+  },
+  {
+    name: 'bash of a process substitution of printf',
+    command: "bash <(printf 'git\\treset -q --hard v1')",
+  },
+  { name: 'echo -e piped to bash', command: "echo -e 'git\\x20reset -q --hard v1' | bash" },
+  {
+    name: 'printf conversions piped to bash',
+    command: "printf '%s %s -q --hard v1\\n' git reset | bash",
+  },
+  {
+    name: "bash -s given a $'…' here-string",
+    command: "bash -s <<< $'true\\ngit reset -q --hard v1'",
+  },
+  {
+    name: 'a here-document, then a here-string, to bash',
+    command: "bash <<'EOF' <<<'git reset -q --hard v1'\necho hi\nEOF\n",
+  },
+  {
+    name: 'printf -v into a subscript with a case',
+    command: `printf -v 'a[$(case x in x) ${CO};; esac)]' x`,
+    runs: PRINTF_ELEMENT,
+  },
+  { name: 'a substitution holding a case', command: `echo "$(case x in x) ${CO};; esac)"` },
+  { name: 'git through a variable', command: 'GIT=git; $GIT reset -q --hard v1' },
+  {
+    name: 'git run by script -c',
+    command: "script -qec 'git reset -q --hard v1' /dev/null",
+    runs: has('script'),
+  },
+  { name: 'a substitution in a default value', command: `echo "\${x:-'$(${CO})'}"` },
+];
+
+describe('lines not read fully that write a covered file are warned about', () => {
+  for (const c of notReadFully) {
+    it(c.name, async () => {
+      const g = setUp(c.scopes ?? PEM, c.prep);
+      try {
+        const done = runInCopy(g.dir, c.command, covered);
+        if (c.runs ?? true)
+          expect(done.written.length, `${c.command}: ${done.output}`).toBeGreaterThan(0);
+        const r = await g.shell(c.command);
+        expect(verdictOf(r), `hook on \`${c.command}\``).toBe('warn');
+      } finally {
+        g.mindly.close();
+      }
+    });
+  }
+});
+
+const notBlocked: { name: string; prep?: string; command: string }[] = [
+  // Text that is not run, with a subscript and a substitution in it.
+  {
+    name: 'a to-do line holding a substitution, written to a file',
+    command: `printf '%s\\n' '- [ ] restore with $(${CO})' >> TODO.md`,
+  },
+  {
+    name: 'a test against text holding a substitution',
+    command: `[ "$x" = '[$(${CO})]' ] || echo no`,
+  },
+  // Lines not read fully, which warn when a covered file is there: a variable, a function, a
+  // loop.
+  {
+    name: 'commit with a message from a shell variable',
+    prep: LOCAL_PEM,
+    command: 'msg="fix"; git commit -qam "$msg"',
+  },
+  { name: 'a function that only prints', command: 'f() { echo hi; }; f; git status' },
+  { name: 'a loop that adds files', command: 'for f in src/a.ts; do git add "$f"; done' },
+  {
+    name: 'a commit with a message holding a variable',
+    prep: LOCAL_PEM,
+    command: 'git add -A && git commit -qm "fix $thing"',
+  },
   {
     name: 'a quoted tip on a line with set -e',
     command: `set -e; echo 'tip: run $(${CO}) to restore'`,
@@ -873,10 +970,10 @@ const notBlocked: { name: string; command: string }[] = [
   },
 ];
 
-describe('code the shell does not run is never blocked', () => {
+describe('lines not read fully, and code the shell does not run, are never blocked', () => {
   for (const c of notBlocked) {
     it(c.name, async () => {
-      const g = setUp(PEM);
+      const g = setUp(PEM, c.prep);
       try {
         const done = runInCopy(g.dir, c.command, covered);
         expect(done.written, c.command).toEqual([]);
@@ -890,6 +987,28 @@ describe('code the shell does not run is never blocked', () => {
 });
 
 describe('git commands read without false warnings or slow reading', () => {
+  it('lines of 200,000 characters of any shape are answered in good time', async () => {
+    const g = setUp(PEM);
+    try {
+      await g.shell('true');
+      for (const unit of [
+        'xargs -i ',
+        'echo $(x) ',
+        'a[$(b)] ',
+        'git checkout -- a ',
+        'cd a; ',
+        '"$x" ',
+      ]) {
+        const command = `${unit.repeat(Math.floor(199_000 / unit.length))}git status`;
+        const t0 = performance.now();
+        await g.shell(command);
+        expect(performance.now() - t0, unit).toBeLessThan(1000);
+      }
+    } finally {
+      g.mindly.close();
+    }
+  });
+
   it('env -S strings in a substitution on a line that may set variables are read once', async () => {
     const g = setUp(PEM);
     try {
