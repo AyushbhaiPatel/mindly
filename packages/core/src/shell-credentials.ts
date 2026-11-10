@@ -5,11 +5,21 @@
  * sudo or chown, and a stored command has to stay runnable, so the text is read as shell
  * commands first.
  *
- * The text is read once, from left to right. Physical lines are joined into logical lines across
- * escaped newlines and into indented option lines; each logical line is split into commands at
- * unquoted separators, and each command into shell words with their quotes removed. A quoted
- * argument is read again as commands of its own (`sh -c "curl ..."`, `ssh host "curl ..."`), at
- * most two levels deep. Everything is linear in the length of the text.
+ * The text is read in two ways, and what either finds is redacted:
+ *
+ * - Whole lines. Physical lines are joined into logical lines across escaped newlines and into
+ *   indented option lines; each logical line is split into commands at unquoted separators, and
+ *   each command into shell words with their quotes removed. A quoted argument is read again as
+ *   commands of its own (`sh -c "curl ..."`, `ssh host "curl ..."`), two levels deep.
+ * - From each client. Every client named anywhere, quoted or not, at any depth, is read forward
+ *   to the end of its command with loose quoting, so an apostrophe in a sentence, quoting nested
+ *   several levels deep or a quoted body over several lines before `-u` does not hide the
+ *   credentials. Where even that loses step with the quoting, a raw scan of the same command
+ *   finds `-u name:value` and the like.
+ *
+ * Everything is linear in the length of the text: each reading from a client is capped, a client
+ * already read reliably is not read again, and the readings from clients together are limited to
+ * a share of the text.
  */
 
 /** HTTP clients by program name, besides curl, wget and ab. */
@@ -113,16 +123,67 @@ const WRAPPED_OPTION_LINE = /[ \t]+--?[A-Za-z0-9#]/y;
 const OPTION_LINE = /[ \t]*--?[A-Za-z0-9#]/y;
 
 /** Characters of a word with no special meaning outside quotes, read in one piece. */
-const PLAIN_RUN = /[^\s;|&'"\\^`]+/y;
+const PLAIN_RUN = /[^\s;|&'"\\^`()]+/y;
 
 /** Characters inside double quotes with no special meaning, read in one piece. */
 const QUOTED_RUN = /[^"\\]+/y;
+
+/** Characters inside single quotes, up to a quote or a backslash (which loose mode looks at). */
+const SINGLE_QUOTED_RUN = /[^'\\]+/y;
 
 /** How deep quoted arguments are read again as commands (`sh -c "ssh h \"curl ...\""`). */
 const MAX_DEPTH = 2;
 
 /** How much of a line is read to tell whether it runs a client. */
 const MAX_LINE_CHARS = 4000;
+
+/** How far a command is read from a client found anywhere in the text, in characters. */
+const MAX_ANCHOR_CHARS = 16_000;
+
+/** How many words a command is read from a client found anywhere in the text. */
+const MAX_ANCHOR_WORDS = 2_000;
+
+/**
+ * How much the commands read from clients found anywhere may add up to, as a multiple of the
+ * text's length (plus a fixed allowance for short texts). Keeps the whole read linear.
+ */
+const ANCHOR_BUDGET_FACTOR = 0.5;
+const ANCHOR_BUDGET_MIN = 64_000;
+
+/** Any client, found anywhere: the start of a command read with loose quoting. */
+const ANCHOR = new RegExp(`${CURL_CLIENT.source}|${HTTPIE_CLIENT.source}`, 'giu');
+
+/** A credential flag still waiting for its value. */
+const NEEDS_VALUE =
+  /^(?:-[0-9A-Za-z#]{0,10}[uUaAHP]|--(?:proxy-)?(?:user|auth|header|pass|tlspassword|cert|oauth2-bearer)|--bearer)$/;
+
+/** Characters around a raw value: spaces, quotes and the backslashes that escape them. */
+const RAW_SEP = `[\\s"'\\\\=]{1,12}`;
+
+/** A raw value: up to a space, a quote, a backslash, a backtick or a parenthesis. */
+const RAW_VALUE = `([^\\s"'\\\\\`()]{1,200})`;
+
+/** Raw curl credentials: user flags with `name:value`, and secret options with a value. */
+const RAW_CURL = new RegExp(
+  `(?<=^|[\\s"'\\\\])(-[0-6aBfGgIijJkLlMNnOpqRsSvVZ#]{0,10}[uU]|--(?:proxy-)?user)${RAW_SEP}([^\\s:"'\\\\]{0,200}):${RAW_VALUE}` +
+    `|(?<=^|[\\s"'\\\\])(--(?:proxy-)?(?:pass|tlspassword)|--oauth2-bearer)()${RAW_SEP}${RAW_VALUE}`,
+  'g',
+);
+
+/** Raw httpie and xh credentials: `-a` / `--auth` with `name:value`. */
+const RAW_HTTPIE = new RegExp(
+  `(?<=^|[\\s"'\\\\])(-[bcdfhjqvxFIS]{0,6}a|--auth)${RAW_SEP}([^\\s:"'\\\\]{0,200}):${RAW_VALUE}`,
+  'g',
+);
+
+/** Characters of quoting, never kept at the ends of a secret. */
+const QUOTING = '"\'\\';
+
+/** Where a raw command region ends: a separator, a standalone `&`, a backtick or a line break. */
+const RAW_END = /[;|`\n]|&&|(?<=\s)&(?=\s|$)/g;
+
+/** ab's options that take credentials: `-A` for the server, `-P` for a proxy. */
+const AB_AUTH = new Set(['-A', '-P']);
 
 /** A string being read, and the offset in the original text of each of its characters. */
 interface Source {
@@ -139,6 +200,10 @@ interface Word {
   quoted: number;
   /** Where the word ends in its source. */
   end: number;
+  /** Read in loose mode (see `readWord`), and read again the same way. */
+  loose: boolean;
+  /** True when a quote in the word was never closed and ran to the end of what was read. */
+  open: boolean;
 }
 
 interface Edit {
@@ -165,25 +230,45 @@ function isWindowsContinuation(s: string, i: number): boolean {
   return s[i + 1] === '\n' || (s[i + 1] === '\r' && s[i + 2] === '\n');
 }
 
+/** True for a character that ends a word outside quotes, besides separators. */
+function endsWord(c: string): boolean {
+  return (
+    c === ' ' ||
+    c === '\t' ||
+    c === '\r' ||
+    c === '\n' ||
+    c === ';' ||
+    c === '|' ||
+    c === '`' ||
+    c === '(' ||
+    c === ')'
+  );
+}
+
 /**
  * Reads one shell word starting at `start`, going no further than `limit`. Single quotes keep
  * everything; double quotes let a backslash escape `"`, `\`, `$` and a backtick; outside quotes a
  * backslash escapes a space, a quote, a backslash or a newline only, so a Windows path keeps its
- * backslashes. An unbalanced quote runs to `limit`. When `map` is given, it receives the source
+ * backslashes. A backtick, `(` and `)` end a word, so a substitution or Markdown code keeps its
+ * delimiters. An unbalanced quote runs to `limit`. When `map` is given, it receives the source
  * offset of every character of the value.
+ *
+ * In `loose` mode, used where the quoting around a command is not known (a command found inside
+ * JSON or an `sh -c` string), backslashes right before a quote are dropped and the quote counts:
+ * `\"admin:pw\"` and `'\''admin:pw'\''` read as the quoted `admin:pw`.
  */
-function readWord(s: string, start: number, limit: number, map?: number[]): Word {
+function readWord(s: string, start: number, limit: number, map?: number[], loose = false): Word {
   // Most words have no quotes or escapes: one slice, and nothing else to allocate.
   PLAIN_RUN.lastIndex = start;
   if (map === undefined && PLAIN_RUN.test(s)) {
     const end = Math.min(PLAIN_RUN.lastIndex, limit);
-    const c = s.charCodeAt(end);
-    if (end === limit || c === 32 || c === 9 || c === 13 || c === 10 || c === 59 || c === 124) {
-      return { start, limit, value: s.slice(start, end), quoted: -1, end };
+    if (end === limit || endsWord(s[end] ?? '')) {
+      return { start, limit, value: s.slice(start, end), quoted: -1, end, loose, open: false };
     }
   }
   let value = '';
   let quoted = -1;
+  let open = false;
   let j = start;
   const add = (k: number): void => {
     value += s[k] ?? '';
@@ -194,6 +279,13 @@ function readWord(s: string, start: number, limit: number, map?: number[]): Word
     value += s.slice(from, to);
     if (map !== undefined) for (let k = from; k < to; k++) map.push(k);
   };
+  // In loose mode, the index of the quote after a run of backslashes at `k`, or -1.
+  const escapedQuote = (k: number): number => {
+    if (!loose || s[k] !== '\\') return -1;
+    let q = k;
+    while (q < limit && s[q] === '\\') q++;
+    return s[q] === '"' || s[q] === "'" ? q : -1;
+  };
   while (j < limit) {
     PLAIN_RUN.lastIndex = j;
     if (PLAIN_RUN.test(s)) {
@@ -203,30 +295,46 @@ function readWord(s: string, start: number, limit: number, map?: number[]): Word
       continue;
     }
     const c = s[j] ?? '';
-    if (c === ' ' || c === '\t' || c === '\r' || c === '\n' || c === ';' || c === '|') break;
+    if (endsWord(c)) break;
     if (c === '&' && (s[j + 1] === '&' || isStandaloneAmp(s, j))) break;
-    if (c === "'") {
+    const quoteAt = escapedQuote(j);
+    if (quoteAt !== -1) j = quoteAt;
+    const q = s[j] ?? '';
+    if (q === "'" && !loose) {
       if (quoted === -1) quoted = value.length;
       const close = s.indexOf("'", j + 1);
-      const to = close === -1 || close > limit ? limit : close;
+      const to = close === -1 || close >= limit ? limit : close;
+      if (to === limit) open = true;
       addRun(j + 1, to);
       j = to + 1;
-    } else if (c === '"') {
+    } else if (q === "'" || q === '"') {
       if (quoted === -1) quoted = value.length;
       j++;
-      while (j < limit && s[j] !== '"') {
-        QUOTED_RUN.lastIndex = j;
-        if (QUOTED_RUN.test(s)) {
-          const to = Math.min(QUOTED_RUN.lastIndex, limit);
+      const run = q === "'" ? SINGLE_QUOTED_RUN : QUOTED_RUN;
+      while (j < limit && s[j] !== q) {
+        run.lastIndex = j;
+        if (run.test(s)) {
+          const to = Math.min(run.lastIndex, limit);
           addRun(j, to);
           j = to;
-        } else if (s[j] === '\\' && j + 1 < limit && '"\\$`\n'.includes(s[j + 1] ?? '')) {
+          continue;
+        }
+        // Here `s[j]` is a backslash.
+        const closeAt = escapedQuote(j);
+        if (closeAt !== -1 && s[closeAt] === q) {
+          j = closeAt;
+          break;
+        }
+        if (q === "'") {
+          add(j++);
+        } else if (j + 1 < limit && '"\\$`\n'.includes(s[j + 1] ?? '')) {
           if (s[j + 1] !== '\n') add(j + 1);
           j += 2;
         } else {
           add(j++);
         }
       }
+      if (j >= limit) open = true;
       j++;
     } else if (c === '\\' && j + 1 < limit) {
       const next = s[j + 1] ?? '';
@@ -244,11 +352,11 @@ function readWord(s: string, start: number, limit: number, map?: number[]): Word
       add(j++);
     }
   }
-  return { start, limit, value, quoted, end: Math.min(j, limit) };
+  return { start, limit, value, quoted, end: Math.min(j, limit), loose, open };
 }
 
 /** The commands of `s` from `from` to `to`, each a list of words. */
-function readCommands(s: string, from: number, to: number): Word[][] {
+function readCommands(s: string, from: number, to: number, loose = false): Word[][] {
   const commands: Word[][] = [];
   let words: Word[] = [];
   const endCommand = (): void => {
@@ -269,10 +377,12 @@ function readCommands(s: string, from: number, to: number): Word[][] {
     } else if (c === '&' && isStandaloneAmp(s, i)) {
       endCommand();
       i++;
-    } else if (isWindowsContinuation(s, i)) {
+    } else if (c === '`' || c === '(' || c === ')' || isWindowsContinuation(s, i)) {
+      // A substitution's or Markdown code's delimiter ends a word, not the command; so does a
+      // cmd `^` that continues the line.
       i++;
     } else {
-      const word = readWord(s, i, to);
+      const word = readWord(s, i, to, undefined, loose);
       words.push(word);
       i = word.end > i ? word.end : i + 1;
     }
@@ -302,11 +412,12 @@ function runnerOf(word: string) {
 function isClientWord(word: string, kind: ClientKind): boolean {
   if (!CLIENT_HINT.test(word)) return false;
   const re = CLIENTS[kind] ?? CURL_CLIENT;
-  for (const candidate of [word, programBase(word)]) {
-    const found = re.exec(candidate);
-    if (found !== null && found.index === 0) return true;
-  }
-  return false;
+  const found = re.exec(word);
+  if (found !== null && found.index === 0) return true;
+  // By its path: `/usr/bin/curl`, `C:\tools\curl.exe`.
+  if (!word.includes('/') && !word.includes('\\')) return false;
+  const base = re.exec(programBase(word));
+  return base !== null && base.index === 0;
 }
 
 /**
@@ -316,6 +427,9 @@ function isClientWord(word: string, kind: ClientKind): boolean {
  */
 function mentionsClient(word: Word, kind: ClientKind): boolean {
   if (isClientWord(word.value, kind)) return true;
+  // `"$(command -v curl)"`, `"$(which curl)"`: the program the substitution prints.
+  const substitution = /^(?:\$\(|`)[^()`]{0,200}?([^\s()`]+)\s*(?:\)|`)$/.exec(word.value);
+  if (substitution !== null && isClientWord(substitution[1] ?? '', kind)) return true;
   if (word.quoted !== -1 || !CLIENT_HINT.test(word.value)) return false;
   return (CLIENTS[kind] ?? CURL_CLIENT).test(word.value);
 }
@@ -390,6 +504,9 @@ function joinsNextLine(text: string, start: number, end: number): boolean {
   const last = text[end - 1] === '\r' ? end - 2 : end - 1;
   const ch = text[last];
   if (ch === '\\') return true;
+  // A credential flag whose value is on the next line (`-u` and a line break) takes it from there.
+  const tail = /(?:^|\s)(\S{1,40})\s*$/.exec(text.slice(Math.max(start, end - 48), end));
+  if (tail !== null && NEEDS_VALUE.test(tail[1] ?? '')) return true;
   if ((ch === '^' || ch === '`') && (text[last - 1] === ' ' || text[last - 1] === '\t')) {
     return true;
   }
@@ -444,10 +561,20 @@ function remoteCopyBefore(words: readonly Word[], client: number): Uint8Array {
 class Reader {
   readonly edits: Edit[] = [];
 
+  /**
+   * Where the reading of whole lines found words of a command that names a client, with every
+   * quote closed: reading again from a client there would find nothing new.
+   */
+  private plain = new Uint8Array(0);
+
   constructor(private readonly marker: string) {}
 
   /** Records the characters `from`..`to` of a word's value as a secret. */
   private redact(source: Source, word: Word, from: number, to: number): void {
+    // Quotes and backslashes at the ends belong to the quoting around a secret (`\'` read in
+    // a string quoted several times over), not to the secret.
+    while (from < to && QUOTING.includes(word.value[from] ?? '')) from++;
+    while (to > from && QUOTING.includes(word.value[to - 1] ?? '')) to--;
     if (to <= from) return;
     const secret = word.value.slice(from, to);
     // A value that is nothing but an earlier redaction is left as it is.
@@ -459,7 +586,15 @@ class Reader {
     let last: number | undefined = word.start + to - 1;
     if (word.end - word.start !== word.value.length) {
       const map: number[] = [];
-      readWord(source.s, word.start, word.limit, map);
+      readWord(source.s, word.start, word.limit, map, word.loose);
+      // A secret with a space in it is one run of the source (`-u "admin:a pass phrase"`). One
+      // made of pieces from several quotes is quoting out of step: it ends at the first space.
+      const space = secret.search(/\s/);
+      if (space !== -1 && (map[to - 1] ?? 0) - (map[from] ?? 0) !== to - from - 1) {
+        to = from + space;
+        while (to > from && QUOTING.includes(word.value[to - 1] ?? '')) to--;
+        if (to <= from) return;
+      }
       first = map[from];
       last = map[to - 1];
     }
@@ -472,9 +607,9 @@ class Reader {
    * password is empty (`apikey:`). A shell variable or the `//` of a URL is not a literal secret.
    * A value with no colon is a user name, unless `token` says it is a token.
    */
-  private userPassword(source: Source, word: Word, o: number, token: boolean): void {
+  private userPassword(source: Source, word: Word, o: number, token: boolean, sep = ':'): void {
     const value = word.value.slice(o);
-    const colon = value.indexOf(':');
+    const colon = value.indexOf(sep);
     if (colon === -1) {
       if (token && value !== '' && !value.startsWith('$')) {
         this.redact(source, word, o, word.value.length);
@@ -488,7 +623,37 @@ class Reader {
       if (name !== '' && !name.startsWith('$')) this.redact(source, word, o, o + colon);
       return;
     }
-    this.redact(source, word, o + colon + 1, word.value.length);
+    // In a word whose quote never closed, the quoting is likely out of step with the text, and
+    // the rest of the line is not part of the password: it ends at the first space.
+    const space = word.open ? password.search(/\s/) : -1;
+    const end = space === -1 ? word.value.length : o + colon + 1 + space;
+    this.redact(source, word, o + colon + 1, end);
+  }
+
+  /**
+   * The same credentials found in the raw text of a command read from a client, whatever the
+   * quoting: `-u name:value` (and curl's other user flags and secret options), or httpie's `-a`.
+   * Quoting nested several levels deep (`'\''admin:pw'\''`) can put the parse out of step;
+   * this finds what the parse missed in the same command.
+   */
+  raw(text: string, from: number, to: number, kind: ClientKind): void {
+    const re = kind === CURL ? RAW_CURL : RAW_HTTPIE;
+    re.lastIndex = from;
+    for (let m = re.exec(text); m !== null && m.index < to; m = re.exec(text)) {
+      // Groups 1-3 are a user flag, its name and value; 4-6 a secret option and its value.
+      const flag = m[1] ?? m[4] ?? '';
+      const name = m[2] ?? m[5];
+      const value = m[3] ?? m[6] ?? '';
+      const at = m.index + m[0].length - value.length;
+      if (at + value.length > to) break;
+      if (value.startsWith('$') || value.startsWith('//')) continue;
+      // A value that is nothing but an earlier redaction is left as it is.
+      if (!/[A-Za-z0-9]/.test(value.split(this.marker).join(''))) continue;
+      // An rsync-style `user@host:/path` after a cluster is left to the parse, which knows
+      // whether rsync, scp or ssh owns it.
+      if (/^-[^-]{2,}/.test(flag) && (name?.includes('@') || value.startsWith('/'))) continue;
+      this.edits.push({ from: at, to: at + value.length });
+    }
   }
 
   /** `--cert file:password`. A Windows drive letter or a `pkcs11:` / `file:` URI is no password. */
@@ -517,7 +682,10 @@ class Reader {
     let at = o + name[0].length;
     const scheme = AUTH_SCHEME.exec(word.value.slice(at));
     if (scheme !== null) at += scheme[0].length;
-    if (word.value.slice(at).startsWith('$')) return;
+    const credentials = word.value.slice(at);
+    // `Authorization: Bearer` with nothing after the scheme names no credential.
+    if (credentials.trim() === '' || AUTH_SCHEME.test(`${credentials.trim()} `)) return;
+    if (credentials.startsWith('$')) return;
     this.redact(source, word, at, word.value.length);
   }
 
@@ -533,7 +701,13 @@ class Reader {
   }
 
   /** Reads one command; `inherited` marks clients named before it (in the word it came from). */
-  command(source: Source, words: readonly Word[], inherited: readonly boolean[], depth: number) {
+  command(
+    source: Source,
+    words: readonly Word[],
+    inherited: readonly boolean[],
+    depth: number,
+    trusted = true,
+  ) {
     const n = words.length;
     const client = [inherited[CURL] ? -1 : n, inherited[HTTPIE] ? -1 : n];
     for (let i = 0; i < n && (client[CURL] === n || client[HTTPIE] === n); i++) {
@@ -544,6 +718,17 @@ class Reader {
     }
     const curlAt = client[CURL] ?? n;
     const httpieAt = client[HTTPIE] ?? n;
+    // A command read with every quote closed, from a line or from a whole quoted argument, needs
+    // no second reading from the clients in it.
+    const firstClient = Math.min(curlAt, httpieAt);
+    if (trusted && firstClient < n && !words.some((w) => w.open)) {
+      for (let k = Math.max(0, firstClient); k < n; k++) {
+        const word = words[k];
+        if (word !== undefined && word.quoted === -1) this.plain[source.at(word.start)] = 1;
+      }
+    }
+    // Programs with their own credential syntax: ab and lftp.
+    const program = curlAt >= 0 && curlAt < n ? programBase(words[curlAt]?.value ?? '') : '';
     let remote: Uint8Array | undefined;
     // httpie's `-A bearer` (or jwt) makes a value of `-a` without a colon a token.
     const bearer =
@@ -569,8 +754,19 @@ class Reader {
       }
       const next = words[i + 1];
 
-      if (curlAt < i && v.startsWith('-')) {
+      if (curlAt < i && v.startsWith('-') && program === 'ab') {
+        // ab: `-A user:password` (and `-P` for a proxy); its `-u` is a file to PUT.
+        const flag = v.slice(0, 2);
+        if (AB_AUTH.has(flag)) {
+          if (v.length > 2) this.userPassword(source, word, 2, false);
+          else if (next !== undefined) this.userPassword(source, next, 0, false);
+          if (v.length === 2) i++;
+          continue;
+        }
+      } else if (curlAt < i && v.startsWith('-')) {
         const glued = Reader.cluster(v, 'uU', CURL_NO_VALUE);
+        // lftp: `-u user,password`.
+        const sep = program === 'lftp' ? ',' : ':';
         if (v === '--user' || v === '--proxy-user' || (glued === v.length && glued > 0)) {
           if (next !== undefined) {
             const isCluster = v.length > 2 && !v.startsWith('--');
@@ -581,7 +777,7 @@ class Reader {
                 continue;
               }
             }
-            this.userPassword(source, next, 0, false);
+            this.userPassword(source, next, 0, false, sep);
           }
           i++;
           continue;
@@ -591,7 +787,7 @@ class Reader {
             remote ??= remoteCopyBefore(words, curlAt);
             if (remote[i] === 1) continue;
           }
-          this.userPassword(source, word, glued, false);
+          this.userPassword(source, word, glued, false, sep);
           continue;
         }
         const long = /^(--[a-z0-9-]+)(=?)/.exec(v);
@@ -613,13 +809,20 @@ class Reader {
           if (!attached) i++;
           continue;
         }
-        if (v === '-H' || option === '--header') {
+        if (option === '--header') {
           if (target !== undefined) this.header(source, target, offset);
           if (!attached) i++;
           continue;
         }
-        if (v.startsWith('-H') && v.length > 2 && !v.startsWith('--')) {
-          this.header(source, word, 2);
+        // `-H value`, `-Hvalue`, and `-H` at the end of a cluster (`-sH`, `-sSH`).
+        const header = Reader.cluster(v, 'H', CURL_NO_VALUE);
+        if (header === v.length) {
+          if (next !== undefined) this.header(source, next, 0);
+          i++;
+          continue;
+        }
+        if (header > 0) {
+          this.header(source, word, header);
           continue;
         }
       }
@@ -665,16 +868,77 @@ class Reader {
    */
   private nested(source: Source, word: Word, clients: readonly boolean[], depth: number): void {
     const map: number[] = [];
-    const value = readWord(source.s, word.start, word.limit, map).value.slice(word.quoted);
+    const value = readWord(source.s, word.start, word.limit, map, word.loose).value.slice(
+      word.quoted,
+    );
     const inner: Source = { s: value, at: (k) => source.at(map[k + word.quoted] ?? 0) };
-    for (const words of readCommands(value, 0, value.length)) {
-      this.command(inner, words, clients, depth + 1);
+    // A word that is one closed quote from start to end (`"curl ..."`) holds a whole command; a
+    // quote that starts or ends inside a word (`Here's the command: curl ...`) may cut one off.
+    const last = source.s[word.end - 1];
+    const enclosed = word.quoted === 0 && !word.open && (last === '"' || last === "'");
+    // Clients named before the argument run only its first command, not those after a `|` or `;`.
+    let first = true;
+    for (const words of readCommands(value, 0, value.length, word.loose)) {
+      this.command(inner, words, first ? clients : [false, false], depth + 1, enclosed);
+      first = false;
+    }
+  }
+
+  /**
+   * Reads a command from every client named anywhere in the text, whatever quoting is around it:
+   * inside JSON, an `sh -c` string, or after an apostrophe in a sentence. Each is read forward to
+   * the end of its command with loose quoting; while a quote is open the command goes on across
+   * lines. A client the whole-line reading found in a command with every quote closed, or one
+   * inside a command already read this way and outside its quoted words, adds nothing and is
+   * skipped; the reading stops when it has covered half the text (plus a fixed allowance). The raw
+   * scan runs from every client, over each region once.
+   */
+  anchors(text: string): void {
+    const source: Source = { s: text, at: (k) => k };
+    let budget = ANCHOR_BUDGET_MIN + ANCHOR_BUDGET_FACTOR * text.length;
+    // The raw region of the current anchors, and how far each kind has scanned it.
+    let rawEnd = -1;
+    const rawDone = [-1, -1];
+    // What earlier commands covered: 0 nothing, 1 inside a quoted word (read again from a client
+    // there), 2 the rest of a command (a client there is part of a command already read).
+    const covered = new Uint8Array(text.length);
+    let lineStart = 0;
+    let nextNewline = text.indexOf('\n');
+    ANCHOR.lastIndex = 0;
+    for (let m = ANCHOR.exec(text); m !== null && budget > 0; m = ANCHOR.exec(text)) {
+      const at = m.index;
+      if (m[0] === '') ANCHOR.lastIndex++;
+      // The raw scan runs from every client, even one whose command was already read.
+      const kind = HTTPIE_CLIENT.test(m[0]) && !CURL_CLIENT.test(m[0]) ? HTTPIE : CURL;
+      if (at >= rawEnd) rawEnd = rawRegionEnd(text, at);
+      const rawFrom = Math.max(at, rawDone[kind] ?? -1);
+      if (rawFrom < rawEnd) {
+        this.raw(text, rawFrom, rawEnd, kind);
+        rawDone[kind] = rawEnd;
+      }
+      if (covered[at] === 2 || this.plain[at] === 1) continue;
+      while (nextNewline !== -1 && nextNewline < at) {
+        lineStart = nextNewline + 1;
+        nextNewline = text.indexOf('\n', lineStart);
+      }
+      const { words, end } = readAnchored(text, at, lineStart);
+      budget -= end - at + 1;
+      covered.fill(2, at, end);
+      for (let k = 1; k < words.length; k++) {
+        const word = words[k];
+        if (word !== undefined && word.quoted !== -1) covered.fill(1, word.start, word.end);
+      }
+      if (words.length > 0) this.command(source, words, [false, false], 0);
     }
   }
 
   /** Reads every logical line of the text. */
   text(text: string): void {
     const source: Source = { s: text, at: (k) => k };
+    this.plain = new Uint8Array(text.length);
+    // Where the next client name may be: lines before it are not read.
+    const hint = new RegExp(CLIENT_HINT.source, 'gi');
+    let nextHint = -1;
     let logical = 0;
     let line = 0;
     for (;;) {
@@ -684,7 +948,11 @@ class Reader {
         line = newline + 1;
         continue;
       }
-      if (CLIENT_HINT.test(text.slice(logical, end))) {
+      if (nextHint < logical) {
+        hint.lastIndex = logical;
+        nextHint = hint.exec(text)?.index ?? text.length;
+      }
+      if (nextHint < end) {
         for (const words of readCommands(text, logical, end)) {
           this.command(source, words, [false, false], 0);
         }
@@ -693,6 +961,65 @@ class Reader {
       logical = line = newline + 1;
     }
   }
+}
+
+/**
+ * Where the raw region of a client at `at` ends, ignoring quotes: at the first `;`, `|`, `&&`,
+ * backtick, or line break that is not escaped. Kept to one line and one command, so a raw match
+ * belongs to the client's own command.
+ */
+function rawRegionEnd(text: string, at: number): number {
+  RAW_END.lastIndex = at;
+  for (let m = RAW_END.exec(text); m !== null; m = RAW_END.exec(text)) {
+    if (m[0] !== '\n') return m.index;
+    const before = text[m.index - 1] === '\r' ? m.index - 2 : m.index - 1;
+    if (text[before] !== '\\') return m.index;
+  }
+  return text.length;
+}
+
+/**
+ * Reads the command that starts at a client at `at`, with loose quoting, to the first unquoted
+ * separator, an unmatched `)` or a backtick (the end of a substitution or of Markdown code), or a
+ * line break that does not continue the command. Returns its words and where reading stopped.
+ */
+function readAnchored(text: string, at: number, lineStart: number): { words: Word[]; end: number } {
+  const cap = Math.min(text.length, at + MAX_ANCHOR_CHARS);
+  const words: Word[] = [];
+  let line = lineStart;
+  let parens = 0;
+  let i = at;
+  while (i < cap && words.length < MAX_ANCHOR_WORDS) {
+    const c = text[i] ?? '';
+    if (c === ' ' || c === '\t' || c === '\r') {
+      i++;
+    } else if (c === '\n') {
+      if (!joinsNextLine(text, line, i)) break;
+      line = i + 1;
+      i++;
+    } else if (c === ';' || c === '|' || c === '`') {
+      break;
+    } else if (c === '&' && (text[i + 1] === '&' || isStandaloneAmp(text, i))) {
+      break;
+    } else if (c === '(') {
+      parens++;
+      i++;
+    } else if (c === ')') {
+      if (parens === 0) break;
+      parens--;
+      i++;
+    } else if (isWindowsContinuation(text, i)) {
+      i++;
+    } else {
+      const word = readWord(text, i, cap, undefined, true);
+      words.push(word);
+      // A quoted word may run over lines; the line the next word is on starts after its last.
+      // Only the word's own characters are looked at, so a long line is not read again.
+      for (let k = i; k < word.end; k++) if (text.charCodeAt(k) === 10) line = k + 1;
+      i = word.end > i ? word.end : i + 1;
+    }
+  }
+  return { words, end: i };
 }
 
 /**
@@ -706,15 +1033,24 @@ export function redactCommandCredentials(
   if (!CLIENT_HINT.test(text)) return { text, count: 0 };
   const reader = new Reader(marker);
   reader.text(text);
+  reader.anchors(text);
   if (reader.edits.length === 0) return { text, count: 0 };
+  // Both readings may find the same secret, or overlapping parts of it: their union is replaced.
   const edits = reader.edits.sort((a, b) => a.from - b.from || b.to - a.to);
   const parts: string[] = [];
   let at = 0;
+  let open = -1;
   for (const edit of edits) {
-    if (edit.from < at) continue;
-    parts.push(text.slice(at, edit.from), marker);
+    if (open !== -1 && edit.from <= at) {
+      if (edit.to > at) at = edit.to;
+      continue;
+    }
+    if (open !== -1) parts.push(marker);
+    parts.push(text.slice(at, edit.from));
+    open = edit.from;
     at = edit.to;
   }
+  if (open !== -1) parts.push(marker);
   parts.push(text.slice(at));
   return { text: parts.join(''), count: (parts.length - 1) / 2 };
 }

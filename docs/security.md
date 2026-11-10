@@ -62,11 +62,15 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   across `\`, `^` or a PowerShell backtick and into indented option lines, split into commands
   at unquoted `|`, `&&`, `||`, `;` or a standalone `&`, and split into words with their quotes
   removed. A quoted argument is one word, and is read again as commands of its own
-  (`sh -c "curl ..."`), two levels deep. In a command that names curl (or its builds, wget,
+  (`sh -c "curl ..."`), two levels deep. Every client named anywhere in the text, quoted or not,
+  is also read forward to the end of its command with loose quoting, so an apostrophe earlier
+  in a sentence, quoting nested deeper than that, or a quoted body over several lines before the
+  flag does not hide the credentials. In a command that names curl (or its builds, wget,
   curlie, aria2c, ab, lftp, hurl, httpstat, or a variable named after one such as `$CURL` or
   `$HTTP_CLIENT`, but not `$HTTP_PORT` or `$HTTPBIN`) before the flag, `-u user:<value>`,
   `--user`, `-U` / `--proxy-user`, `--cert file:<value>`, `--pass`, `--tlspassword`,
-  `--oauth2-bearer` and `-H "Authorization: <value>"` are redacted. In a command that runs
+  `--oauth2-bearer` and `-H "Authorization: <value>"` (also at the end of a cluster such as
+  `-sH`) are redacted, as are ab's `-A` / `-P user:<value>` and lftp's `-u user,<value>`. In a command that runs
   httpie or xh, so are `-a` / `--auth user:<value>` (and a bare `-a <token>` with `-A bearer` or
   `jwt`), `--bearer <value>` and `Authorization:<value>` items. Runners and their options before
   the client (`sudo -u deploy`, `time -f "%e"`, `env A=1`, `/usr/bin/time`) are read word by

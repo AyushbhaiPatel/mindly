@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REDACTED, redact, redactDeep } from '../src/redact.js';
+import { REDACTED, redact, redactDeep, redactText } from '../src/redact.js';
 
 // Built at run time so no token-shaped literal sits in the repository.
 const FAKE_GITHUB = `ghp_${'a'.repeat(36)}`;
@@ -162,7 +162,7 @@ describe('redact', () => {
     ['/usr/bin/curl -u admin:PW x.test', 'PW'],
     ['"C:\\tools\\curl.exe" -u admin:PW x.test', 'PW'],
     ['curlie -u admin:PW x.test', 'PW'],
-    ['ab -u admin:PW x.test/', 'PW'],
+    ['ab -A admin:PW x.test/', 'PW'],
     ['aria2c -u admin:PW x.test/f', 'PW'],
     ['sudo curl -u admin:PW x.test', 'PW'],
     ['sudo -u deploy curl -u admin:PW x.test', 'PW'],
@@ -284,6 +284,25 @@ describe('redact', () => {
     // Lines of a here-document are read as lines of their own.
     ["bash <<'EOF'\ncurl -u admin:PW https://x.test\nEOF", 'PW'],
     ["cat <<EOF\ndon't stop\ncurl -u admin:PW https://x.test\nEOF", 'PW'],
+    // A client found anywhere is read from, whatever quoting comes before it.
+    ["Don't forget: curl -H 'Accept: json' -u admin:PW https://x.test", 'PW'],
+    ["Here's the command: curl -d 'a b' -u admin:PW https://x.test", 'PW'],
+    ["Here's the job: ssh h 'curl -u \"admin:PW\" https://x.test' && echo ok", 'PW'],
+    ['{"command":"ssh prod \\"sh -c \'curl -u admin:PW https://x.test\'\\""}', 'PW'],
+    ["it's sh -c 'curl -o out -u '\\''admin:PW'\\'' -o out https://x.test'", 'PW'],
+    ['"$(command -v curl)" -u admin:PW https://x.test', 'PW'],
+    ['"$(which curl)" -u admin:PW https://x.test', 'PW'],
+    // A quoted body over several lines before the flag, and a value on the next line.
+    ['curl -d \'{\n  "a": 1\n}\' -u admin:PW https://x.test', 'PW'],
+    ['curl -X POST https://x.test \\\n  -d \'{\n    "name": "x"\n  }\' \\\n  -u admin:PW', 'PW'],
+    ['curl -u\r\nadmin:PW https://x.test', 'PW'],
+    // -H at the end of a cluster, and the credential syntax of ab and lftp.
+    ['curl -sH "Authorization: PW" https://x.test', 'PW'],
+    ["curl -sSH 'Authorization: Digest PW' https://x.test", 'PW'],
+    ['ab -A admin:PW -n 10 http://x.test/', 'PW'],
+    ['ab -P proxy:PW -n 10 http://x.test/', 'PW'],
+    ['lftp -u admin,PW sftp://x.test', 'PW'],
+    ["lftp -e 'mirror' -u admin,PW x.test", 'PW'],
     // An ssh or sftp that is a quoted string or an option's value is not a command.
     ["curl -d 'ssh' -su me@example.com:PW https://x.test", 'PW'],
     ['curl --proto-default sftp -su me@example.com:PW example.com/file', 'PW'],
@@ -387,6 +406,11 @@ describe('redact', () => {
     'curl -H "Authorization: Bearer $TOKEN" https://x.test',
     'curl -H "Accept: text/plain" https://x.test',
     'http https://x.test Accept:application/json',
+    // A scheme with nothing after it, ab's file to PUT, a client only named in a pattern.
+    'curl https://x.test -H "Authorization: Bearer" -d a',
+    'ab -u put.json -n 10 http://x.test/',
+    'grep -r "curl" . | sort -u a:b',
+    'git grep "curl" -- \'*.sh\' && git log -u a:b',
     'docker run -e URL=$HTTP_TOOL_URL -u app:staff image',
     'sudo -u deploy docker run image\n    -u app:staff',
     'sudo -n docker run image\n    -u app:staff',
@@ -439,6 +463,20 @@ describe('redact', () => {
     expect(fastest(log)).toBeLessThan(100);
     const env = `env ${'-u X '.repeat(6)}timeout -s KILL 30 `;
     expect(fastest(`${env.repeat(400)}curl x\n  -u admin:pw\n`)).toBeLessThan(50);
+  });
+
+  it.each([
+    ['Run `curl -su admin:PW`, then check.', 'Run `curl -su admin:[R]`, then check.'],
+    ['| `curl -u admin:PW` | works |', '| `curl -u admin:[R]` | works |'],
+    ['echo $(curl -u admin:PW)', 'echo $(curl -u admin:[R])'],
+    [
+      'TOKEN=`curl -su admin:PW https://x.test/token`',
+      'TOKEN=`curl -su admin:[R] https://x.test/token`',
+    ],
+    ['X=$(curl -u admin:PW x)', 'X=$(curl -u admin:[R] x)'],
+  ])('keeps the delimiters around a redacted command: %s', (input, output) => {
+    const pw = 'hunter2SecretValue9';
+    expect(redactText(input.replace('PW', pw))).toBe(output.replace('[R]', REDACTED));
   });
 
   it('reads a long quoted body as one argument', () => {
