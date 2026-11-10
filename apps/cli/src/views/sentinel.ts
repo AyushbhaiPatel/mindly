@@ -238,6 +238,12 @@ export function renderSentinelPass(sc: Screen, r: SentinelPassResult, current: s
       );
       return;
     case 'cancelled':
+      if (r.reason === 'lock_lost') {
+        sc.summary(
+          `${sc.mark('warn')} Stopped: another process took over this checkout while this one was paused. Nothing was saved; run it again.`,
+        );
+        return;
+      }
       sc.summary(
         'Cancelled. The scratch tree stays for the next run; your checkout was not touched.',
       );

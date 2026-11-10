@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   utimesSync,
@@ -878,6 +879,57 @@ describe('sentinel pass', () => {
     expect(w.steps.warmRemoved).toEqual([path]);
     // The new tree has nothing installed: the setup command ran again.
     expect(w.steps.ran.filter((x) => x.startsWith('setup@'))).toEqual(['setup@c2', 'setup@c3']);
+  });
+
+  it('stops, without saving or touching the tree again, when its lock was taken over', async () => {
+    const holder: { takeOver?: (commit: string) => void } = {};
+    const w = await world(
+      (check, commit) => {
+        // While the first check runs at the new step, this process is suspended past the
+        // heartbeat window and a daemon in another container takes the checkout's lock over.
+        if (check === 'unit') holder.takeOver?.(commit);
+        return breaksAt(3)(check, commit);
+      },
+      {
+        project: {
+          checks: [
+            { name: 'unit', argv: ['npm', 'test'] },
+            { name: 'lint', argv: ['npm', 'run', 'lint'] },
+          ],
+        },
+      },
+    );
+    const svc = sentinelOf(w.mindly);
+    w.addSteps(1, 2);
+    await w.pass();
+    const before = w.mindly.store.sentinel.get(w.pid, w.root)!;
+    const lockFile = join(dirname(svc.warmPath(w.pid, w.root)), 'lock');
+    const theirs = ['424242', 'feedfeedfeedfeedfeedfeed', '', 'pid:[4026532001]'].join('\n');
+    holder.takeOver = (commit) => {
+      if (commit === 'c4') writeFileSync(lockFile, theirs);
+    };
+    w.addSteps(3, 4);
+    const ran = w.steps.ran.length;
+    const r = await w.pass();
+    expect(r).toMatchObject({ status: 'cancelled', reason: 'lock_lost', checks: [] });
+    // The command that was running finished; nothing ran after it, and no bisect started.
+    expect(w.steps.ran.slice(ran)).toEqual(['unit@c4']);
+    expect(w.mindly.store.runs.list(w.pid, { kind: 'bisect' })).toEqual([]);
+    expect(w.mindly.store.runs.get(r.runId!)).toMatchObject({ status: 'cancelled' });
+    // The state belongs to whoever holds the lock now: untouched, like their lock.
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toEqual(before);
+    expect(w.mindly.store.conflicts.list(w.pid)).toEqual([]);
+    expect(readFileSync(lockFile, 'utf8')).toBe(theirs);
+
+    // Once they let go, the step is checked as if nothing happened.
+    rmSync(lockFile);
+    delete holder.takeOver;
+    const again = await w.pass();
+    expect(again.status).toBe('checked');
+    expect(again.checks.map((c) => [c.name, c.transition])).toEqual([
+      ['unit', 'broke'],
+      ['lint', 'broke'],
+    ]);
   });
 
   it("refuses to run when Mindly's home is inside the repository", async () => {

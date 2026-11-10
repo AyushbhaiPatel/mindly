@@ -130,9 +130,14 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   id of its own and, on Linux, when the process started and its PID namespace, so a PID used
   again by another process does not keep it. A PID is only judged inside its own namespace:
   seen from another one (two containers sharing `MINDLY_HOME`, or a container and the host), the
-  lock is held for as long as its holder keeps touching it (every 10 seconds) and counts as
-  abandoned a minute after it stopped. The daemon queues passes behind the project's merge
-  checks. Bisects the
+  lock is held for as long as its holder keeps touching it (every 10 seconds). It is taken over
+  only by a process that found it unchanged again more than a minute after it first looked,
+  counted on a clock that does not step (what it saw is noted in a `lock.seen-*` file next to
+  the lock), so a time sync or a resume from suspend never makes a live lock look abandoned. A
+  holder that was suspended for longer than that (a paused container) can lose its lock: the
+  pass checks the lock before every command and before it saves anything, and stops as
+  cancelled, leaving the scratch tree and the state to the new holder. The daemon queues passes
+  behind the project's merge checks. Bisects the
   sentinel starts are capped per project per day (`sentinel.maxBisectsPerDay`), and a step where
   nothing could run, or whose pass failed, is retried with a growing back-off counted from the
   end of the pass (15 minutes up to 6 hours), not on every tick. Agents cannot start a pass:

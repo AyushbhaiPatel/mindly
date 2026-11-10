@@ -130,7 +130,10 @@ export interface SentinelPassResult {
   step: number | null;
   runId: string | null;
   checks: SentinelCheckReport[];
-  /** Why the pass did not run or failed, for `not_ready` and `error`. */
+  /**
+   * Why the pass did not run or failed, for `not_ready` and `error`; `lock_lost` for a pass
+   * cancelled because another process took its checkout's lock over.
+   */
   reason: string | null;
   setupFailed: boolean;
 }
@@ -403,7 +406,17 @@ export class SentinelService {
     if (!lock) return result('busy', { step: latest.seq });
 
     // Everything from here runs under the lock, and whatever happens the lock is released.
-    const signal = opts.signal ?? new AbortController().signal;
+    // The lock can be lost while the pass works: where its PID cannot be judged (a daemon in
+    // another container), a holder suspended for longer than the heartbeat window looks
+    // abandoned. Whoever took the lock over owns the scratch tree and the state from then on,
+    // so the pass stops, as cancelled, before it touches either again.
+    const lostLock = new AbortController();
+    const signal = opts.signal ? AbortSignal.any([opts.signal, lostLock.signal]) : lostLock.signal;
+    const stillOurs = (): void => {
+      if (lostLock.signal.aborted || lock.held()) return;
+      lostLock.abort();
+      throw new BisectAborted();
+    };
     let run: Run | null = null;
     let ws: StepWorkspace | null = null;
     let watch: SentinelWatch | null = null;
@@ -430,7 +443,10 @@ export class SentinelService {
       }
       setupCommit = watch?.setupCommit ?? null;
       run = this.startRun(project, latest, ready, opts.trigger);
-      ws = await this.openWarm(steps, projectId, worktree, latest.commit, signal);
+      const guarded = whileHeld(steps, stillOurs);
+      const tree = await this.openWarm(steps, projectId, worktree, latest.commit, signal);
+      stillOurs();
+      ws = whileHeldTree(tree, stillOurs);
       // A tree made again (it was missing or broken) has none of the dependencies installed before.
       if (ws.fresh) setupCommit = null;
       const known = (checks = this.carryChecks(projectId, watch, ready.checks));
@@ -452,7 +468,7 @@ export class SentinelService {
           continue;
         }
         opts.onProgress?.({ phase: 'check', check: check.name, step: latest.seq });
-        const runner = new StepCommandRunner(steps, ws, {
+        const runner = new StepCommandRunner(guarded, ws, {
           command: check,
           setup: ready.setup,
           setupAt: setupCommit,
@@ -474,6 +490,7 @@ export class SentinelService {
           setup: ready.setup,
           checks: known,
           outcome,
+          steps: guarded,
           ws,
           setupCommit,
           signal,
@@ -485,6 +502,7 @@ export class SentinelService {
         reports.push(report);
         // Saved as each check settles, so a pass cancelled later never redoes this one's bisect
         // (or records its mistake twice).
+        stillOurs();
         this.k.store.sentinel.save(projectId, worktree, {
           checkedSeq: watch?.checkedSeq ?? null,
           checkedAt: watch?.checkedAt ?? null,
@@ -500,6 +518,7 @@ export class SentinelService {
       // counts from the end of the pass: a pass of timeouts must not use its own back-off up.
       const done = this.k.clock.now();
       const skips = ran ? 0 : skipsAt(watch, latest.seq) + 1;
+      stillOurs();
       this.k.store.sentinel.save(projectId, worktree, {
         checkedSeq: ran ? latest.seq : (watch?.checkedSeq ?? null),
         checkedAt: done,
@@ -519,8 +538,21 @@ export class SentinelService {
     } catch (err) {
       const runId = run?.id ?? null;
       if (err instanceof BisectAborted || signal.aborted) {
-        if (run) this.finishRunQuietly(run, 'cancelled', { step: latest.seq, checks: reports });
-        return result('cancelled', { step: latest.seq, runId, checks: reports });
+        const lost = lostLock.signal.aborted;
+        if (lost) this.k.logger.warn('sentinel: lock lost, pass stopped', { projectId });
+        if (run) {
+          this.finishRunQuietly(run, 'cancelled', {
+            step: latest.seq,
+            checks: reports,
+            ...(lost ? { error: 'lock_lost' } : {}),
+          });
+        }
+        return result('cancelled', {
+          step: latest.seq,
+          runId,
+          checks: reports,
+          reason: lost ? 'lock_lost' : null,
+        });
       }
       const reason = sanitizeLine(redactText(describeError(err)), 300);
       this.k.logger.error('sentinel pass failed', { projectId, error: describeError(err) });
@@ -605,6 +637,7 @@ export class SentinelService {
     setup: CommandSpec | null;
     checks: Record<string, SentinelCheck>;
     outcome: StepCheck;
+    steps: StepGitPort;
     ws: StepWorkspace;
     setupCommit: string | null;
     signal: AbortSignal;
@@ -703,6 +736,7 @@ export class SentinelService {
     check: CommandSpec;
     setup: CommandSpec | null;
     checks: Record<string, SentinelCheck>;
+    steps: StepGitPort;
     ws: StepWorkspace;
     setupCommit: string | null;
     signal: AbortSignal;
@@ -775,7 +809,7 @@ export class SentinelService {
     }
 
     // The search, in the same warm tree.
-    const runner = new StepCommandRunner(this.steps as StepGitPort, input.ws, {
+    const runner = new StepCommandRunner(input.steps, input.ws, {
       command: check,
       setup: input.setup,
       setupAt: input.setupCommit,
@@ -1277,6 +1311,42 @@ function checkoutOf(cwd: string, trees: readonly string[]): string | null {
     }
   }
   return best;
+}
+
+/**
+ * `steps` for a pass that may lose its lock: `stillOurs` (which throws once the lock is gone)
+ * is asked before a command starts in the scratch tree and when it returns.
+ */
+function whileHeld(steps: StepGitPort, stillOurs: () => void): StepGitPort {
+  return {
+    scratch: (repoDir, commit) => steps.scratch(repoDir, commit),
+    warm: (repoDir, path, commit) => steps.warm(repoDir, path, commit),
+    removeWarm: (repoDir, path) => steps.removeWarm(repoDir, path),
+    changedPaths: (repoDir, from, to) => steps.changedPaths(repoDir, from, to),
+    isManifestPath: (path) => steps.isManifestPath(path),
+    run: async (dir, command, signal) => {
+      stillOurs();
+      const result = await steps.run(dir, command, signal);
+      stillOurs();
+      return result;
+    },
+  };
+}
+
+/** The scratch tree of such a pass: nothing is checked out in it once the lock is gone. */
+function whileHeldTree(ws: StepWorkspace, stillOurs: () => void): StepWorkspace {
+  return {
+    path: ws.path,
+    fresh: ws.fresh,
+    get current() {
+      return ws.current;
+    },
+    checkout: async (commit) => {
+      stillOurs();
+      await ws.checkout(commit);
+    },
+    dispose: () => ws.dispose(),
+  };
 }
 
 /** Passes in a row that could not check step `seq` (nothing ran, or the pass failed). */

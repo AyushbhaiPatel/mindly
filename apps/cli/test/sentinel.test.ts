@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tryProcessLock } from '@mindly/engine';
 import { describe, expect, it } from 'vitest';
+import { screenFor } from '../src/present/index.js';
+import { renderSentinelPass } from '../src/views/sentinel.js';
 import { cli, git, sandbox, write, type Sandbox } from './helpers.js';
 
 /*
@@ -132,6 +134,25 @@ describe('mindly sentinel', () => {
       daemon: false,
       readiness: { ready: false, reason: 'untrusted' },
     });
+  });
+
+  it('says so when a pass stopped because its checkout was taken over', () => {
+    const lines: string[] = [];
+    const sc = screenFor((l) => lines.push(l), { write: () => undefined, isTTY: false }, {}, 0);
+    const pass = {
+      status: 'cancelled' as const,
+      worktree: '/repo',
+      step: 4,
+      runId: null,
+      checks: [],
+      setupFailed: false,
+    };
+    renderSentinelPass(sc, { ...pass, reason: 'lock_lost' }, '/repo');
+    expect(lines.join('\n')).toContain('another process took over this checkout');
+    expect(lines.join('\n')).toContain('Nothing was saved');
+    lines.length = 0;
+    renderSentinelPass(sc, { ...pass, reason: null }, '/repo');
+    expect(lines.join('\n')).toContain('Cancelled.');
   });
 
   it('does not call checks that could not run passing', async () => {
