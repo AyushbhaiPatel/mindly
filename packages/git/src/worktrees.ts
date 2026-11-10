@@ -372,7 +372,7 @@ export const linkedGitDirLabel = (path: string): string =>
  * stores) is named in `gitData`.
  */
 export const elsewhereGitDirLabel = (path: string): string =>
-  `${path}, whose git storage is reached elsewhere and cannot be checked`;
+  `${path}, whose git storage is reached elsewhere and cannot be checked, even committed`;
 
 /** Files that tell a git directory keeps (some of) its storage elsewhere, by path from it. */
 const ELSEWHERE_FILES = ['/commondir', '/gitdir', '/objects/info/alternates'];
@@ -388,65 +388,21 @@ function noteElsewhere(path: string, into: Map<string, Set<string>>): void {
   }
 }
 
-/** The most of a `commondir`, `gitdir` or `alternates` file that is read. */
-const ELSEWHERE_FILE_MAX = 4096;
-
-/**
- * True when the `tail` file of git directory `dir` points only where nothing is stored outside
- * a commit: outside the worktree (removing it does not touch that), or into a folder of it with
- * nothing changed, staged, untracked or ignored under it (`newUnder`). False when the file cannot
- * be read or makes no sense, or points at the worktree's own folder. Reads that small file only.
- */
-function pointsOnlyToCommitted(
-  root: string,
-  dir: string,
-  tail: string,
-  newUnder: ReadonlySet<string>,
-): boolean {
-  const file = join(root, dir, tail.slice(1));
-  let text: string;
-  try {
-    const st = lstatSync(file);
-    if (!st.isFile() || st.size > ELSEWHERE_FILE_MAX) return false;
-    text = readFileSync(file, 'utf8');
-  } catch {
-    return false;
-  }
-  const lines = text
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l !== '' && !l.startsWith('#'));
-  // `commondir` and `gitdir` hold one path; `alternates` one per line, from `objects/`.
-  const targets = tail === '/objects/info/alternates' ? lines : lines.slice(0, 1);
-  if (targets.length === 0 || lines.some((l) => l.includes('\0'))) return false;
-  const base = tail === '/objects/info/alternates' ? join(root, dir, 'objects') : join(root, dir);
-  for (const t of targets) {
-    const target = resolve(base, t);
-    if (target === root) return false;
-    if (!target.startsWith(`${root}/`)) continue;
-    const rel = target.slice(root.length + 1);
-    const slash = rel.lastIndexOf('/');
-    // A folder with anything new under it, or a file beside something new (it may be the one).
-    if (newUnder.has(rel) || (slash > 0 && newUnder.has(rel.slice(0, slash)))) return false;
-  }
-  return true;
-}
-
 /**
  * What `dir` (not the top level), which holds an entry named `HEAD` (tracked, untracked or
  * ignored), is. `elsewhere` when it also holds a `commondir`, a `gitdir` or an
  * `objects/info/alternates` (`elsewhereStorage`, any status) that, with its `HEAD`, is on disk
- * now, and either something in it is not as in the last commit (`newUnder`) or one of those
- * files points where something is (see `pointsOnlyToCommitted`): its storage, or part of it, is
- * in another folder (a linked worktree's git directory has no `objects` of its own). A committed
- * fixture of that shape, unchanged and pointing at committed folders, is not. Otherwise only
+ * now: its storage, or part of it, is in another folder (a linked worktree's git directory has
+ * no `objects` of its own), which is not looked for. git reads those files its own way (quoted,
+ * chained, through links), so they are not read here: committed and unchanged or not, such a
+ * folder counts while it is on disk. Otherwise only
  * with an `objects` that is a folder on disk (through a link too): `linked` when its `objects`
  * or `refs` is a link, or holds a tracked one, or its `packed-refs` is one (`linkedStorage`):
  * what it stores may then be anywhere, and no link is followed to look; `changed` when something
  * in it other than that `HEAD` is not as in the last commit (`newUnder`: staged, modified,
  * deleted, untracked or ignored; a link elsewhere in it counts only by changing itself).
  * Otherwise null: a fully tracked, unchanged one holds nothing that is not in a commit. Nothing
- * is read but those small files.
+ * is read.
  */
 function gitDirKind(
   root: string,
@@ -459,10 +415,7 @@ function gitDirKind(
   const tails = elsewhereStorage.get(dir);
   if (tails && existsOrLink(join(root, dir, 'HEAD'))) {
     for (const tail of tails) {
-      if (!existsOrLink(join(root, dir, tail.slice(1)))) continue;
-      if (newUnder.has(dir) || !pointsOnlyToCommitted(root, dir, tail, newUnder)) {
-        return 'elsewhere';
-      }
+      if (existsOrLink(join(root, dir, tail.slice(1)))) return 'elsewhere';
     }
   }
   const objects = join(root, dir, 'objects');

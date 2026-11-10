@@ -713,7 +713,7 @@ describe('worktrees', () => {
     ]);
   });
 
-  it('does not count a committed linked-worktree fixture, as it is or deleted', async () => {
+  it('counts a committed linked-worktree fixture while it is on disk, not once deleted', async () => {
     const root = makeRepo({ 'README.md': 'x\n' });
     const g = join(root, 'fx/.gitted');
     git(root, 'init', '-q', '--bare', g);
@@ -724,12 +724,49 @@ describe('worktrees', () => {
     commitAll(root, 'fixture');
     const path = join(tempDir(), 'part');
     await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
-    expect((await worktreeScan(path)).gitData).toEqual([]);
-    // Its common dir changed: now it counts (as a changed git directory, holding the other).
+    // Where it points is not read: it counts, unchanged as it is.
+    expect((await worktreeScan(path)).gitData).toEqual([
+      elsewhereGitDirLabel('fx/.gitted/worktrees/wt'),
+    ]);
+    // Its common dir changed: it counts as a changed git directory, holding the other.
     write(path, 'fx/.gitted/refs/heads/topic', `${'0'.repeat(40)}\n`);
     expect((await worktreeScan(path)).gitData).toEqual(['fx/.gitted']);
+    // Gone from disk: nothing to hold (its deletion is uncommitted work).
     rmSync(join(path, 'fx'), { recursive: true });
     expect((await worktreeScan(path)).gitData).toEqual([]);
+  });
+
+  it('counts a git directory with storage elsewhere however git reaches it', async () => {
+    const root = makeRepo({
+      'README.md': 'x\n',
+      '.gitignore': '.cache/\n',
+      // A commondir through a tracked link to an ignored folder.
+      'wt/HEAD': 'ref: refs/heads/main\n',
+      'wt/commondir': '../lnk/common\n',
+      'wt/objects/.keep': '',
+      // A C-quoted alternates line.
+      'q.git/HEAD': 'ref: refs/heads/main\n',
+      'q.git/objects/info/alternates': '"../../.cache/objs"\n',
+      // Alternates chained through a committed store to an ignored one.
+      'c.git/HEAD': 'ref: refs/heads/main\n',
+      'c.git/objects/info/alternates': '../../store1\n',
+      'store1/info/alternates': '../.cache/objs\n',
+      'store1/pack/.keep': '',
+    });
+    symlinkSync('.cache', join(root, 'lnk'));
+    commitAll(root, 'fixtures');
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    const common = join(path, '.cache/common');
+    git(path, 'init', '-q', '--bare', '-b', 'main', common);
+    renameSync(join(common, 'HEAD'), join(path, '.cache/HEAD.orig'));
+    commitThrough(join(path, 'wt'), 'hours of work\n', 'refs/heads/feature');
+    expect(gd(join(path, 'wt'), ['log', '--format=%s', 'feature'])).toBe('only here');
+    expect((await worktreeScan(path)).gitData).toEqual([
+      elsewhereGitDirLabel('c.git'),
+      elsewhereGitDirLabel('q.git'),
+      elsewhereGitDirLabel('wt'),
+    ]);
   });
 
   it('finds a .git git does not accept, alone in a folder git lists nothing in', async () => {

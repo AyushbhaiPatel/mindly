@@ -216,10 +216,10 @@ repository), a git directory among untracked or ignored files (a `--separate-git
 clone: a folder with a `HEAD` and an `objects` folder, holding anything not as in the last
 commit, staged, changed or new; or one whose `objects`, `refs` or `packed-refs` is a link or
 holds one, since what it stores may then be anywhere and no link is followed to check; or one
-with a `commondir`, a `gitdir` or an `objects/info/alternates` that points where something is
-not as committed, or that has changed itself; a committed fixture of that shape, such as a
-linked worktree's git directory kept in a test suite, does not block an abort while it and what
-it points at are unchanged), files
+with a `commondir`, a `gitdir` or an `objects/info/alternates`, whose storage is elsewhere
+and is not looked for; a committed fixture of that shape, such as a linked worktree's git
+directory or an alternates repository kept in a test suite, holds every abort while it is on
+disk, so move it out of the worktree first or use `--yes --discard`), files
 written into the folder of an uninitialised submodule (git lists nothing there; empty folders
 do not count), or the git directories of the part's submodules, initialised or not. A part holding any of it keeps its worktree and branch, the
 abort stays unfinished, and it says, naming each path (the worktree itself as "the worktree's

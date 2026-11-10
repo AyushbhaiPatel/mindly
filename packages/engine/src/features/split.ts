@@ -1652,8 +1652,12 @@ const abortPendingKey = (splitId: string): string => `split.abortPending:${split
 
 /** Why a worktree holding git data (`held`) was kept, and what to do about it. */
 function heldMessage(held: readonly string[]): string {
-  const named = held.map((p) => (p === '' || p === '.' ? "the worktree's own folder" : p));
-  return `it holds git data that abort never deletes: ${describePaths(named)}. Move it out of the worktree (or delete it yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything with mindly split abort --yes --discard`;
+  // Named in full: an entry may say why it cannot be checked.
+  const named = held
+    .slice(0, 3)
+    .map((p) => (p === '' || p === '.' ? "the worktree's own folder" : sanitizeLine(p, 400)));
+  const more = held.length > named.length ? ` and ${held.length - named.length} more` : '';
+  return `it holds git data that abort never deletes: ${named.join(', ')}${more}. Move it out of the worktree (or delete it yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything with mindly split abort --yes --discard`;
 }
 
 /** Why a worktree was kept when git did not remove it. */
