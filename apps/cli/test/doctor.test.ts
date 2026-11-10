@@ -102,4 +102,80 @@ describe('doctor', () => {
     chmodSync(dir, 0o700);
     expect(modeIfThere(dir)).toBe(0o700);
   });
+
+  it('doctor treats an empty database file like a missing one', async () => {
+    const sb = sandbox();
+    expect((await cli(sb, ['init', '--yes'])).code).toBe(0);
+    const path = join(sb.mindlyHome, 'mindly.db');
+    for (const f of [path, `${path}-wal`, `${path}-shm`]) rmSync(f, { force: true });
+    // What a process leaves when it dies between creating the file and setting it up.
+    writeFileSync(path, '', { mode: 0o600 });
+    const r = await cli(sb, ['doctor']);
+    expect(r.stdout).toContain('[ok] Database is up to date');
+    expect(r.stdout).not.toContain('older format');
+    const checks = json<{ checks: { name: string; status: string; detail: string }[] }>(
+      (await cli(sb, ['doctor', '--json'])).stdout,
+    ).checks;
+    expect(checks.find((c) => c.name === 'database')).toMatchObject({ status: 'ok' });
+    for (const name of ['project', 'checkpoints', 'sentinel']) {
+      expect(checks.find((c) => c.name === name)?.detail, name).not.toMatch(/^not checked/);
+    }
+  });
+
+  it('doctor keeps every check name when the database cannot be used as it is', async () => {
+    const sb = sandbox();
+    expect((await cli(sb, ['init', '--yes'])).code).toBe(0);
+    const path = join(sb.mindlyHome, 'mindly.db');
+    const latest = MIGRATIONS.length;
+    type Checks = { ok: boolean; checks: { name: string; status: string; detail: string }[] };
+    const names = ['project', 'checkpoints', 'sentinel'];
+    const usual = json<Checks>((await cli(sb, ['doctor', '--json'])).stdout).checks;
+    for (const name of names)
+      expect(
+        usual.some((c) => c.name === name),
+        name,
+      ).toBe(true);
+
+    const setVersion = (v: number): void => {
+      const db = new DatabaseSync(path);
+      try {
+        db.exec(`PRAGMA user_version = ${v}`);
+      } finally {
+        db.close();
+      }
+    };
+    setVersion(latest + 1);
+    const newer = json<Checks>((await cli(sb, ['doctor', '--json'])).stdout);
+    expect(newer.ok).toBe(false);
+    for (const name of names) {
+      expect(
+        newer.checks.filter((c) => c.name === name),
+        name,
+      ).toEqual([{ name, status: 'info', detail: 'not checked: the database cannot be opened' }]);
+    }
+    const said = (await cli(sb, ['doctor'])).stdout.replace(/\s+/g, ' ');
+    expect(said).toContain('not checked');
+
+    for (const f of [path, `${path}-wal`, `${path}-shm`]) rmSync(f, { force: true });
+    const old = new DatabaseSync(path);
+    try {
+      for (const sql of MIGRATIONS.slice(0, latest - 1)) old.exec(sql);
+      old.exec(`PRAGMA user_version = ${latest - 1}`);
+    } finally {
+      old.close();
+    }
+    chmodSync(path, 0o600);
+    const older = json<Checks>((await cli(sb, ['doctor', '--json'])).stdout);
+    expect(older.ok).toBe(true);
+    for (const name of names) {
+      expect(
+        older.checks.filter((c) => c.name === name),
+        name,
+      ).toEqual([
+        { name, status: 'info', detail: 'not checked: the database is in an older format' },
+      ]);
+    }
+    const human = (await cli(sb, ['doctor'])).stdout.replace(/\s+/g, ' ');
+    expect(human).toContain('not checked until the database is upgraded');
+  });
 });

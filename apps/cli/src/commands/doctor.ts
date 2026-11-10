@@ -101,21 +101,50 @@ async function claudeStatusLineCheck(
   );
 }
 
+/** Why the checks that need the store were not run: its format is older, or it cannot be opened. */
+type StoreSkip = 'older' | 'unusable';
+
+interface DatabaseCheck {
+  item: DoctorItem;
+  skipped: StoreSkip | null;
+}
+
+/**
+ * The checks that need the store, reported as not run. Their names stay in the output, so a
+ * reader of `--json` that looks a check up by name finds it and sees why it has no result.
+ */
+function skippedStoreItems(why: StoreSkip): DoctorItem[] {
+  const detail =
+    why === 'older'
+      ? 'not checked: the database is in an older format'
+      : 'not checked: the database cannot be opened';
+  const until =
+    why === 'older'
+      ? 'not checked until the database is upgraded'
+      : 'not checked, the database cannot be opened';
+  return [
+    item({ name: 'project', status: 'info', detail }, 'Setup', `This project: ${until}`),
+    item({ name: 'checkpoints', status: 'info', detail }, 'Optional', `Checkpoints: ${until}`),
+    item({ name: 'sentinel', status: 'info', detail }, 'Optional', `The sentinel: ${until}`),
+  ];
+}
+
 /**
  * The database's format, read before anything opens the store: opening it applies every pending
  * migration and refuses a newer format, so a check made afterwards could only ever see "up to
- * date" or a failed open. `usable` is false when the store must not be opened by this diagnostic.
+ * date" or a failed open. `skipped` says why the store must not be opened by this diagnostic, or
+ * is null when it can be.
  */
-function databaseCheck(dbPath: string): { item: DoctorItem; usable: boolean } {
+function databaseCheck(dbPath: string): DatabaseCheck {
   const latest = MIGRATIONS.length;
-  const failed = (err: unknown): { item: DoctorItem; usable: boolean } => ({
+  const failed = (err: unknown): DatabaseCheck => ({
     item: item(
       { name: 'database', status: 'fail', detail: describeError(err) },
       'Setup',
       `The database cannot be opened: ${describeError(err)}`,
       `Close other Mindly processes (mindly daemon stop) and check ${dbPath}`,
     ),
-    usable: false,
+    skipped: 'unusable',
   });
   let found: number | null;
   try {
@@ -131,20 +160,22 @@ function databaseCheck(dbPath: string): { item: DoctorItem; usable: boolean } {
         `The database was written by a newer Mindly (format v${found}, this version reads v${latest})`,
         'Update Mindly to the newest version (npm install -g mindly-cli)',
       ),
-      usable: false,
+      skipped: 'unusable',
     };
   }
-  if (found !== null && found < latest) {
+  // Version 0 is a file without a schema (a process stopped between creating it and setting it
+  // up): there is nothing to upgrade, the store sets it up like a database that is not there.
+  if (found !== null && found >= 1 && found < latest) {
     return {
       item: item(
         { name: 'database', status: 'info', detail: `schema v${found} (expected v${latest})` },
         'Setup',
-        `The database is in an older format v${found}; it is upgraded to v${latest} the next time Mindly runs (project checks are left out until then)`,
+        `The database is in an older format v${found}; it is upgraded to v${latest} the next time Mindly runs`,
       ),
-      usable: false,
+      skipped: 'older',
     };
   }
-  // Up to date, or not there yet (the store creates it).
+  // Up to date, or not set up yet (the store creates it).
   try {
     const store = Store.open(dbPath, { busyTimeoutMs: 2000 });
     try {
@@ -155,7 +186,7 @@ function databaseCheck(dbPath: string): { item: DoctorItem; usable: boolean } {
           'Setup',
           'Database is up to date',
         ),
-        usable: true,
+        skipped: null,
       };
     } finally {
       store.close();
@@ -534,9 +565,9 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
   }
 
   let paths: HomePaths | null = null;
-  // False while the database is in a format this Mindly cannot work with as it is: the checks
-  // that open the store are left out then, since opening it would upgrade or refuse it.
-  let storeUsable = true;
+  // Set while the database is in a format this Mindly cannot work with as it is: the checks that
+  // open the store are not run then, since opening it would upgrade or refuse it.
+  let storeSkipped: StoreSkip | null = null;
   try {
     paths = homePaths(mindlyHome(env));
   } catch (err) {
@@ -574,7 +605,7 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
       items.push(...permissionChecks(paths));
       const database = databaseCheck(paths.db);
       items.push(database.item);
-      storeUsable = database.usable;
+      storeSkipped = database.skipped;
     }
   }
 
@@ -678,7 +709,9 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
     ),
   );
 
-  if (paths && existsSync(paths.home) && storeUsable) {
+  if (paths && existsSync(paths.home) && storeSkipped !== null) {
+    items.push(...skippedStoreItems(storeSkipped));
+  } else if (paths && existsSync(paths.home)) {
     try {
       items.push(
         ...(await withProject(out.io, async ({ mindly, project }): Promise<DoctorItem[]> => [
