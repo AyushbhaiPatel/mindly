@@ -1,6 +1,7 @@
-import { describeError, HOOK_ANCESTRY_PREFIX, HOOK_ANCESTRY_TTL_MS } from '@mindly/core';
+import { describeError } from '@mindly/core';
 import { needsYouCount, savesOf, selfHealingOf, standupService, trackOf } from '@mindly/engine';
 import type { JobContext } from './context.js';
+import { HOOK_ANCESTRY_PREFIX, HOOK_ANCESTRY_TTL_MS } from '@mindly/core';
 
 const DAY_MS = 86_400_000;
 /** Sessions not seen for this long are marked ended. */

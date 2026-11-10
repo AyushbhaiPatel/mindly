@@ -559,10 +559,6 @@ export class KvRepo {
       .run(key, toJson(value), this.clock.now());
   }
 
-  delete(key: string): void {
-    this.db.prepare('DELETE FROM kv WHERE key = ?').run(key);
-  }
-
   /**
    * Deletes at most `max` keys starting with `prefix` that were last written before `before`.
    * Returns how many went. The prefix is matched literally (`%` and `_` in it are not wildcards).
@@ -577,5 +573,9 @@ export class KvRepo {
         )
         .run(like, before, Math.max(0, Math.trunc(max))).changes,
     );
+  }
+
+  delete(key: string): void {
+    this.db.prepare('DELETE FROM kv WHERE key = ?').run(key);
   }
 }
