@@ -14,21 +14,25 @@ const server = createMcpServer(mindly, { agentKind: 'codex', cwd }); // any tran
 A server works out which session it speaks for and keeps it. In order of preference:
 
 1. The session its own client's hooks made. The first hook of a session records which processes
-   started it; a server recognises the session whose hooks were started by the process that
-   started the server too. This is what tells two windows of one agent in one checkout apart.
+   started it; a server recognises the session whose hooks were started by its own parent process.
+   This tells apart two windows of one agent in one checkout, each a client process of its own.
+   It cannot tell apart sessions that one process runs together (an app or IDE host with several
+   threads and a server per thread): when more than one live session matches, the server guesses
+   among those as in (2).
 2. Where that says nothing (a client without hooks, a system where the process table cannot be
    read): the most recently active live session of the agent kind in the working tree of `cwd`
-   that no other running server speaks for. This is a guess, and the server gives it up for (1)
-   as soon as it can.
+   that no other running server speaks for, leaving out sessions whose client is gone. This is a
+   guess, and the server gives it up for (1) as soon as it can.
 3. A session of its own, with external id `mcp-<pid>-<startTime>`.
 
 Each server records its claim, so two servers never share a session; a claim is free again only
-when its process is gone. A server on its own session moves to its client's hook session once
-that exists (the first tool call may come before the first hook) and takes its unfinished tasks,
-active intents and unread messages along. A session stays live while its server is being used.
-When the client disconnects (stdin closes, the process is signalled, the client stops reading)
-the server's own session is ended and its intents are closed. `createMcp` returns the server
-together with that `release` call for other transports.
+when its process is gone. A server on its own session moves to its client's hook session once it
+knows which that is (the first tool call may come before the first hook) and takes its unfinished
+tasks, active intents and unread messages along; it never moves them to a session it only guesses
+at. A session stays live while its server is being used, except a guessed one whose client is
+gone, which the server lets go of. When the client disconnects (stdin closes, the process is
+signalled, the client stops reading) the server's own session is ended and its intents are
+closed. `createMcp` returns the server together with that `release` call for other transports.
 
 Logs go to `$MINDLY_HOME/logs/mindly.log`; stdout carries only the protocol.
 

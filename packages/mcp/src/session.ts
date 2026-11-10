@@ -136,22 +136,30 @@ export class SessionResolver {
   }
 
   /**
-   * True when `session` was made by the hooks of this server's own client: the ancestors its
-   * first hook recorded meet the server's, and nothing between the hook and that common
-   * ancestor is still running. A process still running there is another client (a second
-   * window started from the same terminal shares only the terminal with this server).
+   * How `session` relates to this server, from the ancestors its first hook recorded:
+   *
+   * - `sameParent`: its hooks were started by the process that started this server, which is
+   *   the server's client. Only the direct parent counts: two windows under one terminal,
+   *   multiplexer or IDE host meet further up, and so does the session of a window that is gone.
+   * - `windowAlive`: whether the client that made the session still runs, or null when nothing
+   *   was recorded. A session whose hooks meet this server only further up and that has nothing
+   *   still running below that point belongs to a client that is gone.
    */
-  private mine(session: Session): boolean {
-    const mine = this.chain();
-    if (mine.length === 0) return false;
+  private relation(session: Session): { sameParent: boolean; windowAlive: boolean | null } {
     const recorded = parseProcessChain(
       this.mindly.store.kv.get<unknown>(hookAncestryKey(session.agentKind, session.externalId)),
     );
-    const meet = recorded.findIndex((h) =>
-      mine.some((m) => m.pid === h.pid && m.start === h.start && h.start !== ''),
-    );
-    if (meet === -1) return false;
-    return !recorded.slice(0, meet).some((h) => this.runs(h));
+    if (recorded.length === 0) return { sameParent: false, windowAlive: null };
+    const mine = this.chain();
+    const same = (a: ProcessRef, b: ProcessRef): boolean =>
+      a.pid === b.pid && a.start === b.start && a.start !== '';
+    const meet = recorded.findIndex((h) => mine.some((m) => same(m, h)));
+    if (meet === -1) return { sameParent: false, windowAlive: true };
+    const parent = mine[0];
+    if (parent && same(parent, recorded[meet] as ProcessRef)) {
+      return { sameParent: true, windowAlive: true };
+    }
+    return { sameParent: false, windowAlive: recorded.slice(0, meet).some((h) => this.runs(h)) };
   }
 
   // ----------------------------------------------------------------- project
@@ -248,15 +256,40 @@ export class SessionResolver {
   }
 
   /**
-   * Moves to a better session when there is one: the session of this server's own client, or,
-   * for a server that has none yet, the most recently active one nobody speaks for. Returns
-   * true when the server moved.
+   * Moves to a better session when there is one. Returns true when the server moved.
+   *
+   * The session of this server's own client is known when exactly one live session of its kind
+   * had its hooks started by the server's parent. When several were (one host process running
+   * several sessions, each with a server of its own) ancestry cannot tell them apart, and the
+   * server guesses among those.
+   *
+   * A server with no session yet guesses when it cannot know: the most recently active session
+   * nobody speaks for, leaving out sessions whose client is gone. A server on a session of its
+   * own moves only to a session it knows is its own, and only then takes its work along: a guess
+   * may be another window, and work moved there would stay there. Where this server's own
+   * ancestors cannot be read at all, nothing can be known, and the guess is the rule as before.
    */
   private async improve(project: ScopedProject): Promise<boolean> {
     const before = this.bound;
     const candidates = (await this.hookSessions(project)).filter((s) => s.id !== before?.id);
-    const sure = candidates.filter((s) => this.mine(s));
-    const guessed = before && !before.own ? [] : candidates.filter((s) => !sure.includes(s));
+    const relations = new Map(candidates.map((s) => [s.id, this.relation(s)]));
+    const sameParent = candidates.filter((s) => relations.get(s.id)?.sameParent);
+    // A bound session that was known to be ours is never improved on, so `before` is a guess or
+    // this server's own session here; a session known to be ours also counts the bound one.
+    const boundSameParent =
+      before && !before.own && this.bound
+        ? (() => {
+            const cur = this.mindly.store.sessions.find(before.id);
+            return cur !== null && this.relation(cur).sameParent;
+          })()
+        : false;
+    const sure = sameParent.length === 1 && !boundSameParent ? sameParent : [];
+    const knowable = this.chain().length > 0;
+    let guessed: Session[] = [];
+    if (!before || (before.own && !knowable)) {
+      const pool = sameParent.length > 1 ? sameParent : candidates;
+      guessed = pool.filter((s) => !sure.includes(s) && relations.get(s.id)?.windowAlive !== false);
+    }
     for (const [list, known] of [
       [sure, true],
       [guessed, false],
@@ -308,6 +341,10 @@ export class SessionResolver {
       if (ended || !this.holds(this.bound.id)) {
         if (ended) this.drop();
         else this.bound = null;
+      } else if (cur && !this.bound.own && !this.bound.sure) {
+        // A guessed session whose client is gone (a window closed without ending its session)
+        // is not kept alive by this server: it is let go, and the server chooses again.
+        if (this.relation(cur).windowAlive === false) this.drop();
       }
     }
 

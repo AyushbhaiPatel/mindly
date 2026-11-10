@@ -66,7 +66,14 @@ async function harness(
   const root = base?.root ?? repo();
   const mindly = base?.mindly ?? Mindly.open({ inMemory: true, ports: { git: createGitPort() } });
   if (!base) installDefaultModules(mindly);
-  const server = createMcpServer(mindly, { agentKind: 'claude-code', cwd: root, ...ctx });
+  // Unless a test says otherwise, the server cannot read its ancestors (as on a system without a
+  // process table): sessions are chosen by the rules that do not depend on them.
+  const server = createMcpServer(mindly, {
+    agentKind: 'claude-code',
+    cwd: root,
+    ancestors: [],
+    ...ctx,
+  });
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0.0.0' });
   await Promise.all([server.connect(serverT), client.connect(clientT)]);
@@ -887,6 +894,102 @@ describe('telling windows of one agent apart', () => {
     const hookB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
     expect(sid(await b.call('mindly_status'))).toBe(hookB);
     expect(sid(await a.call('mindly_status'))).toBe(hookA);
+  });
+
+  it('never hands its work to a session it only guesses at', async () => {
+    const a = await harness(windowA);
+    // Window A's server starts before any hook of window A: a session of its own.
+    const own = sid(await a.call('mindly_status'));
+    const task = await a.call('mindly_task_create', { title: 'task of A' });
+    const taskId = (task.structured?.['task'] as { id: string }).id;
+    await a.call('mindly_declare_intent', { summary: 'A works on auth', files: ['src/auth.ts'] });
+    // Window B starts; its session is the only hook session there is, but it is not A's.
+    const hookB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+    expect(sid(await a.call('mindly_status'))).toBe(own);
+    expect(a.mindly.store.tasks.get(taskId).ownerSessionId).toBe(own);
+    expect(a.mindly.store.intents.activeForSession(hookB)).toHaveLength(0);
+    // Window B's server takes its own session; window A's hooks start and A's work follows.
+    const b = await harness(windowB, a);
+    expect(sid(await b.call('mindly_status'))).toBe(hookB);
+    const hookA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+    expect(sid(await a.call('mindly_status'))).toBe(hookA);
+    expect(a.mindly.store.tasks.get(taskId).ownerSessionId).toBe(hookA);
+    expect(a.mindly.store.intents.activeForSession(hookA).map((i) => i.summary)).toEqual([
+      'A works on auth',
+    ]);
+  });
+
+  it('does not take or keep alive the session of a window that is gone', async () => {
+    const MINUTE = 60_000;
+    let now = Date.UTC(2026, 0, 1);
+    const mindly = Mindly.open({
+      inMemory: true,
+      ports: { git: createGitPort() },
+      clock: { now: () => now },
+    });
+    installDefaultModules(mindly);
+    const root = repo();
+    // Window C (process 300) and window A (process 400, closed without ending its session),
+    // both under the same terminal; A was active last.
+    running.add(3000);
+    const windowC = { ...world, pid: 3000, startTime: 3, ancestors: [ref(300), TERMINAL] };
+    const c = await harness(windowC, { root, mindly });
+    const sessA = await hookSession(c, 'win-a', [ref(401), ref(400), TERMINAL]);
+    // Before window C's hooks have run, a dead window's session is no guess: own session.
+    const own = sid(await c.call('mindly_status'));
+    expect(own).not.toBe(sessA);
+    // Window C's hooks run: its session is known, whichever was active last.
+    running.add(300);
+    const sessC = await hookSession(c, 'win-c', [ref(301), ref(300), TERMINAL]);
+    now += MINUTE;
+    await mindly.hooks.handle(hook(root, 'claude-code', 'win-a', 'prompt', { prompt: 'x' }));
+    expect(sid(await c.call('mindly_status'))).toBe(sessC);
+    // A's session is not kept alive by C's calls.
+    const seenA = mindly.store.sessions.get(sessA).lastSeenAt;
+    now += 20 * MINUTE;
+    await c.call('mindly_status');
+    expect(mindly.store.sessions.get(sessA).lastSeenAt).toBe(seenA);
+    running.delete(300);
+    running.delete(3000);
+  });
+
+  it('lets go of a guessed session once its window is gone', async () => {
+    const extra = new Set<number>([500]);
+    const w = {
+      alive: (pid: number) => running.has(pid) || extra.has(pid),
+      processes: (pid: number) =>
+        running.has(pid) || extra.has(pid) ? { ppid: 1, start: `s${pid}` } : null,
+    };
+    const a = await harness({ ...w, pid: 1000, startTime: 1, ancestors: [ref(100), TERMINAL] });
+    // A window (500) whose session this server can only guess at, the only one there is.
+    const other = await hookSession(a, 'win-x', [ref(501), ref(500), TERMINAL]);
+    expect(sid(await a.call('mindly_status'))).toBe(other);
+    // That window is closed without ending its session.
+    extra.delete(500);
+    expect(sid(await a.call('mindly_status'))).not.toBe(other);
+  });
+
+  it('only guesses between sessions that one host process runs together', async () => {
+    // One client process (700) runs two sessions, each with a server of its own.
+    for (const pid of [700, 7001, 7002]) running.add(pid);
+    try {
+      const host = { ...world, ancestors: [ref(700), TERMINAL] };
+      const s1 = await harness({ ...host, pid: 7001, startTime: 1 });
+      const thread1 = await hookSession(s1, 'thread-1', [ref(701), ref(700), TERMINAL]);
+      const thread2 = await hookSession(s1, 'thread-2', [ref(702), ref(700), TERMINAL]);
+      const s2 = await harness({ ...host, pid: 7002, startTime: 2 }, s1);
+      const first = sid(await s1.call('mindly_status'));
+      const second = sid(await s2.call('mindly_status'));
+      expect(new Set([first, second])).toEqual(new Set([thread1, thread2]));
+      // Neither claim says the session is known to be the server's own.
+      const claims = s1.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
+      expect(Object.values(claims).map((c) => c.sure)).toEqual([false, false]);
+      // They stay where they are from call to call.
+      expect(sid(await s1.call('mindly_status'))).toBe(first);
+      expect(sid(await s2.call('mindly_status'))).toBe(second);
+    } finally {
+      for (const pid of [700, 7001, 7002]) running.delete(pid);
+    }
   });
 
   it('keeps the old rule when nothing is known about who started the hooks', async () => {
