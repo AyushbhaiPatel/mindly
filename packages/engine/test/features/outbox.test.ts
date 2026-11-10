@@ -6,6 +6,7 @@ import {
   OUTBOX_MAX_AGE_MS,
   OUTBOX_MAX_ATTEMPTS,
   OUTBOX_MAX_ENTRIES,
+  processStartTime,
   withNotificationId,
   type NotifyResult,
 } from '../../src/index.js';
@@ -315,20 +316,38 @@ describe('the sender', () => {
     expect(env.sent).toHaveLength(1);
   });
 
-  it('does not count a sender whose process id now belongs to another process', async () => {
-    const env = make({ answer: () => sentOk });
-    const outbox = notifyOutbox(env.mindly);
-    const until = env.clock.t + 15_000;
-    // The sender died and its pid went to an unrelated process (here: this one).
-    env.mindly.store.kv.set('notify.outbox-sender', {
-      owner: 'x',
-      until,
-      pid: process.pid,
-      start: 'not-this-process',
-    });
-    expect(outbox.senderAlive()).toBe(false);
-    outbox.enqueue(page);
-    expect(outbox.needsSender()).toBe(true);
+  // Windows has no start-time source: there the mark checks the pid only.
+  it.skipIf(process.platform === 'win32')(
+    'does not count a sender whose process id now belongs to another process',
+    async () => {
+      const env = make({ answer: () => sentOk });
+      const outbox = notifyOutbox(env.mindly);
+      const until = env.clock.t + 15_000;
+      // The sender died and its pid went to an unrelated process (here: this one).
+      env.mindly.store.kv.set('notify.outbox-sender', {
+        owner: 'x',
+        until,
+        pid: process.pid,
+        start: 'not-this-process',
+      });
+      expect(outbox.senderAlive()).toBe(false);
+      outbox.enqueue(page);
+      expect(outbox.needsSender()).toBe(true);
+    },
+  );
+
+  it('tells processes apart by start time, from /proc or from ps', () => {
+    const own = processStartTime(process.pid);
+    expect(own).not.toBeNull();
+    expect(processStartTime(process.pid)).toBe(own);
+    expect(processStartTime(2 ** 22 + 1)).toBeNull();
+    if (process.platform !== 'win32') {
+      // The path used where there is no /proc (macOS, the BSDs).
+      const viaPs = processStartTime(process.pid, 'ps');
+      expect(viaPs).toMatch(/^ps:\S/);
+      expect(processStartTime(process.pid, 'ps')).toBe(viaPs);
+      expect(processStartTime(2 ** 22 + 1, 'ps')).toBeNull();
+    }
   });
 
   it('waits while another process holds the outbox instead of leaving', async () => {

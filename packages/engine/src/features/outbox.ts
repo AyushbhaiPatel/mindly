@@ -1,5 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { redactText, sanitizeForContext, sanitizeLine, sha256, uuidv7 } from '@mindly/core';
 import type { Kernel } from '../kernel.js';
 import type { Mindly } from '../mindly.js';
@@ -24,8 +25,12 @@ import { serviceOf } from './shared.js';
  */
 
 const PREFIX = 'notify.outbox:';
-/** This process's start time, for its presence mark. */
-const ownStart = processStart(process.pid);
+/** This process's start time, for its presence mark; read when first needed (a sender only). */
+let ownStart: string | null | undefined;
+function ownStartTime(): string | null {
+  if (ownStart === undefined) ownStart = processStartTime(process.pid);
+  return ownStart;
+}
 const LEASE_KEY = 'notify.outbox-lease';
 const SENDER_KEY = 'notify.outbox-sender';
 /** Attempts per entry, the first one included. */
@@ -69,18 +74,42 @@ interface Lease {
   until: number;
   /** The sender's process, for its presence mark: a mark whose process is gone is no sender. */
   pid?: number;
-  /** When that process started (Linux), so a process that took over the pid is not the sender. */
+  /** When that process started, so a process that took over the pid is not the sender. */
   start?: string;
 }
 
-/** When the process `pid` started, in clock ticks since boot (Linux); null where unknown. */
-function processStart(pid: number): string | null {
+/**
+ * When the process `pid` started, as an opaque string to compare; null where it cannot be told.
+ * Linux reads `/proc/<pid>/stat` (clock ticks since boot). Elsewhere `ps -o lstart= -p <pid>` is
+ * run directly (no shell) with a short timeout: macOS and the BSDs have it, Windows does not and
+ * gets null. Both sides of a comparison come from the same machine, so from the same source.
+ */
+export function processStartTime(
+  pid: number,
+  source: 'auto' | 'ps' = existsSync('/proc/self/stat') ? 'auto' : 'ps',
+): string | null {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (source === 'auto') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      // Fields after the command name (which may hold spaces): state is field 3, starttime 22.
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      return fields[19] ?? null;
+    } catch {
+      return null;
+    }
+  }
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    // Fields after the command name (which may hold spaces): state is field 3, starttime 22.
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    return fields[19] ?? null;
+    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 1_000,
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out === '' ? null : `ps:${out}`;
   } catch {
+    // No such process (ps exits 1), no `ps`, or it did not answer in time.
     return null;
   }
 }
@@ -224,7 +253,7 @@ export class NotifyOutbox {
       if (mark.pid === undefined) return true;
       if (!processAlive(mark.pid)) return false;
       if (mark.start === undefined) return true;
-      const start = processStart(mark.pid);
+      const start = processStartTime(mark.pid);
       return start === null || start === mark.start;
     } catch {
       return false;
@@ -240,11 +269,12 @@ export class NotifyOutbox {
       const now = this.k.clock.now();
       const mark = this.k.store.kv.get<Lease>(SENDER_KEY);
       if (mark && mark.owner !== owner && this.senderAlive(now)) return false;
+      const start = ownStartTime();
       this.k.store.kv.set(SENDER_KEY, {
         owner,
         until: now + SENDER_FRESH_MS,
         pid: process.pid,
-        ...(ownStart !== null ? { start: ownStart } : {}),
+        ...(start !== null ? { start } : {}),
       } satisfies Lease);
       return true;
     });
