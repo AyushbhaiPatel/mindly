@@ -67,6 +67,8 @@ const HASH_COST = 256;
  * not yet made answers `unknown` and the evidence keeps its validity.
  */
 const MAX_SCAN_WORK = 24_000_000;
+/** Lines that making safe changes, up to which the made-safe file is built line by line. */
+const MAX_LINES_MADE_SAFE_ONE_BY_ONE = 512;
 /** Characters an excerpt lost just before its start that are tried as part of it, at most. */
 const MAX_LOST_BEFORE = 16;
 const DIGEST_COST = 512;
@@ -203,6 +205,8 @@ function safeView(raw: string, norm: string): SafeView {
     for (let i = 0; i < at.length; i++) at[i] = i;
     return { text: neutral(norm), at };
   }
+  // Many characters to change: the whole file in a few passes over arrays, whatever it holds.
+  if (manyMadeSafe(raw)) return safeViewWhole(raw, norm, neutral);
   // Line by line, as the file is normalised: a line that making safe leaves as it is keeps its
   // place; only a line it changes is mapped character by character.
   const parts: string[] = [];
@@ -242,6 +246,71 @@ function safeView(raw: string, norm: string): SafeView {
   }
   const text = parts.join('');
   return { text: neutral(text), at: at.slice(0, n) };
+}
+
+/** True when making safe changes more characters of `raw` than are worth mapping line by line. */
+function manyMadeSafe(raw: string): boolean {
+  const changes = new RegExp(SAFE_CHANGES_RE.source, 'g');
+  for (let changed = 0; changes.exec(raw) !== null;) {
+    if (++changed > MAX_LINES_MADE_SAFE_ONE_BY_ONE) return true;
+  }
+  return false;
+}
+
+/**
+ * What building the made-safe file costs, in characters of the allowance for evidence of earlier
+ * forms: nothing when making safe changes nothing, one pass over the file line by line, four for
+ * the whole file at once.
+ */
+function safeViewCost(raw: string): number {
+  if (!SAFE_CHANGES_RE.test(raw)) return 0;
+  return manyMadeSafe(raw) ? 4 * raw.length : raw.length;
+}
+
+/**
+ * `safeView` for a file with many characters making safe changes: the whole file mapped in a few
+ * linear passes over arrays, with no work per line beyond them.
+ */
+function safeViewWhole(raw: string, norm: string, neutral: (t: string) => string): SafeView {
+  const codes = unitsOf(raw);
+  const identity = new Int32Array(raw.length);
+  for (let i = 0; i < raw.length; i++) identity[i] = i;
+  // Where each character of the file is in the normalised file.
+  const normed = normalizeMapped(codes, raw.length, identity);
+  if (normed.text !== norm) {
+    // Not expected: compare with the normalised file as it is rather than misplace anything.
+    const at = new Int32Array(norm.length);
+    for (let i = 0; i < at.length; i++) at[i] = i;
+    return { text: neutral(norm), at };
+  }
+  const toNorm = new Int32Array(raw.length).fill(-1);
+  for (let i = 0; i < normed.at.length; i++) {
+    const r = normed.at[i] as number;
+    if (r >= 0) toNorm[r] = i;
+  }
+  // Made safe as an excerpt is: a line break for a lone `\r`, unsafe characters removed.
+  const safeCodes = new Uint16Array(raw.length);
+  const safeFrom = new Int32Array(raw.length);
+  let n = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const c = codes[i] as number;
+    if (c === 0x0d) {
+      if (codes[i + 1] === 0x0a) continue;
+      safeCodes[n] = 0x0a;
+      safeFrom[n++] = i;
+      continue;
+    }
+    if (isUnsafe(c)) continue;
+    safeCodes[n] = c;
+    safeFrom[n++] = i;
+  }
+  const safe = normalizeMapped(safeCodes, n, safeFrom);
+  const at = new Int32Array(safe.at.length);
+  for (let i = 0; i < at.length; i++) {
+    const r = safe.at[i] as number;
+    at[i] = r >= 0 ? (toNorm[r] as number) : -1;
+  }
+  return { text: neutral(safe.text), at };
 }
 
 /**
@@ -292,8 +361,19 @@ interface NormFile {
   lineStarts(): Int32Array;
   /** Where each line of the made-safe view starts (see `safe`). */
   safeLineStarts(): Int32Array;
-  /** The file made safe the way a stored excerpt was (see `SafeView`). */
-  safe(): SafeView;
+  /**
+   * The file made safe the way a stored excerpt was (see `SafeView`), built when first needed
+   * and paid for from the allowance for evidence of earlier forms; null when that does not cover
+   * it (see `safeViewCost`).
+   */
+  safe(): SafeView | null;
+  /**
+   * Looks for the normalised excerpts of all evidence of the file in one pass, so `contains`
+   * answers each of them without reading the file again.
+   */
+  prepare(normExcerpts: readonly string[]): void;
+  /** Whether `normExcerpt` is in the file. Linear in the file; never limited by an allowance. */
+  contains(normExcerpt: string): boolean;
   /**
    * False when `text` (kept text of a stored excerpt) cannot be in the file: its skeleton is not
    * in the file's (see `skeleton`); null when the look would go past the work allowed.
@@ -307,6 +387,8 @@ interface NormFile {
   scan(text: string, needle: string, from: number, visit: (at: number) => boolean): boolean;
   /** Characters read so far (see `scan`). */
   scanned(): number;
+  /** The code units of `text` (the file or a view of it), converted once. */
+  units(text: string): Uint16Array;
   /** For each line of `content`: 1 when it is only characters made safe away. */
   madeSafeAway(): Uint8Array;
   /**
@@ -379,6 +461,74 @@ function eachPlace(
   return i - from;
 }
 
+/**
+ * Which of `patterns` occur in `text` (its code units), in one pass (Aho-Corasick): linear in
+ * the text and in the patterns together, whatever they hold, however many there are.
+ */
+function occurringIn(text: Uint16Array, patterns: readonly string[]): string[] {
+  const goTo = new Map<number, number>();
+  const key = (node: number, unit: number): number => node * 0x10000 + unit;
+  const kids: number[][] = [[]];
+  const ends: number[] = [];
+  let nodes = 1;
+  for (const p of patterns) {
+    let v = 0;
+    for (let i = 0; i < p.length; i++) {
+      const c = p.charCodeAt(i);
+      let w = goTo.get(key(v, c));
+      if (w === undefined) {
+        w = nodes++;
+        goTo.set(key(v, c), w);
+        kids.push([]);
+        (kids[v] as number[]).push(c, w);
+      }
+      v = w;
+    }
+    ends.push(v);
+  }
+  const isEnd = new Uint8Array(nodes);
+  for (const v of ends) isEnd[v] = 1;
+  // Failure links, and the nearest node down them that ends a pattern, breadth first.
+  const fail = new Int32Array(nodes);
+  const output = new Int32Array(nodes).fill(-1);
+  const queue = new Int32Array(nodes);
+  let head = 0;
+  let tail = 0;
+  const top = kids[0] as number[];
+  for (let i = 1; i < top.length; i += 2) queue[tail++] = top[i] as number;
+  while (head < tail) {
+    const u = queue[head++] as number;
+    const us = kids[u] as number[];
+    for (let i = 0; i < us.length; i += 2) {
+      const c = us[i] as number;
+      const w = us[i + 1] as number;
+      let f = fail[u] as number;
+      while (f !== 0 && !goTo.has(key(f, c))) f = fail[f] as number;
+      const g = u === 0 ? 0 : (goTo.get(key(f, c)) ?? 0);
+      fail[w] = g === w ? 0 : g;
+      const fw = fail[w] as number;
+      output[w] = isEnd[fw] ? fw : (output[fw] as number);
+      queue[tail++] = w;
+    }
+  }
+  // One pass; every node ending a pattern is marked once, so the marking is linear too.
+  const hit = new Uint8Array(nodes);
+  let v = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] as number;
+    let w = goTo.get(key(v, c));
+    while (w === undefined && v !== 0) {
+      v = fail[v] as number;
+      w = goTo.get(key(v, c));
+    }
+    v = w ?? 0;
+    for (let u = isEnd[v] ? v : (output[v] as number); u > 0 && !hit[u]; u = output[u] as number) {
+      hit[u] = 1;
+    }
+  }
+  return patterns.filter((_, i) => hit[ends[i] as number] === 1);
+}
+
 /** Where each line of `text` starts. */
 function lineStartsOf(text: string): Int32Array {
   const s = [0];
@@ -392,7 +542,8 @@ function normFile(raw: string): NormFile {
   let lines: string[] | null = null;
   let starts: Int32Array | null = null;
   let safeStarts: Int32Array | null = null;
-  let view: SafeView | null = null;
+  let view: SafeView | null | undefined;
+  const found = new Map<string, boolean>();
   let bones: string | null = null;
   let away: Uint8Array | null = null;
   const units = new Map<string, Uint16Array>();
@@ -401,9 +552,32 @@ function normFile(raw: string): NormFile {
   const runs = new Map<number, Map<string, number>>();
   const file: NormFile = {
     content: normContent,
-    safe: () => (view ??= safeView(raw, normContent)),
+    safe() {
+      // Built only for evidence of an earlier form, and only when the allowance for that work in
+      // this file pays for it; otherwise such evidence is not decided.
+      view ??= file.spend(safeViewCost(raw)) ? safeView(raw, normContent) : null;
+      return view;
+    },
+    prepare(normExcerpts) {
+      const wanted = [...new Set(normExcerpts.filter((e) => e.length > 0 && !found.has(e)))];
+      if (wanted.length === 0) return;
+      for (const e of occurringIn(file.units(normContent), wanted)) found.set(e, true);
+      for (const e of wanted) if (!found.has(e)) found.set(e, false);
+    },
+    contains(normExcerpt) {
+      let hit = found.get(normExcerpt);
+      if (hit === undefined) {
+        hit = false;
+        eachPlace(file.units(normContent), normExcerpt, 0, () => {
+          hit = true;
+          return false;
+        });
+        found.set(normExcerpt, hit);
+      }
+      return hit;
+    },
     lineStarts: () => (starts ??= lineStartsOf(normContent)),
-    safeLineStarts: () => (safeStarts ??= lineStartsOf(file.safe().text)),
+    safeLineStarts: () => (safeStarts ??= lineStartsOf(file.safe()?.text ?? '')),
     mayHold(text) {
       bones ??= skeleton(normContent);
       let found = false;
@@ -415,15 +589,18 @@ function normFile(raw: string): NormFile {
     },
     scan(text, needle, from, visit) {
       if (read + (text.length - from) > MAX_SCAN_WORK) return false;
+      read += eachPlace(file.units(text), needle, from, visit);
+      return true;
+    },
+    scanned: () => read,
+    units(text) {
       let codes = units.get(text);
       if (!codes) {
         codes = unitsOf(text);
         units.set(text, codes);
       }
-      read += eachPlace(codes, needle, from, visit);
-      return true;
+      return codes;
     },
-    scanned: () => read,
     madeSafeAway() {
       if (!away) {
         const at = file.lineStarts();
@@ -519,16 +696,7 @@ interface Look {
 
 function excerptIn(file: NormFile, excerpt: string, contentHash: string | null): Look {
   const normExcerpt = normalizeBlock(excerpt);
-  if (normExcerpt.length > 0) {
-    let found = false;
-    const scanned = file.scan(file.content, normExcerpt, 0, () => {
-      found = true;
-      return false;
-    });
-    if (found) return { state: 'present' };
-    // Not looked for within the work allowed for the file: nothing can be said.
-    if (!scanned) return { state: 'unknown' };
-  }
+  if (normExcerpt.length > 0 && file.contains(normExcerpt)) return { state: 'present' };
   if (!contentHash) return { state: 'absent' };
   const span = parseSpan(contentHash);
   if (span) return { state: spanIn(file.content, span) ? 'present' : 'absent' };
@@ -639,6 +807,7 @@ function placeLines(
   const lineInExcerpt = kept.text.slice(0, offset).split('\n').length - 1;
   const excerptLines = kept.text.split('\n').length;
   const view = file.safe();
+  if (!view) return null;
   const viewStarts = file.safeLineStarts();
   const starts = file.lineStarts();
   const norm = file.content;
@@ -710,6 +879,7 @@ function placeKept(
   const tail = fixed[fixed.length - 1];
   if (head === '' || tail === undefined || (!cut && parts[parts.length - 1] === '')) return null;
   const view = file.safe();
+  if (!view) return null;
   const norm = file.content;
   const text = view.text;
   const heads: number[] = [];
@@ -809,6 +979,17 @@ function placeKept(
 }
 
 /**
+ * Whether a row's evidence is of an earlier form (its stored excerpt is not what was found and
+ * its hash is not `span:`): the rows that share the allowance of work for their file.
+ */
+function isEarlierForm(e: MemoryEvidence): boolean {
+  if (e.excerpt === null || e.contentHash === null || parseSpan(e.contentHash)) return false;
+  return (
+    parseCitedLines(e.contentHash) !== null || sha256(normalizeBlock(e.excerpt)) !== e.contentHash
+  );
+}
+
+/**
  * Self-healing memory: when a file changes, re-checks every memory whose evidence points at it.
  * Evidence that no longer exists marks the memory `stale` and tells the live sessions. Evidence
  * that reappears is marked valid again, but trust is never restored automatically.
@@ -840,8 +1021,41 @@ export class SelfHealingService {
   ): EvidenceCheck[] {
     const rows = this.k.store.memories.evidenceForFile(projectId, path);
     if (rows.length === 0) return [];
-    const reader = this.fileReader(projectRoot);
-    return rows.map((e) => this.check(projectId, e, reader, actor));
+    return this.checkRows(projectId, rows, this.fileReader(projectRoot), actor);
+  }
+
+  /**
+   * Checks the evidence rows of one file. Whether each excerpt is in the file is looked up for
+   * all of them in one pass first. Rows of an earlier form share an allowance of work for the
+   * file; they take turns being first, so none is left out every time. Results are in row order.
+   */
+  private checkRows(
+    projectId: string,
+    rows: readonly MemoryEvidence[],
+    read: (rel: string) => FileState,
+    actor: Session | null,
+  ): EvidenceCheck[] {
+    const first = rows[0];
+    if (!first) return [];
+    const file = read(first.ref);
+    if (file.kind === 'present') {
+      file
+        .file()
+        .prepare(rows.flatMap((e) => (e.excerpt === null ? [] : [normalizeBlock(e.excerpt)])));
+    }
+    const earlier = rows.filter((e) => isEarlierForm(e));
+    let order = rows;
+    if (earlier.length > 1) {
+      const key = `self-healing:turn:${projectId}:${first.ref}`;
+      const turn = this.k.store.kv.get<number>(key) ?? 0;
+      this.k.store.kv.set(key, turn + 1);
+      const shift = turn % earlier.length;
+      const rotated = [...earlier.slice(shift), ...earlier.slice(0, shift)];
+      order = [...rows.filter((e) => !isEarlierForm(e)), ...rotated];
+    }
+    const out = new Map<string, EvidenceCheck>();
+    for (const e of order) out.set(e.id, this.check(projectId, e, read, actor));
+    return rows.map((e) => out.get(e.id) as EvidenceCheck);
   }
 
   /**
@@ -852,13 +1066,20 @@ export class SelfHealingService {
     const project = this.k.store.projects.get(projectId);
     const reader = this.fileReader(project.root);
     const result: SweepResult = { checked: 0, invalid: 0, markedStale: 0, restored: 0 };
+    const byFile = new Map<string, MemoryEvidence[]>();
     for (const e of this.k.store.memories.allFileEvidence(projectId, max)) {
-      const c = this.check(projectId, e, reader, null);
-      if (c.state === 'unknown') continue;
-      result.checked++;
-      if (c.state === 'invalid') result.invalid++;
-      if (c.markedStale) result.markedStale++;
-      if (c.restored) result.restored++;
+      const list = byFile.get(e.ref);
+      if (list) list.push(e);
+      else byFile.set(e.ref, [e]);
+    }
+    for (const rows of byFile.values()) {
+      for (const c of this.checkRows(projectId, rows, reader, null)) {
+        if (c.state === 'unknown') continue;
+        result.checked++;
+        if (c.state === 'invalid') result.invalid++;
+        if (c.markedStale) result.markedStale++;
+        if (c.restored) result.restored++;
+      }
     }
     return result;
   }

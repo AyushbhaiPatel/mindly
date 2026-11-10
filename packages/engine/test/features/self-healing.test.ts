@@ -843,6 +843,115 @@ describe('self-healing memory', () => {
     expect(all).toBeLessThan(60 * oneRow + 100);
   });
 
+  it('decides every plain row of a large file in one pass, however many there are', async () => {
+    const { root, mindly, pid, cx, write } = await featureSetup();
+    const excerpts = Array.from(
+      { length: 80 },
+      (_, i) => `const value${i} = compute(${i}); // fact ${i}`,
+    );
+    const filler = Array.from({ length: 12_000 }, (_, i) => `let filler${i} = ${i};`).join('\n');
+    write('src/big.ts', `${excerpts.join('\n')}\n${filler}`);
+    for (const [i, excerpt] of excerpts.entries()) {
+      mindly.memory.remember({
+        projectId: pid,
+        projectRoot: root,
+        kind: 'fact',
+        title: `fact ${i}`,
+        body: `fact ${i}`,
+        source: agentSource(cx),
+        evidence: [{ path: 'src/big.ts', excerpt }],
+      });
+    }
+    // Every excerpt removed: every one of them is gone, none left undecided.
+    const after = `${filler}\n${filler}\n${filler}`.slice(0, 500_000);
+    write('src/big.ts', after);
+    let oneRow = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t = performance.now();
+      excerptState(after, excerpts[0] as string, null);
+      oneRow = Math.min(oneRow, performance.now() - t);
+    }
+    const t = performance.now();
+    const checks = selfHealingOf(mindly).recheckFile(pid, root, 'src/big.ts', null);
+    const all = performance.now() - t;
+    expect(checks.map((c) => c.state)).toEqual(excerpts.map(() => 'invalid'));
+    // One pass for all rows; the rest is marking eighty memories stale.
+    expect(all).toBeLessThan(60 * oneRow + 200);
+  });
+
+  it('gives every earlier row of a file a turn at the work allowed for it', async () => {
+    const { root, mindly, pid, cx, write } = await featureSetup();
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    // 500 KB of short lookalike lines, and one line of its own.
+    const rows: string[] = [];
+    for (let i = 0, size = 0; size < 500 * 1024; i++) {
+      rows.push(`k: ${i % 10}`);
+      size += 5;
+    }
+    const own = `const apiKey = "${secret}"; // billing`;
+    write('src/config.txt', `${rows.join('\n')}\n${own}\n`);
+    const remember = (title: string, excerpt: string) =>
+      mindly.memory.remember({
+        projectId: pid,
+        projectRoot: root,
+        kind: 'fact',
+        title,
+        body: 'b',
+        source: agentSource(cx),
+        evidence: [{ path: 'src/config.txt', excerpt }],
+      }).id;
+    // Stored by an earlier build: a cited line whose kept text is on every line of the file (its
+    // placement takes all the work allowed), and a row that is found at once when it has a turn.
+    const greedy = remember('greedy', 'k: 1');
+    const placeable = remember('placeable', `apiKey = "${secret}"; // billing`);
+    mindly.store.db
+      .prepare('UPDATE memory_evidence SET excerpt = ?, content_hash = ? WHERE memory_id = ?')
+      .run('k: [REDACTED]', `lines:3:${sha256('gone')}`, greedy);
+    const original = `apiKey = "${secret}"; // billing`;
+    mindly.store.db
+      .prepare('UPDATE memory_evidence SET excerpt = ?, content_hash = ? WHERE memory_id = ?')
+      .run(
+        sanitizeForContext(redactText(original), 2000),
+        sha256(normalizeBlock(original)),
+        placeable,
+      );
+    const hashOf = (id: string) => mindly.store.memories.evidenceFor(id)[0]!.contentHash ?? '';
+    expect(hashOf(placeable)).not.toMatch(/^span:/);
+    // Within two re-checks the second row has had the first turn: found, and moved to the exact
+    // form. Neither is ever called gone.
+    for (let i = 0; i < 2; i++) {
+      const states = selfHealingOf(mindly).recheckFile(pid, root, 'src/config.txt', null);
+      expect(states.map((c) => c.state)).not.toContain('invalid');
+    }
+    expect(hashOf(placeable)).toMatch(/^span:/);
+  });
+
+  it('builds the file made safe only when the work allowed for earlier evidence pays for it', () => {
+    /** The best of three runs: the time of the work, not of compiling it. */
+    const timed = <T>(f: () => T): [T, number] => {
+      let best = Infinity;
+      let r = f();
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now();
+        r = f();
+        best = Math.min(best, performance.now() - t);
+      }
+      return [r, best];
+    };
+    // 500 KB with a character making safe removes on every line.
+    const content = '\u0001x\n'.repeat(166_666);
+    const [found, ms] = timed(() =>
+      excerptWork(content, 'x[REDACTED]', `lines:1:${sha256('gone')}`),
+    );
+    expect(found.state).toBe('unknown');
+    expect(found.work).toBeLessThanOrEqual(EARLIER_FORM_WORK);
+    expect(found.scanned).toBeLessThanOrEqual(EVIDENCE_SCAN_WORK);
+    // Little more than normalising the file, measured on this machine (the file made safe is not
+    // built: it would cost more than the work allowed).
+    const [, normalising] = timed(() => normalizeBlock(content));
+    expect(ms).toBeLessThan(4 * normalising + 50);
+  });
+
   it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {
     // Nothing but redactions was kept, on 40 lines: only every run of 40 whole lines could place
     // it, and in a 500 KB file that is more hashing than one check may do.
