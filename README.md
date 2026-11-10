@@ -324,6 +324,7 @@ printf '%s · %s\n' "$mine" "$(printf '%s' "$input" | mindly statusline)"
 mindly status                        # agents, edits in progress, conflicts, what needs you
 mindly dashboard                     # Mission Control in the browser
 mindly standup [--since 24h]         # what your agents did, and what needs you
+mindly notify test                   # send a test alert through every configured channel
 mindly conflicts                     # open conflicts; mindly conflict <id> resolve|dismiss|ack
 ```
 
@@ -383,22 +384,29 @@ mindly config get shadowMerge
 mindly config set checkpoints.keepDays 30
 ```
 
-| Setting                                 | Default       | What it does                                                      |
-| --------------------------------------- | ------------- | ----------------------------------------------------------------- |
-| `rules.autoCapture`                     | `true`        | Turn corrections like "from now on use pnpm" into proposed rules  |
-| `checkpoints.enabled`                   | `true`        | Keep a checkpoint after every agent edit, for `mindly bisect`     |
-| `checkpoints.keepDays`                  | `14`          | How long checkpoints are kept                                     |
-| `track.areaDepth`                       | `2`           | Folder depth of an area in `mindly track` (1-4)                   |
-| `track.minEdits` / `minSessions`        | `20` / `3`    | Data an agent needs in a folder before rates are shown            |
-| `sentinel.enabled`                      | `false`       | Run your trusted checks in the background after agent edits       |
-| `sentinel.everySteps` / `quietSec`      | `10` / `60`   | Check after this many new steps, or once the agents pause         |
-| `sentinel.maxBisectsPerDay`             | `20`          | Bisects the sentinel may start per project in 24 hours            |
-| `shadowMerge.enabled` / `intervalSec`   | `true` / `90` | Background merge checks between agents in separate worktrees      |
-| `failover.enabled`                      | `true`        | Brief the next agent when one hits its usage limit                |
-| `retention.promptsDays` / `eventsDays`  | `30` / `180`  | How long prompt text and event history are kept                   |
-| `notify.channels`                       | none          | Desktop, ntfy or webhook alerts when an agent is stuck or limited |
-| `llm.provider`                          | `none`        | Optional model for extra checks; your own key or a local model    |
-| `redaction.extraPatterns` / `denyPaths` | none          | More secrets to redact and paths Mindly never reads               |
+| Setting                                 | Default       | What it does                                                     |
+| --------------------------------------- | ------------- | ---------------------------------------------------------------- |
+| `rules.autoCapture`                     | `true`        | Turn corrections like "from now on use pnpm" into proposed rules |
+| `checkpoints.enabled`                   | `true`        | Keep a checkpoint after every agent edit, for `mindly bisect`    |
+| `checkpoints.keepDays`                  | `14`          | How long checkpoints are kept                                    |
+| `track.areaDepth`                       | `2`           | Folder depth of an area in `mindly track` (1-4)                  |
+| `track.minEdits` / `minSessions`        | `20` / `3`    | Data an agent needs in a folder before rates are shown           |
+| `sentinel.enabled`                      | `false`       | Run your trusted checks in the background after agent edits      |
+| `sentinel.everySteps` / `quietSec`      | `10` / `60`   | Check after this many new steps, or once the agents pause        |
+| `sentinel.maxBisectsPerDay`             | `20`          | Bisects the sentinel may start per project in 24 hours           |
+| `shadowMerge.enabled` / `intervalSec`   | `true` / `90` | Background merge checks between agents in separate worktrees     |
+| `failover.enabled`                      | `true`        | Brief the next agent when one hits its usage limit               |
+| `retention.promptsDays` / `eventsDays`  | `30` / `180`  | How long prompt text and event history are kept                  |
+| `notify.channels`                       | none          | Desktop, ntfy or webhook alerts (try them: `mindly notify test`) |
+| `llm.provider`                          | `none`        | Optional model for extra checks; your own key or a local model   |
+| `redaction.extraPatterns` / `denyPaths` | none          | More secrets to redact and paths Mindly never reads              |
+
+Alerts are off until you add a channel to `notify.channels`. With one configured, Mindly tells
+you when an agent runs out of usage, when a critical conflict opens and when a check starts
+failing (`notify.triggers`; `review_ready` can be added). A scheduled standup (`standup.time`) is
+sent whatever the triggers say. A channel URL must be `https` (plain `http` only for localhost)
+and hold no credentials, and is refused when you set it otherwise. An alert that could not be
+delivered is tried again a few times, not dropped.
 
 Per-repository checks (commands Mindly may run, such as your test suite) go in
 `.mindly/config.json` and run only after you approve that exact version with `mindly trust`. The

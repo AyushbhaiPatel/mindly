@@ -62,7 +62,14 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   is never captured.
 - Model API keys are read from environment variables at call time and never written to disk by
   Mindly.
-- Pager payloads contain titles and counts only, never code or prompt text.
+- Pager payloads contain titles and counts only, never code or prompt text. They go through
+  the same redaction as stored text, `redaction.extraPatterns` included, after control and
+  invisible characters are removed. A notification raised in a hook is written to an outbox in
+  the local database and sent afterwards (by the daemon, or by the hook process once the agent
+  has its answer); one that reached no channel is tried again up to five times within six hours
+  and then dropped. Channel URLs must be `https` (`http` only for localhost) without credentials;
+  this is checked when the config is read and again when sending, and redirects are not
+  followed.
 - Checkpoints (`mindly bisect`) store the working tree after each agent edit as git commits
   inside the repository itself, under `refs/mindly/steps/<worktree id>/<step>`. They hold code,
   not prompts; the prompt is linked by event id and goes through the usual redaction and
