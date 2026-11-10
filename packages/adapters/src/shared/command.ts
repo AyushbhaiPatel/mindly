@@ -90,22 +90,50 @@ export function shellWords(command: string): string[] | null {
 const baseName = (p: string): string => p.split(/[\\/]/).pop() ?? '';
 const MINDLY_BIN_RE = /^mindly(-cli)?(\.cmd|\.exe)?$/;
 /**
- * The package a package runner is asked for: `mindly-cli`, optionally pinned to a version or a
- * tag (`mindly-cli@0.5.0`, `mindly-cli@latest`), as `mindly init` records it when run with npx.
+ * The program a package runner runs: `mindly-cli`, optionally pinned to a version or a tag
+ * (`mindly-cli@0.5.0`, `mindly-cli@latest`), as `mindly init` records it when run with npx; or
+ * the `mindly` command of an installed `mindly-cli`, unpinned (`mindly@1.0.0` would be the npm
+ * package called `mindly`, which is not this one).
  */
-const MINDLY_PACKAGE_RE = /^mindly(-cli)?(@[A-Za-z0-9][A-Za-z0-9._+-]*)?$/;
+const MINDLY_PACKAGE_RE = /^(mindly-cli(@[A-Za-z0-9][A-Za-z0-9._+-]*)?|mindly)$/;
+/** Runner options that take the next word as their value. */
+const RUNNER_VALUE_OPTIONS = new Set(['-p', '--package']);
+/** Runner options after which the command is not a program and its arguments. */
+const RUNNER_SHELL_OPTIONS = new Set(['-c', '--call', '--shell-mode']);
+/** Subcommands of runners that run a package (`pnpm dlx x`, `yarn exec x`). */
+const RUNNER_SUBCOMMANDS = new Set(['dlx', 'exec', 'x']);
 const CLI_ENTRY_RE = /(^|[\\/])(mindly-cli|apps[\\/]cli)[\\/]dist[\\/]main\.js$/;
 const RUNTIME_RE = /^(node|bun|deno)(\.exe)?$/;
 const PACKAGE_RUNNER_RE = /^(npx|pnpm|pnpx|yarn|bunx)(\.cmd|\.exe)?$/;
 
 /**
  * True when `launcher` runs Mindly through a package runner (`npx --yes mindly-cli@0.5.0`), whatever
- * version it was pinned to: after an upgrade, what an older install wrote is still Mindly's.
+ * version it was pinned to: after an upgrade, what an older install wrote is still Mindly's. Only
+ * the program the runner runs counts: `npx -p mindly-cli other-tool` runs `other-tool`.
  */
 export function isPackageRunnerLauncher(launcher: readonly string[]): boolean {
   const [first, ...rest] = launcher;
   if (first === undefined || !PACKAGE_RUNNER_RE.test(baseName(first))) return false;
-  return rest.some((w) => MINDLY_PACKAGE_RE.test(w));
+  let subcommandSeen = false;
+  for (let i = 0; i < rest.length; i++) {
+    const word = rest[i] as string;
+    if (word === '--') {
+      const program = rest[i + 1];
+      return program !== undefined && MINDLY_PACKAGE_RE.test(program);
+    }
+    if (word.startsWith('-')) {
+      const name = word.split('=')[0] as string;
+      if (RUNNER_SHELL_OPTIONS.has(name)) return false;
+      if (RUNNER_VALUE_OPTIONS.has(name) && !word.includes('=')) i++;
+      continue;
+    }
+    if (!subcommandSeen && RUNNER_SUBCOMMANDS.has(word)) {
+      subcommandSeen = true;
+      continue;
+    }
+    return MINDLY_PACKAGE_RE.test(word);
+  }
+  return false;
 }
 
 /**

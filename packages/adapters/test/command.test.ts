@@ -64,6 +64,11 @@ describe('shell quoting', () => {
       'npx --yes mindly-cli@0.5.0 hook codex Stop',
       'npx --yes mindly-cli@latest hook codex Stop',
       'pnpm dlx mindly-cli@1.0.0-rc.1 hook codex Stop',
+      'pnpm exec mindly hook codex Stop',
+      'npx -p mindly-cli mindly hook codex Stop',
+      'npx --package=mindly-cli@0.5.0 mindly hook codex Stop',
+      'yarn dlx -p mindly-cli mindly hook codex Stop',
+      'npx -- mindly-cli hook codex Stop',
     ];
     for (const command of yes) expect(isMindlyHookCommand(command, 'codex'), command).toBe(true);
     // A launcher Mindly cannot know by name is its own only when it is the one in use.
@@ -90,6 +95,14 @@ describe('shell quoting', () => {
       'npx --yes mindly-cli-extra@1.0.0 hook codex Stop',
       'npx --yes other-cli@1.0.0 hook codex Stop',
       'npx --yes mindly-cli@ hook codex Stop',
+      // The runner runs another program; mindly-cli is only a package it installs.
+      'npx -p mindly-cli other-tool hook codex Stop',
+      'npx --package mindly-cli other-tool hook codex Stop',
+      'npx --package=mindly-cli other-tool hook codex Stop',
+      'npx other-tool mindly-cli hook codex Stop',
+      'npx -c mindly-cli hook codex Stop',
+      // `mindly@<version>` is the npm package called mindly, not this one.
+      'npx mindly@1.0.0 hook codex Stop',
     ];
     for (const command of no) expect(isMindlyHookCommand(command, 'codex'), command).toBe(false);
   });
