@@ -946,6 +946,7 @@ describe('doctor, config, export, misc', () => {
     const sb = sandbox();
     const mindly = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
     let pid: string;
+    let sessionId: string;
     try {
       const db = mindly.store.db;
       const tables = (
@@ -968,6 +969,27 @@ describe('doctor, config, export, misc', () => {
       ).run(pid);
       mindly.store.kv.set(`standup:last:${pid}`, 123);
       mindly.store.kv.set('other:state', 1);
+      // Keys that name one of the project's records instead of the project.
+      const session = mindly.store.sessions.upsert({
+        projectId: pid,
+        agentKind: 'codex',
+        externalId: 'cx-export',
+        worktree: sb.repo,
+        branch: 'main',
+        transcriptPath: null,
+      }).session;
+      db.prepare(
+        `INSERT INTO handoffs (id, project_id, from_session_id, to_agent_kind, reason, summary, packet, status, created_at)
+         VALUES ('h-export-1', ?, ?, 'claude-code', 'manual', 's', '{}', 'pending', 1)`,
+      ).run(pid, session.id);
+      db.prepare(
+        `INSERT INTO splits (id, project_id, slug, goal, status, task_id, base_commit, worktree_root, planned_by, created_at, updated_at)
+         VALUES ('sp-export-1', ?, 'x', 'g', 'active', 't', 'c', '/w', 'user', 1, 1)`,
+      ).run(pid);
+      sessionId = session.id;
+      mindly.store.kv.set(`failover.detected:${session.id}`, 'e');
+      mindly.store.kv.set('failover.launched:h-export-1', 1);
+      mindly.store.kv.set('split.conflicts:sp-export-1', []);
     } finally {
       mindly.close();
     }
@@ -975,7 +997,14 @@ describe('doctor, config, export, misc', () => {
       (await cli(sb, ['export'])).stdout,
     );
     expect(data.saves.map((r) => r.title)).toEqual(['SAVE-MARKER']);
-    expect(data.state.map((r) => r.key)).toEqual([`standup:last:${pid}`]);
+    expect(data.state.map((r) => r.key).sort()).toEqual(
+      [
+        'failover.launched:h-export-1',
+        `failover.detected:${sessionId}`,
+        'split.conflicts:sp-export-1',
+        `standup:last:${pid}`,
+      ].sort(),
+    );
 
     // Forgetting the project removes its bookkeeping rows too, and nobody else's.
     expect((await cli(sb, ['forget', '--project', '--yes'])).code).toBe(0);
@@ -984,8 +1013,7 @@ describe('doctor, config, export, misc', () => {
       const keys = after.store.db.prepare('SELECT key FROM kv ORDER BY key').all() as {
         key: string;
       }[];
-      expect(keys.filter((k) => k.key.includes(pid))).toEqual([]);
-      expect(keys.map((k) => k.key)).toContain('other:state');
+      expect(keys.map((k) => k.key)).toEqual(['other:state']);
     } finally {
       after.close();
     }

@@ -123,6 +123,17 @@ export async function trust(
 }
 
 /**
+ * Bookkeeping rows in `kv` that belong to the project bound as `?1`: their key carries the
+ * project id, or the id of one of its sessions, handoffs or splits (`failover.detected:<session>`,
+ * `failover.launched:<handoff>`, `split.conflicts:<split>`). Ids are UUIDs, so a key holding one
+ * is about that record.
+ */
+const PROJECT_KV = `instr(key, ?1) > 0
+  OR EXISTS (SELECT 1 FROM sessions s WHERE s.project_id = ?1 AND instr(kv.key, s.id) > 0)
+  OR EXISTS (SELECT 1 FROM handoffs h WHERE h.project_id = ?1 AND instr(kv.key, h.id) > 0)
+  OR EXISTS (SELECT 1 FROM splits p WHERE p.project_id = ?1 AND instr(kv.key, p.id) > 0)`;
+
+/**
  * Tables exported for a project, each selected by an allow-listed query. Every table that holds
  * project data must be listed here (a test compares this list with the schema); `kv` holds
  * bookkeeping under keys that carry the project id.
@@ -164,7 +175,7 @@ export const EXPORT_QUERIES: readonly (readonly [string, string])[] = [
   ['splitParts', 'SELECT * FROM split_parts WHERE project_id = ? ORDER BY split_id, position'],
   ['checkpoints', 'SELECT * FROM checkpoints WHERE project_id = ? ORDER BY worktree, seq'],
   ['sentinelWatches', 'SELECT * FROM sentinel_watches WHERE project_id = ? ORDER BY worktree'],
-  ['state', 'SELECT * FROM kv WHERE instr(key, ?) > 0 ORDER BY key'],
+  ['state', `SELECT * FROM kv WHERE ${PROJECT_KV} ORDER BY key`],
 ];
 
 /** Every stored row of one project, as stored (JSON columns stay JSON text). */
@@ -263,9 +274,10 @@ export async function forget(
       );
     }
     mindly.store.transaction(() => {
+      // Bookkeeping rows are not tied to the project by a foreign key, and some are found through
+      // its sessions, handoffs and splits: they go first, while those still exist.
+      mindly.store.db.prepare(`DELETE FROM kv WHERE ${PROJECT_KV}`).run(pid);
       mindly.store.projects.delete(pid);
-      // Bookkeeping rows are not tied to the project by a foreign key: their keys carry its id.
-      mindly.store.db.prepare('DELETE FROM kv WHERE instr(key, ?) > 0').run(pid);
     });
     mindly.store.vacuum();
     out.line(`Forgotten: Mindly no longer has any data for ${clean(project.project.name, 80)}.`);
