@@ -15,7 +15,7 @@ import { once } from 'node:events';
 import { createServer, type AddressInfo, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { codename, shortId } from '@mindly/core';
+import { codename, MINDLY_VERSION, shortId } from '@mindly/core';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary, runHook, styleFor } from '../src/index.js';
 import { EXPORT_QUERIES } from '../src/commands/data.js';
@@ -1175,6 +1175,40 @@ describe('doctor, config, export, misc', () => {
       expect(existsSync(join(sb.mindlyHome, 'daemon.json'))).toBe(false);
     } finally {
       taken.close();
+    }
+  }, 60_000);
+
+  it('says when the running service is an older version than the CLI', async () => {
+    const sb = sandbox();
+    const port = await freePort();
+    expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+    let started = false;
+    try {
+      const up = await cli(sb, ['daemon', 'start']);
+      started = up.code === 0;
+      expect(up.code).toBe(0);
+      const file = join(sb.mindlyHome, 'daemon.json');
+      // Same version: nothing to say.
+      expect((await cli(sb, ['daemon', 'status'])).stdout).not.toContain('restart it');
+      // The service kept running through an upgrade of the CLI.
+      const state = json<Record<string, unknown>>(readFileSync(file, 'utf8'));
+      writeFileSync(file, JSON.stringify({ ...state, version: '0.0.1' }));
+      const status = await cli(sb, ['daemon', 'status']);
+      expect(status.stdout).toContain('Version 0.0.1');
+      expect(status.stdout).toContain(`It runs Mindly 0.0.1, and this is ${MINDLY_VERSION}`);
+      expect(status.stdout).toContain('mindly daemon stop && mindly daemon start');
+      expect(
+        json<{ running: boolean; outdated?: boolean }>(
+          (await cli(sb, ['daemon', 'status', '--json'])).stdout,
+        ),
+      ).toMatchObject({ running: true, outdated: true, cliVersion: MINDLY_VERSION });
+      const again = await cli(sb, ['daemon', 'start']);
+      expect(again.code).toBe(0);
+      expect(again.stdout).toContain('already running');
+      expect(again.stderr).toContain('It runs Mindly 0.0.1');
+      expect(again.stderr).toContain('mindly daemon stop && mindly daemon start');
+    } finally {
+      if (started) await cli(sb, ['daemon', 'stop']);
     }
   }, 60_000);
 

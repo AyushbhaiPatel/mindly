@@ -6,6 +6,7 @@ import {
   ensureHome,
   type HomePaths,
   homePaths,
+  MINDLY_VERSION,
   MindlyError,
   mindlyHome,
   probeDaemon,
@@ -124,6 +125,15 @@ function notAnswering(state: DaemonState): HintedError {
     `Process ${state.pid} holds port ${state.port} and is not answering: it may be Mindly's background service, busy, or another program`,
     `Wait a moment and try again. To discard the recorded state and start a new service anyway (process ${state.pid} is left alone): mindly daemon start --force`,
   );
+}
+
+/**
+ * Said when the running service is another version than this CLI (typically: Mindly was
+ * upgraded and the service still runs the old code, serving the new dashboard from its old API).
+ */
+function versionNote(state: DaemonState): string | null {
+  if (state.version === MINDLY_VERSION) return null;
+  return `It runs Mindly ${state.version}, and this is ${MINDLY_VERSION}: restart it to use this version (mindly daemon stop && mindly daemon start).`;
 }
 
 /** The running daemon of this home (recorded, alive and answering as itself), or null. */
@@ -349,6 +359,8 @@ export async function daemonStart(
   const env = out.io.env;
   const alreadyRunning = (state: DaemonState): number => {
     out.line(`The background service is already running at http://${HOST}:${state.port}.`);
+    const note = versionNote(state);
+    if (note !== null) out.warn(note);
     return 0;
   };
   const running = await runningDaemon(env);
@@ -427,7 +439,13 @@ export async function daemonStatus(out: Out, o: { json?: boolean }): Promise<num
   const env = out.io.env;
   const { kind, state } = await recordedDaemon(env);
   if (o.json) {
-    out.json({ running: kind === 'running', ...(state ? { state } : {}) });
+    out.json({
+      running: kind === 'running',
+      ...(state ? { state } : {}),
+      ...(kind === 'running' && state && state.version !== MINDLY_VERSION
+        ? { outdated: true, cliVersion: MINDLY_VERSION }
+        : {}),
+    });
     return 0;
   }
   const sc = out.screen();
@@ -439,7 +457,13 @@ export async function daemonStatus(out: Out, o: { json?: boolean }): Promise<num
       `Version ${state.version}, started ${relativeTime(state.startedAt, sc.now)}. It serves Mission Control and runs checks in the background.`,
       2,
     );
-    sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
+    const note = versionNote(state);
+    if (note !== null) {
+      sc.text(`${sc.mark('warn')} ${note}`, 2);
+      sc.next([{ cmd: 'mindly daemon stop && mindly daemon start', why: `run ${MINDLY_VERSION}` }]);
+    } else {
+      sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
+    }
   } else if (kind === 'stopping' && state) {
     sc.summary(`${sc.mark('warn')} Mindly's background service is shutting down.`);
     sc.note('It no longer answers and may still be finishing a job. This takes a few seconds.', 2);
@@ -515,6 +539,9 @@ export async function dashboard(out: Out, o: { open?: boolean }): Promise<number
   if (!state) {
     out.warn("Starting Mindly's background service...");
     state = await startBackground(env);
+  } else {
+    const note = versionNote(state);
+    if (note !== null) out.warn(note);
   }
   const { code } = await daemonRequest<{ code: string; expiresAt: number }>(
     env,
