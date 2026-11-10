@@ -14,7 +14,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { hostname } from 'node:os';
+import { hostname, uptime } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 /*
@@ -27,19 +27,26 @@ import { basename, dirname, join } from 'node:path';
  * something inside its PID namespace: two containers sharing `$MINDLY_HOME` both run as PID 1,
  * and a holder in a container is another process, or none, when looked up from the host.
  *
- * So a lock records its PID, an id of its own, when its process started and the PID namespace it
- * is in (the last two where the system tells: Linux), and its holder touches it every few
- * seconds while it holds it. Seen from the same namespace, it is held while that same process
- * lives. Where the PID cannot be judged (another namespace, or one that cannot be read), it is
- * held while it keeps being touched. A lock older than `maxAgeMs` is stale anyway.
+ * A PID also only means something on its machine, in its boot: a home shared between machines
+ * (a network or synced folder) holds locks of processes this one cannot see, and every Linux
+ * machine's first PID namespace has the same name.
+ *
+ * So a lock records its PID, an id of its own, when its process started, the PID namespace it is
+ * in and the machine and boot it runs in, and its holder touches it every few seconds while it
+ * holds it. Seen from the same machine, boot and namespace, it is held while that same process
+ * lives. Where the PID cannot be judged (another machine, boot or namespace, or one of them
+ * cannot be read), it is held while it keeps being touched. A lock older than `maxAgeMs` is
+ * stale anyway.
  *
  * Whether a lock is still touched is not read off one clock difference: the wall clock steps
  * (suspend, a time sync, two machines that disagree). A process that cannot judge the PID notes
- * what it saw in a small file next to the lock, and takes the lock over only when a later
- * attempt finds it unchanged after more than the heartbeat window on its own monotonic clock.
+ * what it saw in a small file next to the lock (one per machine and boot, whatever the
+ * namespace, so that one-shot containers build on each other's looks), and takes the lock over
+ * only when a later attempt finds it unchanged after more than the heartbeat window on the
+ * monotonic clock of the boot.
  *
  * A holder that could not touch its lock for that long (its process was suspended) can lose it
- * while it works: `held()` tells, and the holder must stop when it says no.
+ * while it works: `held()` tells and `signal` is aborted, and the holder must stop at once.
  */
 
 /** A lock nobody can hold longer than this (a pass is bounded far below it). */
@@ -52,6 +59,12 @@ const MISSED_HEARTBEATS = 6;
 const UNREADABLE_BEATS = 6;
 /** A note of what was seen of a lock is not believed past this age, nor when dated in the future. */
 const OBSERVATION_MAX_AGE_MS = 24 * 60 * 60_000;
+/**
+ * Notes of other observers are removed once untouched for this many heartbeat windows. Not after
+ * one window: an observer whose attempts come further apart than that would never get to read
+ * its note again, and could never take an abandoned lock over.
+ */
+const OTHER_NOTE_WINDOWS = 10;
 /** A lock file without a readable holder is being written, or was left by a crash: stale after this. */
 const UNREADABLE_MAX_AGE_MS = 60_000;
 /** A takeover takes microseconds; a guard older than this was left by a crash. */
@@ -69,6 +82,11 @@ export interface ProcessLock {
    * could not touch it (suspended for longer than the heartbeat window). Reads the lock file.
    */
   held(): boolean;
+  /**
+   * Aborted as soon as the holder finds its lock taken over (at a heartbeat, or in `held()`):
+   * whatever it runs under the lock must stop then, not when it next asks.
+   */
+  readonly signal: AbortSignal;
 }
 
 /** True when a process with this PID exists (EPERM: it exists, owned by someone else). */
@@ -117,6 +135,25 @@ export function processIdentity(pid: number): string | null {
   }
 }
 
+let ownHost: string | null | undefined;
+
+/**
+ * The machine and boot this process runs in: the boot id on Linux; elsewhere the host name and
+ * when the machine started (to the minute). Null when it cannot be told.
+ */
+export function hostIdentity(): string | null {
+  if (ownHost !== undefined) return ownHost;
+  if (process.platform === 'linux') return (ownHost = bootIdentity());
+  try {
+    const booted = Math.round((Date.now() / 1000 - uptime()) / 60);
+    const name = hostname().replace(/\s+/g, '');
+    ownHost = name ? `${name}@${booted}` : null;
+  } catch {
+    ownHost = null;
+  }
+  return ownHost;
+}
+
 let ownNamespace: string | null | undefined;
 
 /**
@@ -151,6 +188,8 @@ interface Holder {
   identity: string | null;
   /** `pidNamespace` of the holder, or null. */
   namespace: string | null;
+  /** `hostIdentity` of the holder, or null. */
+  host: string | null;
 }
 
 /** One look at a lock file. */
@@ -171,10 +210,18 @@ function readRaw(file: string): string | null {
 /** The holder written in a lock file, or null when there is none to read. */
 function parseHolder(raw: string | null): Holder | null {
   if (raw === null) return null;
-  const [first = '', id = '', identity = '', namespace = ''] = raw.split('\n').map((l) => l.trim());
+  const [first = '', id = '', identity = '', namespace = '', host = ''] = raw
+    .split('\n')
+    .map((l) => l.trim());
   const pid = Number(first);
   if (!/^\d+$/.test(first) || !Number.isInteger(pid) || pid <= 0) return null;
-  return { pid, id: id || null, identity: identity || null, namespace: namespace || null };
+  return {
+    pid,
+    id: id || null,
+    identity: identity || null,
+    namespace: namespace || null,
+    host: host || null,
+  };
 }
 
 function seenAt(file: string): LockSeen {
@@ -202,7 +249,7 @@ interface Observation {
   mtimeMs: number;
   wall: number;
   mono: number;
-  boot: string | null;
+  host: string | null;
 }
 
 function readObservation(path: string): Observation | null {
@@ -217,7 +264,7 @@ function readObservation(path: string): Observation | null {
       mtimeMs: o['mtimeMs'],
       wall: o['wall'],
       mono: o['mono'],
-      boot: typeof o['boot'] === 'string' ? o['boot'] : null,
+      host: typeof o['host'] === 'string' ? o['host'] : null,
     };
   } catch {
     return null;
@@ -372,8 +419,8 @@ export interface ProcessLockOptions {
   now?: () => number;
   /** Milliseconds on a clock that never steps, shared by the processes of one boot. */
   monotonic?: () => number;
-  /** The id of the running boot (what `monotonic` counts in); the default is `bootIdentity`. */
-  boot?: () => string | null;
+  /** The machine and boot of this process (what `monotonic` counts in); see `hostIdentity`. */
+  host?: () => string | null;
 }
 
 /**
@@ -392,19 +439,43 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
   const link = opts.link ?? linkSync;
   const heartbeatMs = opts.heartbeatMs ?? SENTINEL_LOCK_HEARTBEAT_MS;
   const monotonic = opts.monotonic ?? monotonicMs;
-  const bootOf = opts.boot ?? bootIdentity;
+  const hostOf = opts.host ?? hostIdentity;
   const held = heldIds();
 
   /**
    * Where this observer notes what it saw of a lock: one file for the processes of this
-   * machine, boot and PID namespace, whose clocks can be compared.
+   * machine and boot, whose monotonic clocks can be compared. Not per PID namespace: a one-shot
+   * container is a new namespace every time, and must build on what the last one saw.
    */
   const notePath = (): string => {
     const who = createHash('sha256')
-      .update(`${namespace() ?? ''}\u0000${bootOf() ?? hostname()}`)
+      .update(hostOf() ?? `name:${hostname()}`)
       .digest('hex')
       .slice(0, 12);
     return `${file}.seen-${who}`;
+  };
+
+  /** Removes the notes of other observers that nobody updated for a while. Bounded. */
+  const sweepNotes = (own: string): void => {
+    try {
+      const dir = dirname(file);
+      const prefix = `${basename(file)}.seen-`;
+      const max = OTHER_NOTE_WINDOWS * MISSED_HEARTBEATS * heartbeatMs;
+      let removed = 0;
+      for (const name of readdirSync(dir).slice(0, SWEEP_MAX_ENTRIES)) {
+        const path = join(dir, name);
+        if (!name.startsWith(prefix) || path === own) continue;
+        try {
+          if (Math.abs(now() - statSync(path).mtimeMs) <= max) continue;
+          unlinkSync(path);
+          if (++removed >= SWEEP_MAX_REMOVED) return;
+        } catch {
+          // gone meanwhile
+        }
+      }
+    } catch {
+      // the lock works without the cleanup
+    }
   };
 
   /**
@@ -414,21 +485,27 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
    * starts over.
    */
   const unchangedFor = (seen: LockSeen, id: string): number => {
-    const boot = bootOf();
+    const host = hostOf();
     const note = notePath();
     const wall = now();
     const mono = monotonic();
     const prev = readObservation(note);
+    sweepNotes(note);
     if (prev && prev.id === id && prev.mtimeMs === seen.mtimeMs) {
       const elapsed =
-        prev.boot !== null && prev.boot === boot ? mono - prev.mono : wall - prev.wall;
+        prev.host !== null && prev.host === host ? mono - prev.mono : wall - prev.wall;
       if (elapsed >= 0 && elapsed <= OBSERVATION_MAX_AGE_MS) return elapsed;
     }
+    // Written aside and renamed into place: observers in other namespaces share the note, and
+    // none may read half of one.
+    const tmp = `${note}.${process.pid}-${randomBytes(4).toString('hex')}`;
     try {
-      const o: Observation = { id, mtimeMs: seen.mtimeMs, wall, mono, boot };
-      writeFileSync(note, JSON.stringify(o), { mode: 0o600 });
+      const o: Observation = { id, mtimeMs: seen.mtimeMs, wall, mono, host };
+      writeFileSync(tmp, JSON.stringify(o), { mode: 0o600 });
+      renameSync(tmp, note);
     } catch {
       // not noted: the lock is held until its age cap
+      unlinkQuiet(tmp);
     }
     return 0;
   };
@@ -440,8 +517,11 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
       // there is to go by is whether a process with that PID exists.
       return alive(h.pid) ? 'held' : 'gone';
     }
+    // A PID is judged only on its own machine and boot, and in its own namespace.
     const here = namespace();
+    const host = hostOf();
     if (h.namespace === null || here === null || h.namespace !== here) return 'unknown';
+    if (h.host === null || host === null || h.host !== host) return 'unknown';
     if (h.pid === process.pid) {
       if (held.has(h.id)) return 'held';
       // A lock naming this PID that this process does not know of. From an earlier process
@@ -472,7 +552,13 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
     const id = randomBytes(12).toString('hex');
     try {
       held.add(id);
-      const content = [process.pid, id, identity(process.pid) ?? '', namespace() ?? ''].join('\n');
+      const content = [
+        process.pid,
+        id,
+        identity(process.pid) ?? '',
+        namespace() ?? '',
+        hostOf() ?? '',
+      ].join('\n');
       if (create(file, content, link)) {
         sweepTemp(file, now);
         // What this observer noted about the lock that was here is of no use any more.
@@ -496,10 +582,12 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
         let released = false;
         let lost = false;
         let misses = 0;
+        const lostSignal = new AbortController();
         const lose = (): void => {
           lost = true;
           held.delete(id);
           clearInterval(beat);
+          lostSignal.abort();
         };
         const beat = setInterval(() => {
           const state = look();
@@ -535,6 +623,7 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
             if (state === 'other') lose();
             return state === 'mine';
           },
+          signal: lostSignal.signal,
         };
       }
       held.delete(id);
