@@ -1224,7 +1224,7 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
       }
       break;
     case 'git':
-      return readGit(words);
+      return readGit(words, stdin);
     case 'trap':
       // The first argument is what runs when the signal comes.
       return args[0] && args.length > 1 ? { kind: 'inline', code: args[0].text } : READS;
@@ -1520,6 +1520,12 @@ interface GitPath {
   ifExists?: boolean;
   /** Only tracked files under it are touched (`git rm`). */
   tracked?: boolean;
+  /** A file name, not a pathspec: no wildcard or magic in it is git's (an output file). */
+  literal?: boolean;
+  /** A directory files of unknown names are put in (a clone, a new working tree). */
+  land?: boolean;
+  /** For a file name: everything under it goes too, when it is a directory. */
+  tree?: boolean;
 }
 
 /** git's options before the subcommand that take a value as the next word. */
@@ -1534,6 +1540,41 @@ const GIT_VALUED = [
   '--list-cmds',
 ];
 
+/**
+ * Settings that `-c` may give a single command without changing what it does to files: how it
+ * prints, who commits. Any other may run a program or move what git works on.
+ */
+const GIT_HARMLESS_CONFIG =
+  /^(color\.[\w.-]+|advice\.[\w.-]+|user\.(name|email)|log\.[\w.-]+|i18n\.[\w.-]+|column\.[\w.-]+|format\.pretty|core\.quotepath|diff\.(noprefix|mnemonicprefix)|init\.defaultbranch|status\.(short|branch|showstash))$/i;
+
+/** A pager setting is harmless only as a pager that just shows text. */
+const GIT_PAGER_SETTING = /^(core\.pager|pager\.[\w.-]+)$/i;
+const HARMLESS_PAGER = /^(cat|less|more|true|false)?$/;
+
+/**
+ * Variables that may be set for a git command without changing what it does to files. Any other
+ * `GIT_*` setting may point git elsewhere or run a program.
+ */
+function harmlessGitVariable(name: string, value: string): boolean {
+  if (/^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)$/.test(name)) return true;
+  if (name === 'GIT_TERMINAL_PROMPT') return true;
+  if (name === 'GIT_PAGER') return HARMLESS_PAGER.test(value);
+  if (name === 'GIT_EDITOR' || name === 'GIT_SEQUENCE_EDITOR') return /^(true|:|cat)?$/.test(value);
+  return false;
+}
+
+/**
+ * A `GIT_*` variable set in a way that may change what git does: `GIT_X=…`, or a bare name that
+ * `export` gives a value set before. Harmless ones are left out.
+ */
+const unsafeGitVariable = (w: Word): boolean => {
+  const m = /^(GIT_[A-Za-z0-9_]*)(?:=(.*))?$/s.exec(w.text);
+  return m !== null && !harmlessGitVariable(m[1] as string, m[2] ?? '');
+};
+
+/** Shell words that may give a variable to the commands after them (`export GIT_DIR=x`). */
+const EXPORTS = new Set(['export', 'declare', 'typeset', 'local', 'readonly']);
+
 const TRACKED_FILES: FileKinds = { tracked: true, untracked: false, ignored: false };
 /** Any file that is there, whatever git makes of it. */
 const ANY_FILE: FileKinds = { tracked: true, untracked: true, ignored: true };
@@ -1545,11 +1586,14 @@ function gitCommand(words: readonly Word[]): {
   nocase: boolean;
   /** The working tree git is told to use instead of the one it finds (`--work-tree`). */
   workTree: Word | null;
+  /** A setting given here may run a program or move what git works on. */
+  unsafe: boolean;
 } {
   const rest = words.slice(1);
   let dir: Word | null = null;
   let nocase = false;
   let workTree: Word | null = null;
+  let unsafe = false;
   while (rest[0] && isFlag(rest[0])) {
     const flag = rest.shift() as Word;
     const eq = flag.text.indexOf('=');
@@ -1569,51 +1613,226 @@ function gitCommand(words: readonly Word[]): {
           ? (rest.shift() ?? null)
           : null;
     if (name === '--work-tree' && value !== null) workTree = value;
+    if (name === '--git-dir' || name === '--config-env' || (name === '--exec-path' && eq !== -1))
+      unsafe = true;
     if (name === '-c' && value !== null) {
       const set = /^core\.worktree=/i.exec(value.text);
       if (set) workTree = sliceWord(value, set[0].length);
+      const at = value.text.indexOf('=');
+      const key = at === -1 ? value.text : value.text.slice(0, at);
+      const val = at === -1 ? '' : value.text.slice(at + 1);
+      const harmless =
+        GIT_HARMLESS_CONFIG.test(key) || (GIT_PAGER_SETTING.test(key) && HARMLESS_PAGER.test(val));
+      if (!harmless && !set) unsafe = true;
     }
   }
-  return { dir, rest, nocase, workTree };
-}
-
-/** Which options of a git subcommand take a value: short letters and long names. */
-interface GitOptions {
-  short?: string;
-  long?: readonly string[];
+  return { dir, rest, nocase, workTree, unsafe };
 }
 
 /**
- * The options of each git subcommand that take a value, so that a value is never read as a flag
- * or a path (`-sSTABLE`, `-um wip`, `--message wip`). A long option may be abbreviated, as git
- * allows, as long as the abbreviation is one option's alone.
+ * What a git subcommand's options are, for reading its words: the short letters that take a
+ * value (`short`), or take one only when it is attached (`attached`, as in `-M50%`), and the long
+ * names that take a value (`long`) or not (`flags`), so an abbreviation of either is read as git
+ * reads it. `strict`: an option not known here makes the command a change of the whole tree.
+ *
+ * For a subcommand that only looks or only moves refs, `safe` lists the options that keep it so;
+ * any other option it is given (one that runs a program or writes a file, one not known here, an
+ * abbreviation that cannot be told) makes it a change of the whole tree. `'any'` says none of its
+ * options writes a working file or runs a program given in the text. `output` names the options
+ * whose value is a file it writes.
  */
+interface GitOptions {
+  short?: string;
+  attached?: string;
+  long?: readonly string[];
+  flags?: readonly string[];
+  strict?: boolean;
+  safe?: 'any' | { letters: string; long: readonly string[] };
+  output?: readonly string[];
+}
+
+const optionNames = (text: string): string[] => text.split(/\s+/).filter((x) => x !== '');
+
+/** Display and selection options of the commands that show history and differences. */
+const DIFF_LOG_SAFE = {
+  letters: 'pusztrcMCBDRawbnUWlLSGmiIEFPvefqOX0123456789',
+  long: optionNames(`--stat --numstat --shortstat --dirstat --dirstat-by-file --summary --patch
+    --no-patch --patch-with-raw --patch-with-stat --name-only --name-status --raw --oneline
+    --graph --decorate --no-decorate --color --no-color --color-words --color-moved
+    --color-moved-ws --abbrev-commit --no-abbrev-commit --abbrev --no-abbrev --full-index
+    --binary --patience --histogram --minimal --anchored --indent-heuristic
+    --no-indent-heuristic --word-diff --word-diff-regex --ignore-space-change
+    --ignore-all-space --ignore-space-at-eol --ignore-blank-lines --ignore-cr-at-eol
+    --ignore-matching-lines --ignore-submodules --first-parent --merges --no-merges --reverse
+    --all --branches --tags --remotes --glob --exclude --follow --full-diff --relative
+    --no-relative --text --no-ext-diff --no-textconv --renames --no-renames --find-renames
+    --find-copies --find-copies-harder --irreversible-delete --check --exit-code --quiet
+    --cached --staged --merge-base --submodule --stat-width --stat-name-width --stat-count
+    --stat-graph-width --unified --function-context --src-prefix --dst-prefix --no-prefix
+    --default-prefix --line-prefix --date --pretty --format --encoding --notes --no-notes
+    --show-signature --log-size --left-right --left-only --right-only --cherry --cherry-mark
+    --cherry-pick --boundary --topo-order --date-order --author-date-order --max-count --skip
+    --since --after --until --before --author --committer --grep --all-match --invert-grep
+    --regexp-ignore-case --basic-regexp --extended-regexp --fixed-strings --perl-regexp
+    --max-parents --min-parents --no-min-parents --no-max-parents --simplify-by-decoration
+    --simplify-merges --ancestry-path --full-history --dense --sparse --show-pulls --parents
+    --children --walk-reflogs --mailmap --no-mailmap --use-mailmap --source
+    --clear-decorations --decorate-refs --decorate-refs-exclude --expand-tabs
+    --no-expand-tabs --show-linear-break --count --diff-filter --diff-algorithm
+    --break-rewrites --inter-hunk-context --pickaxe-all --pickaxe-regex --remerge-diff
+    --diff-merges --no-diff-merges --combined-all-paths --cc --root --always --no-commit-id
+    --numbered --email --sort --committer-date-is-author-date --no-color-moved --name
+    --porcelain --line-porcelain --incremental --show-stats --show-email --show-name
+    --show-number --score-debug --ignore-rev --ignore-revs-file --contents --objects
+    --objects-edge --no-walk --do-walk --in-commit-order --bisect --timestamp --header
+    --no-pager --summary --format --group --no-merges --progress`),
+};
+
+/** Options of `git status`. */
+const STATUS_SAFE = {
+  letters: 'sbuvz',
+  long: optionNames(`--short --branch --show-stash --porcelain --long --verbose --untracked-files
+    --ignore-submodules --ignored --column --no-column --ahead-behind --no-ahead-behind
+    --renames --no-renames --find-renames --null`),
+};
+
+/** Options of `git grep`: not `-O` / `--open-files-in-pager`, which runs a program on the files. */
+const GREP_SAFE = {
+  letters: 'aiIwvhHEGFPnlLcoqzefABCWp0123456789',
+  long: optionNames(`--cached --no-index --untracked --no-exclude-standard --exclude-standard
+    --recurse-submodules --text --textconv --no-textconv --ignore-case --word-regexp
+    --invert-match --full-name --extended-regexp --basic-regexp --perl-regexp
+    --fixed-strings --line-number --column --files-with-matches --name-only
+    --files-without-match --null --only-matching --count --color --no-color --break
+    --heading --show-function --context --after-context --before-context --function-context
+    --max-depth --threads --and --or --not --all-match --quiet --max-count`),
+};
+
+/** Options of `git fetch`: not `--upload-pack`, which runs a program, nor `--update-head-ok`. */
+const FETCH_SAFE = {
+  letters: 'qvfpPtnjamk46',
+  long: optionNames(`--quiet --verbose --all --append --atomic --depth --deepen --shallow-since
+    --shallow-exclude --unshallow --update-shallow --negotiation-tip --negotiate-only
+    --dry-run --porcelain --write-fetch-head --no-write-fetch-head --force --keep
+    --multiple --auto-maintenance --no-auto-maintenance --auto-gc --no-auto-gc --write-commit-graph
+    --prefetch --prune --prune-tags --no-tags --refetch --refmap --tags --recurse-submodules
+    --no-recurse-submodules --jobs --set-upstream --progress --server-option --show-forced-updates
+    --no-show-forced-updates --ipv4 --ipv6 --filter`),
+};
+
+/** Options of `git push`: not `--receive-pack` / `--exec`, which run a program. */
+const PUSH_SAFE = {
+  letters: 'qvnfduo46',
+  long: optionNames(`--quiet --verbose --all --branches --mirror --tags --follow-tags --dry-run
+    --porcelain --delete --force --force-with-lease --no-force-with-lease --force-if-includes
+    --atomic --no-atomic --set-upstream --no-verify --verify --recurse-submodules --thin
+    --no-thin --prune --signed --no-signed --push-option --progress --ipv4 --ipv6`),
+};
+
+/** The commands that show history and differences, all read alike. */
+const LOOKS_AT_HISTORY: GitOptions = {
+  short: 'SGLO',
+  attached: 'MCBlUnX',
+  long: ['--output'],
+  safe: DIFF_LOG_SAFE,
+  output: ['--output'],
+};
+
 const GIT_OPTIONS: Readonly<Record<string, GitOptions>> = {
-  restore: { short: 's', long: ['--source', '--conflict', '--pathspec-from-file'] },
-  checkout: { short: 'bB', long: ['--orphan', '--conflict', '--pathspec-from-file'] },
-  switch: { short: 'cC', long: ['--create', '--force-create', '--orphan', '--conflict'] },
-  rm: { long: ['--pathspec-from-file'] },
-  clean: { short: 'e', long: ['--exclude'] },
-  stash: { short: 'm', long: ['--message', '--pathspec-from-file'] },
+  restore: {
+    strict: true,
+    short: 's',
+    long: ['--source', '--conflict', '--pathspec-from-file'],
+    flags: optionNames(`--worktree --staged --quiet --progress --no-progress --ours --theirs --merge
+      --patch --overlay --no-overlay --ignore-unmerged --ignore-skip-worktree-bits
+      --recurse-submodules --no-recurse-submodules --pathspec-file-nul`),
+  },
+  checkout: {
+    strict: true,
+    short: 'bB',
+    long: ['--orphan', '--conflict', '--pathspec-from-file'],
+    flags: optionNames(`--force --quiet --progress --no-progress --ours --theirs --track --no-track
+      --detach --merge --patch --overlay --no-overlay --ignore-skip-worktree-bits
+      --ignore-other-worktrees --recurse-submodules --no-recurse-submodules --guess --no-guess
+      --overwrite-ignore --no-overwrite-ignore --pathspec-file-nul`),
+  },
+  switch: {
+    strict: true,
+    short: 'cC',
+    long: ['--create', '--force-create', '--orphan', '--conflict'],
+    flags: optionNames(`--detach --guess --no-guess --force --discard-changes --merge --quiet
+      --progress --no-progress --track --no-track --ignore-other-worktrees
+      --recurse-submodules --no-recurse-submodules`),
+  },
+  reset: {
+    strict: true,
+    long: ['--pathspec-from-file'],
+    flags: optionNames(`--hard --soft --mixed --merge --keep --quiet --no-quiet --refresh
+      --no-refresh --recurse-submodules --no-recurse-submodules --intent-to-add --patch
+      --pathspec-file-nul`),
+  },
+  rm: {
+    strict: true,
+    long: ['--pathspec-from-file'],
+    flags: optionNames(`--cached --dry-run --force --ignore-unmatch --quiet --sparse --recursive
+      --pathspec-file-nul`),
+  },
+  mv: { strict: true, flags: optionNames('--dry-run --force --verbose --sparse') },
+  clean: {
+    strict: true,
+    short: 'e',
+    long: ['--exclude'],
+    flags: optionNames('--dry-run --force --interactive --quiet'),
+  },
+  stash: {
+    short: 'm',
+    long: ['--message', '--pathspec-from-file'],
+    flags:
+      optionNames(`--include-untracked --no-include-untracked --all --keep-index --no-keep-index
+      --patch --staged --quiet --index --pathspec-file-nul`),
+  },
   config: {
     short: 'f',
     long: ['--file', '--blob', '--type', '--default', '--comment', '--value', '--url'],
+    flags: optionNames(`--get --get-all --get-regexp --get-urlmatch --list --global --system --local
+      --worktree --show-origin --show-scope --name-only --null --includes --no-includes
+      --unset --unset-all --add --replace-all --rename-section --remove-section --edit`),
   },
   archive: {
     short: 'o',
     long: ['--output', '--format', '--prefix', '--remote', '--exec', '--add-file', '--mtime'],
+    safe: {
+      letters: 'lv0123456789',
+      long: optionNames(
+        '--format --prefix --list --verbose --worktree-attributes --add-file --mtime --remote --output',
+      ),
+    },
+    output: ['o', '--output'],
   },
   'merge-file': { short: 'L', long: ['--marker-size', '--diff-algorithm'] },
-  'checkout-index': { long: ['--prefix', '--stage'] },
+  'checkout-index': {
+    strict: true,
+    long: ['--prefix', '--stage'],
+    flags: optionNames(
+      '--all --force --quiet --no-create --index --stdin --temp --ignore-skip-worktree-bits',
+    ),
+  },
+  'read-tree': { long: ['--prefix', '--exclude-per-directory', '--index-output'] },
   'format-patch': {
     short: 'ov',
-    long: ['--output-directory', '--output', '--subject-prefix', '--in-reply-to', '--to', '--cc'],
+    long: optionNames(`--output-directory --output --subject-prefix --in-reply-to --to --cc --suffix
+      --start-number --reroll-count --add-header --signature --signature-file
+      --cover-from-description --base --interdiff --range-diff --creation-factor`),
+    flags: optionNames(`--stdout --numbered-files --cover-letter --numbered --no-numbered --from
+      --notes --thread --attach --inline`),
   },
-  diff: { long: ['--output'] },
-  log: { long: ['--output'] },
-  show: { long: ['--output'] },
-  whatchanged: { long: ['--output'] },
-  'range-diff': { long: ['--output'] },
+  clone: {
+    short: 'obucj',
+    long: optionNames(`--origin --branch --upload-pack --reference --reference-if-able
+      --separate-git-dir --depth --shallow-since --shallow-exclude --config --template --jobs
+      --filter --server-option --bundle-uri --ref-format --revision`),
+  },
+  worktree: { short: 'bB', long: ['--reason', '--orphan'] },
   rebase: { short: 'sXx', long: ['--onto', '--exec', '--strategy', '--strategy-option'] },
   merge: {
     short: 'msXF',
@@ -1622,9 +1841,94 @@ const GIT_OPTIONS: Readonly<Record<string, GitOptions>> = {
   'cherry-pick': { short: 'mX', long: ['--mainline', '--strategy', '--strategy-option'] },
   revert: { short: 'mX', long: ['--mainline', '--strategy', '--strategy-option'] },
   pull: { short: 'sX', long: ['--strategy', '--strategy-option', '--depth', '--upload-pack'] },
-  apply: { short: 'pC', long: ['--exclude', '--include', '--directory', '--whitespace'] },
+  apply: {
+    short: 'pC',
+    long: ['--exclude', '--include', '--directory', '--whitespace'],
+    flags: optionNames(
+      '--stat --numstat --summary --check --index --cached --apply --reverse --3way',
+    ),
+  },
   am: { short: 'pC', long: ['--directory', '--exclude', '--include', '--whitespace'] },
+  // Commands that only look.
+  diff: LOOKS_AT_HISTORY,
+  log: LOOKS_AT_HISTORY,
+  show: LOOKS_AT_HISTORY,
+  whatchanged: LOOKS_AT_HISTORY,
+  'diff-tree': LOOKS_AT_HISTORY,
+  'diff-index': LOOKS_AT_HISTORY,
+  'diff-files': LOOKS_AT_HISTORY,
+  'range-diff': LOOKS_AT_HISTORY,
+  'rev-list': LOOKS_AT_HISTORY,
+  shortlog: LOOKS_AT_HISTORY,
+  cherry: LOOKS_AT_HISTORY,
+  blame: LOOKS_AT_HISTORY,
+  annotate: LOOKS_AT_HISTORY,
+  status: { attached: 'u', safe: STATUS_SAFE },
+  grep: {
+    short: 'efABCm',
+    attached: 'O',
+    flags: ['--open-files-in-pager'],
+    safe: GREP_SAFE,
+  },
+  fetch: { short: 'j', long: ['--upload-pack', '--depth', '--refmap'], safe: FETCH_SAFE },
+  'ls-remote': {
+    long: ['--upload-pack', '--sort', '--server-option'],
+    safe: {
+      letters: 'qhtb',
+      long: optionNames(
+        '--heads --tags --branches --refs --quiet --exit-code --get-url --symref --sort --server-option',
+      ),
+    },
+  },
+  push: {
+    short: 'o',
+    long: ['--receive-pack', '--exec', '--push-option', '--repo'],
+    safe: PUSH_SAFE,
+  },
+  // Commands none of whose options writes a working file or runs a program given in the text.
+  'ls-files': { safe: 'any' },
+  'ls-tree': { safe: 'any' },
+  'cat-file': { safe: 'any' },
+  'rev-parse': { safe: 'any' },
+  describe: { safe: 'any' },
+  'name-rev': { safe: 'any' },
+  'show-ref': { safe: 'any' },
+  'show-branch': { safe: 'any' },
+  'for-each-ref': { safe: 'any' },
+  'merge-base': { safe: 'any' },
+  'check-ignore': { safe: 'any' },
+  'check-attr': { safe: 'any' },
+  'check-ref-format': { safe: 'any' },
+  'count-objects': { safe: 'any' },
+  var: { safe: 'any' },
+  version: { safe: 'any' },
+  help: { safe: 'any' },
+  'verify-commit': { safe: 'any' },
+  'verify-tag': { safe: 'any' },
+  fsck: { safe: 'any' },
+  // Commands that move refs or the index and none of whose options writes a working file.
+  add: { safe: 'any' },
+  stage: { safe: 'any' },
+  commit: { short: 'mFcCt', safe: 'any' },
+  branch: { safe: 'any' },
+  tag: { short: 'mF', safe: 'any' },
+  remote: { safe: 'any' },
+  reflog: { safe: 'any' },
+  notes: { safe: 'any' },
+  'update-ref': { safe: 'any' },
+  'symbolic-ref': { safe: 'any' },
+  'update-index': { safe: 'any' },
+  gc: { safe: 'any' },
+  prune: { safe: 'any' },
+  repack: { safe: 'any' },
+  'pack-refs': { safe: 'any' },
+  replace: { safe: 'any' },
+  maintenance: { safe: 'any' },
 };
+
+/** Options that write a file or run a program, whatever the subcommand. */
+const GIT_RUNS_OR_WRITES =
+  /^--(output|exec|upload-pack|receive-pack|open-files-in-pager|output-directory)$/;
 
 /** A git subcommand's arguments, read with its option table. */
 interface GitParsed {
@@ -1634,7 +1938,7 @@ interface GitParsed {
   afterDashes: Word[] | null;
   /** Short flags seen outside option values, by letter. */
   short: Set<string>;
-  /** Long flags seen, by name (without `=value`). */
+  /** Long flags seen, by name (without `=value`), abbreviations made whole where they can be. */
   long: Set<string>;
   /** The values of the options that take one, by letter or long name. */
   values: Map<string, Word[]>;
@@ -1642,7 +1946,9 @@ interface GitParsed {
 
 function parseGit(words: readonly Word[], options: GitOptions): GitParsed {
   const shortValued = options.short ?? '';
+  const attached = options.attached ?? '';
   const longValued = options.long ?? [];
+  const known = [...longValued, ...(options.flags ?? [])];
   const out: GitParsed = {
     args: [],
     afterDashes: null,
@@ -1668,11 +1974,12 @@ function parseGit(words: readonly Word[], options: GitOptions): GitParsed {
     if (w.text.startsWith('--')) {
       const eq = w.text.indexOf('=');
       const given = eq === -1 ? w.text : w.text.slice(0, eq);
-      // An abbreviation stands for the one valued option it starts, when it is that one's alone.
-      const matches = longValued.filter((n) => n.startsWith(given));
-      const name = longValued.includes(given)
+      // An abbreviation stands for the one option it starts, when it is that one's alone, as
+      // git reads it (`--har` is `--hard`).
+      const matches = known.filter((n) => n.startsWith(given));
+      const name = known.includes(given)
         ? given
-        : given.length >= 4 && matches.length === 1
+        : given.length >= 3 && matches.length === 1
           ? (matches[0] as string)
           : given;
       out.long.add(name);
@@ -1681,12 +1988,18 @@ function parseGit(words: readonly Word[], options: GitOptions): GitParsed {
       continue;
     }
     // A cluster of letters: a letter that takes a value takes the rest of the cluster, or the
-    // next word; what follows it is never read as letters.
+    // next word; what follows it is never read as letters. One whose value is optional takes
+    // only the rest of the cluster.
     for (let k = 1; k < w.text.length; k++) {
       const letter = w.text[k] as string;
       out.short.add(letter);
+      const more = k + 1 < w.text.length;
+      if (attached.includes(letter) && more) {
+        set(letter, sliceWord(w, k + 1));
+        break;
+      }
       if (!shortValued.includes(letter)) continue;
-      set(letter, k + 1 < w.text.length ? sliceWord(w, k + 1) : (words[++i] ?? null));
+      set(letter, more ? sliceWord(w, k + 1) : (words[++i] ?? null));
       break;
     }
   }
@@ -1698,67 +2011,30 @@ const gitHas = (p: GitParsed, letters: string, names: readonly string[] = []): b
   [...letters].some((l) => p.short.has(l)) || names.some((n) => p.long.has(n));
 
 /** The values of an option, by letter or long name. */
-const gitValues = (p: GitParsed, ...keys: string[]): Word[] =>
+const gitValues = (p: GitParsed, ...keys: readonly string[]): Word[] =>
   keys.flatMap((k) => p.values.get(k) ?? []);
 
-/** git subcommands that only look: nothing in the working tree changes. */
-const GIT_LOOKS = new Set([
-  ...READ_ONLY_GIT,
-  'annotate',
-  'cat-file',
-  'check-attr',
-  'check-ignore',
-  'check-ref-format',
-  'cherry',
-  'count-objects',
-  'describe',
-  'diff-files',
-  'diff-index',
-  'diff-tree',
-  'fetch',
-  'for-each-ref',
-  'fsck',
-  'help',
-  'ls-remote',
-  'ls-tree',
-  'merge-base',
-  'name-rev',
-  'rev-list',
-  'rev-parse',
-  'shortlog',
-  'show-branch',
-  'show-ref',
-  'var',
-  'verify-commit',
-  'verify-tag',
-  'version',
-]);
-
 /**
- * git subcommands that change refs, the index or the repository's own files, and no file of the
- * working tree. Unless named below, their options do not change that.
+ * Whether every option a command was given is one that keeps it looking or moving refs only.
+ * The options that name a file it writes are read apart, as that file.
  */
-const GIT_KEEPS_TREE = new Set([
-  'add',
-  'stage',
-  'commit',
-  'push',
-  'branch',
-  'tag',
-  'remote',
-  'reflog',
-  'notes',
-  'update-ref',
-  'symbolic-ref',
-  'update-index',
-  'gc',
-  'prune',
-  'repack',
-  'pack-refs',
-  'replace',
-  'init',
-  'maintenance',
-]);
+function gitOptionsSafe(p: GitParsed, table: GitOptions): boolean {
+  const safe = table.safe ?? { letters: '', long: [] };
+  const output = table.output ?? [];
+  for (const name of p.long) {
+    if (output.includes(name)) continue;
+    if (GIT_RUNS_OR_WRITES.test(name)) return false;
+    if (safe !== 'any' && !safe.long.includes(name)) return false;
+  }
+  return (
+    safe === 'any' || [...p.short].every((l) => safe.letters.includes(l) || output.includes(l))
+  );
+}
+
+/** A push destination that is a repository on this machine, whose working tree it may update. */
+const localRepository = (w: Word | undefined): boolean =>
+  w !== undefined &&
+  (/^(file:|[.~/])/.test(w.text) || (w.text.includes('/') && !w.text.includes(':')));
 
 /**
  * A word git takes for a pathspec whatever else exists: a wildcard, magic (`:(glob)…`, `:/x`),
@@ -1824,89 +2100,188 @@ function gitWildcards(text: string): string[] {
 
 /**
  * git: which subcommands rewrite or remove working files, read from the text alone. A subcommand
- * looks only when it is known to: anything else (an alias, a subcommand not known here) may
- * change the whole working tree. The paths a command names, and the files it writes its output
- * to, are written. A command that changes the working tree without naming paths (a branch
- * switch, `reset --hard`, a stash, a merge) may write any file there: it is said as such, for a
- * warning. Commands that only move the index or refs write no file.
+ * only looks, or only moves refs or the index, when it is known to and every option it is given
+ * keeps it so; anything else (an alias, a subcommand or option not known here, a setting given
+ * with `-c` or a `GIT_*` variable, which `settings` says) may change the whole working tree. The
+ * paths a command names, the files it writes its output to and the directories it fills are
+ * written. A change of the whole tree without named paths (a branch switch, `reset --hard`, a
+ * stash, a merge) may write any file there: it is said as such, for a warning.
  */
-function readGit(words: readonly Word[]): Verdict {
-  const { dir, rest, nocase, workTree } = gitCommand(words);
+function readGit(words: readonly Word[], stdin: string | null, settings = false): Verdict {
+  const { dir, rest, nocase, workTree, unsafe } = gitCommand(words);
   const sub = rest[0]?.text;
   if (sub === undefined) return READS;
-  const command = [word('git'), ...rest.slice(1)];
-  const p = parseGit(command, GIT_OPTIONS[sub] ?? {});
+  const table = GIT_OPTIONS[sub] ?? {};
+  const p = parseGit([word('git'), ...rest.slice(1)], table);
   const under = (list: readonly Word[]): Word[] =>
     dir ? list.map((w) => joinWords(dir, w)) : [...list];
+  // A setting given for this command may make it do anything to the tree.
+  const settingsChange = unsafe || settings;
   const named = (paths: readonly (Word | GitPath)[], whole: FileKinds | null = null): Verdict => {
     const list = paths.map((x): GitPath => ('word' in x ? x : { word: x }));
-    return list.length === 0 && whole === null
+    const all = whole ?? (settingsChange ? ANY_FILE : null);
+    return list.length === 0 && all === null
       ? READS
-      : { kind: 'git', dir, paths: list, whole, nocase, workTree };
+      : { kind: 'git', dir, paths: list, whole: all, nocase, workTree };
   };
   // What it may do to the whole tree is checked against any file that is there: what git counts
   // as tracked or ignored is its business, and an earlier command may change it.
   const whole = (): Verdict => named([], ANY_FILE);
-  /** Files it writes its output to, named apart from the tree. */
-  const outputs = (files: readonly Word[], dirs: readonly Word[] = []): Verdict =>
-    files.length + dirs.length === 0
-      ? READS
-      : writes(...files.map((w) => ({ word: under([w])[0] as Word })), ...trees(under(dirs)));
-  if (['diff', 'log', 'show', 'whatchanged', 'range-diff'].includes(sub))
-    return outputs(gitValues(p, '--output'));
-  if (GIT_LOOKS.has(sub) || GIT_KEEPS_TREE.has(sub)) return READS;
-  // Paths read from a file (or standard input) are not known here.
-  if (p.long.has('--pathspec-from-file'))
-    return { kind: 'unread', why: 'git reads the paths it changes from a file' };
+  /** Files it writes, named as files and not as pathspecs. */
+  const files = (list: readonly Word[]): GitPath[] => list.map((w) => ({ word: w, literal: true }));
+  /** A directory it fills with files of unknown names. */
+  const lands = (w: Word): GitPath => ({ word: w, literal: true, land: true });
+  /** The directory part of a prefix files are written under (`vendor/` of `vendor/x-`). */
+  const prefixDir = (w: Word): Word => {
+    const cut = w.text.lastIndexOf('/');
+    return cut === -1 ? word('.') : sliceWord(w, 0, cut + 1);
+  };
+
+  if (table.safe !== undefined) {
+    // Only looking, or only moving refs or the index, as long as each option keeps it so. A push
+    // into a repository on this machine may update that one's working tree.
+    const outputs = files(gitValues(p, ...(table.output ?? [])));
+    const changes = !gitOptionsSafe(p, table) || (sub === 'push' && localRepository(p.args[0]));
+    return named(outputs, changes ? ANY_FILE : null);
+  }
+  // An option not known here, to a command whose options are, may change what it does.
+  const known = [...(table.long ?? []), ...(table.flags ?? [])];
+  if (table.strict && [...p.long].some((n) => !known.includes(n))) return whole();
+  // Paths read from a file or from standard input: those an `echo` before the pipe gives are
+  // read, any others are not known here.
+  const fromInput =
+    p.long.has('--pathspec-from-file') || (sub === 'checkout-index' && p.long.has('--stdin'));
+  if (fromInput) {
+    const from = gitValues(p, '--pathspec-from-file')[0]?.text ?? '-';
+    if (from !== '-' || stdin === null) {
+      return sub === 'reset'
+        ? named([])
+        : { kind: 'unread', why: 'git reads the paths it changes from a file or its input' };
+    }
+    const listed = stdin
+      .split(/[\n\0]/)
+      .filter((x) => x.trim() !== '')
+      .map((x) => word(x, true));
+    p.args.push(...listed);
+    if (sub === 'checkout') p.afterDashes = [...(p.afterDashes ?? []), ...listed];
+  }
   const patch = gitHas(p, 'p', ['--patch']);
   const verb = rest[1] && !isFlag(rest[1]) ? rest[1].text : null;
   switch (sub) {
-    case 'format-patch':
-      return outputs(gitValues(p, '--output'), gitValues(p, 'o', '--output-directory'));
-    case 'config': {
-      // It writes the file it is given, unless it only reads it.
-      const reads = gitHas(p, 'l', ['--get', '--get-all', '--get-regexp', '--list', '--blob']);
-      return reads || verb === 'get' || verb === 'list'
-        ? READS
-        : outputs(gitValues(p, 'f', '--file'));
+    case 'format-patch': {
+      // Patch files named after their commits, in the folder given or where it runs: what they
+      // are called is told by a sample name with the suffix they get.
+      if (gitHas(p, '', ['--stdout'])) return named([]);
+      const single = gitValues(p, '--output');
+      if (single.length > 0) return named(files(single));
+      const into = gitValues(p, 'o', '--output-directory')[0];
+      const suffix = gitValues(p, '--suffix')[0]?.text ?? '.patch';
+      const name = word(p.long.has('--numbered-files') ? '1' : `0001-patch${suffix}`);
+      return named(files([into ? joinWords(into, name) : name]));
     }
-    case 'archive':
-      return outputs(gitValues(p, 'o', '--output'));
+    case 'config': {
+      // It writes the file it is given; a setting it writes may change what later commands do.
+      const reads =
+        gitHas(p, 'l', ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list']) ||
+        p.long.has('--blob') ||
+        verb === 'get' ||
+        verb === 'list' ||
+        (verb === null &&
+          p.args.length === 1 &&
+          !gitHas(p, 'e', [
+            '--edit',
+            '--unset',
+            '--unset-all',
+            '--remove-section',
+            '--rename-section',
+          ]));
+      if (reads) return named([]);
+      // A file of its own is only that file; git reads it only when told to.
+      const file = gitValues(p, 'f', '--file');
+      const key = (verb === 'set' ? p.args[1] : p.args[0])?.text ?? '';
+      const harmless =
+        !gitHas(p, 'e', ['--edit']) && (file.length > 0 || GIT_HARMLESS_CONFIG.test(key));
+      return named(files(file), harmless ? null : ANY_FILE);
+    }
     case 'merge-file':
       // The first file takes the result, unless it goes to the standard output.
-      return gitHas(p, 'p', ['--stdout']) || p.args[0] === undefined ? READS : named([p.args[0]]);
-    case 'checkout-index':
-      if (gitHas(p, 'a', ['--all', '--prefix'])) return whole();
-      return named(p.args);
-    case 'read-tree':
-      return gitHas(p, 'u') ? whole() : READS;
+      return gitHas(p, 'p', ['--stdout']) || p.args[0] === undefined
+        ? named([])
+        : named(files([p.args[0]]));
+    case 'checkout-index': {
+      // With a prefix, the files are written under it, named as they are in the index.
+      const prefix = gitValues(p, '--prefix')[0];
+      if (prefix) return named([lands(prefixDir(prefix))]);
+      if (gitHas(p, 'a', ['--all'])) return whole();
+      return named(files(p.args));
+    }
+    case 'read-tree': {
+      // Without -u it only reads into the index.
+      if (!gitHas(p, 'u')) return named([]);
+      const prefix = gitValues(p, '--prefix')[0];
+      return prefix ? named([lands(prefixDir(prefix))]) : whole();
+    }
+    case 'init':
+      // A new repository, in the folder given or where it runs.
+      return named(p.args[0] ? [lands(p.args[0])] : []);
+    case 'clone': {
+      // The new repository's folder: given, or named after what is cloned. It runs code from what
+      // it clones only when told to (a program to fetch with, hooks from a template or a setting).
+      const [from, to] = p.args;
+      const name = from?.text
+        .replace(/\/+$/, '')
+        .replace(/\/?\.git$/, '')
+        .split(/[/:]/)
+        .pop();
+      const into = to ?? (name ? word(name) : null);
+      const runs = gitHas(p, 'uc', [
+        '--upload-pack',
+        '--template',
+        '--config',
+        '--separate-git-dir',
+      ]);
+      // A clone of a repository here brings the files this one has, covered ones included.
+      return named(into ? [lands(into)] : [], runs || localRepository(from) ? ANY_FILE : null);
+    }
+    case 'worktree': {
+      const q = parseGit([word('git'), ...rest.slice(2)], table);
+      if (['list', 'lock', 'unlock', 'prune', 'repair'].includes(verb ?? '')) return named([]);
+      // A new working tree is checked out in the folder given, with the files this one has; one
+      // removed or moved goes with what is in it.
+      if (verb === 'add') return named(q.args[0] ? [lands(q.args[0])] : [], ANY_FILE);
+      if (verb === 'remove' || verb === 'move')
+        return named(q.args.map((w) => ({ word: w, literal: true, tree: true })));
+      return whole();
+    }
     case 'bisect':
-      return ['log', 'visualize', 'view', 'help', 'terms'].includes(verb ?? '') ? READS : whole();
+      return ['log', 'visualize', 'view', 'help', 'terms'].includes(verb ?? '')
+        ? named([])
+        : whole();
     case 'sparse-checkout':
-      return verb === 'list' ? READS : whole();
-    case 'worktree':
-      return ['list', 'lock', 'unlock', 'prune'].includes(verb ?? '') ? READS : whole();
+      return verb === 'list' ? named([]) : whole();
     case 'restore': {
       // `--staged` alone only moves the index; the file on disk stays.
-      if (gitHas(p, 'S', ['--staged']) && !gitHas(p, 'W', ['--worktree'])) return READS;
-      if (p.args.length === 0) return patch ? whole() : READS;
+      if (gitHas(p, 'S', ['--staged']) && !gitHas(p, 'W', ['--worktree'])) return named([]);
+      if (p.args.length === 0) return patch ? whole() : named([]);
       return named(p.args);
     }
     case 'rm':
-      if (gitHas(p, 'n', ['--cached', '--dry-run'])) return READS;
+      if (gitHas(p, 'n', ['--cached', '--dry-run'])) return named([]);
       // It removes the tracked files its pathspecs match.
       return named(p.args.map((w) => ({ word: w, tracked: true })));
     case 'mv': {
-      if (gitHas(p, 'n', ['--dry-run'])) return READS;
+      if (gitHas(p, 'n', ['--dry-run'])) return named([]);
       const dest = p.args[p.args.length - 1];
-      if (dest === undefined) return READS;
+      if (dest === undefined) return named([]);
       const sources = p.args.slice(0, -1);
       const [to] = under([dest]) as [Word];
       const entries = under(sources).map((s) => ({ name: posix.basename(s.text), from: s }));
-      return writes(...trees(under(sources)), { word: to, tree: true, entries });
+      return settingsChange
+        ? named([...sources, dest])
+        : writes(...trees(under(sources)), { word: to, tree: true, entries });
     }
     case 'clean': {
-      if (gitHas(p, 'n', ['--dry-run'])) return READS;
+      if (gitHas(p, 'n', ['--dry-run'])) return named([]);
       // Untracked files; ignored ones too with -x / -X, or when an exclude pattern takes a file
       // back out of what is ignored (`-e '!.env'`). Without a path, all of them where it runs.
       const unignores = gitValues(p, 'e', '--exclude').some((v) => v.text.startsWith('!'));
@@ -1916,7 +2291,7 @@ function readGit(words: readonly Word[]): Verdict {
         kind: 'git',
         dir,
         paths: p.args.map((w) => ({ word: w })),
-        whole: p.args.length === 0 ? kinds : null,
+        whole: p.args.length === 0 ? kinds : settingsChange ? ANY_FILE : null,
         nocase,
         workTree,
         how: ignored ? 'clean-ignored' : 'clean',
@@ -1927,14 +2302,14 @@ function readGit(words: readonly Word[]): Verdict {
       const args = p.args;
       // Paths after `--` (from the index, or from a revision before it).
       if (p.afterDashes !== null)
-        return p.afterDashes.length > 0 ? named(p.afterDashes) : patch ? whole() : READS;
+        return p.afterDashes.length > 0 ? named(p.afterDashes) : patch ? whole() : named([]);
       // These only make sense with paths; in patch mode without one, any file may change.
       if (gitHas(p, '', ['--ours', '--theirs'])) return named(args);
       if (patch && args.length <= 1) return args.length === 0 ? whole() : named(args, ANY_FILE);
       // A new branch made here, without a start point, changes no file.
-      if (gitHas(p, 'bB', ['--orphan'])) return args.length > 0 || force ? whole() : READS;
+      if (gitHas(p, 'bB', ['--orphan'])) return args.length > 0 || force ? whole() : named([]);
       const first = args[0];
-      if (first === undefined) return force ? whole() : READS;
+      if (first === undefined) return force ? whole() : named([]);
       // A revision followed by paths, or paths only: the first word is a path when one exists.
       if (args.length >= 2) return named([{ word: first, ifExists: true }, ...args.slice(1)]);
       // One word: a pathspec, or a path when one exists, or a branch to switch to.
@@ -1945,24 +2320,25 @@ function readGit(words: readonly Word[]): Verdict {
       const force = gitHas(p, 'f', ['--force', '--discard-changes']);
       const creates = gitHas(p, 'cC', ['--create', '--force-create']);
       // A new branch made here, without a start point, changes no file.
-      if (creates && p.args.length === 0 && !force) return READS;
-      if (!creates && p.args.length === 0 && !p.long.has('--orphan')) return READS;
+      if (creates && p.args.length === 0 && !force) return named([]);
+      if (!creates && p.args.length === 0 && !p.long.has('--orphan')) return named([]);
       return whole();
     }
     case 'stash': {
       const stashVerb = verb ?? 'push';
-      if (['list', 'show', 'create', 'drop', 'clear', 'store'].includes(stashVerb)) return READS;
+      if (['list', 'show', 'create', 'drop', 'clear', 'store'].includes(stashVerb))
+        return named([]);
       if (!['push', 'save'].includes(stashVerb) && verb !== null) return whole();
       // `git stash [push] [--] [paths]` puts changes away: the files go back to HEAD. A message
       // (`-m wip`, `-um wip`) is a value, never a path.
-      const tail = [word('git'), ...rest.slice(verb === null ? 1 : 2)];
-      const q = parseGit(tail, GIT_OPTIONS['stash'] as GitOptions);
+      const q = parseGit([word('git'), ...rest.slice(verb === null ? 1 : 2)], table);
       const paths = stashVerb === 'save' ? [] : q.args;
+      if (gitHas(q, 'p', ['--patch']) && paths.length === 0) return whole();
       return paths.length > 0 ? named(paths) : whole();
     }
     case 'reset':
       // With paths, or without --hard, it only moves the index.
-      return gitHas(p, '', ['--hard', '--merge', '--keep']) ? whole() : READS;
+      return gitHas(p, '', ['--hard', '--merge', '--keep']) ? whole() : named([]);
     case 'apply':
       // Only looking at the patch, or applying it to the index alone.
       if (
@@ -1970,7 +2346,7 @@ function readGit(words: readonly Word[]): Verdict {
         (gitHas(p, '', ['--check', '--stat', '--numstat', '--summary']) ||
           (p.long.has('--cached') && !p.long.has('--index')))
       )
-        return READS;
+        return named([]);
       return whole();
     case 'rebase': {
       // The commands it runs after each commit are read like any other shell code.
@@ -1978,8 +2354,8 @@ function readGit(words: readonly Word[]): Verdict {
       return { ...(whole() as Extract<Verdict, { kind: 'git' }>), exec };
     }
     default:
-      // merge, pull, cherry-pick, revert, am, submodule, an alias, anything not known here:
-      // the whole tree may change, whatever its flags say.
+      // merge, pull, cherry-pick, revert, am, submodule, send-pack, an alias, anything not known
+      // here: the whole tree may change, whatever its flags say.
       return whole();
   }
 }
@@ -2306,6 +2682,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     top: options.top ?? null,
     timeUp: options.timeUp ?? (() => false),
     commands: 0,
+    gitEnv: false,
   };
   collectTargets(command, '', 0, reading);
   return {
@@ -2327,6 +2704,8 @@ interface Reading {
   timeUp: () => boolean;
   /** Simple commands read so far, over every nested reading. */
   commands: number;
+  /** A `GIT_*` variable that may change what git does was exported earlier on the line. */
+  gitEnv: boolean;
 }
 
 /**
@@ -2566,7 +2945,18 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       } else if (name === 'cat' && feeder.length === 1) stdin = before.stdin;
     }
     before = cmd;
-    const verdict = classify(words, stdin);
+    // A `GIT_*` variable set for git, or exported (or set) earlier on the line, may make it do
+    // anything to the tree.
+    const program = words[0] && !words[0].dynamic ? programName(words[0]) : '';
+    const assigned = cmd.words
+      .slice(0, words[0] ? cmd.words.indexOf(words[0]) : cmd.words.length)
+      .some((w) => isAssignment(w) && unsafeGitVariable(w));
+    if (words.length === 0 && assigned) r.gitEnv = true;
+    if (EXPORTS.has(program) && words.slice(1).some(unsafeGitVariable)) r.gitEnv = true;
+    const verdict =
+      program === 'git' && (assigned || r.gitEnv)
+        ? readGit(words, stdin, true)
+        : classify(words, stdin);
     switch (verdict.kind) {
       case 'reads':
         break;
@@ -2638,10 +3028,17 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           );
         if (verdict.whole !== null) possibly(verdict.whole);
         for (const code of verdict.exec ?? []) collectTargets(code, at, depth + 1, r);
-        if (verdict.paths.some((p) => p.word.dynamic)) break;
+        // Files and folders named as such, where git runs: an output file, a folder a clone or
+        // a new working tree is put in.
+        for (const p of verdict.paths) {
+          if (p.literal)
+            add({ word: p.word, tree: p.tree ?? false, how: p.land ? 'land' : 'write' }, at);
+        }
+        const pathspecs = verdict.paths.filter((p) => !p.literal);
+        if (pathspecs.some((p) => p.word.dynamic)) break;
         // Pathspecs that only leave files out stand for everything else.
-        const given = verdict.paths.filter((p) => !pathspecMagic(p.word.text).exclude);
-        if (given.length === 0 && verdict.paths.length > 0) possibly(ANY_FILE);
+        const given = pathspecs.filter((p) => !pathspecMagic(p.word.text).exclude);
+        if (given.length === 0 && pathspecs.length > 0) possibly(ANY_FILE);
         for (const p of given) {
           const magic = pathspecMagic(p.word.text);
           const bare = magic.rest === '' ? '.' : magic.rest;
@@ -2767,6 +3164,9 @@ export function isReadOnlyCommand(command: string): boolean {
     if (program === 'git') {
       const sub = words.slice(1).find((t) => !t.text.startsWith('-'));
       if (sub === undefined || !READ_ONLY_GIT.has(sub.text)) return false;
+      // An option or a setting may still make it write (`git diff --output=x`).
+      const settings = cmd.words.some((w) => isAssignment(w) && unsafeGitVariable(w));
+      if (readGit(words, null, settings).kind !== 'reads') return false;
       continue;
     }
     if (program === 'cd') continue;

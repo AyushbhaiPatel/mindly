@@ -43,6 +43,15 @@ memory, which is then injected into every other agent.
   command too long to read to its end (200,000 characters, 500 write targets) is answered with a
   warning that the rest was not checked. A patch with more files than are reported in one call
   is refused.
+- git commands are read the same way. One counts as only looking, or only moving refs and the
+  index, when its subcommand is known to do so and every option and setting it is given keeps it
+  so. Anything else (an alias, an option or `-c` setting not known to be harmless, a `GIT_*`
+  variable set on the line, a push into a repository on this machine, a config write that changes
+  what later commands do) is taken as a possible change of the whole working tree, which gets a
+  warning when a covered file is there. What git runs on its own, from settings already in place,
+  is not seen: hooks in `.git/hooks` or under a `core.hooksPath` set earlier (husky, lint-staged
+  and the like running on commit), filters, diff drivers and `core.fsmonitor` in the repository's
+  config, variables exported before the session, and a remote whose URL is a path on this machine.
 - Rendered memory text is sanitised: control characters stripped, fence/delimiter sequences
   neutralised, length capped.
 

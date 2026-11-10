@@ -257,7 +257,7 @@ describe('write targets of a shell command', () => {
       'secret/key.txt/**',
     ]);
     // `git rm` removes the tracked files its pathspecs match.
-    expect(read('git -c a=b rm -r prisma/migrations')).toEqual([
+    expect(read('git -c color.ui=never rm -r prisma/migrations')).toEqual([
       expect.objectContaining({
         path: 'prisma/migrations',
         tree: true,
@@ -291,12 +291,23 @@ describe('write targets of a shell command', () => {
     // Paths read from a file are not known: said, not guessed.
     for (const cmd of [
       'git rm --pathspec-from-file=list.txt',
-      'echo x | git checkout --pathspec-from-file=-',
+      'git checkout --pathspec-from-file=- < list.txt',
+      'git checkout-index -f --stdin < list.txt',
+      'make-list | git checkout-index --std',
     ]) {
       const reading = readShellWrites(cmd);
-      expect(reading.targets, cmd).toEqual([]);
+      expect(
+        reading.targets.filter((t) => t.path !== 'make-list'),
+        cmd,
+      ).toEqual([]);
       expect(reading.limit, cmd).toContain('from a file');
     }
+    // Those an `echo` gives it are read.
+    expect(targets('echo certs/a.pem | git checkout --pathspec-from-file=-')).toEqual([
+      'certs/a.pem',
+      'certs/a.pem/**',
+    ]);
+    expect(targets('echo certs/a.pem | git checkout-index -f --stdin')).toEqual(['certs/a.pem']);
     // A git command whose folder the text does not tell is said, not dropped.
     expect(readShellWrites('cd "$DIR" && git checkout -- .').limit).toContain('git command');
   });
@@ -305,7 +316,12 @@ describe('write targets of a shell command', () => {
     // Output written to a file it is given.
     expect(targets('git diff --output=certs/server.pem')).toEqual(['certs/server.pem']);
     expect(targets('git log -p --output certs/a.pem')).toEqual(['certs/a.pem']);
-    expect(targets('git format-patch -o patches HEAD~2')).toEqual(['patches', 'patches/**']);
+    // Patch files, told by a sample name with the suffix they get, where they go.
+    expect(targets('git format-patch -o patches HEAD~2')).toEqual(['patches/0001-patch.patch']);
+    expect(targets('git -C vendor format-patch -2')).toEqual(['vendor/0001-patch.patch']);
+    expect(targets('git format-patch --suffix=.pem -1')).toEqual(['0001-patch.pem']);
+    expect(targets('git format-patch --numbered-files -o out -1')).toEqual(['out/1']);
+    expect(targets('git format-patch --stdout -1')).toEqual([]);
     // A rebase runs its `--exec` commands like any other shell code.
     expect(targets("git rebase -q -x 'echo z > certs/server.pem' HEAD~1")).toEqual([
       'certs/server.pem',
@@ -337,11 +353,8 @@ describe('write targets of a shell command', () => {
     ]);
     expect(targets('git config -f certs/a.pem a.b c')).toEqual(['certs/a.pem']);
     expect(targets('git archive -o certs/a.pem HEAD')).toEqual(['certs/a.pem']);
-    expect(targets('git merge-file certs/a.pem base other')).toEqual([
-      'certs/a.pem',
-      'certs/a.pem/**',
-    ]);
-    expect(targets('git checkout-index -f certs/a.pem')).toEqual(['certs/a.pem', 'certs/a.pem/**']);
+    expect(targets('git merge-file certs/a.pem base other')).toEqual(['certs/a.pem']);
+    expect(targets('git checkout-index -f certs/a.pem')).toEqual(['certs/a.pem']);
     for (const cmd of [
       'git stash push -um wip',
       'git stash push -km "wip"',
@@ -353,7 +366,6 @@ describe('write targets of a shell command', () => {
       'git sparse-checkout set src',
       'git checkout-index -f -a',
       'git read-tree -u --reset v1',
-      'git worktree add wt v1',
       'git checkout -p',
       'git restore -p',
       'git some-alias',
@@ -407,9 +419,140 @@ describe('write targets of a shell command', () => {
       'git bisect log',
       'git stash show -p',
       'git remote -v',
+      // Options and settings that keep it so.
+      'git fetch',
+      'git fetch --prune --tags origin',
+      'git push origin main',
+      'git push -u origin HEAD',
+      'git push --force-with-lease origin feature',
+      'git -c color.ui=always log',
+      'git -c core.pager=cat log -p',
+      'git --no-pager -c log.showSignature=false log --oneline',
+      'GIT_PAGER=cat git log',
+      'GIT_EDITOR=true git commit -qam x',
+      'GIT_AUTHOR_DATE=2020-01-01 GIT_COMMITTER_DATE=2020-01-01 git commit -m x',
+      'export GIT_PAGER=cat && git log',
+      'git -c user.name=x -c user.email=y commit -m z',
+      'git diff-tree -r HEAD',
+      'git diff-index --cached HEAD',
+      'git rev-list --count HEAD',
+      'git shortlog -sn',
+      'git grep foo',
+      'git grep -n -e foo -- src',
+      'git grep -C 2 foo',
+      'git blame x',
+      'git blame -L 1,2 -M -C x',
+      'git log -Gfoo -n5 --stat',
+      'git log -S foo --pretty=format:%h',
+      'git diff -M50% HEAD',
+      'git status -uno',
+      'git status --porcelain=v1',
+      'git ls-remote origin',
+      'git config user.name x',
+      'git config --global init.defaultBranch main',
+      'git archive --format=tar HEAD',
     ]) {
       expect(read(cmd), cmd).toEqual([]);
     }
+  });
+
+  it('reads a git command as only looking only when each of its options keeps it so', () => {
+    const whole = (command: string) =>
+      read(command)
+        .filter((x) => !x.certain)
+        .map((x) => x.path);
+    // An option or a setting that runs a program or moves what git works on, an option not known
+    // here, an abbreviation that cannot be told, a push into a repository on this machine: any
+    // file in the tree may change.
+    for (const cmd of [
+      "git -c core.fsmonitor='touch x; false' status",
+      "git -c diff.external='touch x' diff v1",
+      "git -c core.sshCommand='touch x' fetch",
+      'git -c core.hooksPath=h commit -qam msg',
+      'git -c core.pager=vim log',
+      'git --git-dir=../other/.git log',
+      "GIT_EXTERNAL_DIFF='touch x' git diff",
+      "env GIT_SSH_COMMAND='touch x' git fetch",
+      'export GIT_DIR=../other/.git && git log',
+      'GIT_DIR=../other/.git; git status',
+      'declare -x GIT_WORK_TREE=/tmp/x && git status',
+      "git fetch --upload-pack='touch x; git-upload-pack' . main",
+      "git fetch --upload='touch x' . main",
+      "git ls-remote --upload-pack='touch x' .",
+      "git push --receive-pack='touch x' . HEAD:refs/heads/x",
+      "git push --exec='touch x' origin main",
+      'git push . ahead:main',
+      'git push ../other main',
+      'git push file:///srv/repo main',
+      "git archive --remote=. --exec='touch x' -o out.tar HEAD",
+      'git grep --open-files-in-pager=rm k2',
+      'git grep --open=rm k2',
+      'git grep -Orm k2',
+      'git log --some-new-option',
+      'git log --onel',
+      'git status --some-new-option',
+      'git diff --ext-diff',
+      'git config receive.denyCurrentBranch updateInstead',
+      'git config core.hooksPath h',
+      'git config --edit',
+      'git reset --har v1',
+      'git checkout --forc',
+      'git checkout --some-new-option main',
+      'git some-alias',
+    ]) {
+      expect(whole(cmd), cmd).toContain(TOP);
+    }
+    // `export` holds for the rest of the line.
+    expect(whole('export GIT_DIR=../other/.git && git checkout -- .')).toEqual([TOP, '.']);
+    // Output to a file it is given is a write of that file, whatever its abbreviation.
+    for (const [cmd, file] of [
+      ['git diff-tree --output=certs/new.pem -p v1 v2', 'certs/new.pem'],
+      ['git diff-index --output=certs/new.pem -p v1', 'certs/new.pem'],
+      ['git diff-files --output certs/new.pem', 'certs/new.pem'],
+      ['git rev-list --output=certs/new.pem HEAD', 'certs/new.pem'],
+      ['git shortlog --output=certs/new.pem HEAD', 'certs/new.pem'],
+      ['git blame --output=certs/new.pem src/a.ts', 'certs/new.pem'],
+      ['git annotate --output=certs/new.pem src/a.ts', 'certs/new.pem'],
+      ['git diff --outp=certs/new.pem', 'certs/new.pem'],
+      ['git archive -o certs/new.pem HEAD', 'certs/new.pem'],
+      ['git -C sub log --output=new.pem', 'sub/new.pem'],
+    ] as const) {
+      expect(targets(cmd), cmd).toEqual([file]);
+      expect(whole(cmd), cmd).toEqual([]);
+    }
+    // Abbreviations git takes are made whole.
+    expect(targets('git restore --staged --work --source=v1 certs/server.pem')).toEqual([
+      'certs/server.pem',
+      'certs/server.pem/**',
+    ]);
+    expect(read('git restore --sta certs/server.pem')).toEqual([]);
+    expect(whole('git reset --har v1')).toEqual([TOP]);
+  });
+
+  it('reads the folders git fills as written as a whole', () => {
+    const lands = (command: string) =>
+      read(command)
+        .filter((x) => x.how === 'land')
+        .map((x) => x.path);
+    const whole = (command: string) => read(command).some((x) => !x.certain && x.path === TOP);
+    expect(lands('git clone -q . vendor/lib')).toEqual(['vendor/lib']);
+    expect(whole('git clone -q . vendor/lib')).toBe(true);
+    expect(lands('git clone https://example.com/team/tool.git')).toEqual(['tool']);
+    expect(whole('git clone https://example.com/team/tool.git')).toBe(false);
+    expect(whole("git clone -u 'touch x' https://example.com/team/tool.git")).toBe(true);
+    expect(lands('git clone -b main https://example.com/team/tool.git vendor/tool')).toEqual([
+      'vendor/tool',
+    ]);
+    expect(lands('git worktree add vendor/wt v1')).toEqual(['vendor/wt']);
+    expect(lands('git worktree add -b x vendor/wt v1')).toEqual(['vendor/wt']);
+    expect(targets('git worktree remove vendor/wt')).toEqual(['vendor/wt', 'vendor/wt/**']);
+    expect(read('git worktree list')).toEqual([]);
+    expect(lands('git checkout-index -a --prefix=vendor/')).toEqual(['vendor']);
+    expect(whole('git checkout-index -a --prefix=vendor/')).toBe(false);
+    expect(lands('git checkout-index -a --prefix=vendor/x-')).toEqual(['vendor']);
+    expect(lands('git read-tree --prefix=vendor/ -u v1')).toEqual(['vendor']);
+    expect(read('git read-tree --prefix=vendor/ v1')).toEqual([]);
+    expect(lands('git init vendor/repo')).toEqual(['vendor/repo']);
   });
 
   it('reads git commands that change the whole tree as possible writes of what is there', () => {
@@ -444,7 +587,6 @@ describe('write targets of a shell command', () => {
       'git restore .',
       'git fetch && git switch other',
       'git commit -qam x && git merge other',
-      'export GIT_DIR=/tmp/other/.git && git checkout -- .',
       "cd .git && echo 'ref: refs/heads/x' > HEAD && cd .. && git reset -q --hard",
       'rm -rf .git && cp -r /tmp/clone/.git .git && git reset -q --hard',
       ': > .gitignore && git stash -q -u',
