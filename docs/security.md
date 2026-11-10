@@ -40,10 +40,10 @@ memory, which is then injected into every other agent.
   names are matched against the rule, but they are still never read and nothing about them is
   stored. Reading a command is not a sandbox: a program can write a file its command line never
   names. A line whose paths depend on what runs (a variable, a pipe into anything but a filter,
-  a `cd` that may fail) is not read fully and is warned about, as described below, and a command
-  too long to read to its end (200,000 characters, 500 write targets) is answered with a warning
-  that the rest was not checked. A patch with more files than are reported in one call
-  is refused.
+  a `cd` other than a leading one) is not read fully and is warned about, as described below,
+  and a command too long to read to its end (200,000 characters, 500 write targets) is answered
+  with a warning that the rest was not checked. A patch with more files than are reported in one
+  call is refused.
 - git commands are read the same way. One counts as only looking, or only moving refs and the
   index, when its subcommand is known to do so and every option and setting it is given keeps it
   so. Anything else is taken as a possible change of the whole working tree, which gets a warning
@@ -62,15 +62,18 @@ memory, which is then injected into every other agent.
   whose writes Mindly models completely, given only options it reads as the program does. The
   programs read fully are `git` (with its own tables of subcommands and options), `rm`, `mv`,
   `cp`, `mkdir`, `rmdir`, `touch`, `ln`, `chmod`, `chown`, `cat`, `ls`, `head`, `tail`, `wc`,
-  `grep` without `-r`, `echo`, `printf` without `-v`, and the builtins `cd`, `true`, `false`,
-  `:`, `pwd`, `exit`, and `test` and `[` without `-v` or `-R`. Each of the file tools is read
+  `grep` without `-r`, `echo`, `printf` without `-v`, and the builtins `true`, `false`, `:`,
+  `pwd`, `exit`, and `test` and `[` without `-v` or `-R`. Each of the file tools is read
   with the options it is known to take; any other option, or a long option abbreviated, makes the
   line one not read fully (`cp -b`, `cp --parents`, `cp -T`, `mv -T`, `rm --rec`, `touch -r`,
-  `rmdir -p`), as does `ln` with a single operand. A `cd` to a folder that is not there makes a
-  line not read fully, unless `mkdir` made it earlier in the same `&&` chain. A copy, move or
-  link into a folder `mkdir` made earlier on the line lands inside it, and its own name is
-  written too; into anything else made earlier on the line, whether it is a folder is not known,
-  and the line is not read fully. The rest of a line read fully is: words of plain characters
+  `rmdir -p`), as does `ln` with a single operand. Where a `cd` lands is not followed: only a
+  line that starts with exactly one `cd <folder> &&`, to a folder that is there when the command
+  is checked and not reached through a symbolic link, is read, the rest of it running in that
+  folder or not at all. Any other `cd`, `pushd` or `popd` makes the line not read fully: one
+  later on the line, after `;`, `||` or another `&&`, inside `if`, a second one, and one with
+  options or more than one operand. A copy, move or link into a folder `mkdir` made earlier on
+  the line lands inside it, and its own name is written too; into anything else made earlier on
+  the line, whether it is a folder is not known, and the line is not read fully. The rest of a line read fully is: words of plain characters
   (`*` and `?` included, unless they may match what an earlier command of the line makes),
   single-quoted text, double-quoted text
   without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a plain
@@ -88,8 +91,8 @@ memory, which is then injected into every other agent.
   `OLDPWD`, `CDPATH` or any other upper-case variable, a variable or a substitution (`$VAR`,
   `$(…)`, a backtick), a backslash, a subshell or group, a function, a loop, a here-document or
   here-string, a process substitution, code fed to a shell (`bash -c`, `| sh`), any other
-  builtin (`export`, `set`, `source`, `read`, `[[`, …), a `[…]` class or `{a,b}`, `!`, a
-  background `&`, and more than 4,000 commands. Such a line is never blocked, and never let
+  builtin (`export`, `set`, `source`, `read`, `[[`, …), any `cd` but a leading one, a `[…]`
+  class or `{a,b}`, `!`, a background `&`, and more than 4,000 commands. Such a line is never blocked, and never let
   through without a word. It may write the whole tree: whenever a file an enforced rule covers is
   present in the project, or a folder a rule's scope names is there, it gets one warning that names the
   rule and what it covers; the write guards (a split's ownership of files) are asked the same
