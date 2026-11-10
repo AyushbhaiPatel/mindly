@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { MindlyError } from '@mindly/core';
@@ -51,17 +51,57 @@ export function openDatabaseReadOnly(path: string, options: { busyTimeoutMs?: nu
   return db;
 }
 
+const SQLITE_MAGIC = 'SQLite format 3\0';
+/** Offset of the 4-byte big-endian user version in the database header. */
+const USER_VERSION_OFFSET = 60;
+const SQLITE_HEADER_BYTES = 100;
+
+/** The first `SQLITE_HEADER_BYTES` of the file (fewer when it is shorter). */
+function readHeader(path: string): Buffer {
+  const fd = openSync(path, 'r');
+  try {
+    const header = Buffer.alloc(SQLITE_HEADER_BYTES);
+    return header.subarray(0, readSync(fd, header, 0, SQLITE_HEADER_BYTES, 0));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function isNonEmptyFile(path: string): boolean {
+  try {
+    return statSync(path).size > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * The schema version of the database at `path`, read without changing anything: no migration, no
- * journal mode switch, no file created. Null when there is no database yet. A diagnostic uses it
- * to tell an older or newer database from one this Mindly can work with before it opens the store
- * (which upgrades an older database and refuses a newer one).
+ * The schema version of the database at `path`, read without migrating it. Null when there is no
+ * database yet; 0 for an empty file, which has no schema yet either. A diagnostic uses it to tell
+ * an older or newer database from one this Mindly can work with before it opens the store (which
+ * upgrades an older database and refuses a newer one).
+ *
+ * The version is taken from the file's header, so nothing is opened and no file is created. The
+ * header is only behind while a write-ahead log holds changes not yet copied into the file; when
+ * such a log is there, the database is opened read-only instead, which reads through the log (and
+ * may leave the `-shm` file SQLite needs for that).
  */
 export function peekSchemaVersion(
   path: string,
   options: { busyTimeoutMs?: number } = {},
 ): number | null {
   if (!existsSync(path)) return null;
+  if (!isNonEmptyFile(`${path}-wal`)) {
+    const header = readHeader(path);
+    if (header.length === 0) return 0;
+    if (
+      header.length === SQLITE_HEADER_BYTES &&
+      header.toString('latin1', 0, SQLITE_MAGIC.length) === SQLITE_MAGIC
+    ) {
+      return header.readUInt32BE(USER_VERSION_OFFSET);
+    }
+    // Not a database header: let SQLite say what is wrong with the file.
+  }
   const db = new DatabaseSync(path, { readOnly: true });
   try {
     db.exec(`PRAGMA busy_timeout = ${Math.trunc(options.busyTimeoutMs ?? 200)}`);

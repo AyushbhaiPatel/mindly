@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -250,5 +259,38 @@ describe('peekSchemaVersion', () => {
     newer.close();
     expect(peekSchemaVersion(path)).toBe(MIGRATIONS.length + 2);
     expect(() => Store.open(path)).toThrow(/newer than this Mindly/);
+  });
+
+  it('creates no file next to a cleanly closed database and reads through a journal', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-peek-')));
+    const path = join(dir, 'mindly.db');
+    Store.open(path).close();
+    expect(readdirSync(dir)).toEqual(['mindly.db']);
+    expect(peekSchemaVersion(path)).toBe(MIGRATIONS.length);
+    expect(readdirSync(dir)).toEqual(['mindly.db']);
+
+    // An empty file has no schema yet.
+    const empty = join(dir, 'empty.db');
+    writeFileSync(empty, '');
+    expect(peekSchemaVersion(empty)).toBe(0);
+    expect(readdirSync(dir).sort()).toEqual(['empty.db', 'mindly.db']);
+
+    // Not a database at all.
+    const junk = join(dir, 'junk.db');
+    writeFileSync(junk, 'x'.repeat(200));
+    expect(() => peekSchemaVersion(junk)).toThrow();
+
+    // A version that so far is only in the journal (another process holds the database open)
+    // is the one reported, not the stale one in the file's header.
+    const live = new DatabaseSync(path);
+    try {
+      live.exec('PRAGMA wal_autocheckpoint = 0');
+      live.exec(`PRAGMA user_version = ${MIGRATIONS.length + 5}`);
+      expect(existsSync(`${path}-wal`)).toBe(true);
+      expect(readFileSync(path).readUInt32BE(60)).toBe(MIGRATIONS.length);
+      expect(peekSchemaVersion(path)).toBe(MIGRATIONS.length + 5);
+    } finally {
+      live.close();
+    }
   });
 });
