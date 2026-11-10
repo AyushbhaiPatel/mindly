@@ -13,25 +13,32 @@ import {
 import { z } from 'zod';
 import { AgentKindSchema } from './domain.js';
 import { globToRegExp } from './glob.js';
-import { matchesZeroWidth } from './redact.js';
+import { consumesText, matchesZeroWidth } from './redact.js';
 import { MindlyError } from './errors.js';
 import { sha256 } from './text.js';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 
 /**
- * Why a redaction pattern cannot be used, or null. A pattern that can match without matching
- * any text (``, `a*`, `x?`, `\b`, `(?=.)`, `(?<=a)`) puts a redaction marker between the
- * characters of everything Mindly stores, so it is refused like one that does not compile. It is
- * tried on a few short samples: a zero-length match on any of them refuses it.
+ * Why a redaction pattern cannot be used, or null. Refused: an empty pattern; one with spaces at
+ * its ends (a typing mistake: a pattern that needs one there writes `\s`); one that does not
+ * compile; one with no part that consumes text (only lookarounds, anchors or `\b`), which can
+ * never cover a secret; and one that can match empty text on a few samples (`a*`, `x?`), which
+ * would mark every position. Redaction itself also never replaces an empty match.
  */
 export function unusableRedactionPattern(source: string): string | null {
   if (source.trim() === '') return 'is empty';
+  if (source !== source.trim()) {
+    return 'starts or ends with a space (write \\s where a space is meant)';
+  }
   let re: RegExp;
   try {
     re = new RegExp(source, 'g');
   } catch {
     return 'is not a valid regular expression';
+  }
+  if (!consumesText(source)) {
+    return 'matches no text (only lookarounds, anchors or \\b), so it cannot hide anything';
   }
   if (matchesZeroWidth(re)) {
     return 'can match empty text (between characters), so it would redact everything';
@@ -42,6 +49,7 @@ export function unusableRedactionPattern(source: string): string | null {
 /** Why a deny-list glob cannot be used, or null. */
 export function unusableDenyPath(glob: string): string | null {
   if (glob.trim() === '') return 'is empty';
+  if (glob !== glob.trim()) return 'starts or ends with a space, so it matches no file';
   try {
     globToRegExp(glob);
   } catch (err) {

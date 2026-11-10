@@ -884,32 +884,37 @@ describe('doctor, config, export, misc', () => {
     expect((await cli(sb, ['config', 'set', 'notify.triggers', 'standup,nope'])).code).toBe(1);
   });
 
-  it('config clears a list for a blank value and keeps a plain one as typed', async () => {
+  it('config clears a list for a blank value and refuses one with spaces at its ends', async () => {
     const sb = sandbox();
     const file = join(sb.mindlyHome, 'config.json');
     for (const empty of ['', ' ', '""']) {
       expect((await cli(sb, ['config', 'set', 'redaction.extraPatterns', empty])).code).toBe(0);
       expect(json(readFileSync(file, 'utf8'))).toEqual({ redaction: { extraPatterns: [] } });
     }
-    expect(
-      (await cli(sb, ['config', 'set', 'redaction.extraPatterns', '  ACME-\\d{6} '])).code,
-    ).toBe(0);
-    // Spaces at the ends may be part of the pattern: kept.
-    expect(json(readFileSync(file, 'utf8'))).toEqual({
-      redaction: { extraPatterns: ['  ACME-\\d{6} '] },
-    });
+    const spaced = await cli(sb, ['config', 'set', 'redaction.extraPatterns', '  ACME-\\d{6} ']);
+    expect(spaced.code).toBe(1);
+    expect(spaced.stderr).toContain('starts or ends with a space');
+    const glob = await cli(sb, ['config', 'set', 'redaction.denyPaths', 'config/*.secret ']);
+    expect(glob.code).toBe(1);
+    expect(glob.stderr).toContain('starts or ends with a space, so it matches no file');
+    // A pattern that only looks around covers nothing: refused with that reason.
+    const look = await cli(sb, ['config', 'set', 'redaction.extraPatterns', '(?=password)']);
+    expect(look.code).toBe(1);
+    expect(look.stderr).toContain('matches no text');
+    // Spaces at the ends are a typing mistake: refused, with what to write instead.
+    expect(json(readFileSync(file, 'utf8'))).toEqual({ redaction: { extraPatterns: [] } });
     // Patterns that would redact between characters are refused, with the reason.
     for (const pattern of ['a*', '(?:)', 'x?', '\\b', '(?=.)', '(?<=a)', '(?=x)']) {
       const r = await cli(sb, ['config', 'set', 'redaction.extraPatterns', pattern]);
       expect(r.code, pattern).toBe(1);
-      expect(r.stderr).toContain('can match empty text');
+      expect(r.stderr).toMatch(/can match empty text|matches no text/);
     }
     expect((await cli(sb, ['config', 'set', 'redaction.extraPatterns', '\\bsecret\\b'])).code).toBe(
       0,
     );
-    const glob = await cli(sb, ['config', 'set', 'redaction.denyPaths', 'config/{prod']);
-    expect(glob.code).toBe(1);
-    expect(glob.stderr).toContain('is not a valid glob');
+    const broken = await cli(sb, ['config', 'set', 'redaction.denyPaths', 'config/{prod']);
+    expect(broken.code).toBe(1);
+    expect(broken.stderr).toContain('is not a valid glob');
     expect(
       (await cli(sb, ['config', 'set', 'redaction.extraPatterns', JSON.stringify(['ok-\\d+', ''])]))
         .code,
@@ -970,7 +975,9 @@ describe('doctor, config, export, misc', () => {
     mkdirSync(sb.mindlyHome, { recursive: true });
     writeFileSync(
       join(sb.mindlyHome, 'config.json'),
-      JSON.stringify({ redaction: { extraPatterns: ['', 'ACME-\\d{6}'] } }),
+      JSON.stringify({
+        redaction: { extraPatterns: ['', 'ACME-\\d{6}'], denyPaths: ['config/*.secret '] },
+      }),
     );
     expect(
       (await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm not npm'])).code,
@@ -980,6 +987,7 @@ describe('doctor, config, export, misc', () => {
     expect(get.code).toBe(0);
     expect(json(get.stdout)).toEqual(['ACME-\\d{6}']);
     expect(get.stderr).toContain('ignored the pattern ""');
+    expect(get.stderr).toContain('ignored the glob "config/*.secret "');
     const doctor = await cli(sb, ['doctor', '--json']);
     const checks = json<{ checks: { name: string; status: string; detail: string }[] }>(
       doctor.stdout,
@@ -988,9 +996,13 @@ describe('doctor, config, export, misc', () => {
       status: 'warn',
       detail: expect.stringContaining('ignored the pattern ""'),
     });
-    // Unsetting the list fixes the file.
-    expect((await cli(sb, ['config', 'unset', 'redaction.extraPatterns'])).code).toBe(0);
-    expect((await cli(sb, ['config', 'get', 'redaction.extraPatterns'])).stderr).toBe('');
+    // Unsetting a list fixes that list; the other one is still reported until it is fixed too.
+    const unset = await cli(sb, ['config', 'unset', 'redaction.extraPatterns']);
+    expect(unset.code).toBe(0);
+    expect(unset.stderr).toContain('ignored the glob "config/*.secret "');
+    expect(unset.stderr).not.toContain('ignored the pattern');
+    expect((await cli(sb, ['config', 'unset', 'redaction.denyPaths'])).code).toBe(0);
+    expect((await cli(sb, ['config', 'get', 'redaction'])).stderr).toBe('');
   });
 
   it('config keeps a list item that contains commas whole', async () => {

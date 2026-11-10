@@ -11,7 +11,7 @@ import {
   UserConfigSchema,
 } from '../src/config.js';
 import { isDeniedPath } from '../src/paths.js';
-import { redactText } from '../src/redact.js';
+import { redact, redactText } from '../src/redact.js';
 
 describe('bounded config reads', () => {
   it.skipIf(process.platform === 'win32')(
@@ -50,6 +50,10 @@ describe('redaction settings that cannot be used', () => {
     '(?=x)',
     '$',
     '^',
+    // Lookarounds on text the samples do not contain: they match nothing either.
+    ...['(?=z)', '(?=password)', '(?=\\d{5})', '(?=AKIA)', '(?<=Z)', '\\B(?=q)', '(?:(?!x)|^)'],
+    // Spaces at the ends are a typing mistake.
+    ...[' ACME-\\d+', 'ACME-\\d+ '],
   ];
 
   it('refuses patterns that are empty, invalid or match empty text', () => {
@@ -57,11 +61,21 @@ describe('redaction settings that cannot be used', () => {
       const r = UserConfigSchema.safeParse({ redaction: { extraPatterns: [pattern] } });
       expect(r.success, JSON.stringify(pattern)).toBe(false);
     }
-    for (const glob of ['', '  ', 'config/{prod,staging.json']) {
+    for (const glob of ['', '  ', 'config/{prod,staging.json', 'config/*.secret ', ' build/**']) {
       const r = UserConfigSchema.safeParse({ redaction: { denyPaths: [glob] } });
       expect(r.success, JSON.stringify(glob)).toBe(false);
     }
-    for (const pattern of ['\\bsecret\\b', 'ACME-[A-Z0-9]{20,40}', 'x+', '(?<=key=)\\w+']) {
+    for (const pattern of [
+      '\\bsecret\\b',
+      'ACME-[A-Z0-9]{20,40}',
+      'x+',
+      '(?<=key=)\\w+',
+      'password(?=:)\\S+',
+      '\\u{1F511}',
+      '[^]',
+      '(?<tok>tk_\\w+)',
+      'a{2}',
+    ]) {
       const r = UserConfigSchema.safeParse({ redaction: { extraPatterns: [pattern] } });
       expect(r.success, pattern).toBe(true);
     }
@@ -103,6 +117,17 @@ describe('redaction settings that cannot be used', () => {
 });
 
 describe('redacting with a pattern that matches empty text', () => {
+  it('never puts a marker where no text matched', () => {
+    const text = 'my password is hunter2, password again';
+    for (const pattern of ['(?=password)', '(?=z)', '(?=\\d{5})', '(?<=Z)', '\\B(?=q)']) {
+      const r = redact(text, { extraPatterns: [pattern] });
+      expect(r.text, pattern).toBe(text);
+      expect(r.count, pattern).toBe(0);
+    }
+    // A pattern that can match either way only replaces what it really covers.
+    expect(redactText('id: ab-12 x', { extraPatterns: ['ab-\\d*'] })).toBe('id: [REDACTED] x');
+  });
+
   it('ignores it instead of marking every position', () => {
     for (const pattern of ['\\b', '(?=.)', '', 'a*']) {
       expect(redactText('deploy to prod', { extraPatterns: [pattern] }), pattern).toBe(
