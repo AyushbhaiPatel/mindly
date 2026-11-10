@@ -88,15 +88,25 @@ describe('probeDaemonPort', () => {
 
   it('folds letter case only where the volume ignores it', () => {
     const root = mkdtempSync(join(tmpdir(), 'mindly-home-id-'));
-    // Two homes that differ only in case, on a volume that keeps them apart.
     mkdirSync(join(root, 'Data'));
-    mkdirSync(join(root, 'data'));
-    const caseSensitive = statSync(join(root, 'Data')).ino !== statSync(join(root, 'data')).ino;
-    if (caseSensitive) {
-      expect(daemonHomeId(join(root, 'Data'))).not.toBe(daemonHomeId(join(root, 'data')));
+    // Is the folder found under its name in another case? Then this volume ignores case (the
+    // default on macOS and Windows), and both spellings name one home.
+    let ignoresCase: boolean;
+    try {
+      ignoresCase = statSync(join(root, 'dATA')).ino === statSync(join(root, 'Data')).ino;
+    } catch {
+      ignoresCase = false;
     }
-    // Where the same folder is found under its name in another case, the volume ignores case
-    // (here imitated with a link): the home is the same however it is typed.
+    if (ignoresCase) {
+      const id = daemonHomeId(join(root, 'Data'));
+      expect(daemonHomeId(join(root, 'dATA'))).toBe(id);
+      expect(daemonHomeId(join(root, 'data'))).toBe(id);
+      return;
+    }
+    // Two homes that differ only in case are two homes where the volume keeps them apart.
+    mkdirSync(join(root, 'data'));
+    expect(daemonHomeId(join(root, 'Data'))).not.toBe(daemonHomeId(join(root, 'data')));
+    // A link under the flipped-case name imitates a volume that ignores case.
     mkdirSync(join(root, 'Home'));
     symlinkSync('Home', join(root, 'hOME'));
     const real = realpathSync(join(root, 'Home'));
