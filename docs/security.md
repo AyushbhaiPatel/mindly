@@ -62,11 +62,6 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   is never captured.
 - Model API keys are read from environment variables at call time and never written to disk by
   Mindly.
-- Text sent to a configured model goes through the same redaction as stored text, including
-  `redaction.extraPatterns`, and so does the reply. The model is asked only about short
-  correction sentences from the user's own prompt, within a fraction of the hook's deadline; when
-  it does not answer in time the rule is stored as it would be with no model. A model answer can
-  narrow where a rule applies or say a sentence is not a rule, but never raises its trust.
 - Pager payloads contain titles and counts only, never code or prompt text.
 - Checkpoints (`mindly bisect`) store the working tree after each agent edit as git commits
   inside the repository itself, under `refs/mindly/steps/<worktree id>/<step>`. They hold code,
@@ -88,6 +83,11 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   deny-list are never read, files over 512 KB are skipped, and a path that now resolves outside
   the tree (a symlink) is not followed. The track record is computed from local data, is not
   available to agents over MCP, and is never included in a saves card.
+- Text sent to a configured model goes through the same redaction as stored text, including
+  `redaction.extraPatterns`, and so does the reply. The model is asked only about short
+  correction sentences from the user's own prompt, within a fraction of the hook's deadline; when
+  it does not answer in time the rule is stored as it would be with no model. A model answer can
+  narrow where a rule applies or say a sentence is not a rule, but never raises its trust.
 
 ### T4. Local network and browser attacks on the daemon
 

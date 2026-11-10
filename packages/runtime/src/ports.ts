@@ -44,6 +44,7 @@ import {
   type ImportGraph,
 } from '@mindly/git';
 import type { CheckpointGitPort, SplitGitPort, StepGitPort } from '@mindly/engine';
+import { NoneProvider } from '@mindly/llm';
 
 /** `CheckpointGitPort` backed by `@mindly/git`. Errors propagate: the checkpoint service fails open. */
 export function createCheckpointGitPort(): CheckpointGitPort {
@@ -174,7 +175,7 @@ export function createSplitGitPort(): SplitGitPort {
     },
   };
 }
-import { createLlmHelpers, createProvider, NoneProvider } from '@mindly/llm';
+import { createLlmHelpers, createProvider } from '@mindly/llm';
 import { createNotifier } from '@mindly/notify';
 
 const GRAPH_TTL_MS = 60_000;
