@@ -53,7 +53,7 @@ team that never talks to each other:
 
 ## Quickstart
 
-You need **Node.js 22.13 or newer** and **git**, on macOS or Linux.
+You need **Node.js 22.13 or newer** (23.4 or newer if you are on Node 23) and **git**, on macOS or Linux.
 
 **1. Install**
 

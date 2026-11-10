@@ -102,9 +102,23 @@ export class Store {
     return transaction(this.db, fn);
   }
 
+  /**
+   * Closes the database once; a second call does nothing. The store keeps its own flag:
+   * `DatabaseSync#isOpen` is newer than the oldest Node Mindly supports (22.13), where it reads
+   * `undefined` and would leave the database open.
+   */
   close(): void {
-    if (this.db.isOpen) this.db.close();
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      this.db.close();
+    } catch (err) {
+      // Closed directly by its owner already: nothing left to do.
+      if ((err as { code?: unknown }).code !== 'ERR_INVALID_STATE') throw err;
+    }
   }
+
+  private closed = false;
 
   /** Reclaims space after large deletions (`mindly forget`). */
   vacuum(): void {
