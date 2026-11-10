@@ -124,6 +124,19 @@ describe('what a shell hook costs', () => {
     expect(under(root)).toEqual([root]);
   });
 
+  it('searches a folder of more than a hundred thousand files beside a small one', async () => {
+    const { root, mindly, hook } = project();
+    await enforce(mindly, root, '**/*.pem');
+    mkdirSync(join(root, 'build'));
+    for (let i = 0; i < 130_000; i++) writeFileSync(join(root, 'build', `f${i}.o`), '');
+    mkdirSync(join(root, 'certs'));
+    writeFileSync(join(root, 'certs', 'server.pem'), '');
+    for (const command of ['rm -rf build certs', 'rm -rf *']) {
+      const r = await hook('pre_tool', command);
+      expect(r.decision, command).toBe('deny');
+    }
+  }, 60_000);
+
   it('answers within a fraction of a second in a repository of ten thousand files', async () => {
     const { root, mindly, hook } = project();
     for (const [dir, n] of [

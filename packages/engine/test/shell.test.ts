@@ -148,8 +148,9 @@ describe('write targets of a shell command', () => {
       'sort names.txt',
     ]) {
       // A bare word is a path only when a file of that name exists, which the caller checks.
+      // Paths that stand in for a question to git only count when git does not answer.
       expect(
-        read(cmd).filter((t) => !t.ifExists),
+        read(cmd).filter((t) => !t.ifExists && t.fallback === null),
         cmd,
       ).toEqual([]);
     }
@@ -233,42 +234,68 @@ describe('write targets of a shell command', () => {
 
   it('knows which git subcommands rewrite the files they are given', () => {
     const tree = (p: string) => [p, `${p}/**`];
-    // From the index, only what differs from it changes: the caller asks git which those are.
-    expect(targets('git checkout -- src/auth.ts')).toEqual(['src/auth.ts (restore)']);
-    expect(targets('git checkout .')).toEqual(['. (restore)']);
-    expect(targets('git checkout --ours certs/a.pem')).toEqual(['certs/a.pem (restore)']);
-    expect(targets('git checkout -p certs')).toEqual(['certs (restore)']);
-    expect(targets('git restore src/')).toEqual(['src (restore)']);
-    expect(targets('git stash push certs/a.pem')).toEqual(['certs/a.pem (restore)']);
-    expect(targets('git stash push -m wip -- certs')).toEqual(['certs (restore)']);
+    const ask = (command: string) =>
+      readShellWrites(command, { home: HOME, top: TOP }).questions.map(
+        (q) =>
+          `${q.cwd || '.'} | ${q.against.join(' ') || '(index)'} | ${q.pathspecs.join(' ') || '(all)'}${q.untracked ? ' | u' : ''}`,
+      );
+    // What a command that brings files back changes is asked of git, with the pathspecs as
+    // given: from the index, from HEAD (`--staged`, a stash), or from a revision.
+    expect(ask('git checkout -- src/auth.ts')).toEqual(['. | (index) | src/auth.ts']);
+    expect(ask("git checkout -- '*.pem'")).toEqual(['. | (index) | *.pem']);
+    expect(ask("git restore ':(glob)**/*.pem'")).toEqual(['. | (index) | :(glob)**/*.pem']);
+    expect(ask('git checkout --ours certs/a.pem')).toEqual(['. | (index) | certs/a.pem']);
+    expect(ask('git restore -SW certs/a.pem')).toEqual(['. | HEAD | certs/a.pem']);
+    expect(ask('git restore --staged --worktree .')).toEqual(['. | HEAD | .']);
+    expect(ask('git restore --source=HEAD~1 prisma')).toEqual(['. | HEAD~1 | prisma']);
+    expect(ask('git checkout HEAD~1 prisma')).toEqual(['. | HEAD~1 | prisma']);
+    expect(ask('git checkout stash@{0} -- prisma/a.sql')).toEqual(['. | stash@{0} | prisma/a.sql']);
+    expect(ask("git stash push -- '*.pem'")).toEqual(['. | HEAD | *.pem']);
+    expect(ask('git stash -u')).toEqual(['. | HEAD | (all) | u']);
+    expect(ask('git stash')).toEqual(['. | HEAD | (all)']);
+    expect(ask('git reset --hard')).toEqual(['. | HEAD | (all)']);
+    expect(ask('git reset --hard HEAD~2')).toEqual(['. | HEAD~2 | (all)']);
+    expect(ask('git checkout -f')).toEqual(['. | HEAD | (all)']);
+    expect(ask('git checkout -f release')).toEqual(['. | release | (all)']);
+    expect(ask('git switch -f release')).toEqual(['. | release | (all)']);
+    expect(ask('cd src && git restore auth.ts')).toEqual(['src | (index) | auth.ts']);
+    expect(ask('git -C packages/web restore src/a.ts')).toEqual([
+      'packages/web | (index) | src/a.ts',
+    ]);
+    // Moving the index, switching branches and dry runs write no file.
+    for (const cmd of [
+      'git restore --staged x',
+      'git reset -- x',
+      'git switch main',
+      'git stash list',
+    ]) {
+      expect(readShellWrites(cmd).questions, cmd).toEqual([]);
+    }
     // One word is a path when such a file exists, else a branch.
-    expect(read('git checkout certs')).toEqual([
-      expect.objectContaining({ path: 'certs', how: 'restore', ifExists: true }),
+    expect(readShellWrites('git checkout certs').questions).toEqual([
+      expect.objectContaining({ pathspecs: ['certs'], ifExists: true }),
     ]);
-    expect(read('git checkout fix/.env-loading')[0]).toMatchObject({ ifExists: true });
-    // From a revision, the files are what that revision holds, whatever their state now.
-    expect(targets('git checkout HEAD~1 prisma')).toEqual(tree('prisma'));
-    expect(targets('git checkout stash@{0} -- prisma/a.sql')).toEqual(tree('prisma/a.sql'));
-    expect(targets('git restore --source=HEAD~1 prisma')).toEqual(tree('prisma'));
-    expect(targets('git restore -s HEAD~1 --staged --worktree prisma')).toEqual(tree('prisma'));
-    expect(targets('git rm -r prisma')).toEqual(tree('prisma'));
-    expect(targets('git -c a=b rm -r prisma/migrations')).toEqual(tree('prisma/migrations'));
-    // Without a path it cleans where it runs; it only touches files that exist.
-    expect(targets('git clean -fdx')).toEqual(['. (clean)']);
-    expect(targets('git clean -fdx prisma')).toEqual(['prisma (clean)']);
+    // Should git not answer, the paths given stand in for it.
+    expect(read("git checkout -- ':(glob)certs/*.pem'")).toEqual([
+      expect.objectContaining({ path: 'certs/*.pem', glob: true, tree: true, fallback: 0 }),
+    ]);
+    expect(read('git reset --hard')).toEqual([
+      expect.objectContaining({ path: '.', tree: true, fallback: 0 }),
+    ]);
+    // `git rm` removes the tracked files its pathspecs match: git lists them.
+    expect(readShellWrites("git rm -r --quiet 'certs/*'").questions).toEqual([
+      expect.objectContaining({ pathspecs: ['certs/*'], tracked: true }),
+    ]);
+    expect(read('git -c a=b rm -r prisma/migrations')).toEqual([
+      expect.objectContaining({ path: 'prisma/migrations', tree: true, fallback: 0 }),
+    ]);
+    void tree;
+    // Without a path it cleans where it runs; it only touches files that exist, and ignored
+    // ones only with -x.
+    expect(targets('git clean -fd')).toEqual(['. (clean)']);
+    expect(targets('git clean -fdx')).toEqual(['. (clean-ignored)']);
+    expect(targets('git clean -fdx prisma')).toEqual(['prisma (clean-ignored)']);
     expect(targets('git mv prisma db')).toEqual(['db/[prisma]/**', 'prisma', 'prisma/**']);
-    expect(targets('git -C packages/web restore src/a.ts')).toEqual([
-      'packages/web/src/a.ts (restore)',
-    ]);
-    // One word after `checkout` that exists is a path brought back from the index.
-    expect(read('git checkout prisma/a.sql')).toEqual([
-      expect.objectContaining({
-        path: 'prisma/a.sql',
-        how: 'restore',
-        certain: true,
-        ifExists: true,
-      }),
-    ]);
   });
 
   it('reports where copies land', () => {
@@ -442,6 +469,7 @@ describe('write targets of a shell command', () => {
         sources: [],
         only: null,
         ifExists: false,
+        fallback: null,
       },
     ]);
     // A shell's wildcard does not stand for a leading dot; a pattern a program expands does.
@@ -464,6 +492,12 @@ describe('write targets of a shell command', () => {
     expect(targets('rm f{1..3}.log')).toEqual(['f1.log', 'f2.log', 'f3.log']);
     expect(targets("rm '{a,b}.ts'")).toEqual(['{a,b}.ts']);
     expect(read('rm f{1..100000}.log')[0]).toMatchObject({ path: 'f{1..100000}.log' });
+    expect(readShellWrites('rm f{1..100000}.log').limit).toContain('brace expansion');
+    // Too many alternatives: the word is not read, and each plain alternative is still checked.
+    const many = Array.from({ length: 300 }, (_, i) => `a${i}`).join(',');
+    const big = readShellWrites(`rm -f {${many},certs/server.pem}`);
+    expect(big.limit).toContain('brace expansion');
+    expect(big.targets.map((t) => t.path)).toContain('certs/server.pem');
     expect(read('rm -rf dist/*')[0]).toMatchObject({ path: 'dist/*', glob: true, tree: true });
     expect(read('rm -f *.log')[0]).toMatchObject({ path: '*.log', glob: true, tree: false });
     expect(read('rm src/*.{ts,tsx}')[0]).toMatchObject({ path: 'src/*.ts', glob: true });
@@ -540,6 +574,28 @@ describe('write targets of a shell command', () => {
     expect(targets(`python3 -c "import subprocess; subprocess.run(['rm','a/b.ts'])"`)).toEqual([
       'a/b.ts',
     ]);
+    // Modes given by keyword or by a variable, flags of os.open, and paths joined from literals.
+    for (const code of [
+      `python3 -c "open('certs/server.pem', mode='w').write('x')"`,
+      `python3 -c "open(file='certs/server.pem', mode='w').write('x')"`,
+      `python3 -c "m='w'; open('certs/server.pem', m).write('x')"`,
+      `python3 -c "import io; io.open('certs/server.pem', 'w')"`,
+      `python3 -c "import os; fd=os.open('certs/server.pem', os.O_WRONLY|os.O_TRUNC); os.close(fd)"`,
+      `node -e "require('fs').writeFileSync(require('path').join('certs','server.pem'), 'x')"`,
+      `python3 -c "import os; os.unlink(os.path.join('certs', 'server.pem'))"`,
+      `python3 -c "from pathlib import Path; (Path('certs') / 'server.pem').unlink()"`,
+      `python3 -c "import os; os.remove(f'certs/server.pem')"`,
+      `python3 -c "import os; os.remove(r'certs/server.pem')"`,
+    ]) {
+      expect(targets(code), code).toContain('certs/server.pem');
+    }
+    for (const code of [
+      `python3 -c "print(open('certs/server.pem', encoding='utf8').read())"`,
+      `python3 -c "print(open('certs/server.pem', mode='r').read())"`,
+      `python3 -c "import os; os.open('certs/server.pem', os.O_RDONLY)"`,
+    ]) {
+      expect(targets(code), code).toEqual([]);
+    }
   });
 
   it('reads substitutions where they are written, quotes and all', () => {
@@ -617,6 +673,16 @@ describe('write targets of a shell command', () => {
     ]) {
       expect(read(cmd), cmd).toEqual([]);
     }
+    // Installing or cleaning in another folder writes inside it.
+    for (const [cmd, dir] of [
+      ['pnpm -C packages/api add left-pad', 'packages/api'],
+      ['npm --prefix packages/api install', 'packages/api'],
+      ['yarn --cwd packages/api install', 'packages/api'],
+      ['make -C packages/api clean', 'packages/api'],
+    ] as const) {
+      expect(possible(cmd), cmd).toEqual([dir, `${dir}/**`]);
+    }
+    expect(read('make -C packages/api')).toEqual([]);
     // Known writers name what they write.
     expect(targets('curl -o certs/server.pem https://x/y')).toEqual(['certs/server.pem']);
     expect(targets('curl -sSLo certs/server.pem https://x/y')).toEqual(['certs/server.pem']);
@@ -633,7 +699,11 @@ describe('write targets of a shell command', () => {
   });
 
   it('says when a limit cut the reading short', () => {
-    expect(readShellWrites('rm a.ts')).toEqual({ targets: [expect.anything()], limit: null });
+    expect(readShellWrites('rm a.ts')).toEqual({
+      targets: [expect.anything()],
+      questions: [],
+      limit: null,
+    });
     const many = Array.from({ length: 700 }, (_, i) => `rm f${i}.ts`).join('; ');
     const cut = readShellWrites(many);
     expect(cut.targets).toHaveLength(500);

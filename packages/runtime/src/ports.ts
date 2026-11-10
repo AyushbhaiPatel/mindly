@@ -249,8 +249,8 @@ export function createGitPort(): GitPort {
       const how = {
         known: ['--cached', '--others', '--exclude-standard'],
         ignored: ['--others', '--ignored', '--exclude-standard', '--directory'],
-        changed: ['--modified', '--deleted'],
         tracked: ['--cached'],
+        dirs: ['--others', '--exclude-standard', '--directory', '--no-empty-directory'],
       }[query.kind];
       try {
         const res = await runGit(['ls-files', '-z', ...how, '--', ...query.pathspecs], {
@@ -267,6 +267,61 @@ export function createGitPort(): GitPort {
           isMindlyError(err, 'timeout') ||
           (isMindlyError(err) && err.message.includes('size limit'));
         return cut ? { files: [], complete: false } : null;
+      }
+    },
+    whatGitChanges: async (cwd, query) => {
+      // A revision comes from a command line: it is never let through as an option.
+      if (query.against.some((r) => r.startsWith('-') || r === '' || r.length > 256)) return null;
+      const options = {
+        cwd,
+        timeoutMs: query.timeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+        // The pathspecs are the command's own, read the way git reads them for it.
+        env: { GIT_LITERAL_PATHSPECS: '0' },
+      };
+      try {
+        const [top, diff, untracked] = await Promise.all([
+          runGit(['rev-parse', '--show-toplevel'], options),
+          // `git rm` removes the tracked files the pathspecs match; the others change what
+          // differs between the working tree and where the files come from.
+          query.tracked
+            ? runGit(
+                ['ls-files', '-z', '--full-name', '--cached', '--', ...query.pathspecs],
+                options,
+              )
+            : runGit(
+                [
+                  'diff',
+                  '--name-only',
+                  '-z',
+                  '--no-renames',
+                  ...query.against,
+                  '--',
+                  ...query.pathspecs,
+                ],
+                options,
+              ),
+          query.untracked
+            ? runGit(
+                [
+                  'ls-files',
+                  '-z',
+                  '--full-name',
+                  '--others',
+                  '--exclude-standard',
+                  '--',
+                  ...query.pathspecs,
+                ],
+                options,
+              )
+            : Promise.resolve(null),
+        ]);
+        const files = [diff.stdout, untracked?.stdout ?? '']
+          .flatMap((out) => out.split('\0'))
+          .filter((f) => f !== '');
+        return Object.assign(files, { root: realpathSync(top.stdout.trim()) });
+      } catch {
+        return null;
       }
     },
     currentBranch: (cwd) => safe(() => currentBranch(cwd), null),

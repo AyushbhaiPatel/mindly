@@ -531,6 +531,98 @@ describe('hook flow', () => {
     }
   });
 
+  it('walks the written folder itself when git does not answer, and still blocks', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-')));
+    mkdirSync(join(root, 'certs'));
+    writeFileSync(join(root, 'certs', 'server.pem'), '');
+    mkdirSync(join(root, 'dist'));
+    writeFileSync(join(root, 'dist', 'a.js'), '');
+    const inRoot = async (cwd: string) =>
+      cwd === root || cwd.startsWith(`${root}/`) ? root : null;
+    // A git that never answers a listing, and one that fails outright.
+    for (const listFiles of [
+      () => new Promise<null>(() => undefined),
+      async () => {
+        throw new Error('git broke');
+      },
+    ]) {
+      const mindly = Mindly.open({
+        inMemory: true,
+        clock: new FakeClock(),
+        ports: { git: { ...fakeGit, findRepoRoot: inRoot, listFiles } },
+      });
+      const ctx = await mindly.projects.resolve(root);
+      mindly.memory.remember({
+        projectId: ctx.project.id,
+        projectRoot: root,
+        kind: 'rule',
+        title: 'Certificates are issued by hand',
+        body: 'Ask first.',
+        scopePaths: ['**/*.pem'],
+        source: USER,
+        enforce: true,
+      });
+      const shell = (command: string) =>
+        mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+      const started = performance.now();
+      const r = await shell('rm -rf certs');
+      expect(performance.now() - started).toBeLessThan(1500);
+      expect(r.decision).toBe('deny');
+      expect((await shell('rm certs/*.pem')).decision).toBe('deny');
+      expect((await shell('rm -rf dist')).decision).toBeNull();
+    }
+  });
+
+  it('keeps the letter case of a rule when the command ignores case', async () => {
+    const { root, mindly } = setup();
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Certificates are issued by hand',
+      body: 'Ask first.',
+      scopePaths: ['**/*.pem'],
+      source: USER,
+      enforce: true,
+    });
+    mkdirSync(join(root, 'certs'));
+    writeFileSync(join(root, 'certs', 'OLD.PEM'), '');
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    expect((await shell("find . -iname '*.pem' -delete")).decision).toBeNull();
+    writeFileSync(join(root, 'certs', 'new.pem'), '');
+    expect((await shell("find . -iname '*.PEM' -delete")).decision).toBe('deny');
+  });
+
+  it('still places plain paths when the time for the rest has run out', async () => {
+    const { root, mindly } = setup();
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Certificates are issued by hand',
+      body: 'Ask first.',
+      scopePaths: ['**/*.pem'],
+      source: USER,
+      enforce: true,
+    });
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    // A clock that has always run out: the heavy part is not placed, the plain path is.
+    let t = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => (t += 10_000));
+    try {
+      const command = `rm -rf ${Array.from({ length: 50 }, (_, i) => `dir${i}/*`).join(' ')} certs/a.pem`;
+      const r = await shell(command);
+      expect(r.decision).toBe('deny');
+      expect(r.reason).toContain('certs/a.pem');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('answers within its time, and says what it did not get to', async () => {
     const { root, mindly } = setup();
     const ctx = await mindly.projects.resolve(root);
@@ -546,13 +638,14 @@ describe('hook flow', () => {
     });
     const shell = (command: string) =>
       mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
-    // A clock that has always run out: nothing is read, and the agent is told so.
+    // A clock that has always run out: what is not searched is not cleared, and the agent is
+    // told so.
     let t = 0;
     const clock = vi.spyOn(performance, 'now').mockImplementation(() => (t += 10_000));
     try {
       const r = await shell('rm -rf certs');
       expect(r.decision).toBeNull();
-      expect(r.context).toContain('did not read this whole command');
+      expect(r.context).toContain('could not search all of certs');
     } finally {
       clock.mockRestore();
     }

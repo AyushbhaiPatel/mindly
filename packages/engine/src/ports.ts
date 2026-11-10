@@ -33,18 +33,36 @@ export interface GitPort {
    */
   workingTrees?(cwd: string): Promise<string[] | null>;
   /**
+   * The files a git command that brings files back would change, run from `cwd`: the paths (from
+   * `root`, the top of the working tree) that `git diff` reports between the working tree and
+   * `against` (the index when empty, else one revision), for `pathspecs` exactly as a command
+   * gave them (none: the whole tree). With `untracked`, the untracked files they match too.
+   * Null when git cannot say (no repository, an unknown revision, no answer in time).
+   */
+  whatGitChanges?(
+    cwd: string,
+    query: {
+      against: string[];
+      pathspecs: string[];
+      untracked: boolean;
+      /** List the tracked files the pathspecs match instead (`git rm`). */
+      tracked?: boolean;
+      timeoutMs: number;
+    },
+  ): Promise<(string[] & { root: string }) | null>;
+  /**
    * Paths (relative to `root`, a working tree) that git lists for `pathspecs`, without walking
    * ignored directories. `known`: tracked files and untracked files that are not ignored.
    * `ignored`: ignored files, and each ignored directory as one entry ending in `/`. `changed`:
-   * tracked files that differ from the index or are gone. `tracked`: tracked files. `complete`
-   * is false when the listing
+   * `tracked`: tracked files. `dirs`: untracked directories, each one entry ending in `/`.
+   * `complete` is false when the listing
    * was cut by the time limit or its size; null when git cannot be asked at all. Optional: with
    * it, looking for the files a rule covers costs what the rule matches, not the size of the tree.
    */
   listFiles?(
     root: string,
     query: {
-      kind: 'known' | 'ignored' | 'changed' | 'tracked';
+      kind: 'known' | 'ignored' | 'tracked' | 'dirs';
       pathspecs: string[];
       timeoutMs: number;
     },

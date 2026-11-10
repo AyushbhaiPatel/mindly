@@ -30,6 +30,7 @@ import {
   normalizeCommandLine,
   pathNamer,
   readShellWrites,
+  type GitQuestion,
   shellMayWrite,
   shellMayWriteFiles,
 } from './shell.js';
@@ -458,15 +459,49 @@ export class HookHandler {
     let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
     const seen = new Set<string>();
+    // git commands that bring files back (`checkout -- x`, `restore`, `stash`, `reset --hard`):
+    // git says which files they change. Those it could not answer for fall back to the paths
+    // they were given. After the command ran there is nothing left to ask: the paths are used.
+    const unanswered = new Set<number>();
+    for (const [i, q] of reading.questions.entries()) {
+      const files = ownTreeOnly ? null : await this.askGit(cwd, q, timeUp);
+      if (files === null) {
+        unanswered.add(i);
+        continue;
+      }
+      for (const abs of files) {
+        // git names the entry itself: a symbolic link is replaced or removed, not what it points
+        // to, so only the folder it sits in is resolved.
+        const dir = await this.locate(project, treeRoot, dirname(abs), trees);
+        if (dir === null || dir === 'unknown') {
+          if (dir === 'unknown') certain.unchecked++;
+          continue;
+        }
+        const rel = dir.rel === '' ? basename(abs) : `${dir.rel}/${basename(abs)}`;
+        const at = join(dir.abs, basename(abs));
+        const deny = this.k.config.redaction.denyPaths;
+        if (!seen.has(`true:${at}`)) {
+          seen.add(`true:${at}`);
+          certain.paths.push({ rel, abs: at, own: dir.own && !isDeniedPath(rel, deny) });
+        }
+      }
+    }
+    let late = false;
     for (const t of reading.targets) {
-      if (timeUp()) {
+      if (t.fallback !== null && !unanswered.has(t.fallback)) continue;
+      // Out of time: paths are still placed (without looking up other working trees), but not
+      // copies, whose sources would have to be listed. Searching what they hold is bounded
+      // apart, and reports what it did not get to.
+      const simple = t.entries.length === 0;
+      if (!late && timeUp()) late = true;
+      if (late && !simple) {
         limit ??= 'no time was left to place all it writes';
-        break;
+        continue;
       }
       const into = t.certain ? certain : possible;
-      const restore = t.how === 'restore';
+      const fallback = t.fallback !== null;
       const place = async (abs: string): Promise<Located | null> => {
-        const found = await this.locate(project, treeRoot, abs, trees);
+        const found = await this.locate(project, treeRoot, abs, late ? null : trees);
         if (found === 'unknown') into.unchecked++;
         return found === 'unknown' ? null : found;
       };
@@ -490,8 +525,8 @@ export class HookHandler {
           only: t.only,
           dotfiles: t.dotfiles,
           nocase: t.nocase,
-          restore,
-          existing: t.how === 'clean',
+          existing: t.how === 'clean' || t.how === 'clean-ignored',
+          withIgnored: t.how === 'clean-ignored',
         });
       };
       const landing = (at: Located | null): void => {
@@ -571,19 +606,18 @@ export class HookHandler {
       }
       const at = await place(path);
       if (at === null) continue;
-      if (restore && ownTreeOnly) {
+      if (fallback && ownTreeOnly) {
         // After the command: what it brought back is checked again like any written file.
         file(at);
         continue;
       }
-      if (restore) {
-        // Only what differs from the index is brought back: the path is a question, not a write.
-        if (at.rel !== '')
-          scope(
-            { ...at, rel: toPosix(dirname(at.rel)) === '.' ? '' : toPosix(dirname(at.rel)) },
-            [basename(at.rel)],
-            dirname(at.abs),
-          );
+      if ((t.how === 'clean' || t.how === 'clean-ignored') && !ownTreeOnly) {
+        // `git clean` only removes files git does not track: the path and what is under it are
+        // decided by what is there, never by the name alone.
+        if (at.rel !== '') {
+          const parent = toPosix(dirname(at.rel));
+          scope({ ...at, rel: parent === '.' ? '' : parent }, [basename(at.rel)], dirname(at.abs));
+        }
         scope(at, ['**']);
         continue;
       }
@@ -596,6 +630,47 @@ export class HookHandler {
     const sure = new Set(certain.paths.map((p) => p.abs));
     possible.paths = possible.paths.filter((p) => !sure.has(p.abs));
     return { certain, possible, limit };
+  }
+
+  /**
+   * The files a git command that brings files back would change, as absolute paths: what
+   * `git diff` reports between the working tree and what the files come from, for the pathspecs
+   * exactly as given (so git's own wildcards and magic apply), and the untracked files it would
+   * remove. Null when git cannot say in time; the caller then falls back to the paths given.
+   */
+  private async askGit(
+    cwd: string,
+    q: GitQuestion,
+    timeUp: () => boolean,
+  ): Promise<string[] | null> {
+    const git = this.k.ports.git;
+    if (!git.whatGitChanges || timeUp()) return null;
+    const at = resolve(cwd, q.cwd);
+    if (!isDirectory(at)) return null;
+    // One word after `git checkout` is a path only when such a file exists; else a branch.
+    if (q.ifExists && !q.pathspecs.every((p) => exists(resolve(at, p)))) return [];
+    const timeoutMs = 400;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<null>((done) => {
+      timer = setTimeout(() => done(null), timeoutMs + 50);
+    });
+    try {
+      const answer = await Promise.race([
+        git
+          .whatGitChanges(at, {
+            against: q.against,
+            pathspecs: q.pathspecs,
+            untracked: q.untracked,
+            tracked: q.tracked,
+            timeoutMs,
+          })
+          .catch(() => null),
+        late,
+      ]);
+      return answer === null ? null : answer.map((f) => join(answer.root, f));
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** The rules the user marked as enforced that have a scope. */
@@ -1330,7 +1405,7 @@ async function expandScopes(
   const whole: string[] = [];
   let expanded = false;
   for (const s of scopes) {
-    const pattern = isWholeTree(s) && s.only === null && !s.restore && s.existing !== true;
+    const pattern = isWholeTree(s) && s.only === null && s.existing !== true;
     const found = pattern ? null : await search.listAll(s);
     if (
       found === null ||
@@ -1341,7 +1416,7 @@ async function expandScopes(
       continue;
     }
     expanded = true;
-    files.push(...found.files.filter((f) => writesKind(s, f)));
+    for (const f of found.files) if (writesKind(s, f)) files.push(f);
   }
   return expanded ? { files, whole } : null;
 }
@@ -1356,7 +1431,6 @@ function settledByText(scope: WrittenScope, reaching: readonly string[]): boolea
   return (
     isWholeTree(scope) &&
     scope.only === null &&
-    !scope.restore &&
     scope.existing !== true &&
     reaching.some(isLiteralScope)
   );
@@ -1373,7 +1447,6 @@ function landingScope(l: Located): WrittenScope {
     only: null,
     dotfiles: true,
     nocase: false,
-    restore: false,
   };
 }
 

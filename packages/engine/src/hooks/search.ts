@@ -8,13 +8,16 @@
  * - An ignored directory is only gone into when a rule could cover a file inside it, with a
  *   budget of its own, so a large one cannot keep a small one from being searched. Dependency
  *   and repository folders are not gone into unless a rule names them.
- * - Without git (no repository, or the listing failed) the written directory itself is walked,
- *   again with a budget of its own.
+ * - Each pattern git is given is limited to the directory being written, so a command on one
+ *   folder never makes git scan the rest of the repository.
+ * - A nested repository and a submodule are walked like an ignored directory: git lists neither.
+ * - Without git (no repository, or git did not answer in time) each written directory is walked,
+ *   one folder at a time, within what is left of the time.
  *
  * Names only: nothing is read. Every walk starts inside a working tree of the project and never
  * follows symbolic links, so it cannot leave it. Every loop checks the deadline it was given.
  */
-import { opendirSync, type Dir } from 'node:fs';
+import { existsSync, opendirSync, readFileSync, type Dir } from 'node:fs';
 import { join, relative } from 'node:path';
 import { globToRegExp, toPosix } from '@mindly/core';
 import { isLiteralScope, literalPrefix, patternSegments, patternsMayOverlap } from './scope.js';
@@ -43,22 +46,19 @@ export interface WrittenScope {
   /** Letter case is ignored (`find -iname`). */
   nocase: boolean;
   /**
-   * Files are brought back from the git index: only those that differ from it change. When git
-   * can say which those are, nothing else counts.
-   */
-  restore: boolean;
-  /**
    * Only files that exist are touched (`git clean`): nothing the command creates. Decided by
-   * what is there, even against a rule that names its directory.
+   * what is there, even against a rule that names its directory. `withIgnored` says whether
+   * ignored files are touched too (`git clean -x`).
    */
   existing?: boolean;
+  withIgnored?: boolean;
 }
 
 /** What git can list for a search; see `GitPort.listFiles`. */
 export type FileLister = (
   root: string,
   query: {
-    kind: 'known' | 'ignored' | 'changed' | 'tracked';
+    kind: 'known' | 'ignored' | 'tracked' | 'dirs';
     pathspecs: string[];
     timeoutMs: number;
   },
@@ -204,12 +204,14 @@ function pathspecs(glob: string, nocase: boolean): string[] | null {
 }
 
 interface TreeFacts {
-  /** Files git knows (tracked, untracked, ignored) that match what was asked. */
+  /** Files git knows (tracked or untracked, not ignored) that match what was asked. */
   files: string[];
+  /** Ignored files that match what was asked. */
+  ignored: string[];
   /** Ignored directories, each one entry, without what is inside. */
   ignoredDirs: string[];
-  /** Tracked files that differ from the index, when that was asked. */
-  changed: Set<string> | null;
+  /** Nested repositories and submodules: git lists nothing inside them. */
+  nestedDirs: string[];
   /** Tracked files among `files`, when a scope that only touches untracked files asked. */
   tracked: Set<string> | null;
   complete: boolean;
@@ -255,7 +257,7 @@ export class ScopeSearch {
   async prepare(asks: readonly { scope: WrittenScope; globs: readonly string[] }[]): Promise<void> {
     const byRoot = new Map<
       string,
-      { specs: Set<string>; restore: Set<string>; ok: boolean; untracked: boolean }
+      { specs: Set<string>; bases: Set<string>; ok: boolean; untracked: boolean }
     >();
     for (const { scope, globs } of asks) {
       if (globs.length === 0 || this.facts.has(scope.root)) continue;
@@ -263,20 +265,21 @@ export class ScopeSearch {
       if (!plan)
         byRoot.set(
           scope.root,
-          (plan = { specs: new Set(), restore: new Set(), ok: true, untracked: false }),
+          (plan = { specs: new Set(), bases: new Set(), ok: true, untracked: false }),
         );
       if (scope.existing === true) plan.untracked = true;
       const base = toPosix(relative(scope.root, scope.base));
+      plan.bases.add(base === '' ? ':(top)' : `:(top,literal)${base}`);
       for (const g of globs) {
         // A rule that names its directory, asked about a pattern inside it: everything the
-        // pattern matches is covered, so the pattern is what git is asked for.
+        // pattern matches is covered, so the pattern is what git is asked for. Otherwise the
+        // rule's pattern, limited to the directory being written.
         const inside = isLiteralScope(g) && isWithin(base, g);
-        const asked = inside ? scope.pattern : g;
+        const asked = inside ? scope.pattern : limitTo(base, g);
         const specs = pathspecs(asked, scope.nocase);
         if (specs === null) plan.ok = false;
         else for (const s of specs) plan.specs.add(s);
       }
-      if (scope.restore) plan.restore.add(base === '' ? ':(top)' : `:(top,literal)${base}`);
     }
     await Promise.all(
       [...byRoot].map(async ([root, plan]) => {
@@ -285,34 +288,57 @@ export class ScopeSearch {
     );
   }
 
+  /** One listing from git, given up on (as cut short) when git does not answer in time. */
+  private async list(
+    root: string,
+    query: Parameters<FileLister>[1],
+  ): Promise<{ files: string[]; complete: boolean } | null> {
+    const lister = this.lister;
+    if (lister === null) return null;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<{ files: string[]; complete: boolean }>((resolve) => {
+      timer = setTimeout(() => resolve({ files: [], complete: false }), query.timeoutMs + 50);
+    });
+    try {
+      return await Promise.race([lister(root, query).catch(() => null), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async ask(
     root: string,
-    plan: { specs: Set<string>; restore: Set<string>; ok: boolean; untracked: boolean },
+    plan: { specs: Set<string>; bases: Set<string>; ok: boolean; untracked: boolean },
   ): Promise<TreeFacts | null> {
-    const lister = this.lister;
-    if (lister === null || !plan.ok || plan.specs.size > SEARCH_LIMITS.pathspecs) return null;
-    const timeoutMs = Math.floor(Math.min(SEARCH_LIMITS.gitMs, this.timeLeft()));
+    if (this.lister === null || !plan.ok || plan.specs.size > SEARCH_LIMITS.pathspecs) return null;
+    const timeoutMs = Math.floor(Math.min(SEARCH_LIMITS.gitMs, this.timeLeft() / 2));
     if (timeoutMs < 20) return null;
     const specs = [...plan.specs];
-    const [known, ignored, changed, tracked] = await Promise.all([
-      lister(root, { kind: 'known', pathspecs: specs, timeoutMs }),
-      lister(root, { kind: 'ignored', pathspecs: specs, timeoutMs }),
-      plan.restore.size > 0
-        ? lister(root, { kind: 'changed', pathspecs: [...plan.restore], timeoutMs })
-        : Promise.resolve(null),
+    const bases = [...plan.bases];
+    const [known, ignored, tracked, dirs] = await Promise.all([
+      this.list(root, { kind: 'known', pathspecs: specs, timeoutMs }),
+      this.list(root, { kind: 'ignored', pathspecs: specs, timeoutMs }),
       plan.untracked
-        ? lister(root, { kind: 'tracked', pathspecs: specs, timeoutMs })
+        ? this.list(root, { kind: 'tracked', pathspecs: specs, timeoutMs })
         : Promise.resolve(null),
+      this.list(root, { kind: 'dirs', pathspecs: bases, timeoutMs }),
     ]);
-    // No git here: the caller walks instead.
-    if (known === null || ignored === null) return null;
-    const dirs = ignored.files.filter((f) => f.endsWith('/')).map((f) => f.slice(0, -1));
+    // No git here, or no answer in time: the caller walks instead.
+    if (known === null || ignored === null || dirs === null) return null;
+    if (!known.complete || !ignored.complete || !dirs.complete) return null;
+    // An untracked directory with a `.git` of its own is a nested repository; registered
+    // submodules are named in `.gitmodules`.
+    const nested = dirs.files
+      .filter((d) => d.endsWith('/') && existsSync(join(root, d, '.git')))
+      .map((d) => d.slice(0, -1));
+    nested.push(...submodules(root));
     return {
-      files: [...known.files, ...ignored.files.filter((f) => !f.endsWith('/'))],
-      ignoredDirs: dirs,
-      changed: changed?.complete ? new Set(changed.files) : null,
+      files: known.files.filter((f) => !f.endsWith('/')),
+      ignored: ignored.files.filter((f) => !f.endsWith('/')),
+      ignoredDirs: ignored.files.filter((f) => f.endsWith('/')).map((f) => f.slice(0, -1)),
+      nestedDirs: [...new Set(nested)],
       tracked: tracked?.complete ? new Set(tracked.files) : null,
-      complete: known.complete && ignored.complete,
+      complete: true,
     };
   }
 
@@ -322,29 +348,30 @@ export class ScopeSearch {
    */
   covered(scope: WrittenScope, globs: readonly string[]): Covered {
     const inScope = scopeMatcher(scope);
-    const byRule = ruleMatcher(globs, scope.nocase);
+    // The rule keeps its own letter case, whatever the command's pattern ignores.
+    const byRule = ruleMatcher(globs, false);
     const facts = this.facts.get(scope.root) ?? null;
     if (facts === null) return this.walkScope(scope, globs, inScope, byRule);
-    // Bringing files back from the index only touches those that differ from it.
-    if (scope.restore && facts.changed !== null) {
-      const files = [...facts.changed].filter((f) => inScope(f) && byRule(f));
-      return { files, complete: true, unsearched: [] };
-    }
-    // `git clean` leaves tracked files alone.
-    const kept = scope.existing === true ? facts.tracked : null;
-    const files = facts.files.filter((f) => inScope(f) && byRule(f) && !kept?.has(f));
+    // `git clean` leaves tracked files alone, and ignored ones without -x.
+    const clean = scope.existing === true;
+    const kept = clean ? facts.tracked : null;
+    const withIgnored = !clean || scope.withIgnored === true;
+    const files = [...facts.files, ...(withIgnored ? facts.ignored : [])].filter(
+      (f) => inScope(f) && byRule(f) && !kept?.has(f),
+    );
     const unsearched: string[] = [];
-    let complete = facts.complete;
+    let complete = !(clean && kept === null);
     if (!complete) unsearched.push(scopeLabel(scope));
     const deps = UNLISTED_DIRS.filter((d) => globs.some((g) => g.includes(d)));
-    for (const dir of facts.ignoredDirs) {
-      // Only an ignored directory the scope reaches into, and a rule could cover a file of.
+    const walkInto = [...(withIgnored ? facts.ignoredDirs : []), ...facts.nestedDirs];
+    for (const dir of walkInto) {
+      // Only a directory the scope reaches into, and a rule could cover a file of.
       const reach = { nocase: scope.nocase };
       if (!patternsMayOverlap(scope.pattern, `${dir}/**`, reach)) continue;
-      if (!globs.some((g) => patternsMayOverlap(g, `${dir}/**`, reach))) continue;
+      if (!globs.some((g) => patternsMayOverlap(g, `${dir}/**`))) continue;
       if (dir.split('/').some((s) => UNLISTED_DIRS.includes(s) && !deps.includes(s))) continue;
       const found = this.walk(scope.root, join(scope.root, dir), deps, byRule, globs.join('\0'));
-      files.push(...found.files.filter(inScope));
+      for (const f of found.files) if (inScope(f)) files.push(f);
       if (!found.complete) {
         complete = false;
         unsearched.push(dir);
@@ -360,16 +387,16 @@ export class ScopeSearch {
   async listAll(scope: WrittenScope): Promise<Covered> {
     const inScope = scopeMatcher(scope);
     const specs = pathspecs(scope.pattern, scope.nocase);
-    const timeoutMs = Math.floor(Math.min(SEARCH_LIMITS.gitMs, this.timeLeft()));
+    const timeoutMs = Math.floor(Math.min(SEARCH_LIMITS.gitMs, this.timeLeft() / 2));
     if (this.lister !== null && specs !== null && timeoutMs >= 20) {
       const query = { pathspecs: specs, timeoutMs };
       const [known, tracked] = await Promise.all([
-        this.lister(scope.root, { kind: 'known', ...query }),
+        this.list(scope.root, { kind: 'known', ...query }),
         scope.existing === true
-          ? this.lister(scope.root, { kind: 'tracked', ...query })
+          ? this.list(scope.root, { kind: 'tracked', ...query })
           : Promise.resolve(null),
       ]);
-      if (known !== null) {
+      if (known !== null && known.complete) {
         // `git clean` leaves tracked files alone.
         const kept = tracked?.complete ? new Set(tracked.files) : null;
         const files = known.files.filter((f) => inScope(f) && !kept?.has(f));
@@ -449,7 +476,7 @@ export class ScopeSearch {
     this.walksLeft--;
     // The directory itself, one level.
     const top = this.walkTree(root, dir, deps, 1, SEARCH_LIMITS.entries);
-    result.files.push(...top.files);
+    append(result.files, top.files);
     if (!top.complete) {
       result.complete = false;
       return result;
@@ -465,7 +492,7 @@ export class ScopeSearch {
           continue;
         }
         const sub = this.walkTree(root, child, deps, maxDepth - 1, budget);
-        if (sub.complete) result.files.push(...sub.files);
+        if (sub.complete) append(result.files, sub.files);
         else unfinished.push(child);
       }
       pending = unfinished;
@@ -520,6 +547,46 @@ export class ScopeSearch {
     }
     return result;
   }
+}
+
+/**
+ * A rule glob limited to what lies under `base` (relative; `''` is the root), so git is only
+ * asked about the directory being written. Exact when the glob starts with `**` or names a
+ * directory around or inside `base`; otherwise everything under `base`, filtered afterwards.
+ */
+export function limitTo(base: string, glob: string): string {
+  if (base === '') return glob;
+  const segments = collapse(patternSegments(glob));
+  if (segments[0] === '**') return [base, ...segments].join('/');
+  const prefix = literalPrefix(glob).join('/');
+  // The rule already lies inside the directory.
+  if (prefix === base || prefix.startsWith(`${base}/`)) return glob;
+  if (base.startsWith(`${prefix}/`) || prefix === '') {
+    const after = segments.slice(prefix === '' ? 0 : prefix.split('/').length);
+    if (after[0] === '**') return [base, ...after].join('/');
+  }
+  return `${base}/**`;
+}
+
+/** Paths of the submodules registered in `.gitmodules` (no git call: the file is read). */
+function submodules(root: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(join(root, '.gitmodules'), 'utf8').slice(0, 256 * 1024);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const m of text.matchAll(/^\s*path\s*=\s*(.+?)\s*$/gm)) {
+    const path = toPosix((m[1] as string).replace(/^"|"$/g, '')).replace(/\/+$/, '');
+    if (path !== '' && !path.split('/').includes('..') && out.length < 256) out.push(path);
+  }
+  return out;
+}
+
+/** Adds `more` to `to` one by one: a spread of a long list overflows the call stack. */
+function append(to: string[], more: readonly string[]): void {
+  for (const x of more) to.push(x);
 }
 
 /** Whether the directory `dir` (relative, `''` for the root) lies in what `glob` covers. */

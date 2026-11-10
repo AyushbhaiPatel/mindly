@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -68,6 +68,192 @@ describe('openMindly', () => {
       const project = mindly.store.projects.findByRoot(dir);
       expect(project?.name).toBe(dir.split('/').pop());
       expect(mindly.store.sessions.list(project!.id)[0]?.branch).toBe('main');
+    } finally {
+      mindly.close();
+    }
+  });
+});
+
+/** A repository with enforced rules, and a way to ask the pre-tool hook about a command. */
+function guarded(scopes: Record<string, string[]>) {
+  const dir = repo();
+  const home = mkdtempSync(join(tmpdir(), 'mindly-home-'));
+  const mindly = openMindly({ home, disableNotify: true });
+  const ready = (async () => {
+    const project = await mindly.projects.resolve(dir);
+    for (const [title, scopePaths] of Object.entries(scopes)) {
+      mindly.memory.remember({
+        projectId: project.project.id,
+        projectRoot: dir,
+        kind: 'rule',
+        title,
+        body: 'Ask first.',
+        scopePaths,
+        source: { type: 'user', sessionId: null, agentKind: null },
+        enforce: true,
+      });
+    }
+  })();
+  const shell = async (command: string, cwd = dir) => {
+    await ready;
+    return mindly.hooks.handle({
+      agentKind: 'codex',
+      event: 'pre_tool',
+      externalSessionId: 'git',
+      cwd,
+      transcriptPath: null,
+      startSource: null,
+      prompt: null,
+      lastMessage: null,
+      tool: {
+        name: 'Bash',
+        writes: false,
+        shell: true,
+        edits: [],
+        command,
+        failed: false,
+        outputExcerpt: null,
+      },
+    });
+  };
+  const git = (...args: string[]) =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@example.invalid',
+        '-c',
+        'protocol.file.allow=always',
+        ...args,
+      ],
+      { cwd: dir, stdio: 'pipe' },
+    );
+  return { dir, mindly, shell, git };
+}
+
+describe('git commands that bring files back', () => {
+  it('asks git which files they would change, with the pathspecs as given', async () => {
+    const { dir, mindly, shell, git } = guarded({
+      'Certificates are issued by hand': ['**/*.pem'],
+    });
+    try {
+      mkdirSync(join(dir, 'certs'));
+      writeFileSync(join(dir, 'certs', 'server.pem'), 'k1\n');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'certs');
+      // Nothing differs: nothing is brought back.
+      for (const command of [
+        'git checkout -- .',
+        "git checkout -- '*.pem'",
+        'git restore -SW certs/server.pem',
+        'git reset --hard',
+        'git stash',
+      ]) {
+        expect((await shell(command)).decision, command).toBeNull();
+      }
+      // A change in the working tree: every spelling that throws it away is refused, also the
+      // ones whose pathspec only git can read.
+      writeFileSync(join(dir, 'certs', 'server.pem'), 'k2\n');
+      for (const command of [
+        'git checkout -- .',
+        "git checkout -- '*.pem'",
+        "git checkout -- '*'",
+        "git restore '*.pem'",
+        "git restore ':(glob)**/*.pem'",
+        "git stash push -- '*.pem'",
+        'git reset --hard',
+        'git checkout -f',
+        'cd certs && git restore server.pem',
+        "git rm -r --quiet 'certs/*'",
+      ]) {
+        const r = await shell(command);
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('certs/server.pem');
+      }
+      // A staged change: the index already holds it, so restoring from the index changes
+      // nothing, but restoring from HEAD (`-SW`) throws it away.
+      git('add', 'certs/server.pem');
+      expect((await shell('git restore certs/server.pem')).decision).toBeNull();
+      expect((await shell('git restore -SW certs/server.pem')).decision).toBe('deny');
+      expect((await shell('git restore --staged --worktree .')).decision).toBe('deny');
+      expect((await shell('git restore --staged certs/server.pem')).decision).toBeNull();
+      // From another revision, what differs from it.
+      git('commit', '-q', '-m', 'k2');
+      expect((await shell('git checkout HEAD~1 -- certs')).decision).toBe('deny');
+      expect((await shell('git checkout HEAD -- certs')).decision).toBeNull();
+      expect((await shell('git reset --hard HEAD~1')).decision).toBe('deny');
+      // An untracked link to a protected file goes with `git stash -u`; the file stays.
+      symlinkSync('certs/server.pem', join(dir, 'link'));
+      expect((await shell('git stash -u')).decision).toBeNull();
+      rmSync(join(dir, 'link'));
+      // An untracked file goes with `git stash -u`, and stays with plain `git stash`.
+      writeFileSync(join(dir, 'certs', 'new.pem'), 'n\n');
+      expect((await shell('git stash')).decision).toBeNull();
+      expect((await shell('git stash -u')).decision).toBe('deny');
+    } finally {
+      mindly.close();
+    }
+  });
+
+  it('looks into nested repositories and submodules, which git does not list', async () => {
+    const { dir, mindly, shell, git } = guarded({
+      'Certificates are issued by hand': ['**/*.pem'],
+    });
+    try {
+      const upstream = repo();
+      mkdirSync(join(upstream, 'keys'));
+      writeFileSync(join(upstream, 'keys', 'a.pem'), 'k\n');
+      execFileSync(
+        'git',
+        ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'add', '-A'],
+        {
+          cwd: upstream,
+        },
+      );
+      execFileSync(
+        'git',
+        ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '-m', 'keys'],
+        { cwd: upstream },
+      );
+      git('submodule', 'add', '-q', upstream, 'vendor/lib');
+      git('commit', '-q', '-m', 'sub');
+      mkdirSync(join(dir, 'nested'));
+      execFileSync('git', ['init', '-q'], { cwd: join(dir, 'nested') });
+      writeFileSync(join(dir, 'nested', 'n.pem'), 'n\n');
+      for (const command of [
+        'rm -rf nested',
+        'rm nested/*.pem',
+        'rm -rf vendor',
+        'rm vendor/lib/keys/*',
+        'rm -rf *',
+      ]) {
+        expect((await shell(command)).decision, command).toBe('deny');
+      }
+      expect((await shell('rm -rf src')).decision).toBeNull();
+    } finally {
+      mindly.close();
+    }
+  });
+
+  it('cleans what git clean cleans: untracked files, ignored ones only with -x', async () => {
+    const { dir, mindly, shell, git } = guarded({
+      'Certificates are issued by hand': ['**/*.pem'],
+    });
+    try {
+      writeFileSync(join(dir, '.gitignore'), 'build/\n');
+      mkdirSync(join(dir, 'certs'));
+      writeFileSync(join(dir, 'certs', 'tracked.pem'), 't\n');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'certs');
+      mkdirSync(join(dir, 'build'));
+      writeFileSync(join(dir, 'build', 'out.pem'), 'o\n');
+      expect((await shell('git clean -fd')).decision).toBeNull();
+      expect((await shell('git clean -f -- certs/tracked.pem')).decision).toBeNull();
+      expect((await shell('git clean -fdx')).decision).toBe('deny');
+      writeFileSync(join(dir, 'certs', 'untracked.pem'), 'u\n');
+      expect((await shell('git clean -fd')).decision).toBe('deny');
     } finally {
       mindly.close();
     }

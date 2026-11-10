@@ -128,7 +128,6 @@ const GIT_KEEPS_FILES = new Set([
   'merge-base',
   'rev-list',
   'check-ignore',
-  'switch',
 ]);
 
 /**
@@ -320,6 +319,28 @@ const RUNS_ELSEWHERE = new Set([
   'glab',
 ]);
 
+/** Package manager commands that write into the project they run in. */
+const INSTALLS = new Set([
+  'install',
+  'i',
+  'add',
+  'remove',
+  'rm',
+  'uninstall',
+  'un',
+  'update',
+  'up',
+  'upgrade',
+  'ci',
+  'prune',
+  'dedupe',
+  'link',
+  'unlink',
+]);
+
+/** make targets that remove or install files. */
+const MAKE_WRITES = /^(clean|distclean|mrproper|realclean|install|uninstall)$/;
+
 /** Options of the package managers whose value is the next word. */
 const PACKAGE_MANAGER_VALUES = [
   '--filter',
@@ -452,10 +473,14 @@ const MAX_BARE_WORDS = 12;
 const MAX_COMMANDS = 20_000;
 /** Longest path, and longest working directory, that is followed. */
 const MAX_PATH_CHARS = 4096;
+/** git commands of one command line that are asked about. */
+const MAX_QUESTIONS = 8;
 /** Sources of one copy that are kept by name. */
 const MAX_ENTRIES = 64;
 /** Words one brace expansion (`{a,b}`, `{1..9}`) may turn into. */
-const MAX_BRACE_WORDS = 64;
+const MAX_BRACE_WORDS = 256;
+/** Alternatives still checked of a brace expansion that is too large. */
+const MAX_BRACE_KEPT = 1024;
 
 const word = (text: string, quoted = false): Word => ({
   text,
@@ -467,8 +492,12 @@ const word = (text: string, quoted = false): Word => ({
  * The words a brace expansion stands for: `a{b,c}d` is `abd acd`, `f{1..3}` is `f1 f2 f3`. Only
  * braces written outside quotes expand. A word that would become too many stays as written.
  */
-function expandBraces(w: Word, depth = 0): Word[] {
-  if (depth > 8 || !w.text.includes('{')) return [w];
+function expandBraces(w: Word, over: { cut: boolean }, depth = 0): Word[] {
+  if (!w.text.includes('{')) return [w];
+  if (depth > 8) {
+    over.cut = true;
+    return [w];
+  }
   for (let i = 0; i < w.text.length; i++) {
     if (w.text[i] !== '{' || w.mask[i] !== 'u') continue;
     let level = 0;
@@ -496,22 +525,30 @@ function expandBraces(w: Word, depth = 0): Word[] {
       if (!numeric && (/\d$/.test(from) || /\d$/.test(to))) continue;
       const lo = numeric ? Number(from) : from.charCodeAt(0);
       const hi = numeric ? Number(to) : to.charCodeAt(0);
-      if (Math.abs(hi - lo) >= MAX_BRACE_WORDS) return [w];
+      if (Math.abs(hi - lo) >= MAX_BRACE_WORDS) {
+        over.cut = true;
+        return [w];
+      }
       alternatives = [];
       for (let v = lo; ; v += hi >= lo ? 1 : -1) {
         alternatives.push(word(numeric ? String(v) : String.fromCharCode(v)));
         if (v === hi) break;
       }
     }
+    const joined = alternatives.map((alt): Word => ({
+      text: w.text.slice(0, i) + alt.text + w.text.slice(end + 1),
+      mask: w.mask.slice(0, i) + alt.mask + w.mask.slice(end + 1),
+      dynamic: w.dynamic,
+    }));
     const out: Word[] = [];
-    for (const alt of alternatives) {
-      const joined: Word = {
-        text: w.text.slice(0, i) + alt.text + w.text.slice(end + 1),
-        mask: w.mask.slice(0, i) + alt.mask + w.mask.slice(end + 1),
-        dynamic: w.dynamic,
-      };
-      out.push(...expandBraces(joined, depth + 1));
-      if (out.length > MAX_BRACE_WORDS) return [w];
+    for (const one of joined) {
+      out.push(...expandBraces(one, over, depth + 1));
+      if (out.length > MAX_BRACE_WORDS) {
+        // Too many words: the word counts as not read, and each alternative without braces of
+        // its own is still checked.
+        over.cut = true;
+        return joined.filter((x) => !x.text.includes('{')).slice(0, MAX_BRACE_KEPT);
+      }
     }
     return out;
   }
@@ -521,10 +558,11 @@ function expandBraces(w: Word, depth = 0): Word[] {
 function parse(
   input: string,
   timeUp: () => boolean = () => false,
-): { commands: SimpleCommand[]; cut: false | 'length' | 'time' } {
+): { commands: SimpleCommand[]; cut: false | 'length' | 'time'; braces: boolean } {
   let cut: false | 'length' | 'time' = input.length > MAX_COMMAND_CHARS ? 'length' : false;
   const src = cut ? input.slice(0, MAX_COMMAND_CHARS) : input;
   let steps = 0;
+  const braces = { cut: false };
   const commands: SimpleCommand[] = [];
   const blank = (piped = false, otherwise = false): SimpleCommand => ({
     words: [],
@@ -576,7 +614,7 @@ function parse(
       pendingRedirect = null;
       return;
     }
-    current.words.push(...expandBraces(w));
+    current.words.push(...expandBraces(w, braces));
   };
   const endCommand = (piped = false, otherwise = false): void => {
     endWord();
@@ -842,7 +880,7 @@ function parse(
   }
   endCommand();
   // A here-document whose line never ended still feeds its command nothing.
-  return { commands, cut };
+  return { commands, cut, braces: braces.cut };
 }
 
 const isAssignment = (w: Word): boolean =>
@@ -968,6 +1006,8 @@ interface Item {
   entries?: { name: string; from: Word | null }[];
   /** The path is a pattern the program expands itself, whatever the quoting. */
   pattern?: boolean;
+  /** Stands for a git question when git cannot answer it. */
+  fallback?: number;
   dotfiles?: boolean;
   nocase?: boolean;
 }
@@ -979,7 +1019,16 @@ type Verdict =
   | { kind: 'unknown'; args: Word[]; bare: boolean }
   | { kind: 'cd'; how: 'cd' | 'pushd' | 'popd'; dir: Word | null }
   | { kind: 'inline'; code: string }
-  | { kind: 'script'; code: string };
+  | { kind: 'script'; code: string }
+  | {
+      kind: 'git';
+      dir: Word | null;
+      against: string[];
+      pathspecs: Word[];
+      untracked: boolean;
+      ifExists: boolean;
+      tracked: boolean;
+    };
 
 const READS: Verdict = { kind: 'reads' };
 const writes = (...items: Item[]): Verdict => ({ kind: 'writes', items });
@@ -1010,6 +1059,14 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
   if (program === 'pushd') return { kind: 'cd', how: 'pushd', dir: args[0] ?? null };
   if (program === 'popd') return { kind: 'cd', how: 'popd', dir: null };
   if (READ_ONLY_PROGRAMS.has(program) || SHELL_WORDS.has(program)) return READS;
+  if (program === 'make' || program === 'gmake') {
+    // `make -C dir clean` removes and installs files inside that directory.
+    const dir = optionValue(words, ['-C', '--directory']);
+    const targets = argsWithout(words, ['-C', '--directory', '-f', '--file', '-j', '-l']);
+    if (dir && targets.some((w) => MAKE_WRITES.test(w.text)))
+      return writes({ word: dir, tree: true, certain: false });
+    return READS;
+  }
   if (CHECKING_PROGRAMS.has(program) || RUNS_ELSEWHERE.has(program)) return READS;
 
   const fixer = Object.hasOwn(FIXERS, program) ? FIXERS[program] : undefined;
@@ -1187,6 +1244,9 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
       const rest = argsWithout(words, PACKAGE_MANAGER_VALUES);
       const head = rest[0];
       if (head === undefined) return READS;
+      // Installing or removing packages in another folder writes inside it.
+      const dir = optionValue(words, ['-C', '--dir', '--cwd', '--prefix']);
+      if (dir && INSTALLS.has(head.text)) return writes({ word: dir, tree: true, certain: false });
       if (head.text === 'run' || head.text === 'run-script') {
         return CHECKING_SCRIPT.test(rest[1]?.text ?? '') ? READS : none;
       }
@@ -1456,19 +1516,41 @@ function readGit(words: readonly Word[]): Verdict {
     dir ? list.map((w) => joinWords(dir, w)) : [...list];
   const dashes = rest.findIndex((w) => w.text === '--');
   const afterDashes = dashes === -1 ? [] : rest.slice(dashes + 1);
-  // Bringing files back from the index only changes those that differ from it.
-  const restore = { how: 'restore' as const };
+  /**
+   * A command that brings files back from the index or a revision. What it changes is what
+   * differs: git is asked (`git diff` against `against`, with the pathspecs exactly as given).
+   */
+  const ask = (
+    against: string[],
+    pathspecs: readonly Word[],
+    extra: { untracked?: boolean; ifExists?: boolean; tracked?: boolean } = {},
+  ): Verdict => ({
+    kind: 'git',
+    dir,
+    against,
+    pathspecs: [...pathspecs],
+    untracked: extra.untracked ?? false,
+    ifExists: extra.ifExists ?? false,
+    tracked: extra.tracked ?? false,
+  });
   switch (sub) {
     case 'restore': {
-      // `--staged` alone only moves the index; the file on disk stays.
       const staged = hasOption(command, 'S', ['--staged']);
-      if (staged && !hasOption(command, 'W', ['--worktree'])) return READS;
-      const from = hasOption(command, 's', ['--source']);
-      return writes(...trees(under(argsWithout(command, ['-s', '--source'])), from ? {} : restore));
+      const worktree = hasOption(command, 'W', ['--worktree']);
+      // `--staged` alone only moves the index; the file on disk stays.
+      if (staged && !worktree) return READS;
+      const source = optionValue(command, ['-s', '--source']);
+      const paths = argsWithout(command, ['-s', '--source', '--pathspec-from-file']);
+      // From the index by default; with `--staged` both come from HEAD, or from the source.
+      const against = source ? [source.text] : staged ? ['HEAD'] : [];
+      return ask(against, paths);
     }
-    case 'rm':
+    case 'rm': {
       if (hasFlag(command, /^--cached$/)) return READS;
-      return writes(...trees(under(argsWithout(command, ['--pathspec-from-file']))));
+      // It removes the tracked files its pathspecs match, as git reads them.
+      const paths = argsWithout(command, ['--pathspec-from-file']);
+      return paths.length > 0 ? ask([], paths, { tracked: true }) : READS;
+    }
     case 'mv': {
       const given = argsWithout(command, []);
       const dest = given[given.length - 1];
@@ -1480,42 +1562,62 @@ function readGit(words: readonly Word[]): Verdict {
     }
     case 'clean': {
       if (hasOption(command, 'n', ['--dry-run'])) return READS;
-      // Without a path it cleans where it runs.
+      // Without a path it cleans where it runs; ignored files only with -x / -X.
       const given = argsWithout(command, ['-e', '--exclude']);
-      return writes(...trees(under(given.length > 0 ? given : [word('.')]), { how: 'clean' }));
+      const how = hasOption(command, 'xX', []) ? 'clean-ignored' : 'clean';
+      return writes(...trees(under(given.length > 0 ? given : [word('.')]), { how }));
     }
     case 'checkout': {
       // Creating a branch names no file.
       if (hasFlag(command, /^(-b|-B|--orphan)$/)) return READS;
       const given = argsWithout(command, ['--conflict', '--pathspec-from-file']);
+      const force = hasOption(command, 'f', ['--force']);
       if (dashes !== -1) {
-        // A revision before `--` brings the files from there, whatever their state.
-        const revision = rest.slice(1, dashes).some((w) => !isFlag(w));
-        return writes(...trees(under(afterDashes), revision ? {} : restore));
+        // A revision before `--` brings the files from there; without one, from the index.
+        const revision = rest.slice(1, dashes).find((w) => !isFlag(w));
+        return ask(revision ? [revision.text] : [], afterDashes);
       }
-      // These only make sense with paths.
-      if (hasFlag(command, /^(--ours|--theirs|-p|--patch|--merge|-m)$/)) {
-        return writes(...trees(under(given), restore));
-      }
+      // These only make sense with paths, from the index.
+      if (hasFlag(command, /^(--ours|--theirs|-p|--patch|--merge|-m)$/)) return ask([], given);
       // A revision followed by more words: the rest are paths.
-      if (given.length >= 2) return writes(...trees(under(given.slice(1))));
-      const only = given[0];
-      if (only === undefined) return READS;
+      const first = given[0];
+      if (first !== undefined && given.length >= 2) return ask([first.text], given.slice(1));
+      if (first === undefined) return force ? ask(['HEAD'], []) : READS;
       // One word is a branch or a path. `.`, `./x` and `x/` can only be paths; any other word
-      // is a path when such a file exists, which the caller checks.
-      const path = /^\.\.?(\/|$)|\/$/.test(only.text);
-      return writes(...trees(under([only]), { ...restore, ifExists: !path }));
+      // is a path when such a file exists, which the caller checks. A forced switch to a branch
+      // throws away every local change on the way.
+      const path = /^\.\.?(\/|$)|\/$/.test(first.text);
+      if (path) return ask([], [first]);
+      return force ? ask([first.text], []) : ask([], [first], { ifExists: true });
+    }
+    case 'switch': {
+      if (!hasOption(command, 'f', ['--force', '--discard-changes'])) return READS;
+      const target = argsWithout(command, ['-c', '-C', '--create', '--force-create'])[0];
+      return ask([target?.text ?? 'HEAD'], []);
     }
     case 'stash': {
-      // `git stash push [--] paths` puts their changes away: the files go back to the index.
-      const args = argsWithout([word('git'), ...rest.slice(2)], ['-m', '--message']);
-      if (rest[1]?.text !== 'push' && dashes === -1) return READS;
-      const paths = dashes === -1 ? args : afterDashes;
-      return paths.length > 0 ? writes(...trees(under(paths), restore)) : READS;
+      // `git stash [push] [--] [paths]` puts changes away: the files go back to HEAD.
+      const verb = rest[1]?.text;
+      if (
+        verb !== undefined &&
+        verb !== 'push' &&
+        verb !== 'save' &&
+        verb !== '--' &&
+        !isFlag(rest[1] as Word)
+      )
+        return READS;
+      const tail = [word('git'), ...rest.slice(verb === 'push' || verb === 'save' ? 2 : 1)];
+      const paths =
+        dashes !== -1 ? afterDashes : verb === 'save' ? [] : argsWithout(tail, ['-m', '--message']);
+      const untracked = hasOption(tail, 'ua', ['--include-untracked', '--all']);
+      return ask(['HEAD'], paths, { untracked });
     }
-    case 'reset':
-      // With paths it only moves the index; `--hard` rewrites files it does not name.
-      return READS;
+    case 'reset': {
+      // With paths, or without --hard, it only moves the index.
+      if (!hasFlag(command, /^--(hard|merge|keep)$/)) return READS;
+      const revision = argsWithout(command, [])[0];
+      return ask([revision?.text ?? 'HEAD'], []);
+    }
     default:
       // pull, merge, apply, …: they change files the command line does not name.
       return {
@@ -1524,6 +1626,29 @@ function readGit(words: readonly Word[]): Verdict {
         bare: false,
       };
   }
+}
+
+/**
+ * A git command whose writes git itself can tell: the files that differ between the working
+ * tree and `against` (the index when empty), limited by the pathspecs exactly as given.
+ */
+export interface GitQuestion {
+  /** Where git runs: the directory the command runs in, placed like a target's path. */
+  cwd: string;
+  /** What the working tree is compared with: nothing (the index), or one revision. */
+  against: string[];
+  /** Pathspecs as the command gives them; empty means the whole tree. */
+  pathspecs: string[];
+  /** Untracked files the pathspecs match are removed too (`git stash -u`). */
+  untracked: boolean;
+  /** The single pathspec is a path only when such a file exists (else a branch name). */
+  ifExists: boolean;
+  /** The tracked files the pathspecs match are what is written (`git rm`), not what differs. */
+  tracked: boolean;
+  /**
+   * Targets of {@link ShellReading.targets} whose `fallback` is this question's index stand for
+   * it when git cannot answer.
+   */
 }
 
 /** A file a shell command names as something it writes. */
@@ -1547,12 +1672,17 @@ export interface ShellTarget {
   /** When the path is a directory, everything under it is written too (`rm -r`, `git checkout`). */
   tree: boolean;
   /**
-   * How the path is written. `write`: created, rewritten or removed. `restore`: brought back from
-   * the git index, which only changes files that differ from it. `land`: files of unknown names
-   * are put somewhere inside it (an archive unpacked there). `clean`: the files there that git
-   * does not track are removed (`git clean`), so only files that exist are touched.
+   * How the path is written. `write`: created, rewritten or removed. `land`: files of unknown
+   * names are put somewhere inside it (an archive unpacked there). `clean`: the files there that
+   * git does not track and does not ignore are removed (`git clean`); `clean-ignored` removes the
+   * ignored ones too (`-x`). Either way only files that exist are touched.
    */
-  how: 'write' | 'restore' | 'land' | 'clean';
+  how: 'write' | 'land' | 'clean' | 'clean-ignored';
+  /**
+   * Set on targets that stand in for a git question (see {@link GitQuestion}) and only count
+   * when git could not answer it: its index in {@link ShellReading.questions}.
+   */
+  fallback: number | null;
   /**
    * For a copy: when the path is a directory, the names that land inside it (`cp a.ts dir`
    * writes `dir/a.ts`; `.` stands for the content of the source itself, `*` for names that are
@@ -1579,6 +1709,8 @@ export interface ShellTarget {
 /** What reading a command found. */
 export interface ShellReading {
   targets: ShellTarget[];
+  /** git commands whose writes git can tell (`git checkout -- x`, `git restore`, `reset --hard`). */
+  questions: GitQuestion[];
   /**
    * Set when a limit cut the reading short (a very long command, too many targets, nesting too
    * deep, a path too long, no time left): what was not read may write files, so the targets are
@@ -1670,8 +1802,37 @@ interface CodeFinding {
   commands: string[];
 }
 
+/**
+ * Paths built from string literals made one literal: `path.join('a', 'b')`,
+ * `os.path.join('a', 'b')`, `require('path').join(…)` and `Path('a') / 'b'` become `'a/b'`.
+ */
+function joinLiterals(code: string): string {
+  const lit = `(?:'[^'\\n]{0,256}'|"[^"\\n]{0,256}")`;
+  const joined = code.replace(
+    new RegExp(
+      `(?:\\bos\\.path|\\bpath|\\bposixpath|require\\(\\s*['"](?:node:)?path['"]\\s*\\))\\s*\\.\\s*(?:join|resolve)\\s*\\(\\s*((?:${lit}\\s*,\\s*){0,16}${lit})\\s*\\)`,
+      'g',
+    ),
+    (_all, args: string) => {
+      const parts = [...args.matchAll(/(['"])([^'"\\\n]*)\1/g)].map((m) => m[2] as string);
+      return `'${parts.join('/')}'`;
+    },
+  );
+  // `Path('a') / 'b' / 'c'`: the parts become one path.
+  return joined.replace(
+    /\b(Path|PurePath|PosixPath)\(\s*(['"])([^'"\\\n]{0,256})\2\s*\)((?:\s*\/\s*(['"])[^'"\\\n]{0,256}\5){1,8})/g,
+    (_all, ctor: string, _q: string, head: string, tail: string) => {
+      const parts = [...tail.matchAll(/(['"])([^'"\\\n]*)\1/g)].map((m) => m[2] as string);
+      return `${ctor}('${[head, ...parts].join('/')}')`;
+    },
+  );
+}
+
+/** `os.open` flags that write. */
+const OPEN_WRITE_FLAGS = /\bO_(WRONLY|RDWR|TRUNC|CREAT|APPEND)\b/;
+
 function readCode(source: string): CodeFinding {
-  const code = source.slice(0, MAX_COMMAND_CHARS);
+  const code = joinLiterals(source.slice(0, MAX_COMMAND_CHARS));
   const out: CodeFinding = { paths: [], commands: [] };
   // Every quoted string, with where it sits.
   const strings: { start: number; end: number; text: string }[] = [];
@@ -1685,8 +1846,9 @@ function readCode(source: string): CodeFinding {
     const s = strings[k] as (typeof strings)[number];
     const before = code.slice(Math.max(0, s.start - 120), s.start);
     // `name(…)`, `name([…])`, or a call without parentheses (`unlink "a"` in Perl and Ruby).
+    // A keyword (`file=`) or a string prefix (`f'…'`, `r'…'`) may stand between.
     const call =
-      /([A-Za-z_][\w.:]*)\s*\(\s*(\[\s*)?$/.exec(before) ??
+      /([A-Za-z_][\w.:]*)\s*\(\s*(\[\s*)?(?:\w+\s*=\s*)?[rbfuRBFU]{0,2}$/.exec(before) ??
       /([A-Za-z_][\w.:]*)[ \t]+$/.exec(before);
     const prev = k > 0 ? (strings[k - 1] as (typeof strings)[number]) : null;
     const prevRole = k > 0 ? (roles[k - 1] ?? null) : null;
@@ -1708,7 +1870,7 @@ function readCode(source: string): CodeFinding {
     const role = roles[k] ?? null;
     const after = code.slice(s.end, s.end + 60);
     // `Path('a').write_text(…)`: the method decides.
-    const method = /^\s*\)\s*\.\s*(\w+)/.exec(after)?.[1];
+    const method = /^\s*\)+\s*\.\s*(\w+)/.exec(after)?.[1];
     if (role && /(^|[.:])(Path|PurePath|PosixPath|Pathname)$/.test(role.chain) && role.at === 1) {
       if (method && PATH_METHOD_WRITES.test(method)) add(s.text, true);
       else if (method === undefined || method === 'open') {
@@ -1737,10 +1899,28 @@ function readCode(source: string): CodeFinding {
       continue;
     }
     if (name === 'open' || name === 'fopen') {
-      // The mode is the second argument; without one the file is only read.
-      const mode = roles[k + 1]?.at === 2 ? (strings[k + 1] as (typeof strings)[number]).text : '';
-      if (at === 1 && /^[rwaxbt+]+$/.test(mode) && /[wax+]/.test(mode)) add(s.text, true);
-      else if (at === 1 && /^\+?>/.test(s.text)) add(s.text, true);
+      if (at !== 1) continue;
+      // `os.open(p, os.O_WRONLY | …)`: the flags say.
+      if (/(^|\.)os\.open$/.test(chain)) {
+        if (OPEN_WRITE_FLAGS.test(after)) add(s.text, true);
+        continue;
+      }
+      // The mode is the second argument or `mode=`; without one the file is only read. A mode
+      // that is not a literal read mode (a variable, an expression) may write.
+      const given = /^\s*,\s*(?:mode\s*=\s*)?(?:(['"])([^'"]*)\1|([A-Za-z_][\w.]*))/.exec(after);
+      const keyword = /^\s*,(?:[^,)]*,)*?\s*mode\s*=\s*(?:(['"])([^'"]*)\1|([A-Za-z_][\w.]*))/.exec(
+        after,
+      );
+      const m = keyword ?? given;
+      const literal = m?.[2];
+      const variable = m?.[3];
+      if (/^\+?>/.test(s.text)) add(s.text, true);
+      else if (literal !== undefined && /[wax+]/.test(literal)) add(s.text, true);
+      else if (
+        variable !== undefined &&
+        !/^(encoding|newline|buffering|errors|closefd)$/.test(variable)
+      )
+        add(s.text, true);
       continue;
     }
     if (at === 1 && (name === 'write' || name === 'write_file') && /^(File|IO|fs)\./.test(chain)) {
@@ -1787,9 +1967,14 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     top: options.top ?? null,
     timeUp: options.timeUp ?? (() => false),
     commands: 0,
+    questions: [],
   };
   collectTargets(command, '', 0, reading);
-  return { targets: [...reading.out.values()], limit: reading.limit };
+  return {
+    targets: [...reading.out.values()],
+    questions: reading.questions,
+    limit: reading.limit,
+  };
 }
 
 /** The targets of {@link readShellWrites}. */
@@ -1805,6 +1990,7 @@ interface Reading {
   timeUp: () => boolean;
   /** Simple commands read so far, over every nested reading. */
   commands: number;
+  questions: GitQuestion[];
 }
 
 /**
@@ -1852,6 +2038,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   if (parsed.cut === 'length') {
     r.limit ??= `only the first ${MAX_COMMAND_CHARS} characters were read`;
   } else if (parsed.cut === 'time') r.limit ??= 'no time was left to read all of it';
+  if (parsed.braces) r.limit ??= `a brace expansion of more than ${MAX_BRACE_WORDS} words`;
   // The directory later commands run in, relative to where the command started; null when a
   // `cd` went somewhere that cannot be read from the text.
   let dir: string | null = startDir;
@@ -1929,7 +2116,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     for (const form of forms) {
       const path = place(form.text, tilde(w), from);
       if (path === null || /^\/(dev|proc)\//.test(path)) continue;
-      const key = `${path}\0${form.glob ? 'g' : ''}${item.ifExists ? 'e' : ''}${how}`;
+      const fallback = item.fallback ?? null;
+      const key = `${path}\0${form.glob ? 'g' : ''}${item.ifExists ? 'e' : ''}${how}\0${fallback}`;
       const known = r.out.get(key);
       if (known) {
         known.tree ||= item.tree ?? false;
@@ -1964,6 +2152,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         certain,
         only,
         ifExists: item.ifExists ?? false,
+        fallback,
       });
     }
   };
@@ -2065,6 +2254,40 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       case 'writes':
         for (const item of verdict.items) add(item, here);
         break;
+      case 'git': {
+        // git runs where the command runs, or where `-C` sends it.
+        const at = verdict.dir ? enter(verdict.dir, here) : here;
+        if (at === null || verdict.pathspecs.some((w) => w.dynamic)) break;
+        if (r.questions.length >= MAX_QUESTIONS) {
+          r.limit ??= `more than ${MAX_QUESTIONS} git commands`;
+          break;
+        }
+        const index = r.questions.length;
+        r.questions.push({
+          cwd: at,
+          against: verdict.against,
+          pathspecs: verdict.pathspecs.map((w) => w.text),
+          untracked: verdict.untracked,
+          ifExists: verdict.ifExists,
+          tracked: verdict.tracked,
+        });
+        // Should git not answer: the paths it was given, as written (`:(glob)` and the like
+        // taken off), and the whole tree when none was given.
+        const given = verdict.pathspecs.length > 0 ? verdict.pathspecs : [word('.')];
+        for (const w of given) {
+          const bare = w.text.replace(/^:(\([^)]*\)|[!^/]*)/, '') || '.';
+          add(
+            {
+              word: { ...w, text: bare, mask: 'u'.repeat(bare.length) },
+              tree: true,
+              fallback: index,
+              ifExists: verdict.ifExists,
+            },
+            at,
+          );
+        }
+        break;
+      }
       case 'inline':
         collectTargets(verdict.code, here, depth + 1, r);
         break;
