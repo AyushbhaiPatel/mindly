@@ -347,23 +347,7 @@ export class MemoryService {
           reason: input.reason ?? null,
         });
       }
-      if (takesOver) {
-        // The user or a repository file takes the memory over: the evidence of the claim it
-        // replaces goes with that claim, and only what the new author gives is attached.
-        this.k.store.memories.clearEvidence(m.id);
-      } else if (existing) {
-        // Its author (the user or the agent kind that proposed it) restates the claim as it
-        // stands now. Evidence that no longer holds is not support for it any more: left
-        // attached, the next sweep would mark the restated memory stale again. Evidence that
-        // still holds stays, with or without new evidence given.
-        const root = this.k.store.projects.get(input.projectId).root;
-        const deny = this.k.config.redaction.denyPaths;
-        for (const e of this.k.store.memories.evidenceFor(m.id)) {
-          if (evidenceState(root, deny, e) === 'invalid') {
-            this.k.store.memories.deleteEvidence(e.id);
-          }
-        }
-      }
+      if (existing) this.reviseEvidence(existing, input, takesOver, evidence);
       this.attachEvidence(m.id, input.projectId, evidence);
       this.k.store.events.append({
         projectId: input.projectId,
@@ -423,6 +407,43 @@ export class MemoryService {
       });
     });
     return existing;
+  }
+
+  /**
+   * Settles which evidence a restated memory keeps, before the new evidence is attached.
+   *
+   * - Taken over from an agent or from Mindly itself (by the user or a repository file): that
+   *   evidence goes with the claim it backed. Left attached, it could later make the new
+   *   author's memory go stale.
+   * - Otherwise (its own author restating it, or the user taking over a rule imported from an
+   *   instruction file) a row is dropped only when it is certainly gone, or, on a takeover, when
+   *   the new author gives evidence for the same file. Rows that hold stay: an imported rule's
+   *   row is the record of the file it came from, which keeps rules sync from writing it there
+   *   again and marks the rule stale when its line is removed.
+   *
+   * Certainly gone means invalid both in the restater's checkout and at the project root, judged
+   * as the sweep judges it. A row that holds on another branch is left for the sweep, which can
+   * mark it invalid and valid again; deleting it could not be undone.
+   */
+  private reviseEvidence(
+    existing: Memory,
+    input: RememberInput,
+    takesOver: boolean,
+    incoming: readonly CheckedEvidence[],
+  ): void {
+    const repo = this.k.store.memories;
+    if (takesOver && authority(existing.source) === 1) {
+      repo.clearEvidence(existing.id);
+      return;
+    }
+    const replaced = new Set(takesOver ? incoming.map((e) => e.rel) : []);
+    const root = this.k.store.projects.get(input.projectId).root;
+    const deny = this.k.config.redaction.denyPaths;
+    const roots = [...new Set([input.projectRoot, root])];
+    for (const e of repo.evidenceFor(existing.id)) {
+      const gone = roots.every((r) => evidenceState(r, deny, e) === 'invalid');
+      if (gone || replaced.has(e.ref)) repo.deleteEvidence(e.id);
+    }
   }
 
   /**

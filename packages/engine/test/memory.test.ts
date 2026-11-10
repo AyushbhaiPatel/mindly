@@ -1,4 +1,5 @@
-import { unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -729,6 +730,65 @@ describe('trust layer', () => {
     expect(mindly.memory.update(fact.id, { status: 'archived' }, agent, null).status).toBe(
       'archived',
     );
+  });
+
+  it('drops evidence on a restatement only when it is gone from the restater checkout too', () => {
+    const { root, mindly, pid } = project();
+    // A linked worktree on another branch, where the line is still as it was.
+    const wt = mkdtempSync(join(tmpdir(), 'syn-wt-'));
+    mkdirSync(join(wt, 'src'));
+    writeFileSync(join(wt, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 8080;\n');
+    writeFileSync(join(root, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 9090;\n');
+    const base = { projectId: pid, kind: 'fact' as const, title: 'server port', source: agent };
+    const fact = mindly.memory.remember({
+      ...base,
+      projectRoot: wt,
+      body: 'listens on 8080',
+      evidence: [{ path: 'src/server.ts', excerpt: 'PORT_NUMBER_FOR_SERVER = 8080' }],
+    });
+    // Restated in the worktree without new evidence: the row holds there, so it stays.
+    mindly.memory.remember({ ...base, projectRoot: wt, body: 'listens on 8080 here' });
+    expect(mindly.store.memories.evidenceFor(fact.id)).toHaveLength(1);
+    // Gone in the worktree as well: now it is certainly gone and is dropped.
+    writeFileSync(join(wt, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 7070;\n');
+    mindly.memory.remember({ ...base, projectRoot: wt, body: 'listens on 7070 here' });
+    expect(mindly.store.memories.evidenceFor(fact.id)).toEqual([]);
+  });
+
+  it('keeps evidence of other files when the user takes over, and replaces it for the same file', () => {
+    const { root, mindly, pid } = project();
+    writeFileSync(join(root, 'AGENTS.md'), '- Keep commits small and focused.\n');
+    const plan = mindly.rules.planImport(pid, root);
+    const [rule] = mindly.rules.importRules(pid, root, plan.fresh, 'proposed');
+    expect(mindly.store.memories.evidenceFor(rule!.id).map((e) => e.ref)).toEqual(['AGENTS.md']);
+    // The user takes it over citing the same file differently, and another file: the row for the
+    // same file is replaced, the new file is added.
+    const taken = mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'rule',
+      title: rule!.title,
+      body: 'mine',
+      source: USER,
+      evidence: [
+        { path: 'AGENTS.md', excerpt: 'Keep commits small' },
+        { path: 'src/auth.ts', excerpt: 'export function login' },
+      ],
+    });
+    expect(mindly.store.memories.evidenceFor(taken.id).map((e) => [e.ref, e.excerpt])).toEqual([
+      ['AGENTS.md', 'Keep commits small'],
+      ['src/auth.ts', 'export function login'],
+    ]);
+    // Restated by the user without evidence: the rows that hold stay.
+    mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'rule',
+      title: rule!.title,
+      body: 'mine again',
+      source: USER,
+    });
+    expect(mindly.store.memories.evidenceFor(taken.id)).toHaveLength(2);
   });
 
   it('does not keep evidence that no longer holds when the user restates a memory', () => {

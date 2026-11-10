@@ -530,6 +530,35 @@ describe('rules file sync', () => {
     expect(p.mindly.memory.checkEvidence(p.root, evidence).valid).toBe(false);
   });
 
+  it('keeps an imported rule tied to its file when the user states it again', () => {
+    const p = project();
+    const agents = '# Agents\n\n- Keep commits small and focused.\n- Never edit generated files.\n';
+    writeFileSync(join(p.root, 'AGENTS.md'), agents);
+    const plan = p.mindly.rules.planImport(p.pid, p.root);
+    p.mindly.rules.importRules(p.pid, p.root, plan.fresh, 'approved');
+    p.files.sync(p.pid, p.root);
+    expect(p.read('AGENTS.md')).toBe(agents);
+
+    // The user says the same rule (`mindly memory add`, or a rule captured from a prompt).
+    const said = p.mindly.memory.remember({
+      projectId: p.pid,
+      projectRoot: p.root,
+      kind: 'rule',
+      title: 'Keep commits small and focused',
+      body: 'Small, focused commits.',
+      source: USER,
+    });
+    expect(said.source.type).toBe('user');
+    expect(p.mindly.store.memories.evidenceFor(said.id).map((e) => e.ref)).toEqual(['AGENTS.md']);
+    // Still written in AGENTS.md by the user: no section repeats it there.
+    expect(p.read('AGENTS.md')).toBe(agents);
+
+    // Its line is still its evidence: removing it marks the rule stale.
+    writeFileSync(join(p.root, 'AGENTS.md'), '# Agents\n\n- Never edit generated files.\n');
+    selfHealingOf(p.mindly).sweep(p.pid);
+    expect(p.mindly.store.memories.get(said.id).trust).toBe('stale');
+  });
+
   it('leaves imported rules in the file they came from, so removing one only drops that rule', async () => {
     const { root, mindly, pid } = await featureSetup();
     const agents = '# Agents\n\n- Use pnpm, never npm or yarn\n- Keep commits small and focused\n';
