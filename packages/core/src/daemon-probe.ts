@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { connect } from 'node:net';
-import { resolve as resolvePath } from 'node:path';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 
 /**
  * What is on a port a `daemon.json` names:
@@ -82,14 +82,40 @@ export interface DaemonProbe {
 }
 
 /**
+ * True when `dir` sits on a volume that ignores letter case (the default on macOS and Windows):
+ * the same directory is found under its name with the case of its last part flipped. Paths
+ * without letters there cannot tell, and are taken as case-sensitive.
+ */
+function caseInsensitiveAt(dir: string): boolean {
+  const name = basename(dir);
+  const flipped = [...name]
+    .map((c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()))
+    .join('');
+  if (flipped === name) return false;
+  try {
+    const a = statSync(dir);
+    const b = statSync(join(dirname(dir), flipped));
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A short id of a Mindly home, for telling one home's daemon from another's: every home uses
  * the same default port, so "a Mindly daemon answers there" does not say whose it is. It is a
  * hash of the resolved path, never the path itself (the health endpoint needs no login).
+ *
+ * `realpath` keeps letter case as it was typed on macOS, so on a volume that ignores case the
+ * path is lower-cased first: `~/Mindly` and `~/mindly` are one home there. The check looks at
+ * the home folder's own volume only; a path that crosses into a case-sensitive volume higher up
+ * could fold two homes that differ only in the case of those higher folders.
  */
 export function daemonHomeId(home: string): string {
   let real: string;
   try {
     real = realpathSync(home);
+    if (caseInsensitiveAt(real)) real = real.toLowerCase();
   } catch {
     real = resolvePath(home);
   }

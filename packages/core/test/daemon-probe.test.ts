@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { once } from 'node:events';
 import { createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -80,6 +84,24 @@ describe('probeDaemonPort', () => {
     const garbled = await listen(afterRequest((s) => s.end(http('200 OK', odd))));
     expect(await probeDaemon(garbled)).toEqual({ owner: 'daemon', pid: null, home: null });
     expect(await probeDaemon(0)).toEqual({ owner: 'absent', pid: null, home: null });
+  });
+
+  it('folds letter case only where the volume ignores it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindly-home-id-'));
+    // Two homes that differ only in case, on a volume that keeps them apart.
+    mkdirSync(join(root, 'Data'));
+    mkdirSync(join(root, 'data'));
+    const caseSensitive = statSync(join(root, 'Data')).ino !== statSync(join(root, 'data')).ino;
+    if (caseSensitive) {
+      expect(daemonHomeId(join(root, 'Data'))).not.toBe(daemonHomeId(join(root, 'data')));
+    }
+    // Where the same folder is found under its name in another case, the volume ignores case
+    // (here imitated with a link): the home is the same however it is typed.
+    mkdirSync(join(root, 'Home'));
+    symlinkSync('Home', join(root, 'hOME'));
+    const real = realpathSync(join(root, 'Home'));
+    const folded = createHash('sha256').update(real.toLowerCase()).digest('hex').slice(0, 16);
+    expect(daemonHomeId(join(root, 'Home'))).toBe(folded);
   });
 
   it('nothing listening is absent', async () => {

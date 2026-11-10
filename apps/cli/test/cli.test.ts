@@ -490,6 +490,61 @@ describe('hook', () => {
 const BUILT_MAIN = join(import.meta.dirname, '..', 'dist', 'main.js');
 
 describe.skipIf(!existsSync(BUILT_MAIN))('built binary', () => {
+  it.skipIf(process.platform === 'win32')(
+    'daemon start interrupted while it waits leaves no file behind',
+    async () => {
+      const sb = sandbox();
+      const port = await freePort();
+      expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+      const logs = join(sb.mindlyHome, 'logs');
+      const leftovers = (): string[] => readdirSync(logs).filter((f) => f.endsWith('.err'));
+      // A service that says it is shutting down: the start waits for it.
+      const old = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+        stdio: 'ignore',
+      });
+      await once(old, 'spawn');
+      writeFileSync(
+        join(sb.mindlyHome, 'daemon.json'),
+        JSON.stringify({
+          pid: old.pid,
+          port,
+          startedAt: 1,
+          version: '0.0.1',
+          stoppingAt: Date.now(),
+        }),
+      );
+      const start = spawn(process.execPath, [BUILT_MAIN, 'daemon', 'start'], {
+        env: sb.env,
+        cwd: sb.repo,
+        stdio: 'ignore',
+      });
+      try {
+        await new Promise((r) => setTimeout(r, 1500));
+        expect(start.exitCode).toBeNull();
+        expect(leftovers()).toEqual([]);
+        start.kill('SIGINT');
+        await once(start, 'exit');
+        expect(leftovers()).toEqual([]);
+      } finally {
+        start.kill('SIGKILL');
+        // The service the interrupted start launched comes up once the old one is gone: stop it.
+        old.kill('SIGKILL');
+        await once(old, 'exit');
+        for (let i = 0; i < 100; i++) {
+          const status = json<{ running: boolean }>(
+            (await cli(sb, ['daemon', 'status', '--json'])).stdout,
+          );
+          if (status.running) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        await cli(sb, ['daemon', 'stop']);
+      }
+      expect(existsSync(join(sb.mindlyHome, 'daemon.json'))).toBe(false);
+      expect(leftovers()).toEqual([]);
+    },
+    60_000,
+  );
+
   it('cold `mindly hook` process latency stays well under a second', async () => {
     const sb = sandbox();
     // Something to say, so SessionStart answers with context.

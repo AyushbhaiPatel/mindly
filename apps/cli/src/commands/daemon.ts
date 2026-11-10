@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   daemonHomeId,
@@ -198,15 +198,68 @@ export function daemonMainPath(): string {
   return layout.daemonMain;
 }
 
-/** Why the daemon process said it could not start (its last `mindly daemon:` line), or null. */
-function startFailure(file: string): string | null {
+const MAX_START_ERROR_BYTES = 64 * 1024;
+
+/**
+ * Why the daemon process said it could not start (its last `mindly daemon:` line), read from
+ * the start of the open file `fd`, or null.
+ */
+function startFailure(fd: number): string | null {
   try {
-    const lines = readFileSync(file, 'utf8').split(/\r?\n/);
+    const buf = Buffer.alloc(MAX_START_ERROR_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    const lines = buf.subarray(0, n).toString('utf8').split(/\r?\n/);
     const said = lines.filter((l) => l.startsWith('mindly daemon: ')).pop();
     return said === undefined ? null : said.slice('mindly daemon: '.length).trim().slice(0, 500);
   } catch {
     return null;
   }
+}
+
+/**
+ * A file the daemon's stderr goes to while it starts. On POSIX its name is removed as soon as
+ * the child holds it open: both processes keep their descriptors, and nothing is left behind
+ * however the CLI ends (Ctrl-C included). Windows cannot remove an open file, so there it is
+ * removed on release, and on Ctrl-C.
+ */
+function startErrorFile(logs: string): { fd: number; spawned(): void; release(): void } {
+  const file = join(logs, `daemon-start-${process.pid}-${Date.now()}.err`);
+  const fd = openSync(file, 'w+', 0o600);
+  let named = true;
+  const unlink = (): void => {
+    if (!named) return;
+    try {
+      rmSync(file, { force: true });
+      named = false;
+    } catch {
+      // Still open elsewhere (Windows): tried again on release.
+    }
+  };
+  const onInterrupt = (): void => {
+    try {
+      closeSync(fd);
+    } catch {
+      // already closed
+    }
+    unlink();
+    process.exit(130);
+  };
+  if (process.platform === 'win32') process.once('SIGINT', onInterrupt);
+  return {
+    fd,
+    spawned: () => {
+      if (process.platform !== 'win32') unlink();
+    },
+    release: () => {
+      process.off('SIGINT', onInterrupt);
+      try {
+        closeSync(fd);
+      } catch {
+        // already closed
+      }
+      unlink();
+    },
+  };
 }
 
 /**
@@ -224,22 +277,23 @@ async function launch(
     throw notAnswering(before.state);
   const main = daemonMainPath();
   // The daemon says why it cannot start on stderr, and a detached process has no terminal:
-  // keep that in a file for the length of the start.
-  const errFile = join(home.logs, `daemon-start-${process.pid}-${Date.now()}.err`);
-  const errFd = openSync(errFile, 'w', 0o600);
+  // keep that for the length of the start.
+  const errors = startErrorFile(home.logs);
   let pid: number | undefined;
   try {
     const child = spawn(process.execPath, o.force === true ? [main, '--force'] : [main], {
       detached: true,
-      stdio: ['ignore', 'ignore', errFd],
+      stdio: ['ignore', 'ignore', errors.fd],
       env,
       windowsHide: true,
     });
     child.unref();
     pid = child.pid;
-  } finally {
-    closeSync(errFd);
+  } catch (err) {
+    errors.release();
+    throw err;
   }
+  errors.spawned();
   try {
     if (pid === undefined) throw new MindlyError('unavailable', 'could not start the daemon');
     // A service that is shutting down is waited for by the new one before it starts.
@@ -260,7 +314,7 @@ async function launch(
       if (now.kind !== 'none' && now.kind !== 'stopping') break;
       await sleep(100);
     }
-    const why = startFailure(errFile);
+    const why = startFailure(errors.fd);
     const portClash = why !== null && /already in use/.test(why);
     throw new HintedError(
       'unavailable',
@@ -272,7 +326,7 @@ async function launch(
         : `See what went wrong in ${join(home.logs, 'mindly.log')}, or run it in this terminal: mindly daemon start --foreground`,
     );
   } finally {
-    rmSync(errFile, { force: true });
+    errors.release();
   }
 }
 
