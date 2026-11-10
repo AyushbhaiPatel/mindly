@@ -410,10 +410,18 @@ export class SentinelService {
     // another container), a holder suspended for longer than the heartbeat window looks
     // abandoned. Whoever took the lock over owns the scratch tree and the state from then on,
     // so the pass stops, as cancelled, before it touches either again.
+    // The lock's own signal is aborted as soon as its heartbeat finds it taken over, which
+    // kills a command running then; `stillOurs` asks at the points in between.
     const lostLock = new AbortController();
-    const signal = opts.signal ? AbortSignal.any([opts.signal, lostLock.signal]) : lostLock.signal;
+    const signal = AbortSignal.any([
+      ...(opts.signal ? [opts.signal] : []),
+      lock.signal,
+      lostLock.signal,
+    ]);
+    const lockLost = (): boolean => lostLock.signal.aborted || lock.signal.aborted;
     const stillOurs = (): void => {
-      if (lostLock.signal.aborted || lock.held()) return;
+      if (lockLost()) throw new BisectAborted();
+      if (lock.held()) return;
       lostLock.abort();
       throw new BisectAborted();
     };
@@ -444,7 +452,7 @@ export class SentinelService {
       setupCommit = watch?.setupCommit ?? null;
       run = this.startRun(project, latest, ready, opts.trigger);
       const guarded = whileHeld(steps, stillOurs);
-      const tree = await this.openWarm(steps, projectId, worktree, latest.commit, signal);
+      const tree = await this.openWarm(guarded, projectId, worktree, latest.commit, signal);
       stillOurs();
       ws = whileHeldTree(tree, stillOurs);
       // A tree made again (it was missing or broken) has none of the dependencies installed before.
@@ -538,7 +546,7 @@ export class SentinelService {
     } catch (err) {
       const runId = run?.id ?? null;
       if (err instanceof BisectAborted || signal.aborted) {
-        const lost = lostLock.signal.aborted;
+        const lost = lockLost();
         if (lost) this.k.logger.warn('sentinel: lock lost, pass stopped', { projectId });
         if (run) {
           this.finishRunQuietly(run, 'cancelled', {
@@ -1315,13 +1323,26 @@ function checkoutOf(cwd: string, trees: readonly string[]): string | null {
 
 /**
  * `steps` for a pass that may lose its lock: `stillOurs` (which throws once the lock is gone)
- * is asked before a command starts in the scratch tree and when it returns.
+ * is asked before the scratch tree is opened, made again or removed, and before a command
+ * starts in it and when it returns. A command running when the lock is lost is killed through
+ * the pass's signal.
  */
 function whileHeld(steps: StepGitPort, stillOurs: () => void): StepGitPort {
   return {
-    scratch: (repoDir, commit) => steps.scratch(repoDir, commit),
-    warm: (repoDir, path, commit) => steps.warm(repoDir, path, commit),
-    removeWarm: (repoDir, path) => steps.removeWarm(repoDir, path),
+    scratch: async (repoDir, commit) => {
+      stillOurs();
+      return steps.scratch(repoDir, commit);
+    },
+    warm: async (repoDir, path, commit) => {
+      stillOurs();
+      const ws = await steps.warm(repoDir, path, commit);
+      stillOurs();
+      return ws;
+    },
+    removeWarm: async (repoDir, path) => {
+      stillOurs();
+      await steps.removeWarm(repoDir, path);
+    },
     changedPaths: (repoDir, from, to) => steps.changedPaths(repoDir, from, to),
     isManifestPath: (path) => steps.isManifestPath(path),
     run: async (dir, command, signal) => {

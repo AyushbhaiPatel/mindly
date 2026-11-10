@@ -127,15 +127,19 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   the user's checkout; the path is refused if it is inside or around the repository (the sentinel
   reports `MINDLY_HOME` inside the repository as not ready). One pass at a time holds a checkout,
   by a lock that stays held while the process that took it lives. The lock records its PID, an
-  id of its own and, on Linux, when the process started and its PID namespace, so a PID used
-  again by another process does not keep it. A PID is only judged inside its own namespace:
-  seen from another one (two containers sharing `MINDLY_HOME`, or a container and the host), the
-  lock is held for as long as its holder keeps touching it (every 10 seconds). It is taken over
-  only by a process that found it unchanged again more than a minute after it first looked,
-  counted on a clock that does not step (what it saw is noted in a `lock.seen-*` file next to
-  the lock), so a time sync or a resume from suspend never makes a live lock look abandoned. A
-  holder that was suspended for longer than that (a paused container) can lose its lock: the
-  pass checks the lock before every command and before it saves anything, and stops as
+  id of its own, when the process started, its PID namespace and its machine and boot (the boot
+  id on Linux, the host name and boot time elsewhere), so a PID used again by another process
+  does not keep it. A PID is only judged on its own machine and boot and inside its own
+  namespace: seen from anywhere else (two containers sharing `MINDLY_HOME`, a container and the
+  host, two machines sharing a folder), the lock is held for as long as its holder keeps
+  touching it (every 10 seconds). It is taken over only by a process that found it unchanged
+  again more than a minute after it was first looked at from the same machine and boot, counted
+  on a clock that does not step (what was seen is noted in a `lock.seen-*` file next to the
+  lock, one per machine and boot, so one-shot containers build on each other's looks), and a
+  time sync or a resume from suspend never makes a live lock look abandoned. A holder that was
+  suspended for longer than that (a paused container) can lose its lock: the command it runs
+  is stopped as soon as its heartbeat finds out, and the pass checks the lock before it opens
+  the scratch tree, before every command and before it saves anything, then stops as
   cancelled, leaving the scratch tree and the state to the new holder. The daemon queues passes
   behind the project's merge checks. Bisects the
   sentinel starts are capped per project per day (`sentinel.maxBisectsPerDay`), and a step where

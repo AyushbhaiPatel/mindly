@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   defaultUserConfig,
   loadProjectConfig,
@@ -25,6 +25,7 @@ import {
   sentinelOf,
   SentinelService,
   SENTINEL_FINGERPRINT_PREFIX,
+  SENTINEL_LOCK_HEARTBEAT_MS,
   SKIP_RETRY_MS,
   tryProcessLock,
   trackOf,
@@ -904,15 +905,34 @@ describe('sentinel pass', () => {
     await w.pass();
     const before = w.mindly.store.sentinel.get(w.pid, w.root)!;
     const lockFile = join(dirname(svc.warmPath(w.pid, w.root)), 'lock');
-    const theirs = ['424242', 'feedfeedfeedfeedfeedfeed', '', 'pid:[4026532001]'].join('\n');
+    const theirs = ['424242', 'feedfeedfeedfeedfeedfeed', '', 'pid:[4026532001]', 'h'].join('\n');
     holder.takeOver = (commit) => {
       if (commit === 'c4') writeFileSync(lockFile, theirs);
     };
+    // The check at the new step is a long one: it runs until it is stopped.
+    const run = w.steps.run;
+    let stopped: boolean | null = null;
+    w.steps.run = async (dir, command, signal) => {
+      const result = await run(dir, command, signal);
+      if (!w.steps.ran.at(-1)?.endsWith('@c4') || command.name !== 'unit') return result;
+      // The next heartbeat of the lock comes while it runs.
+      vi.advanceTimersByTime(SENTINEL_LOCK_HEARTBEAT_MS);
+      stopped = await new Promise<boolean>((resolve) => {
+        if (signal?.aborted) return resolve(true);
+        signal?.addEventListener('abort', () => resolve(true));
+        setTimeout(() => resolve(false), 2000);
+      });
+      return { ...result, status: 'error', exitCode: null };
+    };
     w.addSteps(3, 4);
     const ran = w.steps.ran.length;
-    const r = await w.pass();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const r = await w.pass().finally(() => vi.useRealTimers());
+    w.steps.run = run;
     expect(r).toMatchObject({ status: 'cancelled', reason: 'lock_lost', checks: [] });
-    // The command that was running finished; nothing ran after it, and no bisect started.
+    // The command that was running was stopped when the heartbeat found the lock gone, not
+    // left to finish; nothing ran after it, and no bisect started.
+    expect(stopped).toBe(true);
     expect(w.steps.ran.slice(ran)).toEqual(['unit@c4']);
     expect(w.mindly.store.runs.list(w.pid, { kind: 'bisect' })).toEqual([]);
     expect(w.mindly.store.runs.get(r.runId!)).toMatchObject({ status: 'cancelled' });
