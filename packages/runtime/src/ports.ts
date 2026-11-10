@@ -40,6 +40,7 @@ import {
   tryLockCheckpoint,
   worktreeId,
   assertValidBranchName,
+  assertValidRevision,
   type ExportedSymbol,
   type ImportGraph,
 } from '@mindly/git';
@@ -270,6 +271,17 @@ export function createGitPort(): GitPort {
     restoreSnapshotToBranch: async (repoRoot, id, branch) => {
       await restoreSnapshotToBranch(repoRoot, id, branch);
     },
+    isAncestor: (cwd, ancestor, descendant) =>
+      safe(async () => {
+        assertValidRevision(ancestor);
+        assertValidRevision(descendant);
+        const res = await runGit(['merge-base', '--is-ancestor', ancestor, descendant], {
+          cwd,
+          okExitCodes: [0, 1],
+          timeoutMs: 5_000,
+        });
+        return res.exitCode === 0;
+      }, false),
     isMerged: (repoRoot, branch, into) =>
       safe(async () => {
         assertValidBranchName(branch);

@@ -520,4 +520,177 @@ describe('impact radar', () => {
     );
     expect(impactConflicts(mindly, pid)).toHaveLength(1);
   });
+
+  const authFile = (root: string) => ({
+    path: 'src/auth.ts',
+    abs: `${root}/src/auth.ts`,
+    addedText: '',
+    removedText: '',
+    wholeFile: false,
+  });
+
+  it('credits each agent with its own edit when a later edit is analysed first', async () => {
+    const { root, mindly, pid, cc, cx, write } = await featureSetup();
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+    );
+    write('src/auth.ts', AUTH_V1 + 'export function logout() {}\n');
+    await impactOf(mindly).analyze(pid, root, cc, authFile(root));
+
+    // Claude's analysis is held at the HEAD lookup; Codex's runs to the end in the meantime.
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    mindly.kernel.ports.git.headCommit = async () => {
+      calls += 1;
+      if (calls === 1) await gate;
+      return null;
+    };
+    write('src/auth.ts', AUTH_V1);
+    const claude = impactOf(mindly).analyze(pid, root, cc, authFile(root));
+    const withExtra = AUTH_V1 + 'export function extra() {}\n';
+    write('src/auth.ts', withExtra);
+    const codex = await impactOf(mindly).analyze(pid, root, cx, authFile(root));
+    release();
+    const claudeReport = await claude;
+
+    expect(codex).toBeNull();
+    expect(claudeReport?.diff.removed).toEqual(['logout']);
+    const impact = impactConflicts(mindly, pid);
+    expect(impact).toHaveLength(1);
+    expect(impact[0]!.title).toMatch(/^claude-code #[0-9a-f]{8} changed the exports/);
+    expect(impact[0]!.detail).toContain('Removed: logout');
+    // The stored surface is the file as it is.
+    expect(mindly.store.kv.get(surfaceKey(pid, 'src/auth.ts'))).toEqual(
+      Object.fromEntries(mindly.kernel.ports.git.exportSurface(withExtra, 'src/auth.ts')!),
+    );
+  });
+
+  it('never records a HEAD older than the one already recorded', async () => {
+    const { root, mindly, pid, cc, cx, write } = await featureSetup();
+    const git = mindly.kernel.ports.git;
+    const order = ['h0', 'h1'];
+    git.isAncestor = async (_cwd, a, d) => order.indexOf(a) <= order.indexOf(d);
+    let lookups = 0;
+    git.fileStateAtRef = async () => {
+      lookups += 1;
+      return { state: 'no_ref' };
+    };
+    await impactOf(mindly).analyze(pid, root, cc, authFile(root));
+
+    // Claude reads HEAD before a commit; Codex reads it after and records it first.
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    git.headCommit = async () => {
+      await gate;
+      return 'h0';
+    };
+    write('src/auth.ts', AUTH_V1.replace('"admin"', '"a"'));
+    const claude = impactOf(mindly).analyze(pid, root, cc, authFile(root));
+    git.headCommit = async () => 'h1';
+    write('src/auth.ts', AUTH_V1.replace('"admin"', '"b"'));
+    await impactOf(mindly).analyze(pid, root, cx, authFile(root));
+    release();
+    await claude;
+    expect(mindly.store.kv.get(`surface-state:${pid}:src/auth.ts`)).toMatchObject({ head: 'h1' });
+
+    // The next analysis sees no HEAD move, so it does not look at the commits.
+    lookups = 0;
+    write('src/auth.ts', AUTH_V1.replace('"admin"', '"c"'));
+    await impactOf(mindly).analyze(pid, root, cc, authFile(root));
+    expect(lookups).toBe(0);
+  });
+
+  it('closes a conflict that cannot be shown restored once its removed exports are back', async () => {
+    const { root, mindly, pid, repo, cc, cx, write } = await featureSetup();
+    mindly.kernel.ports.git.exportSurface = (source) =>
+      new Map(
+        [...source.matchAll(/^export (class|function) (\w+)(.*)$/gm)].map((m) => [
+          m[2]!,
+          `${m[1]}:${m[3]!.replace(/\s+/g, '')}`,
+        ]),
+      );
+    repo.head['src/auth.ts'] = 'export class Service {}\n';
+    write('src/auth.ts', 'export class Service {}\n');
+    const { conflict } = mindly.store.conflicts.report({
+      projectId: pid,
+      kind: 'impact',
+      severity: 'critical',
+      title: 'codex changed the exports of src/auth.ts',
+      detail: 'Removed: logout. Changed signature: Service',
+      sessionIds: [cc.id, cx.id].sort(),
+      paths: ['src/auth.ts'],
+      fingerprint: 'impact-test',
+    });
+    mindly.store.kv.set(surfaceKey(pid, 'src/auth.ts'), { Service: 'class:#old' });
+    mindly.store.kv.set(`surface-state:${pid}:src/auth.ts`, {
+      head: null,
+      open: [
+        {
+          conflictId: conflict.id,
+          before: { Service: 'class:#older', logout: 'function:(){}' },
+          removed: ['logout'],
+        },
+      ],
+    });
+
+    write('src/auth.ts', 'export class Service {}\nexport function logout() {}\n');
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'logout') }),
+    );
+    expect(mindly.store.conflicts.get(conflict.id).status).toBe('resolved');
+    const titles = mindly.store.deliveries
+      .list(pid)
+      .filter((d) => d.targetSessionId === cx.id && d.kind === 'impact')
+      .map((d) => d.title);
+    expect(titles).toEqual(['src/auth.ts exports logout again']);
+  });
+
+  it('closes a conflict that cannot be shown restored after a week without changes', async () => {
+    const { root, clock, mindly, pid, repo, cc, cx, write } = await featureSetup();
+    mindly.kernel.ports.git.exportSurface = (source) =>
+      new Map(
+        [...source.matchAll(/^export (class|function) (\w+)(.*)$/gm)].map((m) => [
+          m[2]!,
+          `${m[1]}:${m[3]!.replace(/\s+/g, '')}`,
+        ]),
+      );
+    repo.head['src/auth.ts'] = 'export class Service {}\n';
+    write('src/auth.ts', 'export class Service {}\n');
+    const { conflict } = mindly.store.conflicts.report({
+      projectId: pid,
+      kind: 'impact',
+      severity: 'warning',
+      title: 'codex changed the exports of src/auth.ts',
+      detail: 'Changed signature: Service',
+      sessionIds: [cc.id, cx.id].sort(),
+      paths: ['src/auth.ts'],
+      fingerprint: 'impact-test',
+    });
+    const seed = (): void => {
+      mindly.store.kv.set(surfaceKey(pid, 'src/auth.ts'), { Service: 'class:#old' });
+      mindly.store.kv.set(`surface-state:${pid}:src/auth.ts`, {
+        head: null,
+        open: [{ conflictId: conflict.id, before: { Service: 'class:#older' } }],
+      });
+    };
+    const edit = async (tag: string): Promise<void> => {
+      write('src/auth.ts', `export class Service {}\n// ${tag}\n`);
+      await mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', tag) }),
+      );
+    };
+
+    seed();
+    clock.advance(6 * 24 * 60 * 60_000);
+    await edit('six days');
+    expect(mindly.store.conflicts.get(conflict.id).status).toBe('open');
+
+    seed();
+    clock.advance(2 * 24 * 60 * 60_000);
+    await edit('eight days');
+    expect(mindly.store.conflicts.get(conflict.id).status).toBe('resolved');
+    const told = mindly.store.deliveries.list(pid).filter((d) => d.kind === 'impact');
+    expect(told).toHaveLength(0);
+  });
 });

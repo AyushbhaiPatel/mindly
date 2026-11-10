@@ -16,6 +16,8 @@ const SYMBOL_RE = /^[\w$.]{1,80}$/;
 /** Open impact conflicts remembered per file, so they can be closed when the exports come back. */
 const MAX_OPEN_PER_FILE = 20;
 const MAX_BASELINE_BYTES = 512 * 1024;
+/** A conflict that can no longer be shown restored is closed once untouched for this long. */
+const STALE_CONFLICT_MS = 7 * 24 * 60 * 60_000;
 /**
  * Version of the signature format the export analysis produces. Bump it whenever a change to the
  * analysis alters the signature of unchanged code (how a class is hashed, how a signature is
@@ -139,7 +141,18 @@ interface SurfaceState {
   /** HEAD of the checkout when the surface was stored (null when unknown). */
   head: string | null;
   /** Conflicts this file's changes opened, with the exports as they were before. */
-  open: { conflictId: string; before: Record<string, string> }[];
+  open: OpenImpact[];
+}
+
+/** A conflict opened by a change to the file, remembered so it can be closed when undone. */
+interface OpenImpact {
+  conflictId: string;
+  /** Signatures of the removed and changed exports, as they were before the change. */
+  before: Record<string, string>;
+  /** The exports the change removed. */
+  removed: string[];
+  /** Format `before` is written in. */
+  format: number;
 }
 
 function stateKey(surface: string): string {
@@ -148,22 +161,34 @@ function stateKey(surface: string): string {
 
 function readState(value: unknown): SurfaceState {
   const v = (value ?? {}) as Partial<SurfaceState>;
-  const open = Array.isArray(v.open)
-    ? v.open.filter(
-        (o): o is SurfaceState['open'][number] =>
-          typeof o === 'object' &&
-          o !== null &&
-          typeof o.conflictId === 'string' &&
-          typeof o.before === 'object' &&
-          o.before !== null,
-      )
-    : [];
-  return {
-    // No recorded format means format 1 (see `SurfaceState.format`).
-    format: typeof v.format === 'number' ? v.format : 1,
-    head: typeof v.head === 'string' ? v.head : null,
-    open,
-  };
+  // No recorded format means format 1 (see `SurfaceState.format`).
+  const format = typeof v.format === 'number' ? v.format : 1;
+  const open: OpenImpact[] = [];
+  for (const o of Array.isArray(v.open) ? (v.open as unknown[]) : []) {
+    if (typeof o !== 'object' || o === null) continue;
+    const e = o as Partial<OpenImpact>;
+    if (typeof e.conflictId !== 'string' || typeof e.before !== 'object' || e.before === null) {
+      continue;
+    }
+    open.push({
+      conflictId: e.conflictId,
+      before: e.before,
+      removed: Array.isArray(e.removed) ? e.removed.filter((n) => typeof n === 'string') : [],
+      // Entries written before formats were recorded per entry share the file's format.
+      format: typeof e.format === 'number' ? e.format : format,
+    });
+  }
+  return { format, head: typeof v.head === 'string' ? v.head : null, open };
+}
+
+/**
+ * Export surface of the file as it is on disk now (empty when it was deleted), or null when it
+ * cannot be read or is not analysed. Synchronous, so it can run inside a store transaction.
+ */
+function surfaceNow(k: Kernel, file: ChangedFile): Map<string, string> | null {
+  if (!existsSync(file.abs)) return new Map();
+  const content = readBounded(file.abs);
+  return content === null ? null : k.ports.git.exportSurface(content, file.path);
 }
 
 /** Root of the checkout `file` lives in: the actor's worktree, which may not be the project root. */
@@ -225,79 +250,54 @@ export class ImpactService {
     file: ChangedFile,
   ): Promise<ImpactReport | null> {
     const git = this.k.ports.git;
-    let after: Map<string, string> | null;
-    if (!existsSync(file.abs)) {
-      after = new Map();
-    } else {
-      const content = readBounded(file.abs);
-      if (content === null) return null;
-      after = git.exportSurface(content, file.path);
-    }
-    if (!after) return null;
-
     // The file, its HEAD version and its importers are those of the checkout the agent works in.
     const tree = treeRootOf(file, projectRoot);
     const key = surfaceKey(projectId, file.path, tree === projectRoot ? undefined : tree);
     const kv = this.k.store.kv;
 
-    // Everything that has to be waited for comes first. What it depends on (is there a stored
-    // surface, which HEAD was it taken at) is only a first look here and is checked again below.
-    const seen = readState(kv.get<unknown>(stateKey(key)));
-    const hadSurface = kv.get<unknown>(key) !== null;
-    const head = await git.headCommit(tree);
-    let atHead: Map<string, string> | null = null;
-    let committed: Map<string, string> | null = null;
-    if (!hadSurface) {
-      const content = await git.fileAtRef(tree, 'HEAD', file.path);
-      atHead = content === null ? null : git.exportSurface(content, file.path);
-    } else if (head !== null && seen.head !== null && head !== seen.head) {
-      committed = await this.committedSurface(tree, file.path, seen.head, head);
-    }
-
-    // Reading the stored surface, comparing and storing the new one is one transaction with no
-    // wait in it. Two edits of the file analysed at the same time (each hook is its own process)
-    // are then compared one after the other, and a change is reported once, for the first.
-    const { before, restored } = this.k.store.transaction(() => {
+    // Reading the file, comparing it with the stored surface and storing the new one happen in one
+    // transaction, before anything is waited for. Analyses of the same file (each hook is its own
+    // process) are then compared in the order the file was read, which is the order the edits were
+    // made: each one sees the surface the edit before it left, and a change is reported once,
+    // against the agent that made it.
+    const seen = this.k.store.transaction(() => {
+      const after = surfaceNow(this.k, file);
+      if (!after) return null;
       const stored = kv.get<Record<string, string>>(key);
       const state = readState(kv.get<unknown>(stateKey(key)));
-      let baseline: Map<string, string> | null;
-      let open = state.open;
-      if (stored && typeof stored === 'object') {
-        // A surface stored by another version is still right about which exports exist and about
-        // every signature that version wrote the same way; only the others are taken as unchanged.
-        baseline = migrateSignatures(
-          Object.entries(stored).filter(([, v]) => typeof v === 'string'),
-          state.format,
-          after,
-        );
-        // A conflict remembered with a signature that cannot be compared any more can never be
-        // shown restored. It is forgotten here and stays open until someone resolves it.
-        open = open.filter((o) =>
-          Object.values(o.before).every((sig) => canShowRestored(sig, state.format)),
-        );
-        if (committed && state.head === seen.head) baseline = committed;
-      } else {
-        baseline = atHead;
-      }
-      const back: SurfaceState['open'] = [];
-      const kept: SurfaceState['open'] = [];
-      for (const o of open) {
-        const names = Object.keys(o.before);
-        const isBack =
-          baseline !== null && names.length > 0 && names.every((n) => after.get(n) === o.before[n]);
-        (isBack ? back : kept).push(o);
-      }
+      // A surface stored by another version is still right about which exports exist and about
+      // every signature that version wrote the same way; only the others are taken as unchanged.
+      const baseline =
+        stored && typeof stored === 'object'
+          ? migrateSignatures(
+              Object.entries(stored).filter(([, v]) => typeof v === 'string'),
+              state.format,
+              after,
+            )
+          : null;
+      const outcome = this.sortOpen(state.open, after);
       kv.set(key, Object.fromEntries(after));
-      kv.set(stateKey(key), {
-        format: SURFACE_FORMAT,
-        head,
-        open: kept.slice(-MAX_OPEN_PER_FILE),
-      });
-      return { before: baseline, restored: back };
+      kv.set(stateKey(key), { format: SURFACE_FORMAT, head: state.head, open: outcome.kept });
+      return { after, baseline, priorHead: state.head, ...outcome };
     });
+    if (!seen) return null;
+    const { after } = seen;
+    this.closeRestored(projectId, session, file.path, seen.restored);
+    this.closeOutdated(projectId, session, file.path, seen.outdated, after);
+
+    // Then what has to be waited for: the HEAD the comparison is made against.
+    const head = await git.headCommit(tree);
+    let before = seen.baseline;
+    if (!before) {
+      // First sight of the file: compare with what is committed.
+      const content = await git.fileAtRef(tree, 'HEAD', file.path);
+      before = content === null ? null : git.exportSurface(content, file.path);
+    } else if (head !== null && seen.priorHead !== null && head !== seen.priorHead) {
+      before = (await this.committedSurface(tree, file.path, seen.priorHead, head)) ?? before;
+    }
+    await this.recordHead(tree, key, seen.priorHead, head);
     if (!before) return null;
 
-    this.closeRestored(projectId, session, file.path, restored);
     const raw = git.diffExportSurface(before, after);
     const diff: ExportSurfaceDiff = {
       added: cleanNames(raw.added),
@@ -360,10 +360,13 @@ export class ImpactService {
     }
     this.k.store.transaction(() => {
       const state = readState(kv.get<unknown>(stateKey(key)));
-      const open = [
-        ...state.open.filter((o) => o.conflictId !== conflict.id),
-        { conflictId: conflict.id, before: was },
-      ];
+      const entry: OpenImpact = {
+        conflictId: conflict.id,
+        before: was,
+        removed: diff.removed,
+        format: SURFACE_FORMAT,
+      };
+      const open = [...state.open.filter((o) => o.conflictId !== conflict.id), entry];
       kv.set(stateKey(key), { ...state, open: open.slice(-MAX_OPEN_PER_FILE) });
     });
     const diffKey = fingerprint(...diff.removed, '|', ...diff.changed, '|', ...diff.added);
@@ -416,6 +419,105 @@ export class ImpactService {
   }
 
   /**
+   * Sorts the conflicts remembered for a file against its current surface: those whose exports
+   * are back as they were (`restored`), those that can never be shown restored and are done with
+   * (`outdated`: the exports they removed are back, or nothing touched them for a week), and the
+   * rest (`kept`). Conflicts closed meanwhile are forgotten.
+   */
+  private sortOpen(
+    open: readonly OpenImpact[],
+    after: ReadonlyMap<string, string>,
+  ): { kept: OpenImpact[]; restored: OpenImpact[]; outdated: OpenImpact[] } {
+    const kept: OpenImpact[] = [];
+    const restored: OpenImpact[] = [];
+    const outdated: OpenImpact[] = [];
+    const now = this.k.clock.now();
+    for (const o of open) {
+      const conflict = this.k.store.conflicts.find(o.conflictId);
+      if (!conflict || (conflict.status !== 'open' && conflict.status !== 'acknowledged')) continue;
+      const names = Object.keys(o.before);
+      const comparable = Object.values(o.before).every((sig) => canShowRestored(sig, o.format));
+      if (comparable) {
+        const back = names.length > 0 && names.every((n) => after.get(n) === o.before[n]);
+        (back ? restored : kept).push(o);
+        continue;
+      }
+      // Remembered in a format the current one writes differently: whether the exports are back
+      // as they were cannot be told, but a removed export showing up again, or a long silence, ends
+      // the warning.
+      const removedBack = o.removed.length > 0 && o.removed.every((n) => after.has(n));
+      const quiet = now - conflict.updatedAt >= STALE_CONFLICT_MS;
+      (removedBack || quiet ? outdated : kept).push(o);
+    }
+    return { kept: kept.slice(-MAX_OPEN_PER_FILE), restored, outdated };
+  }
+
+  /**
+   * Records the HEAD the stored surface was compared against. A HEAD read before one another
+   * analysis already recorded is older, and is never written over it.
+   */
+  private async recordHead(
+    tree: string,
+    key: string,
+    priorHead: string | null,
+    head: string | null,
+  ): Promise<void> {
+    if (head === null) return;
+    const kv = this.k.store.kv;
+    const recorded = readState(kv.get<unknown>(stateKey(key))).head;
+    let older = false;
+    if (recorded !== null && recorded !== priorHead && recorded !== head) {
+      older = (await this.k.ports.git.isAncestor?.(tree, head, recorded)) ?? false;
+    }
+    this.k.store.transaction(() => {
+      const state = readState(kv.get<unknown>(stateKey(key)));
+      // Changed again while the order was being checked: the later writer knows better.
+      if (state.head !== recorded || older) return;
+      kv.set(stateKey(key), { ...state, head });
+    });
+  }
+
+  /**
+   * Closes conflicts whose change can no longer be compared with the file (see `sortOpen`), with
+   * a plain note: nothing says the exports are exactly as they were.
+   */
+  private closeOutdated(
+    projectId: string,
+    actor: Session,
+    path: string,
+    outdated: readonly OpenImpact[],
+    after: ReadonlyMap<string, string>,
+  ): void {
+    for (const o of outdated) {
+      const conflict = this.k.store.conflicts.find(o.conflictId);
+      if (!conflict || (conflict.status !== 'open' && conflict.status !== 'acknowledged')) continue;
+      this.k.store.conflicts.setStatus(conflict.id, 'resolved');
+      this.k.store.events.append({
+        projectId,
+        sessionId: actor.id,
+        type: 'conflict.updated',
+        payload: { conflictId: conflict.id, kind: conflict.kind, status: 'resolved' },
+      });
+      // Only a removed export showing up again is worth telling; a long silence is not news.
+      const names = cleanNames(o.removed);
+      if (names.length === 0 || !o.removed.every((n) => after.has(n))) continue;
+      const live = new Set(liveSessions(this.k, projectId).map((s) => s.id));
+      const told = conflict.sessionIds.filter((id) => id !== actor.id && live.has(id));
+      if (told.length === 0) continue;
+      this.telepathy.send({
+        projectId,
+        from: actor,
+        to: { sessionIds: told },
+        kind: 'impact',
+        priority: 4,
+        title: `${path} exports ${nameList(names)} again`,
+        body: `The earlier warning about ${path} is closed. Check that the exports match what your code expects.`,
+        dedupeKey: `impact-closed:${conflict.id}:${conflict.updatedAt}`,
+      });
+    }
+  }
+
+  /**
    * Closes the conflicts of earlier changes to `path` whose exports are back as they were
    * (`restored`, already taken off the file's state) and tells the sessions that were warned.
    */
@@ -423,7 +525,7 @@ export class ImpactService {
     projectId: string,
     actor: Session,
     path: string,
-    restored: SurfaceState['open'],
+    restored: readonly OpenImpact[],
   ): void {
     for (const o of restored) {
       const conflict = this.k.store.conflicts.find(o.conflictId);

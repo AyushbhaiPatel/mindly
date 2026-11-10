@@ -28,7 +28,10 @@ describe('git port', () => {
     const git = createGitPort();
     expect(await git.findRepoRoot(dir)).toBe(dir);
     expect(await git.currentBranch(dir)).toBe('main');
-    expect(await git.headCommit(dir)).toMatch(/^[0-9a-f]{40}$/);
+    const head = await git.headCommit(dir);
+    expect(head).toMatch(/^[0-9a-f]{40}$/);
+    expect(await git.isAncestor?.(dir, head!, head!)).toBe(true);
+    expect(await git.isAncestor?.(dir, head!, '0'.repeat(40))).toBe(false);
     expect(await git.dependentsOf(dir, 'auth.ts')).toEqual(['app.ts']);
     const before = git.exportSurface('export function login(user: string) {}', 'auth.ts');
     const after = git.exportSurface(

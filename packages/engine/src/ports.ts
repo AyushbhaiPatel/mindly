@@ -61,6 +61,11 @@ export interface GitPort {
   ): Promise<{ ref: string; commit: string } | null>;
   /** Optional (time machine): creates a *new* branch `branch` pointing at snapshot `id`. */
   restoreSnapshotToBranch?(repoRoot: string, id: string, branch: string): Promise<void>;
+  /**
+   * Optional (impact radar): whether commit `ancestor` is an ancestor of (or equal to) commit
+   * `descendant`. False when either cannot be read.
+   */
+  isAncestor?(cwd: string, ancestor: string, descendant: string): Promise<boolean>;
   /** Optional (memory branches): whether `branch` is fully merged into `into`. */
   isMerged?(repoRoot: string, branch: string, into: string): Promise<boolean>;
   /** Optional (splits): the operations `mindly split` needs; absent when git is unavailable. */
