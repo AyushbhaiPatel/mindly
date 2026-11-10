@@ -239,6 +239,15 @@ describe('plan validation', () => {
     expect(check(two(['src/API/**'], ['src/api/**']))).toMatch(/could both own the same new files/);
     expect(check(two(['src/API/**'], ['src/app/**']))).toBeNull();
     expect(check(two(['src/**/*.ts'], ['src/**/*.css']))).toBeNull();
+    // An alternative of a group may hold a slash: both of these own src/b/c.
+    expect(check(two(['src/{a,b/c}'], ['src/*/c']))).toMatch(
+      /src\/\{a,b\/c\} and src\/\*\/c are not clearly disjoint/,
+    );
+    expect(check(two(['src/{api,lib/billing}/**'], ['src/lib/**']))).toMatch(
+      /not clearly disjoint/,
+    );
+    expect(check(two(['src/{api,lib/billing}/**'], ['src/app/**']))).toBeNull();
+    expect(check(two(['{..,src}/x.ts'], ['web/**']))).toMatch(/project-relative globs/);
     const withContract = (contract: unknown[]) => ({
       goal: 'g',
       parts: [part('a', ['a/**']), part('b', ['b/**'])],

@@ -2,8 +2,9 @@
  * Minimal, dependency-free glob matching for project-relative POSIX paths.
  *
  * Supported syntax: `**` (any number of path segments), `*` (anything except `/`), `?` (one
- * character except `/`) and `{a,b}` alternation (not nested). Everything else is literal; regex
- * metacharacters are escaped, so a glob can never become an arbitrary regular expression.
+ * character except `/`) and `{a,b}` alternation (not nested; an alternative may hold a `/`, as in
+ * `src/{api,lib/billing}`). Everything else is literal; regex metacharacters are escaped, so a
+ * glob can never become an arbitrary regular expression.
  *
  * A pattern can also name a folder, the way a `.gitignore` line does: a pattern without wildcards
  * (`infra`, `src/api`) matches that path and everything below it, and a pattern ending in `/`
@@ -116,7 +117,45 @@ export function matchesAnyGlob(
 
 const WILDCARD = /[*?[{]/;
 
-/** Segments of a plain pattern, as `expandGlob` returns them. */
+/** With more brace expansions than this, `globsMayOverlap` assumes a glob may overlap anything. */
+const MAX_EXPANSIONS = 64;
+
+/**
+ * The patterns without groups that `plain` stands for, reading groups the way `compile` does: the
+ * first `{` opens a group, a `{` inside one is literal, `,` separates alternatives and the first
+ * `}` closes it. Null when a group is unterminated or there would be more than `limit` patterns.
+ */
+function expandBraces(plain: string, limit: number): string[] | null {
+  let out = [''];
+  let i = 0;
+  for (;;) {
+    const open = plain.indexOf('{', i);
+    if (open === -1) return out.map((p) => p + plain.slice(i));
+    const close = plain.indexOf('}', open + 1);
+    if (close === -1) return null;
+    const head = plain.slice(i, open);
+    const alternatives = [...new Set(plain.slice(open + 1, close).split(','))];
+    if (out.length * alternatives.length > limit) return null;
+    out = out.flatMap((p) => alternatives.map((alt) => p + head + alt));
+    i = close + 1;
+  }
+}
+
+/**
+ * The segments of every pattern without groups that `glob` matches through, or null when there
+ * are too many. Groups are expanded before splitting because an alternative may hold a `/`.
+ */
+function overlapPatterns(glob: string): string[][] | null {
+  const out: string[][] = [];
+  for (const plain of expandGlob(glob)) {
+    const expanded = expandBraces(plain, MAX_EXPANSIONS - out.length);
+    if (!expanded) return null;
+    for (const e of expanded) out.push(globSegments(e));
+  }
+  return out.length > MAX_EXPANSIONS ? null : out;
+}
+
+/** Segments of a pattern without groups (see `expandBraces`): no `/` here sits inside a group. */
 function globSegments(plain: string): string[] {
   return plain.split('/').filter((s) => s !== '' && s !== '.');
 }
@@ -136,17 +175,21 @@ function headTail(segment: string): { head: string; tail: string } | null {
  * false only when they are provably disjoint. Two globs are disjoint when their literal leading
  * segments differ, when their literal trailing segments differ, or when their file-name patterns
  * have literal heads or tails that cannot both fit one name (`*.ts` and `*.css`). Anything
- * involving `**`, groups or classes at the point of comparison counts as a possible overlap.
- * With `nocase`, literal text is compared ignoring letter case.
+ * involving `**` or classes at the point of comparison counts as a possible overlap. Groups are
+ * expanded first and every pair of expansions compared, since an alternative may hold a `/`:
+ * `src/{a,b/c}` and `src/x/c` are not disjoint. A glob with more than `MAX_EXPANSIONS`
+ * expansions, or with an unterminated group, counts as a possible overlap with anything. With
+ * `nocase`, literal text is compared ignoring letter case.
  *
  * Patterns are read the way `matchesGlob` reads them, so a folder (`src/api`, `src/api/`)
  * overlaps anything below it.
  */
 export function globsMayOverlap(a: string, b: string, options: GlobOptions = {}): boolean {
   const fold = (s: string): string => (options.nocase ? s.toLowerCase() : s);
-  const as = expandGlob(fold(a));
-  const bs = expandGlob(fold(b));
-  return as.some((x) => bs.some((y) => plainMayOverlap(globSegments(x), globSegments(y))));
+  const as = overlapPatterns(fold(a));
+  const bs = overlapPatterns(fold(b));
+  if (!as || !bs) return true;
+  return as.some((x) => bs.some((y) => plainMayOverlap(x, y)));
 }
 
 function plainMayOverlap(A: string[], B: string[]): boolean {
