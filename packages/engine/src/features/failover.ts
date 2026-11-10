@@ -38,10 +38,22 @@ const MAX_TEXT_PER_ENTRY = 8000;
 const MAX_ENTRIES = 400;
 const DAY_MS = 24 * 60 * 60_000;
 
-/** One rate-limit signature: a stable id (recorded in events) and the pattern that detects it. */
+/**
+ * Where a piece of text comes from. `client` is the agent client's own error report (an error
+ * event, an error-level system entry, an API error written in place of the answer); `assistant`
+ * is anything the model wrote.
+ */
+export type NoticeSource = 'assistant' | 'client';
+
+/**
+ * One rate-limit signature: a stable id (recorded in events) and the patterns that detect it.
+ * `re` is the strict form for text the assistant wrote; `client` is the generous form for the
+ * client's own error reports.
+ */
 export interface RateLimitSignature {
   id: string;
   re: RegExp;
+  client: RegExp;
 }
 
 /** A pending usage-limit handoff older than this is no longer offered to anyone. */
@@ -52,28 +64,55 @@ export const HANDOFF_SUMMARY_MAX_CHARS = 300;
 
 /** A limit notice is one short line; longer lines are prose or tool output. */
 const MAX_NOTICE_LINE_CHARS = 300;
+/** An assistant message is a notice only when all of it is: this short, this few lines. */
+const MAX_NOTICE_MESSAGE_CHARS = 400;
+const MAX_NOTICE_MESSAGE_LINES = 4;
 
 const APOS = "(?:'|\\u2019)";
-// The label an agent or API client puts in front of a failure: "Error:", "API Error: 429",
-// "stream error:", "[API Error: ...", "Request failed:", "Fatal:", "ERROR", "Warning:".
-const LABEL =
-  '(?:\\[?(?:(?:api|stream|http|request|provider|server|unexpected|fatal) )?(?:error|failed|failure|fatal|warning|warn)\\b\\]?\\s*[:\\-]?\\s*(?:\\(?\\d{3}\\)?\\s*[:\\-]?\\s*)?)';
-// What may follow the phrase in a notice: the end of the line, punctuation, or when to retry.
-// "Rate limit exceeded handling added" is a sentence about code, not a notice.
-const TAIL =
-  '(?=\\s*(?:$|[.,:;!(\\[{|\\u00b7\\u2219\\u2022]|[-\\u2013\\u2014]\\s|(?:please )?(?:try again|retry|retrying|wait|resets?|upgrade)\\b))';
+const QUALIFIER = '(?:(?:api|stream|http|request|provider|server|unexpected|fatal) )?';
+// The label in front of a failure. In text the assistant wrote only "Error" (with what kind),
+// "Request failed" and "Fatal" count: "Warning", "WARN", "Failed" and "Failure" are what logs
+// and test runners print, and the assistant quotes those all the time. A client's own error
+// report may carry any of them.
+const LABEL_WORDS: Record<NoticeSource, string> = {
+  assistant: `${QUALIFIER}error|request failed|fatal`,
+  client: `${QUALIFIER}(?:error|failed|failure|fatal|warning|warn)`,
+};
+// When to come back, which is how a notice goes on after the phrase.
+const HINT =
+  '(?:(?:please )?(?:try again|retry|retrying|wait|resets?|upgrade|check (?:your|quota))\\b|your limit will reset\\b|\\(e\\.g\\.)';
+// What may follow the phrase. For the client's reports: the end of the line, punctuation or a
+// hint. For the assistant the line has to end there or go on with a hint, so that
+// "Rate limit exceeded: the API now answers 429" stays a sentence about code.
+const TAIL: Record<NoticeSource, string> = {
+  assistant: `(?=\\s*(?:[.!]?\\s*$|[.,;:!|\\u00b7\\u2219\\u2022\\u2013\\u2014-]?\\s*${HINT}))`,
+  client: `(?=\\s*(?:$|[.,:;!(\\[{|\\u00b7\\u2219\\u2022]|[-\\u2013\\u2014]\\s|${HINT}))`,
+};
 
-/** A signature that must open the line (after an optional error label). */
-function notice(body: string): RegExp {
-  return new RegExp(`^${LABEL}?(?:${body})${TAIL}`, 'i');
+function label(source: NoticeSource): string {
+  return `(?:\\[?(?:${LABEL_WORDS[source]})\\b\\]?\\s*[:\\-]?\\s*(?:\\(?\\d{3}\\)?\\s*[:\\-]?\\s*)?)`;
+}
+
+/** A signature from a pattern that is given the label and tail of its source. */
+function both(id: string, build: (label: string, tail: string) => string): RateLimitSignature {
+  const re = (source: NoticeSource) => new RegExp(build(label(source), TAIL[source]), 'i');
+  return { id, re: re('assistant'), client: re('client') };
+}
+
+/** A signature whose phrase opens the line (after an optional label) and is followed by a tail. */
+function notice(id: string, body: string): RateLimitSignature {
+  return both(id, (l, tail) => `^${l}?(?:${body})${tail}`);
 }
 
 const HTTP = '(?:http(?:/\\d(?:\\.\\d)?)? )?';
 // "429" alone matches line numbers and ids, so it must open the line as a status.
-const HTTP_429 = new RegExp(
-  `^${LABEL}?${HTTP}(?:status(?: code)?\\s*:?\\s*)?429\\b${TAIL}|^${LABEL}?${HTTP}429 too many requests\\b`,
-  'i',
-);
+function http429(id: string): RateLimitSignature {
+  return both(
+    id,
+    (l, tail) =>
+      `^${l}?${HTTP}(?:status(?: code)?\\s*:?\\s*)?429\\b${tail}|^${l}?${HTTP}429 too many requests\\b`,
+  );
+}
 const RATE_LIMITED = `(?:you are being |you${APOS}re being |requests? (?:was|were|is|are) )?rate[ -]?limited`;
 
 /**
@@ -82,77 +121,63 @@ const RATE_LIMITED = `(?:you are being |you${APOS}re being |requests? (?:was|wer
  * Generic signatures apply to every agent.
  *
  * A signature is matched against one line at a time and has to open that line the way a notice
- * does ("Usage limit reached.", "API Error: 429 ...", "You've hit your usage limit"). An assistant
- * writing *about* rate limiting in the user's code ("the endpoint is now rate limited to 5
- * attempts", "returns HTTP 429") does not trigger a failover, and neither does a log quoted in a
- * code block. Missing an unusual wording is the cheaper mistake: a false match takes the work
- * away from a healthy session.
+ * does ("Usage limit reached.", "API Error: 429 ...", "You've hit your usage limit"). The shape
+ * of a line cannot tell a notice from a sentence about one, so where the text comes from
+ * decides how it is read (see `detectRateLimit`). Missing an unusual wording is the cheaper
+ * mistake: a false match takes the work away from a healthy session.
  */
 export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSignature[]>> = {
   'claude-code': [
-    { id: 'claude.usage_limit_reached', re: notice('(?:claude(?: ai)? )?usage limit reached') },
-    {
-      id: 'claude.five_hour_limit',
-      re: notice(`(?:you${APOS}ve (?:hit|reached) your )?5-hour limit(?: reached)?`),
-    },
-    {
-      id: 'claude.limit_reached',
-      re: notice(
-        `(?:session|weekly|daily|opus|sonnet) limit reached|you${APOS}ve (?:hit|reached) your (?:session|weekly|daily) limit`,
-      ),
-    },
-    { id: 'claude.limit_will_reset', re: /^(?:your )?limit will reset (?:at|in|on)\b/i },
-    // The API error type is a name in code unless it comes straight after the label or as the
-    // quoted value of an error body ("API Error: 429 {"type":"rate_limit_error"}").
-    {
-      id: 'claude.rate_limit_error',
-      re: new RegExp(`^${LABEL}(?:rate_limit_error\\b|.{0,80}"rate_limit_error")`, 'i'),
-    },
-    { id: 'claude.http_429', re: HTTP_429 },
+    notice('claude.usage_limit_reached', '(?:claude(?: ai)? )?usage limit reached'),
+    notice(
+      'claude.five_hour_limit',
+      `(?:you${APOS}ve (?:hit|reached) your )?5-hour limit(?: reached)?`,
+    ),
+    notice(
+      'claude.limit_reached',
+      `(?:session|weekly|daily|opus|sonnet) limit reached|you${APOS}ve (?:hit|reached) your (?:session|weekly|daily) limit`,
+    ),
+    both('claude.limit_will_reset', () => '^(?:your )?limit will reset (?:at|in|on)\\b'),
+    // The API error type is a name in code unless the line is an error with a 429 or an error
+    // body in it: "API Error: 429 {"type":"rate_limit_error"}".
+    both(
+      'claude.rate_limit_error',
+      (l) => `^(?=.*(?:\\b429\\b|"type"\\s*:\\s*"))${l}.{0,120}\\brate_limit_error\\b`,
+    ),
+    http429('claude.http_429'),
   ],
   codex: [
-    { id: 'codex.usage_limit', re: notice(`you${APOS}ve hit your usage limit`) },
-    {
-      id: 'codex.rate_limit',
-      re: notice(
-        `rate limit (?:reached|exceeded|hit)|you${APOS}ve hit (?:a|the|your) rate limit|${RATE_LIMITED}`,
-      ),
-    },
-    { id: 'codex.http_429', re: HTTP_429 },
+    notice('codex.usage_limit', `you${APOS}ve hit your usage limit`),
+    notice(
+      'codex.rate_limit',
+      `rate limit (?:reached|exceeded|hit)|you${APOS}ve hit (?:a|the|your) rate limit|${RATE_LIMITED}`,
+    ),
+    http429('codex.http_429'),
   ],
   gemini: [
-    { id: 'gemini.resource_exhausted', re: notice('resource has been exhausted') },
-    {
-      id: 'gemini.resource_exhausted_status',
-      re: /^\[?(?:(?:API|api|stream|http|request) )?[Ee]rror\b.{0,80}\bRESOURCE_EXHAUSTED\b|^RESOURCE_EXHAUSTED\b\s*(?:$|[.:])/,
-    },
-    {
-      id: 'gemini.quota_exhausted',
-      re: new RegExp(
-        `^${LABEL}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?quota\\b`,
-        'i',
-      ),
-    },
+    notice('gemini.resource_exhausted', 'resource has been exhausted'),
+    both(
+      'gemini.resource_exhausted_status',
+      () =>
+        '^\\[?(?:(?:api|stream|http|request) )?error\\b.{0,80}\\bresource_exhausted\\b|^resource_exhausted\\b\\s*(?:$|[.:])',
+    ),
+    both(
+      'gemini.quota_exhausted',
+      (l) => `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?quota\\b`,
+    ),
   ],
   generic: [
-    {
-      id: 'generic.usage_limit',
-      re: notice(
-        `usage limit (?:reached|exceeded|hit)|you${APOS}ve (?:hit|reached) (?:your|the) usage limit`,
-      ),
-    },
-    {
-      id: 'generic.rate_limit',
-      re: notice(`rate[ _-]?limit[ _](?:exceeded|reached|error)|${RATE_LIMITED}`),
-    },
-    { id: 'generic.too_many_requests', re: notice(`${HTTP}(?:429 )?too many requests`) },
-    {
-      id: 'generic.quota_exceeded',
-      re: notice(
-        `quota (?:exceeded|exhausted)|(?:you have|you${APOS}ve) exceeded your (?:(?:current|daily|monthly) )?quota`,
-      ),
-    },
-    { id: 'generic.http_429', re: HTTP_429 },
+    notice(
+      'generic.usage_limit',
+      `usage limit (?:reached|exceeded|hit)|you${APOS}ve (?:hit|reached) (?:your|the) usage limit`,
+    ),
+    notice('generic.rate_limit', `rate[ _-]?limit[ _](?:exceeded|reached|error)|${RATE_LIMITED}`),
+    notice('generic.too_many_requests', `${HTTP}(?:429 )?too many requests`),
+    notice(
+      'generic.quota_exceeded',
+      `quota (?:exceeded|exhausted)|(?:you have|you${APOS}ve) exceeded your (?:(?:current|daily|monthly) )?quota`,
+    ),
+    http429('generic.http_429'),
   ],
 };
 
@@ -173,6 +198,10 @@ const STAMP = `(?:\\d{4}-\\d{2}-\\d{2}(?:[T ]${CLOCK})?(?:Z|[+-]\\d{2}:?\\d{2})?
 // A log timestamp, bare or bracketed, or a short bracketed tag without spaces ("[error]").
 const LEAD_STAMP = new RegExp(`^(?:\\[${STAMP}\\]|${STAMP}(?=\\s))\\s*`);
 const LEAD_TAG = /^\[[^\]\s]{1,24}\]\s+/;
+// Lines the assistant writes *about* something: a list item, a checkbox, a heading, a
+// quotation, a code comment, a diff line, a test-runner result.
+const WRITTEN_ABOUT =
+  /^(?:[-*+•‣◦]\s|\d{1,3}[.)]\s|\[[ xX]\]|#{1,6}\s|["'`“”‘’«»>]|\/\/|\/\*|<!--|--\s|@@|[✓✔√✅☑]|(?:PASS|FAIL|ok \d|not ok)\b)/;
 
 /** `line` without the decoration and log prefixes in front of its first word. */
 function stripLead(line: string): string {
@@ -186,19 +215,28 @@ function stripLead(line: string): string {
 }
 
 /**
- * The lines of `text` that could be a notice: outside code fences, without the decoration,
- * timestamp or tag in front of them, and short. Agents quote failing logs in fences; a limit
- * notice is never fenced.
+ * The lines of `text` that could be a notice, without the decoration, timestamp or tag in front
+ * of them. Lines in a code fence are never one: that is where logs are quoted.
+ *
+ * An error the client reported is read line by line. Text the assistant wrote is read only
+ * when the whole message is a notice (a few short lines, nothing else) and then without the
+ * lines it wrote about something: a long answer never counts, whatever one of its lines says.
  */
-export function noticeLines(text: string): string[] {
+export function noticeLines(text: string, source: NoticeSource = 'assistant'): string[] {
+  const lines = text.split(/\r?\n/);
+  if (source === 'assistant') {
+    if (text.trim().length > MAX_NOTICE_MESSAGE_CHARS) return [];
+    if (lines.filter((l) => l.trim() !== '').length > MAX_NOTICE_MESSAGE_LINES) return [];
+  }
   const out: string[] = [];
   let fenced = false;
-  for (const raw of text.split(/\r?\n/)) {
+  for (const raw of lines) {
     if (FENCE.test(raw)) {
       fenced = !fenced;
       continue;
     }
     if (fenced || raw.length > 4 * MAX_NOTICE_LINE_CHARS) continue;
+    if (source === 'assistant' && WRITTEN_ABOUT.test(raw.trimStart())) continue;
     const line = stripLead(raw).trimEnd();
     if (line.length === 0 || line.length > MAX_NOTICE_LINE_CHARS) continue;
     out.push(line);
@@ -206,12 +244,19 @@ export function noticeLines(text: string): string[] {
   return out;
 }
 
-/** Returns the id of the first matching signature, or null. Input is treated as untrusted text. */
-export function detectRateLimit(agentKind: string, texts: readonly string[]): string | null {
+/**
+ * Returns the id of the first matching signature, or null. Each text is one message from
+ * `source`; input is treated as untrusted text.
+ */
+export function detectRateLimit(
+  agentKind: string,
+  texts: readonly string[],
+  source: NoticeSource = 'assistant',
+): string | null {
   const sigs = signaturesFor(agentKind);
   for (const raw of texts.slice(-MAX_ENTRIES)) {
-    for (const line of noticeLines(raw.slice(0, MAX_TEXT_PER_ENTRY))) {
-      for (const s of sigs) if (s.re.test(line)) return s.id;
+    for (const line of noticeLines(raw.slice(0, MAX_TEXT_PER_ENTRY), source)) {
+      for (const s of sigs) if ((source === 'client' ? s.client : s.re).test(line)) return s.id;
     }
   }
   return null;
@@ -284,6 +329,10 @@ export interface TranscriptEntry {
    * calls, tool output, attachments and injected context are not: they quote the project.
    */
   agent: boolean;
+  /** True when `text` is the client's own error report rather than something the model wrote. */
+  client: boolean;
+  /** True when the entry is a tool call or a tool result: the agent was at work. */
+  tool: boolean;
   text: string;
 }
 
@@ -305,6 +354,23 @@ function isUserSide(obj: unknown): boolean {
 }
 
 const TEXT_PARTS = new Set(['text', 'output_text']);
+const TOOL_PARTS = new Set(['tool_use', 'tool_result', 'server_tool_use', 'function_call']);
+const TOOL_ENTRIES = new Set([
+  'tool_use',
+  'tool_result',
+  'function_call',
+  'function_call_output',
+  'local_shell_call',
+  'local_shell_call_output',
+  'custom_tool_call',
+  'custom_tool_call_output',
+  'exec_command_begin',
+  'exec_command_end',
+  'mcp_tool_call_begin',
+  'mcp_tool_call_end',
+  'patch_apply_begin',
+  'patch_apply_end',
+]);
 
 /** The plain text of a message body: a string, or the text parts of a content array. */
 function messageText(content: unknown): string | null {
@@ -338,37 +404,61 @@ function errorText(obj: unknown): string | null {
   return null;
 }
 
-const CODEX_AGENT_EVENTS = new Set(['agent_message', 'error', 'stream_error']);
+const CODEX_ERROR_EVENTS = new Set(['error', 'stream_error']);
+
+/** True when the entry is a tool call or a tool result, in any of the known shapes. */
+function isToolEntry(obj: unknown): boolean {
+  const kinds = [field(obj, 'type'), field(obj, 'role'), field(field(obj, 'payload'), 'type')];
+  if (kinds.some((k) => k === 'tool' || (typeof k === 'string' && TOOL_ENTRIES.has(k)))) {
+    return true;
+  }
+  const content = field(field(obj, 'message'), 'content') ?? field(obj, 'content');
+  return (
+    Array.isArray(content) &&
+    content.slice(0, 50).some((part) => {
+      const type = field(part, 'type');
+      return typeof type === 'string' && TOOL_PARTS.has(type);
+    })
+  );
+}
 
 /**
- * What the agent said in one transcript entry, or null when the entry is anything else. Known
- * shapes: Claude Code (`type: "assistant"` with a content array, `type: "system"` error lines),
- * Codex rollouts (`payload.type: "message"` with `role: "assistant"`, `agent_message`, `error`)
- * and plain `{ role: "assistant", content }` logs.
+ * What the agent said in one transcript entry, or null when the entry is anything else, and
+ * whether it is the client's own error report. Known shapes: Claude Code (`type: "assistant"`
+ * with a content array, flagged `isApiErrorMessage` when the client wrote it in place of an
+ * answer; `type: "system"` error lines), Codex rollouts (`payload.type: "message"` with
+ * `role: "assistant"`, `agent_message`, `error`) and plain `{ role: "assistant", content }` logs.
  */
-function agentText(obj: unknown): string | null {
+function agentText(obj: unknown): { text: string; client: boolean } | null {
   if (isUserSide(obj)) return null;
+  const said = (text: string | null, client: boolean) => (text === null ? null : { text, client });
   const type = field(obj, 'type');
   const payload = field(obj, 'payload');
   if (payload !== null && typeof payload === 'object') {
     const kind = field(payload, 'type');
     if (kind === 'message' && field(payload, 'role') === 'assistant') {
-      return messageText(field(payload, 'content'));
+      return said(messageText(field(payload, 'content')), false);
     }
-    if (typeof kind === 'string' && CODEX_AGENT_EVENTS.has(kind)) return errorText(payload);
+    if (kind === 'agent_message') return said(errorText(payload), false);
+    if (typeof kind === 'string' && CODEX_ERROR_EVENTS.has(kind)) {
+      return said(errorText(payload), true);
+    }
     return null;
   }
   const message = field(obj, 'message');
   const role = field(message, 'role') ?? field(obj, 'role');
   if (type === 'assistant' || role === 'assistant') {
-    return messageText(field(message, 'content') ?? field(obj, 'content') ?? message);
+    return said(
+      messageText(field(message, 'content') ?? field(obj, 'content') ?? message),
+      field(obj, 'isApiErrorMessage') === true,
+    );
   }
   const subtype = field(obj, 'subtype');
   const isError =
     type === 'error' ||
     (type === 'system' &&
       (field(obj, 'level') === 'error' || (typeof subtype === 'string' && /error/i.test(subtype))));
-  return isError ? errorText(obj) : null;
+  return isError ? said(errorText(obj), true) : null;
 }
 
 function parseTs(v: unknown): number | null {
@@ -394,34 +484,56 @@ export function parseTranscriptTail(tail: string): TranscriptEntry[] {
         ts: null,
         user: false,
         agent: true,
+        client: false,
+        tool: false,
         text: trimmed.slice(0, MAX_TEXT_PER_ENTRY),
       });
       continue;
     }
-    const text = agentText(obj);
+    const said = agentText(obj);
     out.push({
       ts: parseTs(field(obj, 'timestamp')),
       user: isUserSide(obj),
-      agent: text !== null,
-      text: (text ?? '').slice(0, MAX_TEXT_PER_ENTRY),
+      agent: said !== null,
+      client: said?.client ?? false,
+      tool: isToolEntry(obj),
+      text: (said?.text ?? '').slice(0, MAX_TEXT_PER_ENTRY),
     });
   }
   return out;
 }
 
 /**
- * What the agent said after `since`. Entries with timestamps are compared directly; when the
- * transcript has no timestamps, only entries after the last user-side entry are considered.
+ * What the agent said after `since`, optionally only from one source. Entries with timestamps
+ * are compared directly; when the transcript has no timestamps, only entries after the last
+ * user-side entry are considered.
  */
-export function recentAgentTexts(entries: readonly TranscriptEntry[], since: number): string[] {
+export function recentAgentTexts(
+  entries: readonly TranscriptEntry[],
+  since: number,
+  source?: NoticeSource,
+): string[] {
   const anyTs = entries.some((e) => e.ts !== null);
   let lastUser = -1;
   entries.forEach((e, i) => {
     if (e.user) lastUser = i;
   });
   return entries
-    .filter((e, i) => e.agent && (anyTs ? e.ts !== null && e.ts >= since : i > lastUser))
+    .filter(
+      (e, i) =>
+        e.agent &&
+        (source === undefined || e.client === (source === 'client')) &&
+        (anyTs ? e.ts !== null && e.ts >= since : i > lastUser),
+    )
     .map((e) => e.text);
+}
+
+/**
+ * True when the transcript shows a tool call or a tool result after `since`. Needs timestamps:
+ * without them a tool result cannot be told from the prompt that started the turn.
+ */
+export function ranToolsSince(entries: readonly TranscriptEntry[], since: number): boolean {
+  return entries.some((e) => e.tool && e.ts !== null && e.ts >= since);
 }
 
 async function safely<T>(p: Promise<T>, fallback: T): Promise<T> {
@@ -652,8 +764,8 @@ export class FailoverService {
 
   /**
    * Withdraws the handoff a session left when it hit its limit, once the session has plainly
-   * carried on: a turn that started after the handoff ended with work done in it (a file
-   * changed, a tool ran) or with an answer longer than any notice. A turn that shows no notice
+   * carried on: a turn that started after the handoff in which the agent ran tools or changed
+   * a file, or that ended with an answer longer than any notice. A turn that shows no notice
    * and no work proves nothing: the notice may be worded in a way no signature knows, and
    * cancelling then would lose the handoff exactly when it is needed.
    */
@@ -661,11 +773,12 @@ export class FailoverService {
     projectId: string,
     session: Session,
     turnStartedAt: number,
-    said: readonly string[],
+    turn: { ranTools: boolean; said: readonly string[] },
   ): void {
     const stale = this.pendingRateLimitHandoff(projectId, session.id);
     if (!stale || stale.createdAt >= turnStartedAt) return;
     const worked =
+      turn.ranTools ||
       this.k.store.fileChanges.recentPaths(session.id, turnStartedAt).length > 0 ||
       this.k.store.events.query(projectId, {
         sessionId: session.id,
@@ -673,7 +786,7 @@ export class FailoverService {
         since: turnStartedAt,
         limit: 1,
       }).length > 0;
-    const answered = said.some((t) => t.trim().length > MAX_NOTICE_LINE_CHARS);
+    const answered = turn.said.some((t) => t.trim().length > MAX_NOTICE_MESSAGE_CHARS);
     if (!worked && !answered) return;
     this.k.store.handoffs.setStatus(stale.id, 'cancelled');
   }
@@ -696,20 +809,32 @@ export class FailoverService {
     const guardKey = `failover.detected:${session.id}`;
     if (this.k.store.kv.get<string>(guardKey) === epoch) return null;
 
-    const texts: string[] = [];
-    if (p.lastMessage) texts.push(p.lastMessage.slice(0, MAX_TEXT_PER_ENTRY));
+    // What the model wrote, and what the client reported on its own: the two are read
+    // differently (see `noticeLines`).
+    const said: string[] = [];
+    const reported: string[] = [];
+    if (p.lastMessage) said.push(p.lastMessage.slice(0, MAX_TEXT_PER_ENTRY));
     const path = p.transcriptPath ?? session.transcriptPath;
     let transcriptRead = true;
+    let ranTools = false;
     if (path) {
       const tail = readTranscriptTail(path, this.homeDir);
       if (tail === null) transcriptRead = false;
-      else texts.push(...recentAgentTexts(parseTranscriptTail(tail), since));
+      else {
+        const entries = parseTranscriptTail(tail);
+        reported.push(...recentAgentTexts(entries, since, 'client'));
+        said.push(...recentAgentTexts(entries, since, 'assistant'));
+        // The transcript holds every tool call of the turn, whatever the tool was.
+        ranTools = ranToolsSince(entries, since);
+      }
     }
-    const signature = detectRateLimit(session.agentKind, texts);
+    const signature =
+      detectRateLimit(session.agentKind, reported, 'client') ??
+      detectRateLimit(session.agentKind, said, 'assistant');
     if (!signature) {
       // Without the transcript the turn was not really looked at: leave the handoff alone.
       if (lastPrompt && transcriptRead) {
-        this.withdrawStaleHandoff(p.projectId, session, lastPrompt.createdAt, texts);
+        this.withdrawStaleHandoff(p.projectId, session, lastPrompt.createdAt, { ranTools, said });
       }
       return null;
     }
