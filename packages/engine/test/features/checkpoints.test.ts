@@ -317,10 +317,13 @@ describe('checkpoints through hooks', () => {
       clock.advance(10);
       await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'something else' }));
     };
-    const write = () =>
-      mindly.hooks.handle(
+    let n = 0;
+    const write = async () => {
+      await mindly.hooks.handle(
         event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'a') }),
       );
+      writeFileSync(join(root, 'src', 'auth.ts'), `export const n = ${++n};\n`);
+    };
     const lateEdit = () => {
       fake.state.alreadyTaken = true;
       return mindly.hooks.handle(
@@ -383,6 +386,67 @@ describe('checkpoints through hooks', () => {
     expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside' });
     await unchangedWrite();
     expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside', sessionId: null });
+  });
+
+  it('keeps a hand edit rescanned while a write that changed nothing was on its way', async () => {
+    const { root, clock, mindly, fake, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    // The file is edited by hand; the agent starts a write that leaves it as it now is.
+    writeFileSync(join(root, 'src', 'auth.ts'), 'export const hand = 1;\n');
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'a') }),
+    );
+    // Another session's prompt rescans the hand edit before the write's post-tool hook.
+    fake.state.rescanChanges = ['src/auth.ts'];
+    clock.advance(10);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look' }));
+    fake.state.alreadyTaken = true;
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'a') }),
+    );
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', sessionId: null });
+  });
+
+  it('matches each write of a session with its own pre-tool hook', async () => {
+    const { root, clock, mindly, fake, pid, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const pre = (path: string) =>
+      mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool(path, 'a') }),
+      );
+    const post = (path: string, taken: boolean) => {
+      fake.state.alreadyTaken = taken;
+      return mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool(path, 'a') }),
+      );
+    };
+    const rescan = async () => {
+      fake.state.rescanChanges = ['src/auth.ts'];
+      clock.advance(10);
+      await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look' }));
+    };
+    const cc = () => mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!.id;
+    // Two subagents of one session: A writes auth.ts, a rescan takes it, B starts another write.
+    await pre('src/auth.ts');
+    writeFileSync(join(root, 'src', 'auth.ts'), 'export const a = 1;\n');
+    await rescan();
+    await pre('src/other.ts');
+    await post('src/auth.ts', true);
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'agent', sessionId: cc() });
+    writeFileSync(join(root, 'src', 'other.ts'), 'export const b = 1;\n');
+    await post('src/other.ts', false);
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'agent', paths: ['src/other.ts'] });
+    // A write whose post-tool hook never came (denied by the user) is forgotten after a while.
+    await pre('src/auth.ts');
+    clock.advance(6 * 60_000);
+    writeFileSync(join(root, 'src', 'auth.ts'), 'export const a = 2;\n');
+    await rescan();
+    await post('src/auth.ts', true);
+    expect(rows().at(-1)).toMatchObject({ seq: 4, kind: 'outside', sessionId: null });
+    // And when the session ends.
+    await pre('src/auth.ts');
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_end'));
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc()}`)).toBeNull();
   });
 
   it('credits a rescan only with edits recorded in its working tree', async () => {

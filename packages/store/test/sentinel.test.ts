@@ -64,7 +64,7 @@ describe('sentinel schema (v6)', () => {
     const project = old.projects.upsertByRoot('/repo', 'repo');
     const run = old.runs.create({ projectId: project.id, kind: 'bisect', title: 'b', input: {} });
     old.db.exec(
-      `ALTER TABLE file_changes DROP COLUMN worktree; DROP TABLE sentinel_watches; ${RUNS_V4} PRAGMA user_version = 5;`,
+      `DROP TABLE file_change_worktrees; DROP TABLE sentinel_watches; ${RUNS_V4} PRAGMA user_version = 5;`,
     );
     // The downgrade is real: the old kind check rejects a sentinel run until the migration runs.
     expect(() =>

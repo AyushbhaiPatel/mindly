@@ -115,4 +115,29 @@ describe('a write that changes nothing', () => {
     ]);
     expect((await bisect(sb)).mistakeId).toBeNull();
   }, 120_000);
+
+  it('does not take over a hand edit rescanned while the write was on its way', async () => {
+    const sb = await setup();
+    // The user breaks calc.js by hand; the agent starts writing the file with that same content.
+    const broken = calcSource(7, true);
+    write(sb.repo, 'src/calc.js', broken);
+    const file = join(sb.repo, 'src/calc.js');
+    const tool = { tool_name: 'Write', tool_input: { file_path: file, content: broken } };
+    await hook(sb, 'PreToolUse', { ...tool, tool_use_id: 'toolu_1' });
+    // Another session's prompt rescans the hand edit before the write's post-tool hook.
+    await hook(sb, 'UserPromptSubmit', {
+      session_id: 'cc-session-2',
+      transcript_path: join(sb.home, 'cc-session-2.jsonl'),
+      prompt: 'meanwhile',
+    });
+    write(sb.repo, 'src/calc.js', broken);
+    await hook(sb, 'PostToolUse', {
+      ...tool,
+      tool_response: { filePath: file, type: 'update' },
+      tool_use_id: 'toolu_1',
+    });
+    const steps = await list(sb);
+    expect(steps.at(-1)).toMatchObject({ seq: 2, kind: 'outside', agentKind: null });
+    expect((await bisect(sb)).mistakeId).toBeNull();
+  }, 120_000);
 });

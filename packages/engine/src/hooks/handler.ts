@@ -313,7 +313,7 @@ export class HookHandler {
         return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: guard.deny, context: built.text };
       }
       // A rescan that takes this edit before the post-tool hook can only come after this point.
-      this.d.checkpoints.noteWriteStart(session.id, paths);
+      await this.d.checkpoints.noteWriteStart(session.id, evt.cwd, paths);
       return { ...EMPTY_HOOK_RESULT, context: built.text };
     }
     if (tool.shell && tool.command) {
@@ -362,7 +362,6 @@ export class HookHandler {
     const tool = evt.tool;
     if (!tool) return EMPTY_HOOK_RESULT;
     this.k.store.sessions.touch(session.id);
-    const started = tool.writes ? this.d.checkpoints.takeWriteStart(session.id) : null;
     // Only sessions with a save waiting for evidence record their tool calls: one indexed query,
     // no memory lookups (whether a warned command ran again is told by the pending save itself).
     const pending = this.k.store.saves.caughtFor(
@@ -456,7 +455,6 @@ export class HookHandler {
       tool: tool.name,
       fileChangeId: firstChangeId,
       promptEventId: promptEvent?.id ?? null,
-      started,
     });
     for (const c of changed) this.d.intents.checkRecentEditors(session, c.path);
     await this.d.bus.emit('files.changed', {
@@ -634,6 +632,7 @@ export class HookHandler {
   private async sessionEnd(project: ProjectContext, session: Session): Promise<HookResult> {
     this.k.store.sessions.setStatus(session.id, 'ended');
     this.d.intents.closeSession(session);
+    this.d.checkpoints.forgetWrites(session.id);
     this.k.store.events.append({
       projectId: project.project.id,
       sessionId: session.id,

@@ -8,7 +8,7 @@ import { setup } from './helpers.js';
 
 const DAY = 86_400_000;
 const DOWNGRADE =
-  'ALTER TABLE file_changes DROP COLUMN worktree; DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines;';
+  'DROP TABLE file_change_worktrees; DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines;';
 
 function change(
   store: Store,

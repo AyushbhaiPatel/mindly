@@ -273,6 +273,9 @@ describe('intents and file changes', () => {
     );
     expect(store.fileChanges.record({ ...base, path: 'y.ts' }).worktree).toBeNull();
     expect(store.fileChanges.forPath(project.id, 'x.ts')[0]?.worktree).toBe('/wt');
+    // Two processes opening an older store at once may both apply v7.
+    store.db.exec(MIGRATIONS[6] as string);
+    expect(store.fileChanges.forPath(project.id, 'x.ts')[0]?.worktree).toBe('/wt');
     expect(store.fileChanges.since(project.id, 0).map((c) => [c.path, c.worktree])).toEqual(
       expect.arrayContaining([
         ['x.ts', '/wt'],

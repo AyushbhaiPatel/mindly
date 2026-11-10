@@ -92,7 +92,7 @@ describe('checkpoints schema (v4)', () => {
     const path = tempDb('syn-checkpoints-v3-');
     const ids = downgrade(
       path,
-      `ALTER TABLE file_changes DROP COLUMN worktree; DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines; DROP TABLE checkpoints; ${RUNS_V1} PRAGMA user_version = 3;`,
+      `DROP TABLE file_change_worktrees; DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines; DROP TABLE checkpoints; ${RUNS_V1} PRAGMA user_version = 3;`,
     );
     expectUpgraded(path, ids);
   });
@@ -101,7 +101,7 @@ describe('checkpoints schema (v4)', () => {
     const path = tempDb('syn-checkpoints-v1-');
     const ids = downgrade(
       path,
-      `ALTER TABLE file_changes DROP COLUMN worktree; DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines; DROP TABLE checkpoints; DROP TABLE saves; DROP TABLE split_parts; DROP TABLE splits;
+      `DROP TABLE file_change_worktrees; DROP TABLE sentinel_watches; DROP INDEX file_changes_created; DROP TABLE line_survival; DROP TABLE file_change_lines; DROP TABLE checkpoints; DROP TABLE saves; DROP TABLE split_parts; DROP TABLE splits;
        ALTER TABLE handoffs DROP COLUMN worktree; ${RUNS_V1} PRAGMA user_version = 1;`,
     );
     expectUpgraded(path, ids);
