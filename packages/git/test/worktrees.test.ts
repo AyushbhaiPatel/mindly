@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError } from '@mindly/core';
@@ -403,7 +403,7 @@ describe('worktrees', () => {
     expect(git(path, 'status', '--porcelain')).toBe(' M c.txt\n');
   });
 
-  it('finds every nested repository git sees, wherever it is, and skips rebuildable ones', async () => {
+  it('finds every nested repository git sees, wherever it is, a clean clone included', async () => {
     const root = makeRepo({ '.gitignore': 'tools/\nnode_modules/\nlib/\n/deps\nsrc/vendor/\n' });
     const repo = (rel: string, commit = true): void => {
       write(root, `${rel}/a.txt`, 'a\n');
@@ -420,35 +420,85 @@ describe('worktrees', () => {
     write(root, 'src/vendor/lib/.git', 'gitdir: /elsewhere\n');
     // A new one, not ignored.
     repo('src/newrepo');
-    // A dependency checkout that can be fetched again is not listed; with a local commit, or an
-    // edit, it is.
+    // A clean dependency checkout counts too: nothing local proves it can be fetched again.
     const upstream = makeRepo({ 'mix.exs': 'x\n' });
     git(root, 'clone', '-q', upstream, join(root, 'deps/jason'));
-    git(root, 'clone', '-q', upstream, join(root, 'deps/plug'));
-    write(root, 'deps/plug/mix.exs', 'patched\n');
-    git(root, 'clone', '-q', upstream, join(root, 'deps/ecto'));
-    write(root, 'deps/ecto/fix.ex', 'fix\n');
-    commitAll(join(root, 'deps/ecto'), 'fix');
     const found = await nestedRepos(root);
     expect(found.map((r) => `${r.kind} ${r.path}`)).toEqual([
-      'ignored deps/ecto',
-      'ignored deps/plug',
+      'ignored deps/jason',
       'ignored lib/python3.12/site-packages/pkg',
       'ignored node_modules/dep',
       'untracked src/newrepo',
       'ignored tools/empty',
       'ignored tools/patched-dep',
     ]);
-    // The state is stable, and changes with a commit or an edit in the repository.
-    const state = async (rel: string): Promise<string> =>
-      (await nestedRepoState(join(root, rel))).state;
-    const before = await state('tools/patched-dep');
-    expect(await state('tools/patched-dep')).toBe(before);
-    write(root, 'tools/patched-dep/a.txt', 'edited, same size\n'.slice(0, 2));
-    const edited = await state('tools/patched-dep');
-    expect(edited).not.toBe(before);
-    commitAll(join(root, 'tools/patched-dep'), 'more');
-    expect(await state('tools/patched-dep')).not.toBe(edited);
+  });
+
+  it('fingerprints everything deleting a nested repository destroys', async () => {
+    const root = makeRepo({ '.gitignore': 'tools/\n' });
+    const dep = join(root, 'tools/dep');
+    write(dep, '.gitignore', 'notes/\ndeps/\n.env\n');
+    write(dep, 'main.ts', 'export const v = 1;\n');
+    git(dep, 'init', '-q', '-b', 'main');
+    commitAll(dep, 'dep');
+    const state = async (): Promise<string> => (await nestedRepoState(dep)).state;
+    let last = await state();
+    expect(await state()).toBe(last);
+    const changes: [string, () => void][] = [
+      ['a local tag', () => git(dep, 'tag', 'mine')],
+      ['a hand-made remote-tracking ref', () => git(dep, 'update-ref', 'refs/remotes/o/w', 'HEAD')],
+      [
+        'an ignored file',
+        () => {
+          write(dep, 'notes/a.md', 'new\n');
+          utimesSync(join(dep, 'notes/a.md'), 1_700_000_000, 1_700_000_000);
+        },
+      ],
+      ['an ignored secret', () => write(dep, '.env', 'KEY=1\n')],
+      [
+        'a same-size, same-time edit',
+        () => {
+          write(dep, 'notes/a.md', 'NEW\n');
+          utimesSync(join(dep, 'notes/a.md'), 1_700_000_000, 1_700_000_000);
+        },
+      ],
+      [
+        'an edit to a skip-worktree file',
+        () => {
+          git(dep, 'update-index', '--skip-worktree', 'main.ts');
+          write(dep, 'main.ts', 'export const v = 2;\n');
+        },
+      ],
+      [
+        'a stash',
+        () => {
+          write(dep, 'stashed.ts', 's\n');
+          git(dep, 'add', 'stashed.ts');
+          git(dep, 'stash', '-q');
+        },
+      ],
+    ];
+    for (const [what, change] of changes) {
+      change();
+      const now = await state();
+      expect(now, what).not.toBe(last);
+      last = now;
+    }
+    // A repository inside, and a linked worktree elsewhere with a commit on a detached HEAD.
+    git(dep, 'init', '-q', '-b', 'main', 'deps/inner');
+    write(dep, 'deps/inner/a.ts', 'a\n');
+    commitAll(join(dep, 'deps/inner'), 'inner');
+    const wt = join(tempDir(), 'exp');
+    git(dep, 'worktree', 'add', '-q', '--detach', wt);
+    const before = await nestedRepoState(dep);
+    expect(before.nested).toEqual(['deps/inner']);
+    expect(before.worktrees).toEqual([wt]);
+    write(wt, 'mix.ts', 'x\n');
+    commitAll(wt, 'experiment');
+    expect((await nestedRepoState(dep)).state).not.toBe(before.state);
+    write(dep, 'deps/inner/a.ts', 'b\n');
+    const [found] = await nestedRepos(root);
+    expect(found?.nested).toEqual(['tools/dep/deps/inner']);
   });
 
   it('deletes a nested repository only while it is as it was seen', async () => {

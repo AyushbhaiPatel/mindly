@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
 import {
+  closeSync,
   existsSync,
   lstatSync,
+  openSync,
   readFileSync,
+  readSync,
   readlinkSync,
   realpathSync,
   rmdirSync,
@@ -299,24 +302,88 @@ export interface NestedRepo {
    * (git refuses the worktree).
    */
   kind: 'ignored' | 'untracked' | 'submodule';
-  /** A fingerprint of its refs, HEAD and uncommitted files: changes when any of them does. */
+  /** A fingerprint of everything removing it destroys (see `nestedRepoState`). */
   state: string;
+  /** Repositories inside it (repository-relative), which go with it. */
+  nested: string[];
+  /** Its linked worktrees elsewhere, which stop working without it. */
+  worktrees: string[];
+  /** Set when some of its files were compared by size and time only (see `nestedRepoState`). */
+  partial: boolean;
 }
 
+/** Files whose content `nestedRepoState` hashes, at most, before it goes by size and time. */
+export const NESTED_CONTENT_CAP = { files: 20_000, bytes: 512 * 1024 * 1024 };
+
+interface ContentBudget {
+  files: number;
+  bytes: number;
+  partial: boolean;
+}
+
+/** Content of the file at `abs` (`st`) as a digest, in chunks, within `budget`. */
+function contentDigest(abs: string, st: Stats, budget: ContentBudget): string {
+  const stat = `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.mode}`;
+  if (st.isSymbolicLink()) return `link:${readlinkSync(abs)}`;
+  if (!st.isFile()) return `other:${stat}`;
+  if (budget.files <= 0 || budget.bytes < st.size) {
+    budget.partial = true;
+    return `stat:${stat}`;
+  }
+  budget.files -= 1;
+  budget.bytes -= st.size;
+  const h = createHash('sha256');
+  try {
+    const fd = openSync(abs, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(1 << 20);
+      for (;;) {
+        const n = readSync(fd, buf, 0, buf.length, null);
+        if (n <= 0) break;
+        h.update(buf.subarray(0, n));
+      }
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return `unreadable:${stat}`;
+  }
+  return `file:${st.mode}:${h.digest('hex')}`;
+}
+
+/** What `rel` holds under `dir`: deny-listed files by size and time only, never read. */
+function entryDigest(dir: string, rel: string, budget: ContentBudget): string {
+  const st = lstatInTree(dir, rel);
+  if (!st) return 'missing';
+  if (isDeniedPath(rel)) return `stat:${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.mode}`;
+  return contentDigest(join(dir, rel), st, budget);
+}
+
+/** How deep `nestedRepoState` follows repositories inside repositories. */
+const NESTED_DEPTH = 8;
+
 /**
- * The state of the repository whose working tree is `dir`. `state` fingerprints its HEAD, every
- * ref (a stash included) and its uncommitted files (paths, size, time and mode; content is not
- * read). `rebuildable`: nothing in it would be lost, because it has no uncommitted files, no
- * stash, and HEAD and every branch are reachable from its remote-tracking branches or tags (a
- * dependency checkout that can be fetched again). A repository git cannot read gets a state made
- * of its `.git` entry's size, time and mode, and is not rebuildable.
+ * A fingerprint of everything deleting the repository whose working tree is `dir` destroys:
+ * HEAD and every ref, the stash, its linked worktrees (path, HEAD and branch: commits made in
+ * them live here), every changed, untracked and ignored file (by content, hashed in chunks;
+ * deny-listed ones and, past `NESTED_CONTENT_CAP`, the rest by size, times and mode), files
+ * flagged skip-worktree or assume-unchanged, and the repositories inside it, the same way.
+ * Nothing in a local repository proves it can be fetched again, so none of this is skipped.
+ * `nested`: the repositories inside it (relative to `dir`); `worktrees`: its linked worktrees;
+ * `partial`: some files were compared by size and time only. A repository git cannot read gets
+ * a state made of its `.git` entry's size, times and mode.
  */
 export async function nestedRepoState(
   dir: string,
-): Promise<{ state: string; rebuildable: boolean }> {
+  budget: ContentBudget = { ...NESTED_CONTENT_CAP, partial: false },
+  depth = 0,
+): Promise<{ state: string; nested: string[]; worktrees: string[]; partial: boolean }> {
   const h = createHash('sha256');
+  const nested: string[] = [];
+  const worktrees: string[] = [];
   try {
-    const opts = { cwd: dir, timeoutMs: 60_000 };
+    if (depth > NESTED_DEPTH) throw new Error('too deep');
+    const opts = { cwd: dir, timeoutMs: 120_000 };
     // A `.git` git does not take for a repository would have it read the one around `dir`.
     const top = (await runGit(['rev-parse', '--show-toplevel'], opts)).stdout.trim();
     if (realpathSync(top) !== realpathSync(dir)) throw new Error('not a repository of its own');
@@ -324,53 +391,74 @@ export async function nestedRepoState(
       await runGit(['rev-parse', '-q', '--verify', 'HEAD'], { ...opts, okExitCodes: [1, 128] })
     ).stdout.trim();
     const refs = (await runGit(['for-each-ref', '--format=%(objectname) %(refname)'], opts)).stdout;
-    const status = (
-      await runGit(
-        ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'],
-        opts,
-      )
-    ).stdout;
-    h.update(`head:${head}\0refs:${refs}\0status:${status}\0`);
-    for (const rec of status.split('\0')) {
-      if (rec.length < 4) continue;
-      const st = lstatInTree(dir, rec.slice(3));
-      h.update(st ? `${rec}:${st.size}:${st.mtimeMs}:${st.mode}\0` : `${rec}:missing\0`);
+    const stash = / refs\/stash$/m.test(refs)
+      ? (await runGit(['reflog', 'show', '--format=%H', 'refs/stash', '--'], opts)).stdout
+      : '';
+    const linked = (await runGit(['worktree', 'list', '--porcelain', '-z'], opts)).stdout;
+    h.update(`head:${head}\0refs:${refs}\0stash:${stash}\0worktrees:${linked}\0`);
+    const self = realpathSync(dir);
+    for (const rec of linked.split('\0')) {
+      if (!rec.startsWith('worktree ')) continue;
+      const path = rec.slice('worktree '.length);
+      let real = path;
+      try {
+        real = realpathSync(path);
+      } catch {
+        // Gone: still listed by git, and still in the fingerprint.
+      }
+      if (real !== self) worktrees.push(path);
     }
-    let rebuildable = status === '' && !/ refs\/stash$/m.test(refs);
-    if (rebuildable && (head !== '' || refs !== '')) {
-      const unreached = await runGit(
-        [
-          'rev-list',
-          '-n',
-          '1',
-          ...(head !== '' ? ['HEAD'] : []),
-          '--branches',
-          '--not',
-          '--remotes',
-          '--tags',
-        ],
-        { ...opts, okExitCodes: [128] },
-      );
-      rebuildable = unreached.exitCode === 0 && unreached.stdout.trim() === '';
+    // Changed, untracked and ignored files one by one, and repositories inside as folders.
+    const inner: string[] = [];
+    await runGitRecords(
+      [
+        'status',
+        '--porcelain=v1',
+        '-z',
+        '--no-renames',
+        '--untracked-files=all',
+        '--ignored=traditional',
+        '--ignore-submodules=none',
+      ],
+      opts,
+      (rec) => {
+        const rel = rec.slice(3);
+        h.update(`${rec}\0`);
+        if (rel.endsWith('/')) inner.push(rel.slice(0, -1));
+        else h.update(`${entryDigest(dir, rel, budget)}\0`);
+        return false;
+      },
+    );
+    for (const e of await flaggedEntries(dir)) {
+      h.update(`flagged:${e.path}:${e.object}:${entryDigest(dir, e.path, budget)}\0`);
     }
-    return { state: h.digest('hex'), rebuildable };
+    for (const rel of inner.sort()) {
+      const sub = await nestedRepoState(join(dir, rel), budget, depth + 1);
+      h.update(`repo:${rel}:${sub.state}\0`);
+      nested.push(rel, ...sub.nested.map((p) => `${rel}/${p}`));
+      worktrees.push(...sub.worktrees);
+    }
+    return { state: h.digest('hex'), nested, worktrees, partial: budget.partial };
   } catch {
     const st = lstatInTree(dir, '.git');
     return {
-      state: `unreadable:${st ? `${st.size}:${st.mtimeMs}:${st.mode}` : 'missing'}`,
-      rebuildable: false,
+      state: `unreadable:${st ? `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.mode}` : 'missing'}`,
+      nested,
+      worktrees,
+      partial: budget.partial,
     };
   }
 }
 
 /**
- * Nested git repositories of the working tree at `cwd` that removing it would lose: every new
- * (untracked) one, every populated submodule or committed repository, and those in ignored
- * folders (a dependency cloned into `vendor/` and patched there) unless they are rebuildable
- * (see `nestedRepoState`). git lists them itself, as folders it does not descend into, wherever
- * they are (in `node_modules` too).
+ * Folders of the nested git repositories of the working tree at `cwd`: every new (untracked)
+ * one, every populated submodule or committed repository, and every one in an ignored folder (a
+ * dependency cloned into `vendor/`). git lists them itself, as folders it does not descend into,
+ * wherever they are (in `node_modules` too). Repository-relative, sorted.
  */
-export async function nestedRepos(cwd: string): Promise<NestedRepo[]> {
+export async function nestedRepoPaths(
+  cwd: string,
+): Promise<{ path: string; kind: NestedRepo['kind'] }[]> {
   const root = await findRepoRoot(cwd);
   const asDir = (r: string): boolean => r.endsWith('/');
   const opts = { cwd: root, timeoutMs: 300_000 };
@@ -388,20 +476,34 @@ export async function nestedRepos(cwd: string): Promise<NestedRepo[]> {
   const gitlinks = (
     await runGitRecords(['ls-files', '-z', '-s'], opts, (r) => r.startsWith('160000 '))
   ).map((r) => r.slice(r.indexOf('\t') + 1));
-  const found: { path: string; kind: NestedRepo['kind'] }[] = [
+  return [
     ...ignored.map((p) => ({ path: p.slice(0, -1), kind: 'ignored' as const })),
     ...untracked.map((p) => ({ path: p.slice(0, -1), kind: 'untracked' as const })),
     ...gitlinks
       .filter((p) => lstatInTree(root, `${p}/.git`) !== null)
       .map((p) => ({ path: p, kind: 'submodule' as const })),
-  ];
+  ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * The nested git repositories of the working tree at `cwd` (see `nestedRepoPaths`), each with
+ * the fingerprint of what removing it would destroy (see `nestedRepoState`). All of them count:
+ * any local ref that would show one can be fetched again can be made by hand.
+ */
+export async function nestedRepos(cwd: string): Promise<NestedRepo[]> {
+  const root = await findRepoRoot(cwd);
   const out: NestedRepo[] = [];
-  for (const f of found) {
-    const { state, rebuildable } = await nestedRepoState(join(root, f.path));
-    if (f.kind === 'ignored' && rebuildable) continue;
-    out.push({ ...f, state });
+  for (const f of await nestedRepoPaths(root)) {
+    const s = await nestedRepoState(join(root, f.path));
+    out.push({
+      ...f,
+      state: s.state,
+      nested: s.nested.map((p) => `${f.path}/${p}`),
+      worktrees: s.worktrees,
+      partial: s.partial,
+    });
   }
-  return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return out;
 }
 
 /**

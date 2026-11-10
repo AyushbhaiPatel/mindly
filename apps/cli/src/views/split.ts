@@ -18,6 +18,7 @@ import {
   type Screen,
   type Step,
 } from '../present/index.js';
+import { describeNestedRepo } from '@mindly/engine';
 import { clean } from '../util.js';
 
 /** Plain words for a part's state. */
@@ -217,7 +218,11 @@ export function unmergedLine(w: SplitUnmergedWork): string {
   const files = w.paths.filter((p) => !repos.has(p));
   if (files.length > 0) what.push(list(files));
   if (repos.size > 0) {
-    what.push(`git repositories, with their commits and changes: ${list([...repos])}`);
+    const named = [...repos].slice(0, 3).map((p) => describeNestedRepo(p, w));
+    const more = repos.size - named.length;
+    what.push(
+      `git repositories, with their commits and changes: ${named.join(', ')}${more > 0 ? ` and ${more} more` : ''}`,
+    );
   }
   const commits = w.commits ?? [];
   if (commits.length > 0) {

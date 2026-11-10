@@ -57,7 +57,10 @@ function fakeSplitGit(root: string) {
   const denied = new Set<string>();
   // Nested repositories a listing counts (by worktree), and the state of each now (by folder) when
   // it differs from the listed one.
-  const nestedRepos = new Map<string, { path: string; state: string }[]>();
+  const nestedRepos = new Map<
+    string,
+    { path: string; state: string; nested?: string[]; worktrees?: string[] }[]
+  >();
   const repoStateNow = new Map<string, string>();
   // What appeared right before a removal (by worktree).
   const stray = new Map<string, string[]>();
@@ -117,7 +120,12 @@ function fakeSplitGit(root: string) {
         paths,
         ignoredDenied: ignored,
         denied: [...paths, ...ignored].filter((p) => denied.has(p)),
-        nestedRepos: nestedRepos.get(wt) ?? [],
+        nestedRepos: (nestedRepos.get(wt) ?? []).map((r) => ({
+          nested: [],
+          worktrees: [],
+          partial: false,
+          ...r,
+        })),
       };
     },
     changedSince: async (_root, wt, base) =>

@@ -206,8 +206,9 @@ merged branch, every part commit is like that. Run `mindly split abort --keep-br
 the worktrees and keep the part branches, so that no commit is lost; `mindly split abort --yes
 --discard` deletes it all. When you confirm an abort on the terminal, it deletes only what it
 listed, each file only if it still holds what it held when you were asked, and each nested
-repository only if its branches, HEAD and uncommitted files are as they were: anything new or
-changed since stops it.
+repository only if everything deleting it destroys is as it was: HEAD, every ref and the stash,
+its linked worktrees, and its changed, untracked and ignored files (by content; past 20,000 files
+or 512 MiB, by size and time, and the listing says so). Anything new or changed since stops it.
 
 Then worktrees are removed the way `git worktree remove` does without `--force`: git refuses one
 with modified or untracked files (an edited file flagged skip-worktree or assume-unchanged
@@ -216,10 +217,12 @@ included), with submodules or that is locked, and the abort keeps it and says wh
 deny-list or your `redaction.denyPaths` count as work, except installed ones: anything in
 `node_modules` or `site-packages`, and, apart from `.env*` and key files, anything in
 `__pycache__`, `.tox`, `.gradle`, `vendor/bundle` or a virtualenv (a `venv`, `.venv` or `env`
-folder holding `pyvenv.cfg`). Nested git repositories count wherever they are, ignored or not:
-a new one, a submodule, or one in an ignored folder, unless it is a checkout that can be fetched
-again (no uncommitted files, no stash, and every branch on one of its remote-tracking branches or
-tags, like the git dependencies `mix deps.get` leaves in `deps/`). Right before git removes a
+folder holding `pyvenv.cfg`). Every nested git repository counts, wherever it is and however
+clean: a new one, a submodule, one in an ignored folder (the git dependencies `mix deps.get`
+leaves in `deps/` too), with the repositories inside it and any linked worktrees elsewhere that
+stop working without it, all listed. Nothing local proves a repository can be fetched again, so
+`--yes` alone refuses while one is listed: confirm on the terminal, or have a script that cleans
+up such checkouts pass `--yes --discard`. Right before git removes a
 worktree, the abort looks once more for untracked files, counted ignored files and nested
 repositories, and keeps the worktree if any appeared; git's own check covers untracked files
 after that, but an ignored file written in between goes with the worktree. When an abort keeps

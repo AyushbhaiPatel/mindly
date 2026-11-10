@@ -24,6 +24,7 @@ import {
   findRepoRoot,
   flaggedChanges,
   ignoredDeniedFiles,
+  nestedRepoPaths,
   nestedRepos,
   removeNestedRepo,
   headCommit,
@@ -121,7 +122,7 @@ export function createSplitGitPort(): SplitGitPort {
             .filter((p) => p !== '')
             .map((p) => p.replace(/\/$/, '')),
           ...(await ignoredDeniedFiles(worktree, secretDeny)),
-          ...(await nestedRepos(worktree)).map((r) => r.path),
+          ...(await nestedRepoPaths(worktree)).map((r) => r.path),
         ]),
       ].sort();
     },
@@ -159,7 +160,13 @@ export function createSplitGitPort(): SplitGitPort {
         paths: [...paths].sort(),
         denied: [...new Set([...captured.skipped, ...ignored, ...flagged.denied])].sort(),
         ignoredDenied: ignored.filter((p) => !paths.has(p)),
-        nestedRepos: nested.map((r) => ({ path: r.path, state: r.state })),
+        nestedRepos: nested.map((r) => ({
+          path: r.path,
+          state: r.state,
+          nested: r.nested,
+          worktrees: r.worktrees,
+          partial: r.partial,
+        })),
       };
     },
     changedSince: async (repoRoot, worktree, base, extraDeny) => {

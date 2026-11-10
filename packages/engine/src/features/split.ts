@@ -364,6 +364,38 @@ export interface SplitUnmergedWork {
    * confirmation covers one while its refs and uncommitted files are as they were.
    */
   repos?: string[];
+  /** What else goes with some of `repos`: repositories inside, worktrees elsewhere. */
+  repoDetails?: SplitNestedRepo[];
+}
+
+/** A nested repository an abort would delete, beyond its own commits and files. */
+export interface SplitNestedRepo {
+  path: string;
+  /** Repositories inside it, which go with it. */
+  nested: string[];
+  /** Its linked worktrees elsewhere, which stop working without it. */
+  worktrees: string[];
+  /** Some of its files are compared by size and time only (too many to read). */
+  partial: boolean;
+}
+
+/** `vendor/lib (holding vendor/lib/deps/inner; its worktrees elsewhere stop working: /x)`. */
+export function describeNestedRepo(path: string, w: SplitUnmergedWork): string {
+  const d = w.repoDetails?.find((r) => r.path === path);
+  const notes: string[] = [];
+  const list = (items: readonly string[]): string => {
+    const shown = items.slice(0, 3).map((p) => sanitizeLine(p, 160));
+    return items.length > shown.length
+      ? `${shown.join(', ')} and ${items.length - shown.length} more`
+      : shown.join(', ');
+  };
+  if (d && d.nested.length > 0) notes.push(`holding ${list(d.nested)}`);
+  if (d && d.worktrees.length > 0) {
+    notes.push(`its worktrees elsewhere stop working: ${list(d.worktrees)}`);
+  }
+  if (d?.partial) notes.push('some files compared by size and time only');
+  const name = sanitizeLine(path, 160);
+  return notes.length > 0 ? `${name} (${notes.join('; ')})` : name;
 }
 
 /**
@@ -718,6 +750,7 @@ export class SplitService {
     lost: string[];
     denied: ReadonlySet<string>;
     repos: string[];
+    repoDetails: SplitNestedRepo[];
     content: string;
     files: Record<string, string>;
     opaque: string[];
@@ -729,6 +762,7 @@ export class SplitService {
         lost: [],
         denied,
         repos: [],
+        repoDetails: [],
         ...worktreeFingerprint(part.worktree, [], denied, new Map()),
       };
     }
@@ -750,6 +784,14 @@ export class SplitService {
       lost,
       denied,
       repos: [...repos.keys()].sort(),
+      repoDetails: work.nestedRepos
+        .filter((r) => r.nested.length > 0 || r.worktrees.length > 0 || r.partial)
+        .map((r) => ({
+          path: r.path,
+          nested: r.nested,
+          worktrees: r.worktrees,
+          partial: r.partial,
+        })),
       ...worktreeFingerprint(part.worktree, lost, denied, repos),
     };
   }
@@ -893,6 +935,7 @@ export class SplitService {
         ...(only.more || files.lost.length > PATHS_SHOWN ? { more: true as const } : {}),
         ...(files.opaque.length > 0 ? { opaque: files.opaque } : {}),
         ...(files.repos.length > 0 ? { repos: files.repos } : {}),
+        ...(files.repoDetails.length > 0 ? { repoDetails: files.repoDetails } : {}),
       });
     }
     return { work, state };
@@ -1789,7 +1832,11 @@ function describeWork(w: SplitUnmergedWork): string {
   const files = w.paths.filter((p) => !repos.has(p));
   if (files.length > 0) what.push(`not committed: ${describePaths(files)}`);
   if (repos.size > 0) {
-    what.push(`git repositories, with their commits and changes: ${describePaths([...repos])}`);
+    const named = [...repos].slice(0, 3).map((p) => describeNestedRepo(p, w));
+    const more = repos.size - named.length;
+    what.push(
+      `git repositories, with their commits and changes: ${named.join(', ')}${more > 0 ? ` and ${more} more` : ''}`,
+    );
   }
   const commits = w.commits ?? [];
   if (commits.length > 0) {

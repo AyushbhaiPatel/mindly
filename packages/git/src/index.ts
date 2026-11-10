@@ -82,6 +82,8 @@ export {
   PACKAGE_DIRS,
   flaggedChanges,
   ignoredDeniedFiles,
+  NESTED_CONTENT_CAP,
+  nestedRepoPaths,
   nestedRepoState,
   nestedRepos,
   removeNestedRepo,

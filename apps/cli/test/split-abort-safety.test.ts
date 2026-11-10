@@ -346,26 +346,24 @@ describe('split abort leaves the last word to git, confirmed or not', () => {
     expect(existsSync(page)).toBe(false);
   });
 
-  it('does not count a dependency checkout that can be fetched again, and lists one with local work', async () => {
+  it('lists a clean dependency checkout too, and a confirmation removes it', async () => {
     const upstream = tempDir('r10-dep-');
     git(upstream, 'init', '-q', '-b', 'main');
     write(upstream, 'mix.exs', 'x\n');
     git(upstream, 'add', '-A');
     git(upstream, 'commit', '-q', '-m', 'dep');
     const sb = await splitSandbox((s) => write(s.repo, '.gitignore', '/deps\n/_build\n'));
-    // What `mix deps.get` leaves for a git dependency.
-    for (const key of ['api', 'page'])
+    // What `mix deps.get` leaves for a git dependency: nothing local proves it can be fetched
+    // again, so it is listed like any other repository; a script removes it with --discard.
+    for (const key of ['api', 'page']) {
       git(sb.repo, 'clone', '-q', upstream, join(partDir(sb, key), 'deps/jason'));
-    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(0);
-    const sb2 = await splitSandbox((s) => write(s.repo, '.gitignore', '/deps\n'));
-    const page = partDir(sb2, 'page');
-    git(sb2.repo, 'clone', '-q', upstream, join(page, 'deps/jason'));
-    write(page, 'deps/jason/mix.exs', 'patched\n');
-    const r = await cli(sb2, ['split', 'abort', '--yes', '--keep-branches']);
+    }
+    const r = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
     expect(r.code).toBe(1);
-    expect(r.stderr).toContain('deps/jason');
-    const confirmed = await cli(sb2, ['split', 'abort', '--keep-branches'], { answers: ['y'] });
+    expect(r.stderr).toContain('git repositories, with their commits and changes: deps/jason');
+    const confirmed = await cli(sb, ['split', 'abort', '--keep-branches'], { answers: ['y'] });
     expect(confirmed.code).toBe(0);
+    expect(existsSync(partDir(sb, 'page'))).toBe(false);
   });
 
   it('does not stop at a large ignored build folder', async () => {
@@ -440,5 +438,137 @@ describe('split abort leaves the last word to git, confirmed or not', () => {
     expect(a.keptBecause[page]).toMatch(/^git did not remove it: .*modified or untracked/);
     expect(readFileSync(join(page, 'config/local.json'), 'utf8')).toContain('postgres://');
     expect(git(page, 'ls-files', '-v', 'config/local.json')).toBe('S config/local.json\n');
+  });
+});
+
+describe('split abort counts every nested repository, and all that deleting it destroys', () => {
+  /** An upstream repository cloned into `<page>/vendor/lib` (ignored by the outer one). */
+  function cloneVendor(page: string, prepare?: (up: string) => void): string {
+    const up = tempDir('r10-up-');
+    git(up, 'init', '-q', '-b', 'main');
+    write(up, 'lib.ts', 'export const lib = 1;\n');
+    prepare?.(up);
+    git(up, 'add', '-A');
+    git(up, 'commit', '-q', '-m', 'lib');
+    git(page, 'clone', '-q', up, 'vendor/lib');
+    return join(page, 'vendor/lib');
+  }
+  const ignoreVendor = (s: Sandbox): void => write(s.repo, '.gitignore', 'vendor/\n');
+
+  async function refused(sb: Sandbox, lib: string): Promise<string> {
+    const r = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(r.code).toBe(1);
+    expect(existsSync(lib)).toBe(true);
+    return r.stderr;
+  }
+
+  it('a commit only a local tag reaches', async () => {
+    const sb = await splitSandbox(ignoreVendor);
+    const lib = cloneVendor(partDir(sb, 'page'));
+    write(lib, 'lib.ts', 'export const lib = 2;\n');
+    git(lib, 'commit', '-q', '-am', 'patch');
+    git(lib, 'tag', 'my-patch');
+    expect(await refused(sb, lib)).toContain('vendor/lib');
+  });
+
+  it('a commit only a hand-made remote-tracking ref reaches', async () => {
+    const sb = await splitSandbox(ignoreVendor);
+    const lib = cloneVendor(partDir(sb, 'page'));
+    write(lib, 'lib.ts', 'export const lib = 2;\n');
+    git(lib, 'commit', '-q', '-am', 'patch');
+    git(lib, 'update-ref', 'refs/remotes/origin/wip', 'HEAD');
+    await refused(sb, lib);
+  });
+
+  it('an ignored .env in a clean, pushed nested repository', async () => {
+    const sb = await splitSandbox(ignoreVendor);
+    const lib = cloneVendor(partDir(sb, 'page'), (up) => write(up, '.gitignore', '.env\n'));
+    write(lib, '.env', 'STRIPE_KEY=sk_live_only_copy\n');
+    await refused(sb, lib);
+    expect(existsSync(join(lib, '.env'))).toBe(true);
+  });
+
+  it("a nested repository's own ignored repository, shown under it", async () => {
+    const sb = await splitSandbox(ignoreVendor);
+    const lib = cloneVendor(partDir(sb, 'page'), (up) => write(up, '.gitignore', 'deps/\n'));
+    git(lib, 'init', '-q', '-b', 'main', 'deps/inner');
+    write(lib, 'deps/inner/a.ts', 'export const a = 1;\n');
+    git(join(lib, 'deps/inner'), 'add', '-A');
+    git(join(lib, 'deps/inner'), 'commit', '-q', '-m', 'only copy');
+    expect(await refused(sb, lib)).toContain('vendor/lib (holding vendor/lib/deps/inner)');
+  });
+
+  it('an edit to a skip-worktree file in a clean, pushed nested repository', async () => {
+    const sb = await splitSandbox(ignoreVendor);
+    const lib = cloneVendor(partDir(sb, 'page'));
+    git(lib, 'update-index', '--skip-worktree', 'lib.ts');
+    write(lib, 'lib.ts', 'export const lib = 42;\n');
+    await refused(sb, lib);
+  });
+
+  it('an unpushed commit, with nothing else', async () => {
+    const sb = await splitSandbox(ignoreVendor);
+    const lib = cloneVendor(partDir(sb, 'page'));
+    write(lib, 'lib.ts', 'export const lib = 2;\n');
+    git(lib, 'commit', '-q', '-am', 'patch');
+    await refused(sb, lib);
+  });
+
+  it('a linked worktree elsewhere, with a commit on its detached HEAD, shown', async () => {
+    const sb = await splitSandbox(ignoreVendor);
+    const lib = cloneVendor(partDir(sb, 'page'));
+    const wt = join(tempDir('r10-wt-'), 'exp');
+    git(lib, 'worktree', 'add', '-q', '--detach', wt);
+    write(wt, 'lib.ts', 'export const lib = 3;\n');
+    git(wt, 'commit', '-q', '-am', 'experiment');
+    const commit = git(wt, 'rev-parse', 'HEAD').trim();
+    expect(await refused(sb, lib)).toContain(
+      `vendor/lib (its worktrees elsewhere stop working: ${wt})`,
+    );
+    expect(git(wt, 'cat-file', '-t', commit).trim()).toBe('commit');
+  });
+
+  /** A new nested repository, shown and confirmed; `change` runs once the abort is under way. */
+  async function confirmedAbortWith(
+    change: (repo: string) => void,
+  ): Promise<{ code: number; repo: string }> {
+    const sb = await splitSandbox();
+    const page = partDir(sb, 'page');
+    const repo = join(page, 'src/app/tool');
+    git(page, 'init', '-q', '-b', 'main', 'src/app/tool');
+    write(repo, '.gitignore', 'notes/\n');
+    write(repo, 'main.ts', 'export const v = 1;\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'tool');
+    write(repo, 'main.ts', 'export const v = 2;\n');
+    utimesSync(join(repo, 'main.ts'), 1_700_000_000, 1_700_000_000);
+    // The page branch is looked at by the listing, then by abort's own check: change it then.
+    let looks = 0;
+    hook.afterBranchLook = (branch) => {
+      if (branch === 'mindly/billing/page' && ++looks === 2) change(repo);
+    };
+    let r: Awaited<ReturnType<typeof cli>>;
+    try {
+      r = await cli(sb, ['split', 'abort'], { answers: ['y'] });
+    } finally {
+      delete hook.afterBranchLook;
+    }
+    expect(looks).toBeGreaterThanOrEqual(2);
+    return { code: r.code, repo };
+  }
+
+  it('an ignored file written in a confirmed nested repository after the yes', async () => {
+    const { code, repo } = await confirmedAbortWith((r) => write(r, 'notes/design.md', 'new\n'));
+    expect(code).toBe(1);
+    expect(existsSync(join(repo, 'notes/design.md'))).toBe(true);
+  });
+
+  it('a same-size, same-time edit in a confirmed nested repository after the yes', async () => {
+    const { code, repo } = await confirmedAbortWith((r) => {
+      writeFileSync(join(r, 'main.ts'), 'export const v = 9;\n');
+      utimesSync(join(r, 'main.ts'), 1_700_000_000, 1_700_000_000);
+    });
+    expect(code).toBe(1);
+    expect(readFileSync(join(repo, 'main.ts'), 'utf8')).toBe('export const v = 9;\n');
   });
 });
