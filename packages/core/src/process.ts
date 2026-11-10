@@ -12,6 +12,8 @@ import { existsSync, readFileSync } from 'node:fs';
 export interface ProcessRef {
   pid: number;
   start: string;
+  /** The program's name, when known (only used to recognise launchers such as `npx`). */
+  name?: string;
 }
 
 /** How many ancestors are recorded for a process. */
@@ -20,6 +22,7 @@ export const MAX_ANCESTORS = 5;
 interface ProcessInfo {
   ppid: number;
   start: string;
+  name?: string;
 }
 
 /** Reads one process from `/proc` (Linux). Null when it is gone or `/proc` is not there. */
@@ -34,21 +37,45 @@ function fromProc(pid: number): ProcessInfo | null {
     const ppid = Number(fields[1]);
     const start = fields[19];
     if (!Number.isInteger(ppid) || !start || !/^\d+$/.test(start)) return null;
-    return { ppid, start };
+    const name = stat.slice(stat.indexOf('(') + 1, stat.lastIndexOf(')'));
+    return { ppid, start, ...(name ? { name } : {}) };
   } catch {
     return null;
   }
 }
 
-/** Parses `ps -o pid=,ppid=,lstart=` output: one process per line. */
+// `lstart` in the C locale: weekday, month, day, time, year ("Tue Nov 10 03:00:36 2026").
+const PS_LINE =
+  /^\s*(\d+)\s+(\d+)\s+([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})(?:\s+(.*?))?\s*\r?$/;
+
+/**
+ * Parses `ps -o pid=,ppid=,lstart=,comm=` output: one process per line, the command name last
+ * (it may be missing, or hold spaces). Lines that are not of that form are skipped.
+ */
 export function parsePsTable(out: string): Map<number, ProcessInfo> {
   const table = new Map<number, ProcessInfo>();
   for (const line of out.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\S.*?)\s*\r?$/.exec(line);
+    const m = PS_LINE.exec(line);
     if (!m) continue;
-    table.set(Number(m[1]), { ppid: Number(m[2]), start: (m[3] as string).replace(/\s+/g, ' ') });
+    const name = m[4]?.trim();
+    table.set(Number(m[1]), {
+      ppid: Number(m[2]),
+      start: (m[3] as string).replace(/\s+/g, ' '),
+      ...(name ? { name } : {}),
+    });
   }
   return table;
+}
+
+/**
+ * The lines of `out` that were printed whole. A `ps` that was killed or failed part-way may have
+ * printed half a line, which can still look like a whole one with a wrong start time (output
+ * arrives in blocks, so the cut can fall anywhere): its last line counts only when the run ended
+ * normally and the output ends with a line break.
+ */
+export function completeLines(out: string, interrupted: boolean): string {
+  if (!interrupted && out.endsWith('\n')) return out;
+  return out.slice(0, out.lastIndexOf('\n') + 1);
 }
 
 const PS_PATHS = ['/bin/ps', '/usr/bin/ps'];
@@ -63,7 +90,7 @@ function psTable(): Map<number, ProcessInfo> {
   const ps = PS_PATHS.find((p) => existsSync(p));
   if (!ps) return new Map();
   try {
-    const r = spawnSync(ps, ['-A', '-o', 'pid=,ppid=,lstart='], {
+    const r = spawnSync(ps, ['-A', '-o', 'pid=,ppid=,lstart=,comm='], {
       encoding: 'utf8',
       timeout: 400,
       killSignal: 'SIGKILL',
@@ -72,14 +99,15 @@ function psTable(): Map<number, ProcessInfo> {
       // A fixed locale, so the start time reads the same in every process that asks.
       env: { LC_ALL: 'C', PATH: '/bin:/usr/bin' },
     });
-    return parsePsTable(typeof r.stdout === 'string' ? r.stdout : '');
+    const out = typeof r.stdout === 'string' ? r.stdout : '';
+    return parsePsTable(completeLines(out, Boolean(r.error) || r.signal !== null));
   } catch {
     return new Map();
   }
 }
 
 /** Where process facts come from; tests give their own. */
-export type ProcessLookup = (pid: number) => { ppid: number; start: string } | null;
+export type ProcessLookup = (pid: number) => { ppid: number; start: string; name?: string } | null;
 
 /** A lookup over one `ps` call, made when it is first asked. */
 export function psProcessLookup(): ProcessLookup {
@@ -111,7 +139,7 @@ export function ancestorChain(
       seen.add(cur);
       const info = lookup(cur);
       if (!info) break;
-      chain.push({ pid: cur, start: info.start });
+      chain.push({ pid: cur, start: info.start, ...(info.name ? { name: info.name } : {}) });
       cur = info.ppid;
     }
   } catch {
@@ -142,6 +170,21 @@ export function processRuns(
 /** `pid` with its start time, or with an empty start when that cannot be read. */
 export function processRef(pid: number, lookup: ProcessLookup = systemProcessLookup()): ProcessRef {
   return { pid, start: lookup(pid)?.start ?? '' };
+}
+
+/**
+ * True when `name` is a program that only starts another one and waits for it: a package runner
+ * (`npx`, `pnpm dlx`, `npm exec`, `yarn dlx`, `bunx`), a JavaScript runtime running a shim, or a
+ * shell. Such a process between an MCP server and its client says nothing about which client it
+ * is. Unknown names are not launchers.
+ */
+export function isLauncherName(name: string | undefined): boolean {
+  if (!name) return false;
+  const first = name.trim().split(/\s+/)[0] ?? '';
+  const base = (first.split(/[\\/]/).pop() ?? '').toLowerCase().replace(/\.(exe|cmd)$/, '');
+  return /^(node|nodejs|npm|npx|pnpm|pnpx|yarn|bun|bunx|deno|corepack|sh|bash|zsh|dash|cmd|pwsh|powershell)$/.test(
+    base,
+  );
 }
 
 /** Parses a stored chain; anything malformed yields an empty one. */

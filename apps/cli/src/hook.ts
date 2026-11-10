@@ -178,7 +178,11 @@ export function rememberClient(
     if (evt.event === 'session_start') {
       kv.deleteStale?.(HOOK_ANCESTRY_PREFIX, now - HOOK_ANCESTRY_TTL_MS, 50);
     }
-    const chain = (options.chain ?? (() => ancestorChain(process.pid)))();
+    // Only PIDs and start times are kept: the program names are not needed to match a session.
+    const chain = (options.chain ?? (() => ancestorChain(process.pid)))().map(({ pid, start }) => ({
+      pid,
+      start,
+    }));
     // Nothing read (a slow or failing process table) is not stored as an answer: the next hook
     // tries again, a minute later at the earliest.
     const retry: AncestryRetry = { retryAfter: now + HOOK_ANCESTRY_RETRY_MS };

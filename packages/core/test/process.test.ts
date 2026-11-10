@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   psProcessLookup,
   ancestorChain,
+  completeLines,
   hookAncestryKey,
+  isLauncherName,
   MAX_ANCESTORS,
   parseProcessChain,
   parsePsTable,
@@ -85,6 +87,49 @@ describe('parsePsTable', () => {
     expect(odd.get(812)).toEqual({ ppid: 1, start: 'Mon Nov 9 20:14:02 2026' });
     const lookup: ProcessLookup = (pid) => t.get(pid) ?? null;
     expect(ancestorChain(34567, lookup)).toEqual([{ pid: 812, start: 'Mon Nov 9 20:14:02 2026' }]);
+  });
+});
+
+describe('ps output', () => {
+  const whole = '  812     1 Mon Nov  9 20:14:02 2026 /usr/bin/node\n';
+  it('reads the command name after the start time', () => {
+    expect(parsePsTable(whole).get(812)).toEqual({
+      ppid: 1,
+      start: 'Mon Nov 9 20:14:02 2026',
+      name: '/usr/bin/node',
+    });
+    expect(
+      parsePsTable('  9  1 Mon Nov  9 20:14:02 2026 Cursor Helper (Plugin)\n').get(9)?.name,
+    ).toBe('Cursor Helper (Plugin)');
+  });
+
+  it('drops a line cut off when ps was killed or failed', () => {
+    // Killed in the middle of the year: the cut line would still parse, with a wrong start.
+    const cut = `${whole}34567   812 Tue Nov 10 03:01:09 20`;
+    expect(parsePsTable(completeLines(cut, true)).has(34567)).toBe(false);
+    expect(parsePsTable(completeLines(cut, false)).has(34567)).toBe(false);
+    // A line that ended before the cut is whole, killed or not.
+    expect(parsePsTable(completeLines(`${whole}9 1 Tue Nov 10 03:01:09 2026\n`, true)).has(9)).toBe(
+      true,
+    );
+    expect(completeLines(whole, false)).toBe(whole);
+  });
+
+  it('tells launchers from clients by name', () => {
+    for (const name of [
+      'node',
+      '/usr/local/bin/node',
+      'npx',
+      'npm exec',
+      'pnpm',
+      'sh',
+      'node.exe',
+    ]) {
+      expect(isLauncherName(name)).toBe(true);
+    }
+    for (const name of ['claude', 'codex', 'Cursor Helper', 'tmux: server', undefined, '']) {
+      expect(isLauncherName(name)).toBe(false);
+    }
   });
 });
 
