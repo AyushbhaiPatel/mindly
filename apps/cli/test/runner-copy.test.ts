@@ -12,6 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { applyInstallSteps, createClaudeCodeAdapter } from '@mindly/adapters';
 import { describe, expect, it } from 'vitest';
@@ -22,6 +23,7 @@ import {
   ensureCopy,
   inRunnerCache,
   launcherPath,
+  launchRefusal,
   runnerTree,
   stableNode,
 } from '../src/runner-copy.js';
@@ -103,7 +105,10 @@ describe('package runner caches', () => {
       'C:\\Users\\a\\AppData\\Local\\npm-cache\\_npx\\1f0e9a2b3c4d5e6f\\node_modules\\mindly-cli\\dist\\main.js',
       '/home/a/.cache/pnpm/dlx/hfz5kqp2gqeoeyvztqv4ws2fji/19a1b2c3d4e-1f2a/node_modules/.pnpm/mindly-cli@0.5.0/node_modules/mindly-cli/dist/main.js',
       '/tmp/dlx-12345/node_modules/mindly-cli/dist/main.js',
+      join(tmpdir(), 'dlx-12345', 'node_modules', 'mindly-cli', 'dist', 'main.js'),
       '/tmp/xfs-1a2b3c4d/dlx-4242/node_modules/mindly-cli/dist/main.js',
+      '/home/a/.yarn/berry/cache/mindly-cli-npm-0.5.0-3f2a1b9c8d-10c0.zip/node_modules/mindly-cli/dist/main.js',
+      '/home/a/project/.yarn/cache/mindly-cli-npm-0.5.0-3f2a1b9c8d-10c0.zip/node_modules/mindly-cli/dist/main.js',
       '/tmp/bunx-501-mindly-cli@latest/node_modules/mindly-cli/dist/main.js',
       '/home/a/.bun/install/cache/mindly-cli@0.5.0/dist/main.js',
     ]) {
@@ -118,12 +123,45 @@ describe('package runner caches', () => {
       '/home/a/src/dlxtools/apps/cli/dist/main.js',
       '/home/dlx/.npm-global/lib/node_modules/mindly-cli/dist/main.js',
       '/home/a/code/dlx-tools/node_modules/mindly-cli/dist/main.js',
+      '/home/a/code/dlx-2024/node_modules/mindly-cli/dist/main.js',
       '/home/a/src/bunx-demo/node_modules/mindly-cli/dist/main.js',
       'C:\\Users\\dlx\\AppData\\Roaming\\npm\\node_modules\\mindly-cli\\dist\\main.js',
       '/home/a/_npx/notes/node_modules/mindly-cli/dist/main.js',
     ]) {
       expect(inRunnerCache(path), path).toBe(false);
     }
+  });
+
+  it('finds no tree to copy inside a zip, and refuses init from there', () => {
+    const zip =
+      '/home/a/.yarn/berry/cache/mindly-cli-npm-0.5.0-3f2a1b9c8d-10c0.zip/node_modules/mindly-cli/dist/main.js';
+    expect(runnerTree(zip)).toBe(null);
+    expect(launchRefusal([zip])).toMatch(/cannot copy itself out of/);
+    expect(launchRefusal([zip])).toContain('npm i -g mindly-cli && mindly init');
+    expect(launchRefusal([npxTree()])).toBe(null);
+  });
+
+  it('refuses an entry that is not a file Node can start, when it must exist', () => {
+    const base = realpathSync(tempDir('mindly-entry-'));
+    const archive = join(base, 'pkg.bin');
+    file(archive, 'not a folder');
+    for (const missing of [join(base, 'nowhere', 'main.js'), join(archive, 'dist', 'main.js')]) {
+      expect(launchRefusal([missing], true), missing).toContain('not a file Node can start');
+      expect(launchRefusal([missing], false)).toBe(null);
+    }
+  });
+
+  it("finds the tree through the path as given when pnpm's global virtual store links it away", () => {
+    const base = realpathSync(tempDir('mindly-gvs-'));
+    const store = join(base, 'store', 'v10', 'links', 'mindly-cli', '0.5.0', 'abc', 'node_modules');
+    cliPackage(join(store, 'mindly-cli'));
+    depPackage(join(store, 'dep'));
+    const dlx = join(base, 'dlx', 'hfz5kqp2gqeoeyvztqv4ws2fji', '19a1b2c3d4e-1f2a', 'node_modules');
+    mkdirSync(dlx, { recursive: true });
+    symlinkSync(join(store, 'mindly-cli'), join(dlx, 'mindly-cli'));
+    const viaDlx = join(dlx, 'mindly-cli', 'dist', 'main.js');
+    expect(runnerTree(realpathSync(viaDlx))).toBe(null);
+    expect(runnerTree(viaDlx)).toEqual({ root: dlx, entry: join('mindly-cli', 'dist', 'main.js') });
   });
 
   it("finds the runner's package tree, and none outside a runner's cache", () => {

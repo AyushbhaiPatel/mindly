@@ -36,6 +36,7 @@ import {
   ensureCopy,
   inRunnerCache,
   isKeptCopy,
+  launchRefusal,
   launcherPath,
   ownedRuntime,
   removeRuntime,
@@ -196,7 +197,9 @@ function keptLaunch(
   } catch {
     return null;
   }
-  const tree = runnerTree(entry);
+  // The script Node was started with too: with pnpm's global virtual store only it shows the cache.
+  const started = process.argv[1];
+  const tree = runnerTree(entry) ?? (started ? runnerTree(started) : null);
   if (tree !== null) return { home, tree };
   return isKeptCopy(home, entry) ? { home, tree: null } : null;
 }
@@ -335,6 +338,14 @@ interface SetupOptions {
 /** `mindly init`. */
 export async function init(out: Out, o: SetupOptions): Promise<number> {
   if (o.listAgents) return listAgents(out);
+  // Before anything is planned or written, so a dry run says the same. The entry must exist in
+  // the published package; a monorepo checkout may not be built yet (its tests run from source).
+  const layout = resolveLayout(import.meta.url);
+  const refusal = launchRefusal([layout.cliMain, process.argv[1]], layout.kind === 'release');
+  if (refusal !== null) {
+    out.warn(refusal);
+    return 1;
+  }
   const env = out.io.env;
   const statusLine = o.statusline !== false;
   const all = adaptersFor(env, { statusLine });
