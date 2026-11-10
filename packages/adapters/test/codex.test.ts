@@ -62,14 +62,28 @@ describe('codex parse', () => {
     expect(ev?.tool?.edits[0]).toMatchObject({ path: 'a.txt', addedText: 'hi' });
   });
 
-  it('reads a shell line that only holds a patch as a shell line', () => {
+  it('reads a shell line that holds a patch bash would run as a shell line, and its patch', () => {
     for (const command of [
       "rm certs/server.pem; echo '*** Begin Patch\n*** Add File: n.txt\n+x\n*** End Patch' >/dev/null",
-      "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\nEOF\nrm x",
+      "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: n.txt\n+hi\n*** End Patch\nEOF\nrm x",
+      // An unquoted delimiter: bash expands the here-document.
+      'apply_patch <<EOF\n*** Begin Patch\n*** Add File: n.txt\n+$(rm x)\n*** End Patch\nEOF',
+      // A bare patch given to the shell: bash runs each line.
+      '*** Begin Patch\n*** Update File: n.txt\n@@\n rm x\n-a\n+b\n*** End Patch',
     ]) {
       const ev = a.parse('PreToolUse', { ...f('PreToolUse.Bash'), tool_input: { command } });
-      expect(ev?.tool, command).toMatchObject({ shell: true, writes: false, edits: [], command });
+      expect(ev?.tool, command).toMatchObject({ shell: true, writes: false, command });
+      expect(ev?.tool?.edits[0], command).toMatchObject({ path: 'n.txt' });
     }
+    // A quoted delimiter, as the whole command: the agent's patch tool.
+    const quoted = a.parse('PreToolUse', {
+      ...f('PreToolUse.Bash'),
+      tool_input: {
+        command:
+          'apply_patch <<"EOF"\n*** Begin Patch\n*** Add File: n.txt\n+$(x)\n*** End Patch\nEOF',
+      },
+    });
+    expect(quoted?.tool).toMatchObject({ shell: true, writes: true });
   });
 
   it('parses Bash and failed PostToolUse', () => {

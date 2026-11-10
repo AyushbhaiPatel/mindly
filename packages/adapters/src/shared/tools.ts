@@ -183,9 +183,13 @@ export interface BuildToolOptions {
 }
 
 /** Builds the normalised `tool` section of an event. */
-/** A shell command that is only a patch: its text, or `apply_patch <<'EOF'` with it. */
+/**
+ * A shell call that bash never runs: `apply_patch` given a patch in a here-document whose
+ * delimiter is quoted (so nothing in it is expanded), as the whole command. The agent takes it
+ * as its patch tool. A bare patch text, or a here-document bash expands, is shell code.
+ */
 const PATCH_CALL =
-  /^\s*(?:(?:apply_patch|applypatch)[ \t]+<<-?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*\r?\n)?\*\*\* Begin Patch\r?\n(?:(?!\*\*\* End Patch)[\s\S])*\*\*\* End Patch[ \t]*(?:\r?\n\2)?\s*$/;
+  /^\s*(?:apply_patch|applypatch)[ \t]+<<-?[ \t]*(['"])([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*\r?\n\*\*\* Begin Patch\r?\n(?:(?!\*\*\* End Patch)[\s\S])*\*\*\* End Patch[ \t]*\r?\n\2\s*$/;
 
 function isPatchCall(command: string): boolean {
   return command.includes('*** Begin Patch') && PATCH_CALL.test(command);
@@ -198,12 +202,13 @@ export function buildTool(opts: BuildToolOptions): NonNullable<NormalizedHookEve
   let edits: FileEdit[] = [];
   let editsCut = false;
   let writes = opts.writes ?? cls.writes;
-  // A shell call is a patch only when the whole command is one (a patch, or `apply_patch` given
-  // one in a here-document); any other line that merely holds a patch's text is read as a shell
-  // line, so what else it does is not hidden behind the patch.
-  if (writes || (shell && command !== null && isPatchCall(command))) {
+  if (writes) {
     ({ edits, cut: editsCut } = readEdits(opts.name, opts.input));
-    if (edits.length > 0) writes = true;
+  } else if (shell && command !== null && command.includes('*** Begin Patch')) {
+    // A shell call is the agent's patch only when bash would run nothing of it. Any other line
+    // holding a patch stays a shell line, read as one, and its patch's files are read besides.
+    ({ edits, cut: editsCut } = readEdits(opts.name, opts.input));
+    if (edits.length > 0 && isPatchCall(command)) writes = true;
   }
   const hasResponse = opts.response !== undefined;
   return {

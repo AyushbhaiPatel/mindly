@@ -779,6 +779,7 @@ export class HookHandler {
     rules: readonly Memory[],
     writes: Writes,
     search: ScopeSearch,
+    /** For a line not read fully: a folder a rule names, there under this root, is reached. */
     root: string | null = null,
   ): { deny: RuleHit | null; warn: RuleHit[] } {
     const warn: RuleHit[] = [];
@@ -955,6 +956,17 @@ export class HookHandler {
         () => until - performance.now(),
         true,
       );
+      // A shell line that also holds a patch: the files the patch names may be written too.
+      if (tool.edits.length > 0) {
+        const patched = await this.checkedPaths(
+          project,
+          evt.cwd,
+          tool.edits.map((e) => e.path),
+        );
+        possible.paths.push(...patched.paths);
+        possible.unchecked += patched.unchecked;
+        possible.unsafe += patched.unsafe;
+      }
       if (certain.unsafe > 0) return unsafeDenial();
       if (certain.unchecked > 0) return uncheckedDenial(certain.unchecked, false);
       const written = certain.paths.map((p) => p.rel);
@@ -1011,9 +1023,12 @@ export class HookHandler {
           enforced.map((m) => ({ scope, globs: globsReaching(scope, m.scope.paths) })),
         ),
       );
-      const rules = this.enforcedRules(enforced, certain, search, project.root);
+      const rules = this.enforcedRules(enforced, certain, search);
       const rule = rules.deny;
-      const softRules = rule ? null : this.enforcedRules(enforced, possible, search, project.root);
+      // A line not read fully also warns when a folder a rule names is there, whatever it holds.
+      const softRules = rule
+        ? null
+        : this.enforcedRules(enforced, possible, search, understood ? null : project.root);
       if (mistakes.length > 0 || pending.length > 0 || rule) {
         const recorded = certain.paths.filter((p) => p.own).map((p) => p.rel);
         this.appendToolEvent(pid, session, 'tool.before', {

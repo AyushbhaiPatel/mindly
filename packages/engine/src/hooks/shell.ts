@@ -3897,6 +3897,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     linked: options.linked ?? null,
     linksMade: false,
     made: [],
+    madeDirs: new Set(),
     unmatched: false,
   };
   collectTargets(command, '', 0, reading);
@@ -3999,8 +4000,9 @@ const READ_FULLY: Readonly<Record<string, ReadFully>> = {
       '--one-file-system',
     ],
   },
+  // `-T` (the destination itself takes the source's place) is not modelled.
   mv: {
-    letters: 'finuvT',
+    letters: 'finuv',
     values: 't',
     long: [
       '--force',
@@ -4008,13 +4010,12 @@ const READ_FULLY: Readonly<Record<string, ReadFully>> = {
       '--no-clobber',
       '--update',
       '--verbose',
-      '--no-target-directory',
       '--strip-trailing-slashes',
     ],
     longValues: ['--target-directory'],
   },
   cp: {
-    letters: 'aRrdfiHLlnPpsuvxT',
+    letters: 'aRrdfiHLlnPpsuvx',
     values: 't',
     long: [
       '--archive',
@@ -4031,7 +4032,6 @@ const READ_FULLY: Readonly<Record<string, ReadFully>> = {
       '--update',
       '--verbose',
       '--one-file-system',
-      '--no-target-directory',
       '--remove-destination',
       '--strip-trailing-slashes',
       '--attributes-only',
@@ -4041,7 +4041,7 @@ const READ_FULLY: Readonly<Record<string, ReadFully>> = {
     longValues: ['--target-directory'],
   },
   ln: {
-    letters: 'sfnvrLPT',
+    letters: 'sfnvrLP',
     values: 't',
     long: [
       '--symbolic',
@@ -4051,7 +4051,6 @@ const READ_FULLY: Readonly<Record<string, ReadFully>> = {
       '--relative',
       '--logical',
       '--physical',
-      '--no-target-directory',
     ],
     longValues: ['--target-directory'],
   },
@@ -4133,6 +4132,19 @@ function mayMatchMade(pattern: string, made: readonly string[]): boolean {
     for (let i = 0; i < n; i++) if (!(res[i] as RegExp).test(ms[i] as string)) return false;
     return true;
   });
+}
+
+/** How many of a program's words are operands, not options or their values. */
+function operandCount(table: ReadFully, args: readonly PlainWord[]): number {
+  let n = 0;
+  for (let i = 0; i < args.length; i++) {
+    const t = (args[i] as PlainWord).text;
+    if (t === '--') return n + args.length - i - 1;
+    if (!t.startsWith('-') || t === '-') n++;
+    else if (/^-.$/.test(t) && (table.values ?? '').includes(t.slice(1))) i++;
+    else if ((table.longValues ?? []).includes(t)) i++;
+  }
+  return n;
 }
 
 /** Whether a program's words are all ones its table reads as the program does. */
@@ -4383,7 +4395,15 @@ function understoodCommand(all: readonly PlainWord[], piped: boolean): boolean {
     const table = Object.hasOwn(READ_FULLY, first.text) ? READ_FULLY[first.text] : undefined;
     if (table === undefined) return false;
     if (piped && !READ_FULLY_FILTERS.has(first.text)) return false;
-    return optionsReadFully(table, all.slice(at + 1));
+    const args = all.slice(at + 1);
+    // `ln target` with no link name links into the folder it runs in: not modelled.
+    if (
+      first.text === 'ln' &&
+      operandCount(table, args) < 2 &&
+      !args.some((w) => /^(-t|--target-directory)/.test(w.text))
+    )
+      return false;
+    return optionsReadFully(table, args);
   }
 }
 
@@ -4456,6 +4476,8 @@ interface Reading {
   linksMade: boolean;
   /** Paths earlier commands of the line write, as placed. */
   made: string[];
+  /** Folders earlier commands of the line make (`mkdir`), as placed. */
+  madeDirs: Set<string>;
   /** A wildcard may match what an earlier command of the line makes. */
   unmatched: boolean;
 }
@@ -4576,7 +4598,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       const kinds = item.touches
         ? `${item.touches.tracked ? 't' : ''}${item.touches.untracked ? 'u' : ''}${item.touches.ignored ? 'i' : ''}`
         : '-';
-      const same = `${from === null ? '\u0001' : from}\0${previous === null ? '\u0001' : previous}\0${w.text}\0${w.mask}\0${flags}\0${item.how ?? ''}\0${kinds}\0${item.only?.join('/') ?? '\u0001'}`;
+      // What earlier commands made is part of it: a wildcard may match it now (`ln -s` between).
+      const same = `${r.made.length}\0${from === null ? '\u0001' : from}\0${previous === null ? '\u0001' : previous}\0${w.text}\0${w.mask}\0${flags}\0${item.how ?? ''}\0${kinds}\0${item.only?.join('/') ?? '\u0001'}`;
       if (r.added.has(same)) return;
       if (r.added.size < MAX_COMMANDS) r.added.add(same);
     }
@@ -4808,6 +4831,41 @@ function collectTargets(command: string, startDir: string | null, depth: number,
 
   // How many targets earlier commands of this reading wrote.
   let made = r.out.size;
+  /**
+   * A copy, move or link into a path an earlier command of the line made: into a folder `mkdir`
+   * made, what it brings lands inside (`dest/name`); into anything else made there, whether it is
+   * a folder is not known here, and the line is not read fully.
+   */
+  const intoMade = (items: readonly Item[], from: string | null): Item[] => {
+    if (r.made.length === 0) return [...items];
+    const out: Item[] = [];
+    for (const item of items) {
+      const dest =
+        item.entries === undefined ? null : place(item.word.text, tilde(item.word), from);
+      if (dest === null || item.word.dynamic) {
+        out.push(item);
+        continue;
+      }
+      if (r.madeDirs.has(dest)) {
+        for (const e of item.entries ?? []) {
+          if (e.name === '*') {
+            r.unmatched = true;
+            continue;
+          }
+          const name = e.name === '.' ? '' : `/${e.name}`;
+          const text = `${item.word.text}${name}`;
+          out.push({
+            word: { ...item.word, text, mask: `${item.word.mask}${'q'.repeat(name.length)}` },
+            tree: true,
+          });
+        }
+        continue;
+      }
+      if (r.made.some((m) => m === dest || dest.startsWith(`${m}/`))) r.unmatched = true;
+      out.push(item);
+    }
+    return out;
+  };
   let before: SimpleCommand | null = null;
   // Where the shell was before the last `cd`, for the command after `cd … ||`: that one runs
   // only when the `cd` failed.
@@ -4978,7 +5036,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           break;
         }
         case 'writes':
-          for (const item of verdict.items) add(item, here);
+          for (const item of intoMade(verdict.items, here)) add(item, here);
           break;
         case 'unread':
           r.limit ??= verdict.why;
@@ -5071,11 +5129,21 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // A program that may make or move a symbolic link (`ln -s`, `cp -P` / `-a` / `-R`, `mv`, an
     // archive unpacked, git checking one out): a later `cd` may pass through it.
     if (makesLinks(words)) r.linksMade = true;
-    // What it writes is there for the wildcards of later commands.
+    // What it writes is there for the wildcards of later commands; a folder `mkdir` makes (with
+    // its parents, under `-p`) is one for the copies of later commands.
     if (r.out.size > made && r.made.length < MAX_TARGETS) {
       r.made = [...r.out.values()].map((t) => t.path).slice(0, MAX_TARGETS);
     }
     made = r.out.size;
+    if (verdict.kind === 'writes' && words[0] !== undefined && programName(words[0]) === 'mkdir') {
+      for (const item of verdict.items) {
+        const at = item.word.dynamic ? null : place(item.word.text, tilde(item.word), here);
+        for (let p = at; p !== null && p !== '' && p !== '.' && p !== '/'; p = posix.dirname(p)) {
+          if (r.madeDirs.size < MAX_TARGETS) r.madeDirs.add(p);
+          if (!hasOption(words, 'p', ['--parents'])) break;
+        }
+      }
+    }
   }
 }
 

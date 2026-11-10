@@ -814,6 +814,59 @@ const quiet: { name: string; prep?: string; command: string }[] = [
   { name: 'a test of the diff', command: 'if git diff --quiet; then echo ok; fi' },
 ];
 
+/** A folder `d` with a file of the covered name, to pour or link from. */
+const D_FOLDER = 'mkdir -p d && echo z > d/server.pem';
+
+// Copies, moves and links whose destination the text alone does not settle.
+cases.push(
+  {
+    name: 'a wildcard read before the link it later matches',
+    scopes: ['certs/**'],
+    command: 'rm -f l*/server.pem; ln -s certs lnk && rm -f l*/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'cp -rT pours a folder into a covered one',
+    scopes: ['certs/server.pem'],
+    prep: D_FOLDER,
+    command: 'cp -rT d certs',
+    want: ['warn'],
+  },
+  {
+    name: 'cp -r --no-target-directory',
+    scopes: ['certs/server.pem'],
+    prep: D_FOLDER,
+    command: 'cp -r --no-target-directory d certs',
+    want: ['warn'],
+  },
+  {
+    name: 'ln with one operand links into the folder it runs in',
+    scopes: ['certs/**'],
+    prep: D_FOLDER,
+    command: 'cd certs && ln -f ../d/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'ln -sf with one operand',
+    scopes: ['certs/**'],
+    prep: D_FOLDER,
+    command: 'cd certs && ln -sf ../d/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'cp into a folder made earlier on the line',
+    scopes: VENDOR,
+    command: 'mkdir vendor && cp src/a.ts vendor',
+    want: ['deny'],
+  },
+  {
+    name: 'mv into a folder made earlier on the line',
+    scopes: VENDOR,
+    command: 'mkdir vendor; mv src/a.ts vendor',
+    want: ['deny'],
+  },
+);
+
 describe('git commands that write a covered file through an option or a setting', () => {
   for (const c of cases) {
     it(c.name, async () => {
@@ -1007,6 +1060,35 @@ notReadFully.push(
 );
 
 describe('a shell line that holds a patch is read as a shell line', () => {
+  for (const command of [
+    // An unquoted delimiter: bash expands the here-document, substitutions and all.
+    'apply_patch <<EOF\n*** Begin Patch\n*** Add File: notes.txt\n+$(rm -f certs/server.pem)\n*** End Patch\nEOF',
+    // A bare patch given to the shell: bash runs each of its lines.
+    '*** Begin Patch\n*** Update File: src/a.ts\n@@\n rm -f certs/server.pem\n-x\n+y\n*** End Patch',
+  ]) {
+    it(`a patch bash runs: ${JSON.stringify(command.slice(0, 30))}`, async () => {
+      const { buildTool } = await import('../../adapters/src/shared/tools.js');
+      const g = setUp(PEM);
+      try {
+        expect(runInCopy(g.dir, command, covered).written).toEqual(['certs/server.pem']);
+        const r = await g.mindly.hooks.handle({
+          agentKind: 'claude-code',
+          event: 'pre_tool',
+          externalSessionId: 'p',
+          cwd: g.dir,
+          transcriptPath: null,
+          startSource: null,
+          prompt: null,
+          lastMessage: null,
+          tool: buildTool({ name: 'Bash', input: { command } }),
+        });
+        expect(verdictOf(r)).toBe('warn');
+      } finally {
+        g.mindly.close();
+      }
+    });
+  }
+
   it('a Bash line holding an apply_patch envelope', async () => {
     const { buildTool } = await import('../../adapters/src/shared/tools.js');
     const g = setUp(PEM);
@@ -1049,7 +1131,20 @@ describe('lines not read fully that write a covered file are warned about', () =
   }
 });
 
-const notBlocked: { name: string; prep?: string; command: string }[] = [
+const notBlocked: { name: string; scopes?: string[]; prep?: string; command: string }[] = [
+  // What git clean removes is untracked: a folder rule over tracked files is not reached.
+  {
+    name: 'git clean of a pattern beside a folder rule',
+    scopes: ['certs/**'],
+    prep: 'echo t > junk.orig',
+    command: "git clean -f '*.orig'",
+  },
+  {
+    name: 'git clean of folders beside a folder rule',
+    scopes: ['certs/**'],
+    prep: 'mkdir -p a/dist && echo t > a/dist/x.js',
+    command: "git clean -fd -- '**/dist'",
+  },
   // A package manager is not modelled completely: the line warns, never blocks.
   { name: 'tests, then a commit', command: 'npm test >/dev/null 2>&1 && git commit -qm x' },
   // Text that is not run, with a subscript and a substitution in it.
@@ -1089,7 +1184,7 @@ const notBlocked: { name: string; prep?: string; command: string }[] = [
 describe('lines not read fully, and code the shell does not run, are never blocked', () => {
   for (const c of notBlocked) {
     it(c.name, async () => {
-      const g = setUp(PEM, c.prep);
+      const g = setUp(c.scopes ?? PEM, c.prep);
       try {
         const done = runInCopy(g.dir, c.command, covered);
         expect(done.written, c.command).toEqual([]);
