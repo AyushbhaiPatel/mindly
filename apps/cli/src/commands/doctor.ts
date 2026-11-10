@@ -3,7 +3,13 @@ import { join } from 'node:path';
 import { describeError, homePaths, mindlyHome, shortId, type HomePaths } from '@mindly/core';
 import { checkSafePattern, sentinelOf, type Mindly, type ProjectContext } from '@mindly/engine';
 import { findRepoRoot, gitVersion, lockfileIn, mirrorRemotes, versionAtLeast } from '@mindly/git';
-import { MIGRATIONS, peekSchemaVersion, schemaVersion, Store } from '@mindly/store';
+import {
+  confirmSchemaVersion,
+  MIGRATIONS,
+  peekSchemaVersion,
+  schemaVersion,
+  Store,
+} from '@mindly/store';
 import { withProject } from '../context.js';
 import { clean, type Out } from '../util.js';
 import { runningDaemon } from './daemon.js';
@@ -101,8 +107,11 @@ async function claudeStatusLineCheck(
   );
 }
 
-/** Why the checks that need the store were not run: its format is older, or it cannot be opened. */
-type StoreSkip = 'older' | 'unusable';
+/**
+ * Why the checks that need the store were not run: its format is older, it cannot be opened, or
+ * the project in it could not be.
+ */
+type StoreSkip = 'older' | 'unusable' | 'project';
 
 interface DatabaseCheck {
   item: DoctorItem;
@@ -111,23 +120,32 @@ interface DatabaseCheck {
 
 /**
  * The checks that need the store, reported as not run. Their names stay in the output, so a
- * reader of `--json` that looks a check up by name finds it and sees why it has no result.
+ * reader of `--json` that looks a check up by name finds it and sees why it has no result. The
+ * project's own entry is left out when the caller reports it itself.
  */
 function skippedStoreItems(why: StoreSkip): DoctorItem[] {
-  const detail =
-    why === 'older'
-      ? 'not checked: the database is in an older format'
-      : 'not checked: the database cannot be opened';
-  const until =
-    why === 'older'
-      ? 'not checked until the database is upgraded'
-      : 'not checked, the database cannot be opened';
+  const reason = {
+    older: 'the database is in an older format',
+    unusable: 'the database cannot be opened',
+    project: 'the project could not be opened',
+  }[why];
+  const said = {
+    older: 'not checked until the database is upgraded',
+    unusable: 'not checked, the database cannot be opened',
+    project: 'not checked, the project could not be opened',
+  }[why];
+  const detail = `not checked: ${reason}`;
   return [
-    item({ name: 'project', status: 'info', detail }, 'Setup', `This project: ${until}`),
-    item({ name: 'checkpoints', status: 'info', detail }, 'Optional', `Checkpoints: ${until}`),
-    item({ name: 'sentinel', status: 'info', detail }, 'Optional', `The sentinel: ${until}`),
+    ...(why === 'project'
+      ? []
+      : [item({ name: 'project', status: 'info', detail }, 'Setup', `This project: ${said}`)]),
+    item({ name: 'checkpoints', status: 'info', detail }, 'Optional', `Checkpoints: ${said}`),
+    item({ name: 'sentinel', status: 'info', detail }, 'Optional', `The sentinel: ${said}`),
   ];
 }
+
+/** A version further ahead of this Mindly's than this is damage, not a newer release. */
+const MAX_VERSIONS_AHEAD = 1000;
 
 /**
  * The database's format, read before anything opens the store: opening it applies every pending
@@ -146,11 +164,32 @@ function databaseCheck(dbPath: string): DatabaseCheck {
     ),
     skipped: 'unusable',
   });
+  const damaged = (what: string): DatabaseCheck => ({
+    item: item(
+      { name: 'database', status: 'fail', detail: what },
+      'Setup',
+      `The database file cannot be read as a Mindly database: ${what}`,
+      `Check ${dbPath}; if it is damaged, move it away and Mindly starts a new one`,
+    ),
+    skipped: 'unusable',
+  });
   let found: number | null;
   try {
     found = peekSchemaVersion(dbPath, { busyTimeoutMs: 2000 });
+    // The first look reads the file's header and nothing else. Whatever it says other than "up
+    // to date" (or "empty") is acted on without the store ever opening the file, so SQLite has
+    // to read the database first: a file cut short or overwritten still has a header.
+    const empty =
+      found === 0 && modeIfThere(dbPath, 'file') !== null && statSync(dbPath).size === 0;
+    if (found !== null && found !== latest && !empty) {
+      found = confirmSchemaVersion(dbPath, { busyTimeoutMs: 2000 });
+    }
   } catch (err) {
-    return failed(err);
+    return damaged(describeError(err));
+  }
+  // No Mindly wrote a version this far ahead: the number is not a version.
+  if (found !== null && found > latest + MAX_VERSIONS_AHEAD) {
+    return damaged(`schema version ${found} is not one Mindly writes`);
   }
   if (found !== null && found > latest) {
     return {
@@ -728,6 +767,7 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
           'Setup',
           `This folder could not be opened as a project: ${describeError(err)}`,
         ),
+        ...skippedStoreItems('project'),
       );
     }
   }

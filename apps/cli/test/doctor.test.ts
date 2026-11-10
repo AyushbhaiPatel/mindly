@@ -1,4 +1,4 @@
-import { chmodSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
@@ -178,4 +178,166 @@ describe('doctor', () => {
     const human = (await cli(sb, ['doctor'])).stdout.replace(/\s+/g, ' ');
     expect(human).toContain('not checked until the database is upgraded');
   });
+
+  it('doctor lets SQLite confirm a database that does not look up to date', async () => {
+    const sb = sandbox();
+    expect((await cli(sb, ['init', '--yes'])).code).toBe(0);
+    const path = join(sb.mindlyHome, 'mindly.db');
+    const latest = MIGRATIONS.length;
+    type Checks = { ok: boolean; checks: { name: string; status: string; detail: string }[] };
+    const database = async (): Promise<{
+      ok: boolean;
+      status: string;
+      detail: string;
+      text: string;
+    }> => {
+      const j = json<Checks>((await cli(sb, ['doctor', '--json'])).stdout);
+      const c = j.checks.find((x) => x.name === 'database');
+      const text = (await cli(sb, ['doctor'])).stdout.replace(/\s+/g, ' ');
+      return { ok: j.ok, status: c?.status ?? '', detail: c?.detail ?? '', text };
+    };
+
+    // The header says "one format behind", but most of the file is gone.
+    const db = new DatabaseSync(path);
+    try {
+      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      db.exec(`PRAGMA user_version = ${latest - 1}`);
+      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    } finally {
+      db.close();
+    }
+    for (const f of [`${path}-wal`, `${path}-shm`]) rmSync(f, { force: true });
+    truncateSync(path, 5000);
+    const cut = await database();
+    expect(cut.ok).toBe(false);
+    expect(cut.status).toBe('fail');
+    expect(cut.detail).not.toMatch(/^schema v/);
+    expect(cut.text).not.toContain('older format');
+    expect(cut.text).not.toContain('upgraded');
+
+    // The start of a database file with anything after it is not a newer Mindly's database.
+    writeFileSync(
+      path,
+      Buffer.concat([Buffer.from('SQLite format 3\0'), Buffer.alloc(4096, 0x41)]),
+      {
+        mode: 0o600,
+      },
+    );
+    const junk = await database();
+    expect(junk.ok).toBe(false);
+    expect(junk.status).toBe('fail');
+    expect(junk.text).not.toContain('newer Mindly');
+    expect(junk.text).not.toContain('npm install -g mindly-cli');
+
+    // A sound database with a version no Mindly ever wrote is damage too, not "newer".
+    rmSync(path);
+    const odd = new DatabaseSync(path);
+    try {
+      odd.exec('CREATE TABLE t (x)');
+      odd.exec(`PRAGMA user_version = ${latest + 5000}`);
+    } finally {
+      odd.close();
+    }
+    chmodSync(path, 0o600);
+    const absurd = await database();
+    expect(absurd.status).toBe('fail');
+    expect(absurd.text).not.toContain('newer Mindly');
+  });
+
+  it('doctor lists the same checks whatever state the database is in', async () => {
+    const latest = MIGRATIONS.length;
+    type Checks = { ok: boolean; checks: { name: string; status: string; detail: string }[] };
+    const always = [
+      'node',
+      'node:sqlite',
+      'git',
+      'home',
+      'permissions',
+      'database',
+      'daemon',
+      'project',
+      'checkpoints',
+      'sentinel',
+    ];
+    const fresh = async (): Promise<{ sb: ReturnType<typeof sandbox>; path: string }> => {
+      const sb = sandbox();
+      // No command has used the store for this project yet, so doctor has to write to open it.
+      expect((await cli(sb, ['init', '--yes'])).code).toBe(0);
+      return { sb, path: join(sb.mindlyHome, 'mindly.db') };
+    };
+    const wipe = (path: string): void => {
+      for (const f of [path, `${path}-wal`, `${path}-shm`]) rmSync(f, { force: true });
+    };
+    const setVersion = (path: string, v: number): void => {
+      const db = new DatabaseSync(path);
+      try {
+        db.exec(`PRAGMA user_version = ${v}`);
+        db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      } finally {
+        db.close();
+      }
+    };
+    const states: Record<string, (path: string) => unknown> = {
+      'up to date': () => undefined,
+      missing: (path) => wipe(path),
+      empty: (path) => {
+        wipe(path);
+        writeFileSync(path, '', { mode: 0o600 });
+      },
+      older: (path) => {
+        wipe(path);
+        const db = new DatabaseSync(path);
+        try {
+          for (const sql of MIGRATIONS.slice(0, latest - 1)) db.exec(sql);
+          db.exec(`PRAGMA user_version = ${latest - 1}`);
+        } finally {
+          db.close();
+        }
+        chmodSync(path, 0o600);
+      },
+      newer: (path) => setVersion(path, latest + 1),
+      damaged: (path) => {
+        setVersion(path, latest - 1);
+        for (const f of [`${path}-wal`, `${path}-shm`]) rmSync(f, { force: true });
+        truncateSync(path, 5000);
+      },
+      locked: (path) => {
+        const holder = new DatabaseSync(path);
+        holder.exec('BEGIN EXCLUSIVE');
+        return () => {
+          holder.exec('ROLLBACK');
+          holder.close();
+        };
+      },
+    };
+    for (const [state, prepare] of Object.entries(states)) {
+      const { sb, path } = await fresh();
+      const release = prepare(path);
+      try {
+        const j = json<Checks>((await cli(sb, ['doctor', '--json'])).stdout);
+        const names = j.checks.map((c) => c.name);
+        for (const name of always) expect(names, `${state}: ${name}`).toContain(name);
+        for (const c of j.checks) expect(c.detail, `${state}: ${c.name}`).not.toBe('');
+        const status = (name: string): string | undefined =>
+          j.checks.find((c) => c.name === name)?.status;
+        if (state === 'locked') {
+          expect(status('project')).toBe('warn');
+          for (const name of ['checkpoints', 'sentinel']) {
+            expect(j.checks.find((c) => c.name === name)).toEqual({
+              name,
+              status: 'info',
+              detail: 'not checked: the project could not be opened',
+            });
+          }
+        }
+        if (state === 'damaged' || state === 'newer') expect(status('database')).toBe('fail');
+        if (state === 'older') expect(status('database')).toBe('info');
+        if (['up to date', 'missing', 'empty', 'locked'].includes(state)) {
+          expect(status('database'), state).toBe('ok');
+        }
+      } finally {
+        if (typeof release === 'function') (release as () => void)();
+      }
+    }
+  }, 60_000);
 });
