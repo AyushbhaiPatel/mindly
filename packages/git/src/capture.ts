@@ -154,6 +154,9 @@ export async function captureWorktreeCommit(
     const skipped = new Set<string>();
     const toAdd: string[] = [];
     for (const p of new Set([...unstaged, ...untracked])) {
+      // A new nested repository (listed as its folder): not part of this tree. Adding it would
+      // record a commit that only it holds, or fail when it has none.
+      if (p.endsWith('/')) continue;
       if (isDeniedPath(p, extraDeny)) skipped.add(p);
       else toAdd.push(p);
     }

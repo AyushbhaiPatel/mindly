@@ -82,11 +82,9 @@ export {
   PACKAGE_DIRS,
   flaggedChanges,
   ignoredDeniedFiles,
-  NESTED_CONTENT_CAP,
+  keepNestedRepos,
+  keptReposDir,
   nestedRepoPaths,
-  nestedRepoState,
-  nestedRepos,
-  removeNestedRepo,
   listFiles,
   mergeIntoNewBranch,
   removeWorktree,
@@ -97,6 +95,7 @@ export type {
   BranchOnlyWork,
   MergeIntoBranchResult,
   MergeSource,
+  KeptRepo,
   NestedRepo,
 } from './worktrees.js';
 

@@ -201,14 +201,24 @@ The merge takes what each agent committed on its part's branch. If a part's work
 work that is not committed there, `mindly split merge` stops and names the files (`--force`
 merges without them). Before or after a merge, `mindly split abort` removes nothing while the
 parts hold work no other branch has: uncommitted files (secrets such as a local `.env` included,
-listed by name only), nested git repositories, or commits only on a part branch. After a squash or rebase merge of the
+listed by name only), or commits only on a part branch. After a squash or rebase merge of the
 merged branch, every part commit is like that. Run `mindly split abort --keep-branches` to remove
 the worktrees and keep the part branches, so that no commit is lost; `mindly split abort --yes
---discard` deletes it all. When you confirm an abort on the terminal, it deletes only what it
-listed, each file only if it still holds what it held when you were asked, and each nested
-repository only if everything deleting it destroys is as it was: HEAD, every ref and the stash,
-its linked worktrees, and its changed, untracked and ignored files (by content; past 20,000 files
-or 512 MiB, by size and time, and the listing says so). Anything new or changed since stops it.
+--discard` deletes it all. When you confirm an abort on the terminal, it deletes only the files
+it listed, each only if it still holds what it held when you were asked: anything new or changed
+since stops it.
+
+Nested git repositories in a part's worktree are never deleted, short of `--yes --discard`: a
+new one, a submodule, one committed into the part, one made in a folder the part tracks, and one
+in an ignored folder (a dependency checkout such as the ones `mix deps.get` leaves in `deps/`).
+Before a worktree is removed, each is moved out whole, by renaming its folder, to
+`.git/mindly/kept/<split id>/<part>/<its path>` in your repository (the git common directory);
+a repository inside another goes with it. Its history, reflog, stash, hooks, config, index,
+submodules and every file, ignored ones included, stay as they were, and its linked worktrees
+elsewhere are pointed at the new place. Nothing needs confirming for that. The abort names each
+one and where it went: move a folder back where you want it, or delete it (`rm -rf`) once you
+are sure. When one cannot be renamed (another file system, permissions), the worktree is kept
+and the abort says why; nothing is ever copied and deleted instead.
 
 Then worktrees are removed the way `git worktree remove` does without `--force`: git refuses one
 with modified or untracked files (an edited file flagged skip-worktree or assume-unchanged
@@ -217,16 +227,11 @@ included), with submodules or that is locked, and the abort keeps it and says wh
 deny-list or your `redaction.denyPaths` count as work, except installed ones: anything in
 `node_modules` or `site-packages`, and, apart from `.env*` and key files, anything in
 `__pycache__`, `.tox`, `.gradle`, `vendor/bundle` or a virtualenv (a `venv`, `.venv` or `env`
-folder holding `pyvenv.cfg`). Every nested git repository counts, wherever it is and however
-clean: a new one, a submodule, one in an ignored folder (the git dependencies `mix deps.get`
-leaves in `deps/` too), with the repositories inside it and any linked worktrees elsewhere that
-stop working without it, all listed. Nothing local proves a repository can be fetched again, so
-`--yes` alone refuses while one is listed: confirm on the terminal, or have a script that cleans
-up such checkouts pass `--yes --discard`. Right before git removes a
-worktree, the abort looks once more for untracked files, counted ignored files and nested
-repositories, and keeps the worktree if any appeared; git's own check covers untracked files
-after that, but an ignored file written in between goes with the worktree. When an abort keeps
-something, run `mindly split abort` again to finish.
+folder holding `pyvenv.cfg`). Right before git removes a worktree, the abort looks once more for
+untracked files and counted ignored files, keeping the worktree if any appeared, and for nested
+repositories, which it moves out; git's own check covers untracked files after that, but an
+ignored file written in between goes with the worktree. When an abort keeps something, run
+`mindly split abort` again to finish.
 
 ### Which agent is better at what, in your repo
 

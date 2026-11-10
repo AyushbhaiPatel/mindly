@@ -18,7 +18,6 @@ import {
   type Screen,
   type Step,
 } from '../present/index.js';
-import { describeNestedRepo } from '@mindly/engine';
 import { clean } from '../util.js';
 
 /** Plain words for a part's state. */
@@ -214,16 +213,7 @@ export function unmergedLine(w: SplitUnmergedWork): string {
     return `${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
   };
   const what: string[] = [];
-  const repos = new Set(w.repos ?? []);
-  const files = w.paths.filter((p) => !repos.has(p));
-  if (files.length > 0) what.push(list(files));
-  if (repos.size > 0) {
-    const named = [...repos].slice(0, 3).map((p) => describeNestedRepo(p, w));
-    const more = repos.size - named.length;
-    what.push(
-      `git repositories, with their commits and changes: ${named.join(', ')}${more > 0 ? ` and ${more} more` : ''}`,
-    );
-  }
+  if (w.paths.length > 0) what.push(list(w.paths));
   const commits = w.commits ?? [];
   if (commits.length > 0) {
     what.push(`${count(commits.length, 'commit')} only on its branch: ${list(commits)}`);
@@ -361,6 +351,19 @@ export function renderAborted(sc: Screen, a: SplitAbortResult): void {
       2,
     );
     for (const w of a.discarded) sc.text(unmergedLine(w), 4);
+  }
+  if (a.keptRepos.length > 0) {
+    sc.text(
+      `${sc.mark('ok')} Moved ${count(a.keptRepos.length, 'git repository', 'git repositories')} out of the worktrees first, whole (history, stash, hooks and every file):`,
+      2,
+    );
+    for (const r of a.keptRepos) {
+      sc.text(`Part "${clean(r.part, 60)}": ${clean(r.path, 200)} -> ${clean(r.to, 300)}`, 4);
+    }
+    sc.note(
+      'To bring one back, move its folder where you want it (mv); to delete one, remove its folder (rm -rf).',
+      2,
+    );
   }
   if (a.split.integrationBranch)
     sc.note(`The merged branch ${a.split.integrationBranch} stays.`, 2);

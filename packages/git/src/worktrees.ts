@@ -1,17 +1,17 @@
 import { createHash } from 'node:crypto';
 import {
-  closeSync,
   existsSync,
   lstatSync,
-  openSync,
+  mkdirSync,
   readFileSync,
-  readSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   rmdirSync,
-  rmSync,
+  unlinkSync,
   type Stats,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { DEFAULT_DENY_PATHS, MindlyError, isDeniedPath, sanitizeLine } from '@mindly/core';
 import { commitTree } from './capture.js';
@@ -273,278 +273,199 @@ export async function flaggedChanges(
 }
 
 /**
- * Puts `paths` of the worktree back to its HEAD in the index, and writes the committed ones that
- * are missing from disk; a file that is on disk is never overwritten. Used after the files a user
- * confirmed were deleted, so that git's own check of the worktree only finds what was not listed.
+ * Puts `paths` of the worktree (files, or folders and all they hold) back to its HEAD in the
+ * index, and writes the committed files that are missing from disk; a file that is on disk is
+ * never overwritten. Used after the files a user confirmed were deleted, and after nested
+ * repositories were moved out, so that git's own check of the worktree only finds what else is
+ * there.
  */
 export async function restoreFromHead(worktree: string, paths: readonly string[]): Promise<void> {
   if (paths.length === 0) return;
   const root = await findRepoRoot(worktree);
   const common = {
     cwd: root,
-    input: `${paths.join('\0')}\0`,
     config: await driverOverrides(root),
     timeoutMs: 120_000,
     // A path neither committed nor in the index, or a file in the way: git's check sees to it.
     okExitCodes: [1],
   };
-  await runGit(['reset', '-q', 'HEAD', '--pathspec-from-file=-', '--pathspec-file-nul'], common);
-  await runGit(['checkout-index', '-q', '-z', '--stdin'], common);
+  const input = `${paths.join('\0')}\0`;
+  await runGit(['reset', '-q', 'HEAD', '--pathspec-from-file=-', '--pathspec-file-nul'], {
+    ...common,
+    input,
+  });
+  const files = (await runGit(['ls-files', '-z', '--', ...paths], common)).stdout;
+  if (files === '') return;
+  await runGit(['checkout-index', '-q', '-z', '--stdin'], { ...common, input: files });
 }
 
-/** A nested git repository in a working tree, with what removing it would lose. */
+/** Where a nested repository is in a working tree, and how git sees it. */
 export interface NestedRepo {
   /** Its folder, repository-relative. */
   path: string;
   /**
-   * `ignored`: in an ignored folder (git deletes it with the worktree). `untracked`: a new one
-   * (git refuses the worktree). `submodule`: a populated submodule or committed repository
-   * (git refuses the worktree).
+   * `ignored`: in an ignored folder. `untracked`: a new one. `submodule`: a populated submodule
+   * or committed repository. `tracked`: one made in a folder the working tree tracks files in
+   * (git looks past it and never names it).
    */
-  kind: 'ignored' | 'untracked' | 'submodule';
-  /** A fingerprint of everything removing it destroys (see `nestedRepoState`). */
-  state: string;
-  /** Repositories inside it (repository-relative), which go with it. */
-  nested: string[];
-  /** Its linked worktrees elsewhere, which stop working without it. */
-  worktrees: string[];
-  /** Set when some of its files were compared by size and time only (see `nestedRepoState`). */
-  partial: boolean;
+  kind: 'ignored' | 'untracked' | 'submodule' | 'tracked';
 }
 
-/** Files whose content `nestedRepoState` hashes, at most, before it goes by size and time. */
-export const NESTED_CONTENT_CAP = { files: 20_000, bytes: 512 * 1024 * 1024 };
-
-interface ContentBudget {
-  files: number;
-  bytes: number;
-  partial: boolean;
-}
-
-/** Content of the file at `abs` (`st`) as a digest, in chunks, within `budget`. */
-function contentDigest(abs: string, st: Stats, budget: ContentBudget): string {
-  const stat = `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.mode}`;
-  if (st.isSymbolicLink()) return `link:${readlinkSync(abs)}`;
-  if (!st.isFile()) return `other:${stat}`;
-  if (budget.files <= 0 || budget.bytes < st.size) {
-    budget.partial = true;
-    return `stat:${stat}`;
-  }
-  budget.files -= 1;
-  budget.bytes -= st.size;
-  const h = createHash('sha256');
-  try {
-    const fd = openSync(abs, 'r');
-    try {
-      const buf = Buffer.allocUnsafe(1 << 20);
-      for (;;) {
-        const n = readSync(fd, buf, 0, buf.length, null);
-        if (n <= 0) break;
-        h.update(buf.subarray(0, n));
-      }
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return `unreadable:${stat}`;
-  }
-  return `file:${st.mode}:${h.digest('hex')}`;
-}
-
-/** What `rel` holds under `dir`: deny-listed files by size and time only, never read. */
-function entryDigest(dir: string, rel: string, budget: ContentBudget): string {
-  const st = lstatInTree(dir, rel);
-  if (!st) return 'missing';
-  if (isDeniedPath(rel)) return `stat:${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.mode}`;
-  return contentDigest(join(dir, rel), st, budget);
-}
-
-/** How deep `nestedRepoState` follows repositories inside repositories. */
-const NESTED_DEPTH = 8;
-
-/**
- * A fingerprint of everything deleting the repository whose working tree is `dir` destroys:
- * HEAD and every ref, the stash, its linked worktrees (path, HEAD and branch: commits made in
- * them live here), every changed, untracked and ignored file (by content, hashed in chunks;
- * deny-listed ones and, past `NESTED_CONTENT_CAP`, the rest by size, times and mode), files
- * flagged skip-worktree or assume-unchanged, and the repositories inside it, the same way.
- * Nothing in a local repository proves it can be fetched again, so none of this is skipped.
- * `nested`: the repositories inside it (relative to `dir`); `worktrees`: its linked worktrees;
- * `partial`: some files were compared by size and time only. A repository git cannot read gets
- * a state made of its `.git` entry's size, times and mode.
- */
-export async function nestedRepoState(
-  dir: string,
-  budget: ContentBudget = { ...NESTED_CONTENT_CAP, partial: false },
-  depth = 0,
-): Promise<{ state: string; nested: string[]; worktrees: string[]; partial: boolean }> {
-  const h = createHash('sha256');
-  const nested: string[] = [];
-  const worktrees: string[] = [];
-  try {
-    if (depth > NESTED_DEPTH) throw new Error('too deep');
-    const opts = { cwd: dir, timeoutMs: 120_000 };
-    // A `.git` git does not take for a repository would have it read the one around `dir`.
-    const top = (await runGit(['rev-parse', '--show-toplevel'], opts)).stdout.trim();
-    if (realpathSync(top) !== realpathSync(dir)) throw new Error('not a repository of its own');
-    const head = (
-      await runGit(['rev-parse', '-q', '--verify', 'HEAD'], { ...opts, okExitCodes: [1, 128] })
-    ).stdout.trim();
-    const refs = (await runGit(['for-each-ref', '--format=%(objectname) %(refname)'], opts)).stdout;
-    const stash = / refs\/stash$/m.test(refs)
-      ? (await runGit(['reflog', 'show', '--format=%H', 'refs/stash', '--'], opts)).stdout
-      : '';
-    const linked = (await runGit(['worktree', 'list', '--porcelain', '-z'], opts)).stdout;
-    h.update(`head:${head}\0refs:${refs}\0stash:${stash}\0worktrees:${linked}\0`);
-    const self = realpathSync(dir);
-    for (const rec of linked.split('\0')) {
-      if (!rec.startsWith('worktree ')) continue;
-      const path = rec.slice('worktree '.length);
-      let real = path;
-      try {
-        real = realpathSync(path);
-      } catch {
-        // Gone: still listed by git, and still in the fingerprint.
-      }
-      if (real !== self) worktrees.push(path);
-    }
-    // Changed, untracked and ignored files one by one, and repositories inside as folders.
-    const inner: string[] = [];
-    await runGitRecords(
-      [
-        'status',
-        '--porcelain=v1',
-        '-z',
-        '--no-renames',
-        '--untracked-files=all',
-        '--ignored=traditional',
-        '--ignore-submodules=none',
-      ],
-      opts,
-      (rec) => {
-        const rel = rec.slice(3);
-        h.update(`${rec}\0`);
-        if (rel.endsWith('/')) inner.push(rel.slice(0, -1));
-        else h.update(`${entryDigest(dir, rel, budget)}\0`);
-        return false;
-      },
-    );
-    for (const e of await flaggedEntries(dir)) {
-      h.update(`flagged:${e.path}:${e.object}:${entryDigest(dir, e.path, budget)}\0`);
-    }
-    for (const rel of inner.sort()) {
-      const sub = await nestedRepoState(join(dir, rel), budget, depth + 1);
-      h.update(`repo:${rel}:${sub.state}\0`);
-      nested.push(rel, ...sub.nested.map((p) => `${rel}/${p}`));
-      worktrees.push(...sub.worktrees);
-    }
-    return { state: h.digest('hex'), nested, worktrees, partial: budget.partial };
-  } catch {
-    const st = lstatInTree(dir, '.git');
-    return {
-      state: `unreadable:${st ? `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.mode}` : 'missing'}`,
-      nested,
-      worktrees,
-      partial: budget.partial,
-    };
-  }
-}
-
-/**
- * Folders of the nested git repositories of the working tree at `cwd`: every new (untracked)
- * one, every populated submodule or committed repository, and every one in an ignored folder (a
- * dependency cloned into `vendor/`). git lists them itself, as folders it does not descend into,
- * wherever they are (in `node_modules` too). Repository-relative, sorted.
- */
-export async function nestedRepoPaths(
-  cwd: string,
-): Promise<{ path: string; kind: NestedRepo['kind'] }[]> {
-  const root = await findRepoRoot(cwd);
-  const asDir = (r: string): boolean => r.endsWith('/');
-  const opts = { cwd: root, timeoutMs: 300_000 };
-  // Every ignored file is listed: read as it comes, keeping only the repositories.
-  const ignored = await runGitRecords(
-    ['ls-files', '-z', '--others', '--ignored', '--exclude-standard'],
-    opts,
-    asDir,
-  );
-  const untracked = await runGitRecords(
-    ['ls-files', '-z', '--others', '--exclude-standard'],
-    opts,
-    asDir,
-  );
-  const gitlinks = (
-    await runGitRecords(['ls-files', '-z', '-s'], opts, (r) => r.startsWith('160000 '))
-  ).map((r) => r.slice(r.indexOf('\t') + 1));
-  return [
-    ...ignored.map((p) => ({ path: p.slice(0, -1), kind: 'ignored' as const })),
-    ...untracked.map((p) => ({ path: p.slice(0, -1), kind: 'untracked' as const })),
-    ...gitlinks
-      .filter((p) => lstatInTree(root, `${p}/.git`) !== null)
-      .map((p) => ({ path: p, kind: 'submodule' as const })),
-  ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-}
-
-/**
- * The nested git repositories of the working tree at `cwd` (see `nestedRepoPaths`), each with
- * the fingerprint of what removing it would destroy (see `nestedRepoState`). All of them count:
- * any local ref that would show one can be fetched again can be made by hand.
- */
-export async function nestedRepos(cwd: string): Promise<NestedRepo[]> {
-  const root = await findRepoRoot(cwd);
-  const out: NestedRepo[] = [];
-  for (const f of await nestedRepoPaths(root)) {
-    const s = await nestedRepoState(join(root, f.path));
-    out.push({
-      ...f,
-      state: s.state,
-      nested: s.nested.map((p) => `${f.path}/${p}`),
-      worktrees: s.worktrees,
-      partial: s.partial,
-    });
+/** Sorts `items` by path, and drops those inside another one (they go with it). */
+function outermost<T extends { path: string }>(items: readonly T[]): T[] {
+  const sorted = [...items].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const out: T[] = [];
+  for (const it of sorted) {
+    const last = out[out.length - 1];
+    if (last && (it.path === last.path || it.path.startsWith(`${last.path}/`))) continue;
+    out.push(it);
   }
   return out;
 }
 
 /**
- * Deletes the nested repository at `rel` in the worktree, only while its state is still
- * `expected` (checked right before). A submodule whose git directory lives in the worktree's own
- * git directory loses that too, so that git no longer counts it. False when it changed (nothing
- * is deleted) or is not a folder of the worktree.
+ * The nested git repositories of the working tree at `cwd`: new (untracked) ones and ones in
+ * ignored folders, as git lists them (folders it does not descend into, wherever they are);
+ * populated submodules and committed repositories, from the index; and repositories made in a
+ * folder the working tree tracks files in, which git looks past, found by one `lstat` of
+ * `<folder>/.git` per tracked folder. Only the outermost: one inside another goes with it.
+ * Repository-relative, sorted. Nothing is read from any of them.
  */
-export async function removeNestedRepo(
-  worktree: string,
-  rel: string,
-  expected: string,
-): Promise<boolean> {
-  const root = await findRepoRoot(worktree);
-  if (rel === '' || rel.split('/').some((p) => p === '' || p === '.' || p === '..')) return false;
-  if (!lstatInTree(root, rel)?.isDirectory()) return false;
-  const dir = join(root, rel);
-  if ((await nestedRepoState(dir)).state !== expected) return false;
-  let gitdir: string | null = null;
-  if (lstatInTree(root, `${rel}/.git`)?.isFile()) {
-    const m = /^gitdir: (.+)$/m.exec(readFileSync(join(dir, '.git'), 'utf8'));
-    if (m) gitdir = resolve(dir, (m[1] as string).trim());
+export async function nestedRepoPaths(cwd: string): Promise<NestedRepo[]> {
+  const root = await findRepoRoot(cwd);
+  const asDir = (r: string): boolean => r.endsWith('/');
+  const opts = { cwd: root, timeoutMs: 300_000 };
+  const found: NestedRepo[] = [];
+  // Every ignored file is listed: read as it comes, keeping only the repositories.
+  for (const p of await runGitRecords(
+    ['ls-files', '-z', '--others', '--ignored', '--exclude-standard'],
+    opts,
+    asDir,
+  )) {
+    found.push({ path: p.slice(0, -1), kind: 'ignored' });
   }
+  for (const p of await runGitRecords(
+    ['ls-files', '-z', '--others', '--exclude-standard'],
+    opts,
+    asDir,
+  )) {
+    found.push({ path: p.slice(0, -1), kind: 'untracked' });
+  }
+  // The index: submodules, and every folder that holds a tracked file.
+  const folders = new Set<string>();
+  await runGitRecords(['ls-files', '-z', '-s'], opts, (rec) => {
+    const path = rec.slice(rec.indexOf('\t') + 1);
+    if (rec.startsWith('160000 ')) {
+      if (lstatInTree(root, `${path}/.git`) !== null) found.push({ path, kind: 'submodule' });
+      return false;
+    }
+    for (let i = path.indexOf('/'); i !== -1; i = path.indexOf('/', i + 1)) {
+      folders.add(path.slice(0, i));
+    }
+    return false;
+  });
+  for (const dir of folders) {
+    if (lstatInTree(root, `${dir}/.git`) !== null) found.push({ path: dir, kind: 'tracked' });
+  }
+  return outermost(found);
+}
+
+/** A nested repository moved out of a working tree, and where to. */
+export interface KeptRepo {
+  /** Its folder in the working tree, repository-relative. */
+  path: string;
+  /** Where it is now. */
+  to: string;
+}
+
+/** `<git-common-dir>/mindly/kept`: where nested repositories of removed worktrees are kept. */
+export async function keptReposDir(repoRoot: string): Promise<string> {
+  const root = await findRepoRoot(repoRoot);
+  return join(await gitCommonDir(root), 'mindly', 'kept');
+}
+
+/** A path at `want`, or `want.1`, `want.2`, ... when it is taken. */
+function freePath(want: string): string {
+  if (!existsSync(want)) return want;
+  for (let i = 1; ; i++) if (!existsSync(`${want}.${i}`)) return `${want}.${i}`;
+}
+
+/**
+ * Moves every nested repository of `worktree` (see `nestedRepoPaths`) into `holding`, at its
+ * path in the worktree, by renaming it: nothing in it is copied or deleted, so its refs, reflog,
+ * stash, hooks, config, index, submodules and every file stay as they are. A submodule whose git
+ * directory lives in the worktree's own git directory takes it along as its `.git` (and loses
+ * the `core.worktree` that pointed back); links between a moved repository and its linked
+ * worktrees are repaired. Then the worktree's files that those folders held and it tracks are
+ * written back from its HEAD, so that git's check of the worktree only sees what else is there.
+ * Stops at the first one that cannot be renamed (another file system, permissions): `failed`
+ * says which and why, and the rest stay where they are. Never copies.
+ */
+export async function keepNestedRepos(
+  worktree: string,
+  holding: string,
+): Promise<{ moved: KeptRepo[]; failed: { path: string; reason: string } | null }> {
+  const root = await findRepoRoot(worktree);
+  const repos = await nestedRepoPaths(root);
+  const moved: KeptRepo[] = [];
+  if (repos.length === 0) return { moved, failed: null };
   const admin = resolve(
     root,
     (await runGit(['rev-parse', '--git-dir'], { cwd: root, timeoutMs: 30_000 })).stdout.trim(),
   );
   const modules = join(admin, 'modules');
-  rmSync(dir, { recursive: true, force: true });
-  if (gitdir && gitdir.startsWith(`${modules}/`)) {
-    rmSync(gitdir, { recursive: true, force: true });
-    // Folders left empty, up to `modules` itself: git counts that folder as submodules.
-    for (let d = dirname(gitdir); d === modules || d.startsWith(`${modules}/`); d = dirname(d)) {
-      try {
-        rmdirSync(d);
-      } catch {
-        break;
+  let failed: { path: string; reason: string } | null = null;
+  for (const repo of repos) {
+    const from = join(root, repo.path);
+    const to = freePath(join(holding, repo.path));
+    try {
+      // Its git directory, when it lives in the worktree's own (an absorbed submodule).
+      let gitdir: string | null = null;
+      if (lstatInTree(root, `${repo.path}/.git`)?.isFile()) {
+        const m = /^gitdir: (.+)$/m.exec(readFileSync(join(from, '.git'), 'utf8'));
+        const dir = m ? resolve(from, (m[1] as string).trim()) : null;
+        if (dir && dir.startsWith(`${modules}/`)) gitdir = dir;
       }
+      mkdirSync(dirname(to), { recursive: true });
+      renameSync(from, to);
+      moved.push({ path: repo.path, to });
+      if (gitdir) {
+        const staged = join(to, '.git.moving');
+        renameSync(gitdir, staged);
+        unlinkSync(join(to, '.git'));
+        renameSync(staged, join(to, '.git'));
+        // Run from outside it: git would read that `core.worktree` on the way in.
+        await runGit(['config', '--file', join(to, '.git', 'config'), '--unset', 'core.worktree'], {
+          cwd: tmpdir(),
+          timeoutMs: 30_000,
+          okExitCodes: [5],
+        });
+        // Folders left empty, up to `modules` itself: git counts that folder as submodules.
+        for (
+          let d = dirname(gitdir);
+          d === modules || d.startsWith(`${modules}/`);
+          d = dirname(d)
+        ) {
+          try {
+            rmdirSync(d);
+          } catch {
+            break;
+          }
+        }
+      }
+      // Its linked worktrees (or the repository it is a worktree of) follow it to its new place.
+      await runGit(['worktree', 'repair'], { cwd: to, timeoutMs: 60_000, okExitCodes: [1, 128] });
+    } catch (err) {
+      failed = { path: repo.path, reason: err instanceof Error ? err.message : String(err) };
+      break;
     }
   }
-  return true;
+  if (moved.length > 0)
+    await restoreFromHead(
+      root,
+      moved.map((m) => m.path),
+    );
+  return { moved, failed };
 }
 
 /**

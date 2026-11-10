@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs';
-import { basename, dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { UserConfig } from '@mindly/core';
 import type { GitPort, LlmPort, NotifierPort } from '@mindly/engine';
 import {
@@ -24,9 +24,9 @@ import {
   findRepoRoot,
   flaggedChanges,
   ignoredDeniedFiles,
+  keepNestedRepos,
+  keptReposDir,
   nestedRepoPaths,
-  nestedRepos,
-  removeNestedRepo,
   headCommit,
   hunkHashes,
   isManifestPath,
@@ -99,6 +99,11 @@ export function createStepGitPort(): StepGitPort {
   };
 }
 
+/** A filter keeping the paths that are not in (or one of) the nested repositories `repos`. */
+function outsideNestedRepos(repos: readonly { path: string }[]): (path: string) => boolean {
+  return (p) => !repos.some((r) => p === r.path || p.startsWith(`${r.path}/`));
+}
+
 /** `SplitGitPort` backed by `@mindly/git`. Errors propagate: split commands report them. */
 export function createSplitGitPort(): SplitGitPort {
   return {
@@ -108,23 +113,23 @@ export function createSplitGitPort(): SplitGitPort {
       (await addWorktree(repoRoot, path, branch, startPoint)).path,
     removeWorktree: (repoRoot, path, options) => removeWorktree(repoRoot, path, options),
     restoreFromHead: (_repoRoot, worktree, paths) => restoreFromHead(worktree, paths),
-    removeNestedRepo: (_repoRoot, worktree, path, expected) =>
-      removeNestedRepo(worktree, path, expected),
+    keepNestedRepos: async (repoRoot, worktree, holding) =>
+      keepNestedRepos(worktree, join(await keptReposDir(repoRoot), ...holding)),
     strayWork: async (_repoRoot, worktree, secretDeny) => {
       const untracked = await runGit(['ls-files', '-z', '--others', '--exclude-standard'], {
         cwd: worktree,
         timeoutMs: 120_000,
       });
+      // Nested repositories are moved out before the worktree goes: not stray.
+      const inRepo = outsideNestedRepos(await nestedRepoPaths(worktree));
       return [
         ...new Set([
-          ...untracked.stdout
-            .split('\0')
-            .filter((p) => p !== '')
-            .map((p) => p.replace(/\/$/, '')),
+          ...untracked.stdout.split('\0').filter((p) => p !== '' && !p.endsWith('/')),
           ...(await ignoredDeniedFiles(worktree, secretDeny)),
-          ...(await nestedRepoPaths(worktree)).map((r) => r.path),
         ]),
-      ].sort();
+      ]
+        .filter(inRepo)
+        .sort();
     },
     deleteBranch: (repoRoot, branch, expectedTip) => deleteBranch(repoRoot, branch, expectedTip),
     branchOnlyWork: (repoRoot, branch, options) => branchOnlyWork(repoRoot, branch, options),
@@ -149,24 +154,21 @@ export function createSplitGitPort(): SplitGitPort {
       // Edited files flagged skip-worktree or assume-unchanged: neither the capture nor git's
       // status sees them.
       const flagged = await flaggedChanges(worktree, extraDeny);
-      const nested = await nestedRepos(worktree);
-      const paths = new Set([
-        ...res.stdout.split('\0').filter((p) => p !== ''),
-        // Left out of the capture because they are on the deny-list: still work in the worktree.
-        ...captured.skipped,
-        ...flagged.changed,
-      ]);
+      // Nested repositories, and what is in them, are moved out whole before the worktree goes:
+      // nothing in them is lost, so none of it is listed (a submodule's new commit included).
+      const outside = outsideNestedRepos(await nestedRepoPaths(worktree));
+      const paths = new Set(
+        [
+          ...res.stdout.split('\0').filter((p) => p !== ''),
+          // Left out of the capture because they are on the deny-list: still work in the worktree.
+          ...captured.skipped,
+          ...flagged.changed,
+        ].filter(outside),
+      );
       return {
         paths: [...paths].sort(),
         denied: [...new Set([...captured.skipped, ...ignored, ...flagged.denied])].sort(),
-        ignoredDenied: ignored.filter((p) => !paths.has(p)),
-        nestedRepos: nested.map((r) => ({
-          path: r.path,
-          state: r.state,
-          nested: r.nested,
-          worktrees: r.worktrees,
-          partial: r.partial,
-        })),
+        ignoredDenied: ignored.filter((p) => !paths.has(p) && outside(p)),
       };
     },
     changedSince: async (repoRoot, worktree, base, extraDeny) => {

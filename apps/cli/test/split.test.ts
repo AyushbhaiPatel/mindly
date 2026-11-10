@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -838,7 +845,7 @@ describe('split status, merge and abort (acceptance 4)', () => {
     expect((await cli(sb, ['split', 'status'])).stdout).not.toContain('finish the abort');
   });
 
-  it('a yes covers a nested repository only as it was shown', async () => {
+  it('a yes moves a nested repository out whole, whatever is written into it while asked', async () => {
     const sb = await splitSandbox();
     await createSplit(sb);
     const nested = join(partDir(sb, 'page'), 'src/app/vendor');
@@ -854,12 +861,13 @@ describe('split status, merge and abort (acceptance 4)', () => {
       },
     };
     const r = await cli(sb, ['split', 'abort'], { answers: [answer] as unknown as string[] });
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain('git repositories, with their commits and changes: src/app/vendor');
-    expect(existsSync(join(nested, 'new.ts'))).toBe(true);
-    // Shown as it is now, and confirmed, it goes.
-    expect((await cli(sb, ['split', 'abort'], { answers: ['y'] })).code).toBe(0);
+    expect(r.code).toBe(0);
     expect(existsSync(nested)).toBe(false);
+    const kept = join(sb.repo, '.git', 'mindly', 'kept');
+    const [id] = readdirSync(kept);
+    const moved = join(kept, id as string, 'page', 'src/app/vendor');
+    expect(readFileSync(join(moved, 'new.ts'), 'utf8')).toBe('export const fresh = 1;\n');
+    expect(readFileSync(join(moved, 'lib.ts'), 'utf8')).toBe('export const lib = 2;\n');
   });
 
   it('abort after a merge removes commits only on a part branch with --discard', async () => {

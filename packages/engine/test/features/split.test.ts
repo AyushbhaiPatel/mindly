@@ -55,13 +55,9 @@ function fakeSplitGit(root: string) {
   // Ignored files on the deny-list (by worktree), and which paths are deny-listed.
   const ignoredDenied = new Map<string, string[]>();
   const denied = new Set<string>();
-  // Nested repositories a listing counts (by worktree), and the state of each now (by folder) when
-  // it differs from the listed one.
-  const nestedRepos = new Map<
-    string,
-    { path: string; state: string; nested?: string[]; worktrees?: string[] }[]
-  >();
-  const repoStateNow = new Map<string, string>();
+  // Nested repositories (by worktree), moved out before a worktree goes, or the one that cannot be.
+  const nestedRepos = new Map<string, string[]>();
+  const cannotMove = new Map<string, { path: string; reason: string }>();
   // What appeared right before a removal (by worktree).
   const stray = new Map<string, string[]>();
   // Commits only a branch has (by branch), as `branchOnlyWork` reports them; the branch tip is
@@ -94,11 +90,15 @@ function fakeSplitGit(root: string) {
     restoreFromHead: async (_root, worktree, paths) => {
       calls.restored.push({ worktree, paths: [...paths] });
     },
-    removeNestedRepo: async (_root, worktree, path, expected) => {
-      const listed = nestedRepos.get(worktree)?.find((r) => r.path === path)?.state;
-      if ((repoStateNow.get(join(worktree, path)) ?? listed) !== expected) return false;
-      rmSync(join(worktree, path), { recursive: true, force: true });
-      return true;
+    keepNestedRepos: async (_root, worktree, holding) => {
+      const failed = cannotMove.get(worktree) ?? null;
+      if (failed) return { moved: [], failed };
+      const moved = (nestedRepos.get(worktree) ?? []).map((path) => ({
+        path,
+        to: join(root, '.git', 'mindly', 'kept', ...holding, path),
+      }));
+      nestedRepos.delete(worktree);
+      return { moved, failed: null };
     },
     strayWork: async (_root, worktree) => stray.get(worktree) ?? [],
     deleteBranch: async (_root, b, expectedTip) => {
@@ -120,12 +120,6 @@ function fakeSplitGit(root: string) {
         paths,
         ignoredDenied: ignored,
         denied: [...paths, ...ignored].filter((p) => denied.has(p)),
-        nestedRepos: (nestedRepos.get(wt) ?? []).map((r) => ({
-          nested: [],
-          worktrees: [],
-          partial: false,
-          ...r,
-        })),
       };
     },
     changedSince: async (_root, wt, base) =>
@@ -159,7 +153,7 @@ function fakeSplitGit(root: string) {
     ignoredDenied,
     denied,
     nestedRepos,
-    repoStateNow,
+    cannotMove,
     stray,
     onlyOn,
     calls,
@@ -1381,38 +1375,55 @@ describe('split through hook events', () => {
     expect(readFileSync(join(edited.page, 'src', 'app', 'wip.ts'), 'utf8')).toBe('more\n');
   });
 
-  it('lists a nested repository, and deletes it on a confirmation only while it is as shown', async () => {
-    const run = async (moveIt: boolean) => {
-      const { svc, pid, fake } = await setup();
-      const created = await svc.create({
-        projectId: pid,
-        plan: PLAN,
-        slug: 'billing',
-        plannedBy: 'plan-file',
-        connectedAgents: null,
-      });
-      const page = (created.parts as { worktree: string }[])[1] as { worktree: string };
-      mkdirSync(join(page.worktree, 'tools', 'dep', '.git'), { recursive: true });
-      fake.nestedRepos.set(page.worktree, [{ path: 'tools/dep', state: 'refs-1' }]);
-      const check = await svc.abortCheck(created.split.id);
-      expect(check.work).toEqual([
-        expect.objectContaining({ part: 'page', paths: ['tools/dep'], repos: ['tools/dep'] }),
-      ]);
-      // Without a confirmation it is refused, as any other work.
-      await expect(svc.abort(created.split.id)).rejects.toMatchObject({ code: 'conflict' });
-      // A commit made in it after the confirmation, right before it goes.
-      if (moveIt) fake.repoStateNow.set(join(page.worktree, 'tools/dep'), 'refs-2');
-      const aborted = await svc.abort(created.split.id, { confirmed: check });
-      return { aborted, page: page.worktree };
-    };
-    const ok = await run(false);
-    expect(ok.aborted.finished).toBe(true);
-    const moved = await run(true);
-    expect(moved.aborted.finished).toBe(false);
-    expect(moved.aborted.keptBecause[moved.page]).toBe(
-      'a file it listed changed after the abort was confirmed: tools/dep',
+  it('moves nested repositories out before a worktree goes, and keeps it when it cannot', async () => {
+    const { svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const [api, page] = created.parts as [
+      (typeof created.parts)[number],
+      (typeof created.parts)[number],
+    ];
+    fake.nestedRepos.set(api.worktree, ['vendor/lib']);
+    fake.cannotMove.set(page.worktree, { path: 'deps/x', reason: 'EXDEV: cross-device link' });
+    // Nothing to confirm: moving a repository loses nothing.
+    expect((await svc.abortCheck(created.split.id)).work).toEqual([]);
+    const first = await svc.abort(created.split.id);
+    expect(first.keptRepos).toEqual([
+      {
+        part: 'api',
+        path: 'vendor/lib',
+        to: expect.stringMatching(new RegExp(`/mindly/kept/${created.split.id}/api/vendor/lib$`)),
+      },
+    ]);
+    expect(first.removedWorktrees).toEqual([api.worktree]);
+    expect(first.finished).toBe(false);
+    expect(first.keptBecause[page.worktree]).toBe(
+      'could not move the git repository deps/x out of it: EXDEV: cross-device link',
     );
-    expect(existsSync(join(moved.page, 'tools', 'dep', '.git'))).toBe(true);
+    expect(existsSync(page.worktree)).toBe(true);
+    fake.cannotMove.delete(page.worktree);
+    expect((await svc.abort(created.split.id)).finished).toBe(true);
+  });
+
+  it('moves no repository on a discard: everything goes', async () => {
+    const { svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const page = (created.parts as { worktree: string }[])[1] as { worktree: string };
+    fake.nestedRepos.set(page.worktree, ['vendor/lib']);
+    const aborted = await svc.abort(created.split.id, { discardUncommitted: true });
+    expect(aborted.keptRepos).toEqual([]);
+    expect(aborted.finished).toBe(true);
   });
 
   it('keeps a worktree that got work its listing counts after the last look at it', async () => {

@@ -359,43 +359,6 @@ export interface SplitUnmergedWork {
    * a confirmation never covers them.
    */
   opaque?: string[];
-  /**
-   * Nested git repositories among `paths` (their commits and uncommitted files go with them): a
-   * confirmation covers one while its refs and uncommitted files are as they were.
-   */
-  repos?: string[];
-  /** What else goes with some of `repos`: repositories inside, worktrees elsewhere. */
-  repoDetails?: SplitNestedRepo[];
-}
-
-/** A nested repository an abort would delete, beyond its own commits and files. */
-export interface SplitNestedRepo {
-  path: string;
-  /** Repositories inside it, which go with it. */
-  nested: string[];
-  /** Its linked worktrees elsewhere, which stop working without it. */
-  worktrees: string[];
-  /** Some of its files are compared by size and time only (too many to read). */
-  partial: boolean;
-}
-
-/** `vendor/lib (holding vendor/lib/deps/inner; its worktrees elsewhere stop working: /x)`. */
-export function describeNestedRepo(path: string, w: SplitUnmergedWork): string {
-  const d = w.repoDetails?.find((r) => r.path === path);
-  const notes: string[] = [];
-  const list = (items: readonly string[]): string => {
-    const shown = items.slice(0, 3).map((p) => sanitizeLine(p, 160));
-    return items.length > shown.length
-      ? `${shown.join(', ')} and ${items.length - shown.length} more`
-      : shown.join(', ');
-  };
-  if (d && d.nested.length > 0) notes.push(`holding ${list(d.nested)}`);
-  if (d && d.worktrees.length > 0) {
-    notes.push(`its worktrees elsewhere stop working: ${list(d.worktrees)}`);
-  }
-  if (d?.partial) notes.push('some files compared by size and time only');
-  const name = sanitizeLine(path, 160);
-  return notes.length > 0 ? `${name} (${notes.join('; ')})` : name;
 }
 
 /**
@@ -440,6 +403,12 @@ export interface SplitAbortResult {
   keptBranches: string[];
   /** Uncommitted work, and commits only a deleted branch had, that went away with the split. */
   discarded: SplitUnmergedWork[];
+  /**
+   * Nested git repositories moved out of the worktrees, whole (history, stash, hooks, ignored
+   * files and all), before they were removed: by part, from its path in the worktree to `to`, in
+   * `<git-common-dir>/mindly/kept/<split id>/<part>/`. Nothing in them was deleted.
+   */
+  keptRepos: { part: string; path: string; to: string }[];
 }
 
 export class SplitService {
@@ -749,8 +718,6 @@ export class SplitService {
     paths: string[];
     lost: string[];
     denied: ReadonlySet<string>;
-    repos: string[];
-    repoDetails: SplitNestedRepo[];
     content: string;
     files: Record<string, string>;
     opaque: string[];
@@ -761,9 +728,7 @@ export class SplitService {
         paths: [],
         lost: [],
         denied,
-        repos: [],
-        repoDetails: [],
-        ...worktreeFingerprint(part.worktree, [], denied, new Map()),
+        ...worktreeFingerprint(part.worktree, [], denied),
       };
     }
     const work = await git.uncommittedWork(
@@ -776,24 +741,9 @@ export class SplitService {
       this.k.config.redaction.denyPaths,
     );
     const paths = [...new Set(work.paths)].sort();
-    const repos = new Map(work.nestedRepos.map((r) => [r.path, r.state]));
-    const lost = [...new Set([...paths, ...work.ignoredDenied, ...repos.keys()])].sort();
+    const lost = [...new Set([...paths, ...work.ignoredDenied])].sort();
     const denied = new Set(work.denied);
-    return {
-      paths,
-      lost,
-      denied,
-      repos: [...repos.keys()].sort(),
-      repoDetails: work.nestedRepos
-        .filter((r) => r.nested.length > 0 || r.worktrees.length > 0 || r.partial)
-        .map((r) => ({
-          path: r.path,
-          nested: r.nested,
-          worktrees: r.worktrees,
-          partial: r.partial,
-        })),
-      ...worktreeFingerprint(part.worktree, lost, denied, repos),
-    };
+    return { paths, lost, denied, ...worktreeFingerprint(part.worktree, lost, denied) };
   }
 
   /**
@@ -821,23 +771,11 @@ export class SplitService {
     if (first.length > 0) {
       return `a file it listed changed after the abort was confirmed: ${describePaths(first)}`;
     }
-    const changedSince = (rel: string): string =>
-      `a file it listed changed after the abort was confirmed: ${describePaths([rel])}`;
     for (const rel of still) {
-      const listedAs = now.files[rel] as string;
-      if (listedAs.startsWith('repo:')) {
-        // A nested repository: deleted only while its refs and files are as they were shown.
-        try {
-          if (!(await git.removeNestedRepo(root, part.worktree, rel, listedAs.slice(5)))) {
-            return changedSince(rel);
-          }
-        } catch (err) {
-          return `could not delete ${sanitizeLine(rel, 200)}: ${sanitizeLine(err instanceof Error ? err.message : String(err), 200)}`;
-        }
-        continue;
-      }
       const digest = fileDigest(part.worktree, rel, now.denied);
-      if (changed(rel, digest)) return changedSince(rel);
+      if (changed(rel, digest)) {
+        return `a file it listed changed after the abort was confirmed: ${describePaths([rel])}`;
+      }
       if (digest === 'missing') continue;
       try {
         unlinkSync(join(part.worktree, rel));
@@ -934,8 +872,6 @@ export class SplitService {
         ...(only.commits.length > 0 ? { commits: only.commits } : {}),
         ...(only.more || files.lost.length > PATHS_SHOWN ? { more: true as const } : {}),
         ...(files.opaque.length > 0 ? { opaque: files.opaque } : {}),
-        ...(files.repos.length > 0 ? { repos: files.repos } : {}),
-        ...(files.repoDetails.length > 0 ? { repoDetails: files.repoDetails } : {}),
       });
     }
     return { work, state };
@@ -1433,6 +1369,7 @@ export class SplitService {
     const keptBranches: string[] = [];
     const unfinishedParts = new Set<string>();
     const keptBecause: Record<string, string> = {};
+    const keptRepos: SplitAbortResult['keptRepos'] = [];
     for (const part of parts) {
       const was = check?.state[part.key];
       let unfinished = false;
@@ -1471,6 +1408,22 @@ export class SplitService {
         if (why) {
           unfinished = true;
           keptBecause[part.worktree] = why;
+        }
+      }
+      // Nested repositories are never deleted (short of a discard): they move out whole first.
+      if (!unfinished && !everything && existsSync(part.worktree)) {
+        try {
+          const kept = await git.keepNestedRepos(root, part.worktree, [split.id, part.key]);
+          for (const m of kept.moved) keptRepos.push({ part: part.key, ...m });
+          if (kept.failed) {
+            unfinished = true;
+            keptBecause[part.worktree] =
+              `could not move the git repository ${sanitizeLine(kept.failed.path, 200)} out of it: ${sanitizeLine(kept.failed.reason, 200)}`;
+          }
+        } catch (err) {
+          unfinished = true;
+          keptBecause[part.worktree] =
+            `could not move its git repositories out of it: ${sanitizeLine(err instanceof Error ? err.message : String(err), 300)}`;
         }
       }
       if (!unfinished) {
@@ -1573,6 +1526,7 @@ export class SplitService {
         splitId: split.id,
         removedWorktrees: removedWorktrees.length,
         keptBranches,
+        keptRepos: keptRepos.map((r) => r.to),
         finished,
         unfinished: [...unfinishedParts],
       },
@@ -1586,6 +1540,7 @@ export class SplitService {
       deletedBranches,
       keptBranches,
       discarded: discarded.filter((w) => !unfinishedParts.has(w.part)),
+      keptRepos,
     };
   }
 
@@ -1723,8 +1678,7 @@ function lossRefusal(
 ): MindlyError {
   const list = fresh.map(describeWork).join('; ');
   const commits = fresh.some((w) => (w.commits ?? []).length > 0);
-  // Files to commit; nested repositories are not committed on a part branch.
-  const paths = fresh.some((w) => w.paths.some((p) => !(w.repos ?? []).includes(p)));
+  const paths = fresh.some((w) => w.paths.length > 0);
   const more = fresh.some((w) => w.more || (w.opaque ?? []).length > 0);
   const message = afterConfirm
     ? `nothing was removed: the parts hold work that was not shown when the abort was confirmed, or that cannot be checked: ${list}`
@@ -1754,14 +1708,12 @@ function worktreeFingerprint(
   worktree: string,
   paths: readonly string[],
   denied: ReadonlySet<string>,
-  repos: ReadonlyMap<string, string>,
 ): { content: string; files: Record<string, string>; opaque: string[] } {
   const h = createHash('sha256');
   const files: Record<string, string> = {};
   const opaque: string[] = [];
   for (const rel of paths) {
-    const repo = repos.get(rel);
-    const digest = repo !== undefined ? `repo:${repo}` : fileDigest(worktree, rel, denied);
+    const digest = fileDigest(worktree, rel, denied);
     if (digest === 'dir') opaque.push(rel);
     files[rel] = digest;
     h.update(rel).update('\0').update(digest).update('\0');
@@ -1828,16 +1780,7 @@ function hashFile(abs: string, h: Hash): void {
 /** `"API" (not committed: a.ts; 2 commits only on its branch: 1a2b3c4d5e6f Add plans, …)`. */
 function describeWork(w: SplitUnmergedWork): string {
   const what: string[] = [];
-  const repos = new Set(w.repos ?? []);
-  const files = w.paths.filter((p) => !repos.has(p));
-  if (files.length > 0) what.push(`not committed: ${describePaths(files)}`);
-  if (repos.size > 0) {
-    const named = [...repos].slice(0, 3).map((p) => describeNestedRepo(p, w));
-    const more = repos.size - named.length;
-    what.push(
-      `git repositories, with their commits and changes: ${named.join(', ')}${more > 0 ? ` and ${more} more` : ''}`,
-    );
-  }
+  if (w.paths.length > 0) what.push(`not committed: ${describePaths(w.paths)}`);
   const commits = w.commits ?? [];
   if (commits.length > 0) {
     what.push(
