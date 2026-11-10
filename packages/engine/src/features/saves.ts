@@ -165,12 +165,17 @@ export class SavesService {
     // protected files only: the rest of the call may be written later without breaking the rule.
     const paths = ruleId ? this.protectedBy(ruleId, strings(p.paths, 50)).slice(0, 20) : [];
     if (ruleId && paths.length > 0) {
+      // Saves used to be recorded with every path of the call. The same denial again is still
+      // that save, not a new one.
+      const before = fingerprint('rule_enforced', ruleId, ...strings(p.paths, 20).sort());
+      const now = fingerprint('rule_enforced', ruleId, ...[...paths].sort());
+      const known = before !== now && this.k.store.saves.findByFingerprint(e.projectId, before);
       this.record(e, {
         kind: 'rule_enforced',
         title: `A write by ${this.name(helped)} was blocked by your rule`,
         sessionIds: [helped.id],
         paths,
-        fingerprint: fingerprint('rule_enforced', ruleId, ...[...paths].sort()),
+        fingerprint: known ? before : now,
         refs: { ruleId },
       });
     }
