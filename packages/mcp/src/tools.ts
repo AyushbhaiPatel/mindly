@@ -126,6 +126,13 @@ function notStored(outcome: RememberOutcome, m: Memory): CallToolResult | null {
         'Not stored: the user rejected a memory with this title. Do not propose it again; ask ' +
         'the user if you think it should be reconsidered.',
     },
+    kept_user_decision: {
+      heading: 'Existing settled memory',
+      text:
+        'Not stored: a memory with this title is settled (the user pinned, enforced or ' +
+        'archived it, or it was verified against the code) and was left unchanged. Propose the ' +
+        'change under a different title or ask the user to edit it.',
+    },
     kept_other_author: {
       heading: 'Existing memory of another agent',
       text:

@@ -448,6 +448,24 @@ describe('mindly MCP server', () => {
     expect(h.mindly.store.memories.get(other.id).status).toBe('active');
   });
 
+  it('does not rewrite its own proposal once the user pinned it', async () => {
+    const h = await harness();
+    const first = await h.call('mindly_remember', { kind: 'rule', title: 'Use pnpm', body: 'v1' });
+    const id = (first.structured?.['memory'] as { id: string }).id;
+    h.mindly.memory.update(id, { pinned: true }, USER, null);
+    const again = await h.call('mindly_remember', { kind: 'rule', title: 'Use pnpm', body: 'v2' });
+    expect(again.isError).toBe(false);
+    expect(again.text).toMatch(/Not stored: a memory with this title is settled/);
+    expect(again.structured).toMatchObject({
+      stored: false,
+      outcome: 'kept_user_decision',
+      memory: { id, version: 1 },
+    });
+    expect(h.mindly.store.memories.get(id)).toMatchObject({ body: 'v1', pinned: true });
+    const edit = await h.call('mindly_update_memory', { id, body: 'v2' });
+    expect(edit.text).toMatch(/^forbidden:/);
+  });
+
   it('leaves the proposal of another agent in its own words', async () => {
     const h = await harness();
     const first = await h.call('mindly_remember', {

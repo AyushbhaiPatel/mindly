@@ -493,6 +493,21 @@ export class MemoryRepo {
     return toEvidence(this.db.prepare('SELECT * FROM memory_evidence WHERE id = ?').get(id) as Row);
   }
 
+  /**
+   * Makes an evidence row its memory's newest, as if it had just been added (it was stated again):
+   * now, or just after the newest row when that one is from the same millisecond.
+   */
+  touchEvidence(id: string): void {
+    this.db
+      .prepare(
+        `UPDATE memory_evidence SET created_at = MAX(?1, COALESCE((
+           SELECT MAX(e.created_at) + 1 FROM memory_evidence e
+           WHERE e.memory_id = memory_evidence.memory_id AND e.id <> memory_evidence.id), ?1))
+         WHERE id = ?2`,
+      )
+      .run(this.clock.now(), id);
+  }
+
   deleteEvidence(id: string): void {
     this.db.prepare('DELETE FROM memory_evidence WHERE id = ?').run(id);
   }

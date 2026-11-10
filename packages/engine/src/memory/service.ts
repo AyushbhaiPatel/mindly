@@ -53,14 +53,50 @@ export interface RememberInput {
 }
 
 /**
- * What {@link MemoryService.rememberResult} did. `kept_approved`: a memory the user approved has
- * this title, so nothing about it changed (only the occurrence is recorded). `kept_rejected`: the user rejected a memory with this title; nothing was stored.
- * `kept_other_author`: a different agent proposed a memory with this title; nothing about it
- * changed (only the occurrence is recorded). Callers that go on to approve, enforce, announce or
- * link the result must do so only for `created` and `updated`: a kept memory is someone else's.
+ * What {@link MemoryService.rememberResult} did. Every `kept_` outcome leaves the memory exactly as
+ * it was and attaches nothing to it; apart from `kept_rejected`, the occurrence is recorded.
+ *
+ * - `kept_rejected`: the user rejected a memory with this title.
+ * - `kept_approved`: the user approved a memory with this title.
+ * - `kept_user_decision`: the memory is settled in another way: the user pinned, enforced or
+ *   archived it, or it was verified against the code (or marked stale). Only the user changes it.
+ * - `kept_other_author`: a different agent proposed a memory with this title.
+ *
+ * Callers that go on to approve, enforce, announce or link the result must do so only for
+ * `created` and `updated`: a kept memory is someone else's.
  */
 export type RememberOutcome =
-  'created' | 'updated' | 'kept_approved' | 'kept_rejected' | 'kept_other_author';
+  | 'created'
+  | 'updated'
+  | 'kept_approved'
+  | 'kept_rejected'
+  | 'kept_user_decision'
+  | 'kept_other_author';
+
+/** Why a source other than the user may not change a memory (see {@link agentLock}). */
+type AgentLock = 'rejected' | 'approved' | 'decided' | 'other_author';
+
+/**
+ * Whether `by`, a source other than the user, may change `m`; null when it may. An agent may
+ * change only a memory its own kind proposed that is still proposed, active, not enforced and not
+ * pinned: anything the user approved, rejected, enforced, pinned or archived is the user's, and a
+ * verified or stale memory is settled too. `takesOver` (a repository file restating an agent's
+ * proposal) lifts only the author check. The one rule behind both
+ * {@link MemoryService.rememberResult} and {@link MemoryService.update}.
+ */
+function agentLock(m: Memory, by: MemorySource, takesOver = false): AgentLock | null {
+  if (m.trust === 'rejected') return 'rejected';
+  if (m.trust === 'approved') return 'approved';
+  if (m.trust !== 'proposed' || m.status !== 'active' || m.enforce || m.pinned) return 'decided';
+  return takesOver || sameAuthor(m.source, by) ? null : 'other_author';
+}
+
+const KEPT: Record<AgentLock, RememberOutcome> = {
+  rejected: 'kept_rejected',
+  approved: 'kept_approved',
+  decided: 'kept_user_decision',
+  other_author: 'kept_other_author',
+};
 
 /** Evidence rows one memory keeps. */
 const MAX_EVIDENCE_ROWS = 20;
@@ -260,20 +296,13 @@ export class MemoryService {
           'a user memory with this title exists; propose the change under a different title',
         );
       }
-      // What the user decided about a memory is not undone by saying it again: a memory they
-      // rejected stays rejected, and one they approved stays exactly as it is. Only the user
-      // changes either (only the user can set these two trust levels). The caller is told, so
-      // nothing is dropped without its author knowing.
-      if (existing.trust === 'rejected') return { memory: existing, outcome: 'kept_rejected' };
-      if (existing.trust === 'approved') {
-        return { memory: this.restated(existing, input), outcome: 'kept_approved' };
-      }
-      // A memory stays in the words of whoever it is attributed to: another agent saying the same
-      // thing cannot put its own text under the first agent's name, nor hang evidence on it that
-      // would later make it go stale. An agent may still refine what it proposed.
-      if (!takesOver && !sameAuthor(existing.source, input.source)) {
-        return { memory: this.restated(existing, input), outcome: 'kept_other_author' };
-      }
+      // Saying it again changes a memory exactly when `update()` would let this source change
+      // it. What the user decided stays decided, and a memory stays in the words of whoever it is
+      // attributed to: nobody else puts their text under that name or hangs evidence on it that
+      // would later make it go stale. The caller is told, so nothing is dropped unknowingly.
+      const lock = agentLock(existing, input.source, takesOver);
+      if (lock === 'rejected') return { memory: existing, outcome: 'kept_rejected' };
+      if (lock) return { memory: this.restated(existing, input), outcome: KEPT[lock] };
     }
     // A repository file replaces an agent's proposal whole; the agent's version stays in the
     // history. The user's own write keeps what it did not mention, as it always has.
@@ -398,12 +427,20 @@ export class MemoryService {
     }));
     for (const e of evidence) {
       const text = e.excerpt === null ? null : normalizeBlock(e.excerpt);
-      const known = have.some(
+      const at = have.findIndex(
         (h) =>
           h.ref === e.rel &&
           (h.hash === e.hash || (text !== null && h.text !== null && h.text.includes(text))),
       );
-      if (known) continue;
+      if (at >= 0) {
+        // Stated again: the row counts as new, so trimming below never drops what was just said.
+        const [known] = have.splice(at, 1);
+        if (known) {
+          repo.touchEvidence(known.id);
+          have.push(known);
+        }
+        continue;
+      }
       const row = repo.addEvidence({
         memoryId,
         projectId,
@@ -484,12 +521,9 @@ export class MemoryService {
     if (by.type !== 'user') {
       if (agentLocked(cur)) throw new MindlyError('forbidden', 'agents cannot edit user memories');
       // An agent may refine or archive what its own kind proposed (from any of its sessions) while
-      // the user has not decided on it. Once the user approved, rejected, enforced, pinned or
-      // archived a memory it is the user's. This is refused out loud: a dropped field would look
-      // like success to the caller.
-      const open =
-        cur.trust === 'proposed' && cur.status === 'active' && !cur.enforce && !cur.pinned;
-      if (!open || !sameAuthor(cur.source, by)) {
+      // nobody has settled it (see agentLock). This is refused out loud: a dropped field would
+      // look like success to the caller.
+      if (agentLock(cur, by)) {
         throw new MindlyError(
           'forbidden',
           'agents can only change memories they proposed that the user has not decided on',

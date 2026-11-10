@@ -230,6 +230,12 @@ describe('memories', () => {
     );
     store.memories.deleteEvidence(rows[1]!.id);
     expect(store.memories.evidenceFor(m.id).map((e) => e.ref)).toEqual(['a.ts', 'c.ts']);
+    // Touching a row makes it the newest, even within the same millisecond.
+    store.memories.touchEvidence(rows[0]!.id);
+    expect(store.memories.evidenceFor(m.id).map((e) => e.ref)).toEqual(['c.ts', 'a.ts']);
+    store.memories.deleteEvidence(rows[2]!.id);
+    store.memories.touchEvidence(rows[0]!.id);
+    expect(store.memories.evidenceFor(m.id).map((e) => e.ref)).toEqual(['a.ts']);
     store.memories.clearEvidence(m.id);
     expect(store.memories.evidenceFor(m.id)).toEqual([]);
   });

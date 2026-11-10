@@ -255,7 +255,8 @@ describe('trust layer', () => {
     const { root, mindly, clock } = setup();
     const pid = mindly.store.projects.upsertByRoot(root, 'r').id;
     const claude = { type: 'agent' as const, sessionId: null, agentKind: 'claude-code' };
-    const base = { projectId: pid, projectRoot: root, kind: 'fact' as const };
+    // A note, so that substantial evidence never makes it verified (and so settled).
+    const base = { projectId: pid, projectRoot: root, kind: 'note' as const };
     const evidence = [{ path: 'src/auth.ts', excerpt: 'export function login(user: string) {' }];
     const fact = mindly.memory.remember({
       ...base,
@@ -312,6 +313,25 @@ describe('trust layer', () => {
     const kept = mindly.store.memories.evidenceFor(fact.id);
     expect(kept).toHaveLength(20);
     expect(kept.map((e) => e.excerpt)).toEqual(lines.slice(10));
+    // Restating the oldest kept excerpt with one new one: the restated row is now the newest
+    // but one, and the trim drops the next oldest instead.
+    writeFileSync(join(root, 'src', 'values.ts'), `${lines.join('\n')}\nexport const EXTRA = 1;\n`);
+    clock.advance(1000);
+    mindly.memory.remember({
+      ...base,
+      title: 'Login is in auth',
+      body: 'a',
+      evidence: [
+        { path: 'src/values.ts', excerpt: lines[10]! },
+        { path: 'src/values.ts', excerpt: 'export const EXTRA = 1;' },
+      ],
+      source: claude,
+    });
+    expect(mindly.store.memories.evidenceFor(fact.id).map((e) => e.excerpt)).toEqual([
+      ...lines.slice(12),
+      lines[10],
+      'export const EXTRA = 1;',
+    ]);
 
     // A new hour, or another session, is a new occurrence.
     clock.advance(61 * 60 * 1000);
@@ -443,7 +463,8 @@ describe('trust layer', () => {
       evidence: [{ path: 'notes.txt', excerpt: 'a line that is going to change soon' }],
       source: { type: 'agent', sessionId: null, agentKind: 'claude-code' },
     });
-    expect(other.outcome).toBe('kept_other_author');
+    // A verified fact is settled, whoever restates it.
+    expect(other.outcome).toBe('kept_user_decision');
     expect(mindly.store.memories.evidenceFor(fact.id).map((e) => e.ref)).toEqual(['src/auth.ts']);
     writeFileSync(join(root, 'notes.txt'), 'changed\n');
     selfHealingOf(mindly).sweep(pid);
@@ -577,6 +598,74 @@ describe('trust layer', () => {
         source: agent,
       }),
     ).toThrow(/user memory with this title exists/);
+  });
+
+  it('changes a restated memory only when the same rule as update() allows it', () => {
+    const { root, mindly, pid } = project();
+    const base = { projectId: pid, projectRoot: root, kind: 'rule' as const, source: agent };
+    const restate = (title: string) =>
+      mindly.memory.rememberResult({ ...base, title, body: 'replaced', evidence: [] });
+    const updateRefused = (id: string) =>
+      expect(() => mindly.memory.update(id, { body: 'replaced' }, agent, null)).toThrow(
+        /agents can only change memories they proposed/,
+      );
+
+    // Pinned or enforced by the user: refused by update(), kept by a restatement.
+    const pinned = mindly.memory.remember({ ...base, title: 'Use pnpm', body: 'original' });
+    mindly.memory.update(pinned.id, { pinned: true }, USER, null);
+    const enforced = mindly.memory.remember({ ...base, title: 'No secrets', body: 'original' });
+    mindly.memory.update(enforced.id, { enforce: true }, USER, null);
+    for (const m of [pinned, enforced]) {
+      updateRefused(m.id);
+      const r = restate(m.title);
+      expect(r.outcome).toBe('kept_user_decision');
+      expect(r.memory).toEqual(mindly.store.memories.get(m.id));
+      expect(r.memory).toMatchObject({ body: 'original', version: 1 });
+    }
+
+    // The agent's own verified fact.
+    const fact = mindly.memory.remember({
+      ...base,
+      kind: 'fact',
+      title: 'Login returns the admin role',
+      body: 'original',
+      evidence: [{ path: 'src/auth.ts', excerpt: 'return { role: "admin" };' }],
+    });
+    expect(fact.trust).toBe('verified');
+    updateRefused(fact.id);
+    const again = mindly.memory.rememberResult({
+      ...base,
+      kind: 'fact',
+      title: 'Login returns the admin role',
+      body: 'replaced',
+    });
+    expect(again).toMatchObject({
+      outcome: 'kept_user_decision',
+      memory: { body: 'original', trust: 'verified', version: 1 },
+    });
+    expect(mindly.store.memories.evidenceFor(fact.id)).toHaveLength(1);
+
+    // Still open: both allow it.
+    const open = mindly.memory.remember({ ...base, title: 'Prefer named exports', body: 'v1' });
+    expect(restate(open.title)).toMatchObject({ outcome: 'updated', memory: { body: 'replaced' } });
+    expect(mindly.memory.update(open.id, { body: 'v3' }, agent, null).body).toBe('v3');
+
+    // A repository file does not take over a proposal the user pinned either.
+    writeFileSync(join(root, 'CLAUDE.md'), '- Keep every handler small and pure.\n');
+    const plan = mindly.rules.planImport(pid, root);
+    expect(plan.fresh.map((r) => r.title)).toEqual(['Keep every handler small and pure']);
+    const proposal = mindly.memory.remember({
+      ...base,
+      title: 'Keep every handler small and pure',
+      body: 'original',
+    });
+    mindly.memory.update(proposal.id, { pinned: true }, USER, null);
+    expect(mindly.rules.importRules(pid, root, plan.fresh, 'approved')).toEqual([]);
+    expect(mindly.store.memories.get(proposal.id)).toMatchObject({
+      body: 'original',
+      trust: 'proposed',
+      source: { agentKind: 'codex' },
+    });
   });
 
   it('requires a file named as evidence to exist', () => {
