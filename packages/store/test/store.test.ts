@@ -505,4 +505,18 @@ describe('misc repos', () => {
     expect(store.kv.get(`notes:${c.id}`)).toEqual([1]);
     expect(store.kv.get(`other:${a.id}`)).toBe(1);
   });
+
+  it('deletes the keys under a prefix last written before a time', () => {
+    const { store } = setup();
+    store.kv.set('notes:old', 1);
+    store.kv.set('notes_x', 1);
+    store.kv.set('other:old', 1);
+    store.db.prepare('UPDATE kv SET updated_at = 0').run();
+    store.kv.set('notes:fresh', 1);
+    expect(store.kv.deleteStale('notes:', 1)).toBe(1);
+    expect(store.kv.get('notes:old')).toBeNull();
+    expect(store.kv.get('notes_x')).toBe(1);
+    expect(store.kv.get('other:old')).toBe(1);
+    expect(store.kv.get('notes:fresh')).toBe(1);
+  });
 });

@@ -242,9 +242,12 @@ describe('maintenance and failover', () => {
     });
     store.db.prepare('UPDATE events SET created_at = ?').run(Date.now() - 40 * 86_400_000);
     store.db.prepare('UPDATE sessions SET last_seen_at = ?').run(Date.now() - 7 * 3_600_000);
+    // A write in flight the session never finished: it goes when the session is ended.
+    store.kv.set(`checkpoints:writing:${s.id}`, [{ at: Date.now() }]);
     const r = housekeepingTick(d.jobs);
     expect(r.promptsCompacted).toBe(1);
     expect(r.sessionsEnded).toBe(1);
+    expect(store.kv.get(`checkpoints:writing:${s.id}`)).toBeNull();
     const [e] = store.events.query(s.projectId, { types: ['prompt.submitted'] });
     expect(e?.payload).toEqual({ summary: 'old' });
   });

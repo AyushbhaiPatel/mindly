@@ -167,7 +167,10 @@ export class HookHandler {
     session: Session,
     evt: NormalizedHookEvent,
   ): Promise<HookResult> {
-    this.k.store.sessions.endStale(project.project.id, LIVE_WINDOW_MS * 4);
+    // Sessions ended here never had their end hook: their writes in flight go with them.
+    for (const id of this.k.store.sessions.endStale(project.project.id, LIVE_WINDOW_MS * 4)) {
+      this.d.checkpoints.forgetWrites(id);
+    }
     this.k.store.intents.expire();
     this.k.store.deliveries.expire();
     this.k.store.events.append({

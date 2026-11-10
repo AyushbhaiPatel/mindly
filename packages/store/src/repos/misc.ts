@@ -570,4 +570,12 @@ export class KvRepo {
       .run(prefix, projectId);
     return Number(r.changes);
   }
+
+  /** Deletes the keys starting with `prefix` last written before `before`; returns how many. */
+  deleteStale(prefix: string, before: number): number {
+    const r = this.db
+      .prepare('DELETE FROM kv WHERE substr(key, 1, length(?)) = ? AND updated_at < ?')
+      .run(prefix, prefix, before);
+    return Number(r.changes);
+  }
 }

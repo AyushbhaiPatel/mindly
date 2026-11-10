@@ -11,6 +11,7 @@ import {
   type UserConfig,
 } from '@mindly/core';
 import {
+  LIVE_WINDOW_MS,
   Mindly,
   PRUNE_INTERVAL_MS,
   type CheckpointCaptureInput,
@@ -540,6 +541,47 @@ describe('checkpoints through hooks', () => {
     await pre('src/auth.ts');
     await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_end'));
     expect(mindly.store.kv.get(`checkpoints:writing:${cc()}`)).toBeNull();
+  });
+
+  it('drops the notes of writes in flight of a session ended as stale', async () => {
+    const { root, clock, mindly, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const cc = mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!.id;
+    // A write whose post-tool hook never comes, in a window killed without its end hook.
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'x') }),
+    );
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc}`)).not.toBeNull();
+    // A later session's start ends it as stale.
+    clock.advance(LIVE_WINDOW_MS * 4 + 1);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc2', 'session_start'));
+    expect(mindly.store.sessions.get(cc).status).toBe('ended');
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc}`)).toBeNull();
+  });
+
+  it('prunes the notes of writes in flight once they expired, however the session ended', async () => {
+    const { root, clock, mindly, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    const cc = mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!.id;
+    const cx = mindly.store.sessions.findByExternal(pid(), 'codex', 'cx')!.id;
+    const pre = (agent: string, id: string) =>
+      mindly.hooks.handle(
+        event(root, agent, id, 'pre_tool', { tool: writeTool('src/auth.ts', 'x') }),
+      );
+    await pre('claude-code', 'cc');
+    clock.advance(6 * 60_000);
+    await pre('codex', 'cx');
+    // An unrelated key with the same start is left alone.
+    mindly.store.kv.set('checkpoints:pruned:x', 1);
+    await mindly.checkpoints.pruneAll();
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc}`)).toBeNull();
+    expect(mindly.store.kv.get(`checkpoints:writing:${cx}`)).not.toBeNull();
+    expect(mindly.store.kv.get('checkpoints:pruned:x')).toBe(1);
+    // The daily prune of the hooks (no daemon) sweeps them too.
+    clock.advance(PRUNE_INTERVAL_MS);
+    expect(await mindly.checkpoints.pruneIfDue(pid())).not.toBeNull();
+    expect(mindly.store.kv.get(`checkpoints:writing:${cx}`)).toBeNull();
   });
 
   it('credits a rescan only with edits recorded in its working tree', async () => {

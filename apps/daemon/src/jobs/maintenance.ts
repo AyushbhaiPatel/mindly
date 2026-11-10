@@ -54,7 +54,10 @@ export function housekeepingTick(ctx: JobContext): HousekeepingResult {
     saves: { confirmed: 0, expired: 0, rejected: 0 },
   };
   for (const p of store.projects.list().slice(0, MAX_PROJECTS)) {
-    result.sessionsEnded += store.sessions.endStale(p.id, STALE_SESSION_MS).length;
+    const ended = store.sessions.endStale(p.id, STALE_SESSION_MS);
+    // They never had their end hook: their notes of writes in flight go with them.
+    for (const id of ended) ctx.mindly.checkpoints.forgetWrites(id);
+    result.sessionsEnded += ended.length;
   }
   result.saves = savesOf(ctx.mindly).sweep();
   ctx.logger.info('housekeeping', { ...result });

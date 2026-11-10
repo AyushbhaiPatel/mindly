@@ -162,7 +162,22 @@ export class CheckpointService {
     try {
       this.k.store.kv.delete(this.writeKey(sessionId));
     } catch {
-      // They expire on their own.
+      // The prune removes them once they expired.
+    }
+  }
+
+  /**
+   * Removes every session's notes of writes in flight that all expired: a session that never
+   * ended through its hook (its window was killed, it was ended as stale) leaves its last ones
+   * behind otherwise. A note is written with its row, so a row untouched for longer than a note
+   * lives holds expired notes only. Returns how many sessions' notes went.
+   */
+  sweepWrites(): number {
+    try {
+      return this.k.store.kv.deleteStale(WRITE_NOTE_PREFIX, this.k.clock.now() - WRITE_NOTE_TTL_MS);
+    } catch (err) {
+      this.k.logger.warn('write notes not swept', { error: describeError(err) });
+      return 0;
     }
   }
 
@@ -591,6 +606,7 @@ export class CheckpointService {
     const now = this.k.clock.now();
     if (now - last < PRUNE_INTERVAL_MS || this.daemonAlive()) return null;
     this.k.store.kv.set(key, now);
+    this.sweepWrites();
     try {
       return await this.prune(projectId);
     } catch (err) {
@@ -612,8 +628,9 @@ export class CheckpointService {
     }
   }
 
-  /** Prunes every project; failures are logged per project. */
+  /** Prunes every project, and the expired notes of writes in flight; failures are logged. */
   async pruneAll(): Promise<PruneResult> {
+    this.sweepWrites();
     const total: PruneResult = { refsDeleted: 0, rowsDeleted: 0 };
     for (const p of this.k.store.projects.list().slice(0, 500)) {
       try {
