@@ -269,13 +269,15 @@ const EMPTY_VERSIONS: Record<Topic, number> = {
 function Shell({
   client,
   liveFactory,
-  projects,
+  projects: initialProjects,
 }: {
   client: MindlyClient;
   liveFactory: LiveFactory;
   projects: Project[];
 }) {
   const [route, setRoute] = useState<Route>(readRoute);
+  // The list from boot, read again when something stored on a project changes.
+  const [projects, setProjects] = useState<Project[]>(initialProjects);
   const projectIds = useMemo(() => projects.map((p) => p.id), [projects]);
   const [projectId, setProjectId] = useState<string>(
     () =>
@@ -306,6 +308,11 @@ function Shell({
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, [projectIds]);
+
+  const reloadProjects = useCallback(async () => {
+    const list = await client.projects();
+    if (list.length > 0) setProjects([...list]);
+  }, [client]);
 
   const notify = useCallback((text: string, tone: Toast['tone'] = 'neutral') => {
     const id = Date.now() + Math.random();
@@ -407,9 +414,21 @@ function Shell({
       versions,
       notify,
       navigate,
+      reloadProjects,
       params: route.params,
     }),
-    [client, project, sessions, events, eventsLoadedFor, versions, notify, navigate, route.params],
+    [
+      client,
+      project,
+      sessions,
+      events,
+      eventsLoadedFor,
+      versions,
+      notify,
+      navigate,
+      reloadProjects,
+      route.params,
+    ],
   );
 
   const changeProject = (id: string) => {

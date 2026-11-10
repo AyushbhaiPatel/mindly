@@ -29,7 +29,7 @@ const checkCols: Column<CheckDef>[] = [
 ];
 
 export function SettingsView() {
-  const { client, project } = useApp();
+  const { client, project, reloadProjects } = useApp();
   const res = useResource(() => client.trust(project.id), [project.id]);
   const { busy, run } = useAction();
   const [confirm, setConfirm] = useState(false);
@@ -47,10 +47,10 @@ export function SettingsView() {
       </Panel>
       <Loaded res={res}>
         {(t) => {
-          const changed =
-            !!project.trustedConfigHash &&
-            !!t.configHash &&
-            project.trustedConfigHash !== t.configHash;
+          // A trusted config is trusted at its current hash, whatever the project list read
+          // earlier still says; otherwise the list holds the hash that was trusted last.
+          const trustedHash = t.trusted ? t.configHash : project.trustedConfigHash;
+          const changed = !!trustedHash && !!t.configHash && trustedHash !== t.configHash;
           return (
             <Panel
               title="Config trust"
@@ -91,9 +91,9 @@ export function SettingsView() {
                     ],
                     [
                       'Trusted hash',
-                      project.trustedConfigHash ? (
+                      trustedHash ? (
                         <>
-                          <Mono>{project.trustedConfigHash}</Mono>
+                          <Mono>{trustedHash}</Mono>
                           {changed && (
                             <span className="warn-text"> {'·'} config changed since</span>
                           )}
@@ -135,7 +135,12 @@ export function SettingsView() {
                     'trust',
                     () => client.trustConfig(project.id, t.configHash ?? ''),
                     'Config trusted',
-                  ).then((ok) => ok && res.reload());
+                  ).then((ok) => {
+                    if (!ok) return;
+                    res.reload();
+                    // The trusted hash is stored on the project: read the list again.
+                    void reloadProjects().catch(() => undefined);
+                  });
                 }}
               >
                 <p>
