@@ -884,7 +884,7 @@ describe('doctor, config, export, misc', () => {
     expect((await cli(sb, ['config', 'set', 'notify.triggers', 'standup,nope'])).code).toBe(1);
   });
 
-  it('config clears a list for an empty value and trims a plain one', async () => {
+  it('config clears a list for a blank value and keeps a plain one as typed', async () => {
     const sb = sandbox();
     const file = join(sb.mindlyHome, 'config.json');
     for (const empty of ['', ' ', '""']) {
@@ -894,15 +894,19 @@ describe('doctor, config, export, misc', () => {
     expect(
       (await cli(sb, ['config', 'set', 'redaction.extraPatterns', '  ACME-\\d{6} '])).code,
     ).toBe(0);
+    // Spaces at the ends may be part of the pattern: kept.
     expect(json(readFileSync(file, 'utf8'))).toEqual({
-      redaction: { extraPatterns: ['ACME-\\d{6}'] },
+      redaction: { extraPatterns: ['  ACME-\\d{6} '] },
     });
-    // Patterns that would redact everything are refused, with the reason.
-    for (const pattern of ['a*', '(?:)', 'x?']) {
+    // Patterns that would redact between characters are refused, with the reason.
+    for (const pattern of ['a*', '(?:)', 'x?', '\\b', '(?=.)', '(?<=a)', '(?=x)']) {
       const r = await cli(sb, ['config', 'set', 'redaction.extraPatterns', pattern]);
       expect(r.code, pattern).toBe(1);
-      expect(r.stderr).toContain('matches empty text');
+      expect(r.stderr).toContain('can match empty text');
     }
+    expect((await cli(sb, ['config', 'set', 'redaction.extraPatterns', '\\bsecret\\b'])).code).toBe(
+      0,
+    );
     const glob = await cli(sb, ['config', 'set', 'redaction.denyPaths', 'config/{prod']);
     expect(glob.code).toBe(1);
     expect(glob.stderr).toContain('is not a valid glob');
@@ -915,6 +919,50 @@ describe('doctor, config, export, misc', () => {
       (await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm not npm'])).code,
     ).toBe(0);
     expect((await cli(sb, ['memory', 'list'])).stdout).toContain('Use pnpm not npm');
+  });
+
+  it('a bad hand-edited entry does not block changing other settings', async () => {
+    const sb = sandbox();
+    mkdirSync(sb.mindlyHome, { recursive: true });
+    const file = join(sb.mindlyHome, 'config.json');
+    writeFileSync(file, JSON.stringify({ redaction: { extraPatterns: ['(?i)secret'] } }));
+    const set = await cli(sb, ['config', 'set', 'hooks.timeoutMs', '1000']);
+    expect(set.code).toBe(0);
+    expect(set.stderr).toContain('ignored the pattern "(?i)secret"');
+    const deny = await cli(sb, ['config', 'set', 'redaction.denyPaths', '["build/**"]']);
+    expect(deny.code).toBe(0);
+    expect((await cli(sb, ['config', 'unset', 'hooks.timeoutMs'])).code).toBe(0);
+    // The file keeps the user's entry as written; only the key that was set changed.
+    expect(json(readFileSync(file, 'utf8'))).toEqual({
+      redaction: { extraPatterns: ['(?i)secret'], denyPaths: ['build/**'] },
+    });
+    // The key that holds the bad entry is fixed the same way, strictly.
+    const still = await cli(sb, ['config', 'set', 'redaction.extraPatterns', '(?i)secret']);
+    expect(still.code).toBe(1);
+    expect(still.stderr).toContain('is not a valid regular expression');
+    const fixed = await cli(sb, ['config', 'set', 'redaction.extraPatterns', '[Ss]ecret-\\d+']);
+    expect(fixed.code).toBe(0);
+    expect(fixed.stderr).toBe('');
+    expect((await cli(sb, ['config', 'get', 'redaction'])).stderr).toBe('');
+  });
+
+  it('a bad ignore glob in the project config is left out, and doctor says so', async () => {
+    const sb = sandbox();
+    // Doctor looks at the project once Mindly's data folder exists.
+    expect((await cli(sb, ['memory', 'add', '--kind', 'fact', '--title', 'x'])).code).toBe(0);
+    write(sb.repo, '.mindly/config.json', JSON.stringify({ ignore: ['config/{prod', 'dist/**'] }));
+    write(sb.repo, 'src/a.ts', 'export const a = 1;\n');
+    const doctor = json<{ checks: { name: string; status: string; detail: string }[] }>(
+      (await cli(sb, ['doctor', '--json'])).stdout,
+    ).checks;
+    expect(doctor.find((c) => c.name === 'project-config')).toMatchObject({
+      status: 'warn',
+      detail: expect.stringContaining('left out the glob "config/{prod"'),
+    });
+    expect(doctor.find((c) => c.name === 'project')?.detail).not.toContain('invalid');
+    // Path checks keep working.
+    const why = await cli(sb, ['why', 'src/a.ts']);
+    expect(why.stderr).not.toMatch(/unterminated/i);
   });
 
   it('a hand-edited empty pattern is ignored with a warning, not applied', async () => {

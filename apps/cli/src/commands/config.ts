@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import {
   ensureHome,
+  dropUnusableEntries,
   readUserConfig,
   mindlyHome,
   MindlyError,
@@ -108,8 +109,8 @@ function noSuchSetting(key: string): HintedError {
 /**
  * The value to store for what was typed, by the setting's type: a text setting takes the text as
  * typed (so a model called `4` stays text); a list takes a JSON array for several items, any
- * other value, trimmed, as its one item (never split on commas: a pattern such as `{20,40}` or a
- * glob such as `{prod,staging}` holds commas of its own), and an empty value as no items;
+ * other value as its one item (never split on commas: a pattern such as `{20,40}` or a glob such
+ * as `{prod,staging}` holds commas of its own), and an empty or blank value as no items;
  * anything else is JSON.
  */
 export function settingValue(setting: Setting | null, raw: string): unknown {
@@ -120,9 +121,10 @@ export function settingValue(setting: Setting | null, raw: string): unknown {
     const element = unwrap((setting?.schema.def as unknown as { element: z.ZodType }).element);
     const kind = element.schema.def.type;
     if (kind === 'string' || kind === 'enum') {
-      // Trimmed, and nothing at all clears the list: an empty item is never what was meant.
-      const item = (typeof json === 'string' ? json : raw).trim();
-      return item === '' ? [] : [item];
+      // Nothing at all clears the list: an empty item is never what was meant. Anything else is
+      // kept as typed; spaces at its ends may be part of a pattern.
+      const item = typeof json === 'string' ? json : raw;
+      return item.trim() === '' ? [] : [item];
     }
   }
   return json;
@@ -195,6 +197,44 @@ function validated(raw: Record<string, unknown>, key: string): UserConfig {
   return parsed.data;
 }
 
+/** True when the warning is about `parts` or something inside it. */
+function warningAbout(warning: string, parts: readonly string[]): boolean {
+  const key = parts.join('.');
+  return warning.startsWith(`${key}:`) || warning.startsWith(`${key}.`);
+}
+
+/**
+ * Checks the file as it would be after a change to `parts`: strictly for that key, and for the
+ * rest as every command reads it, leaving out entries that cannot be used. A bad entry elsewhere
+ * (left in a hand-edited file) does not stop the change; it is reported, and the key it is in can
+ * still be set or unset to fix it.
+ */
+function validatedChange(
+  out: Out,
+  raw: Record<string, unknown>,
+  parts: readonly string[],
+  key: string,
+): UserConfig {
+  const { config: tolerant, warnings } = dropUnusableEntries(structuredClone(raw));
+  const value = getPath(raw, parts);
+  const view = tolerant as Record<string, unknown>;
+  if (value === undefined) deletePath(view, parts);
+  else setPath(view, parts, value);
+  const parsed = validated(view, key);
+  for (const w of warnings) {
+    if (!warningAbout(w, parts))
+      out.warn(`${w}. Fix it with: mindly config set or mindly config unset`);
+  }
+  return parsed;
+}
+
+function deletePath(obj: Record<string, unknown>, parts: readonly string[]): void {
+  const holder = getPath(obj, parts.slice(0, -1));
+  if (holder !== null && typeof holder === 'object') {
+    Reflect.deleteProperty(holder, parts[parts.length - 1] as string);
+  }
+}
+
 /**
  * `mindly config set <key> <value>`: validates the whole file against `UserConfigSchema` before
  * writing it (atomically, mode 0600). Unknown keys are refused.
@@ -206,7 +246,7 @@ export function configSet(out: Out, key: string, rawValue: string): number {
   const setting = settingAt(parts);
   const value = settingValue(setting, rawValue);
   setPath(raw, parts, value);
-  validated(raw, key);
+  validatedChange(out, raw, parts, key);
   // zod strips unknown keys, so validation alone does not catch a key that does not exist.
   if (setting === null) {
     throw new HintedError(
@@ -244,7 +284,7 @@ export function configUnset(out: Out, key: string): number {
     }
     Reflect.deleteProperty(holder, name);
   }
-  const now = getPath(validated(raw, key), parts);
+  const now = getPath(validatedChange(out, raw, parts, key), parts);
   writeJsonFile(path, raw);
   out.line(
     now === undefined

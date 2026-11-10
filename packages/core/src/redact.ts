@@ -130,6 +130,33 @@ export interface RedactOptions {
 
 const extraCache = new Map<string, RegExp | null>();
 
+/** Text a pattern is tried on: empty, short, words, digits, punctuation, lines. */
+const ZERO_WIDTH_PROBES = [
+  '',
+  'a',
+  'ab c',
+  'secret token 123',
+  'Deploy to prod: key=ACME-1234, user@example.com\n\tpath/to/file.ts (line 42); ÄÖ ✓ 0x1F',
+];
+
+/**
+ * True when the global regex `re` can match without matching any text (``, `a*`, `\b`,
+ * `(?=.)`) on one of a few short samples. Such a pattern would put a marker between characters.
+ */
+export function matchesZeroWidth(re: RegExp): boolean {
+  for (const probe of ZERO_WIDTH_PROBES) {
+    re.lastIndex = 0;
+    for (let m = re.exec(probe), n = 0; m !== null && n < 200; m = re.exec(probe), n++) {
+      if (m[0].length === 0) {
+        re.lastIndex = 0;
+        return true;
+      }
+    }
+  }
+  re.lastIndex = 0;
+  return false;
+}
+
 function compileExtra(source: string): RegExp | null {
   if (extraCache.has(source)) return extraCache.get(source) ?? null;
   let re: RegExp | null = null;
@@ -138,6 +165,8 @@ function compileExtra(source: string): RegExp | null {
   } catch {
     re = null;
   }
+  // The settings refuse these; a caller passing patterns of its own must not get them either.
+  if (re !== null && matchesZeroWidth(re)) re = null;
   extraCache.set(source, re);
   return re;
 }

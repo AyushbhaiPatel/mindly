@@ -17,6 +17,8 @@ export interface ProjectContext {
   configHash: string | null;
   trusted: boolean;
   configError: string | null;
+  /** Entries of the project config Mindly leaves out because they cannot be used. */
+  configWarnings: string[];
 }
 
 export class ProjectService {
@@ -50,15 +52,28 @@ export class ProjectService {
     let config: ProjectConfig = ProjectConfigSchema.parse({});
     let hash: string | null = null;
     let configError: string | null = null;
+    let configWarnings: string[] = [];
     try {
       const loaded = loadProjectConfig(join(project.root, '.mindly', 'config.json'));
       config = loaded.config;
       hash = loaded.hash;
+      configWarnings = loaded.warnings;
     } catch (err) {
       configError = err instanceof Error ? err.message : 'invalid project config';
     }
+    for (const w of configWarnings) {
+      this.k.logger.warn('project config entry left out', { project: project.id, warning: w });
+    }
     const trusted = hash !== null && project.trustedConfigHash === hash;
-    return { project, root: project.root, config, configHash: hash, trusted, configError };
+    return {
+      project,
+      root: project.root,
+      config,
+      configHash: hash,
+      trusted,
+      configError,
+      configWarnings,
+    };
   }
 
   /**

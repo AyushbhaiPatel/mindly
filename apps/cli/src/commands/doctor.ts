@@ -661,6 +661,14 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
       items.push(
         ...(await withProject(out.io, async ({ mindly, project }): Promise<DoctorItem[]> => [
           projectItem(project),
+          ...project.configWarnings.map((w) =>
+            item(
+              { name: 'project-config', status: 'warn', detail: w },
+              'Setup',
+              `This project's .mindly/config.json has an entry Mindly leaves out: ${w}`,
+              'Fix that entry in .mindly/config.json',
+            ),
+          ),
           ...rejectedPatternItems(mindly, project),
           ...(await checkpointItems(mindly, project, out.io.cwd)),
           ...sentinelItems(mindly, project, daemon !== null),

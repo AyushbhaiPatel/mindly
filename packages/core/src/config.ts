@@ -13,25 +13,29 @@ import {
 import { z } from 'zod';
 import { AgentKindSchema } from './domain.js';
 import { globToRegExp } from './glob.js';
+import { matchesZeroWidth } from './redact.js';
 import { MindlyError } from './errors.js';
 import { sha256 } from './text.js';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 
 /**
- * Why a redaction pattern cannot be used, or null. A pattern that matches empty text (``, a
- * lone space aside, `a*`, `x?`) would put a redaction marker between every character of
- * everything Mindly stores, so it is refused like one that does not compile.
+ * Why a redaction pattern cannot be used, or null. A pattern that can match without matching
+ * any text (``, `a*`, `x?`, `\b`, `(?=.)`, `(?<=a)`) puts a redaction marker between the
+ * characters of everything Mindly stores, so it is refused like one that does not compile. It is
+ * tried on a few short samples: a zero-length match on any of them refuses it.
  */
 export function unusableRedactionPattern(source: string): string | null {
   if (source.trim() === '') return 'is empty';
   let re: RegExp;
   try {
-    re = new RegExp(source);
+    re = new RegExp(source, 'g');
   } catch {
     return 'is not a valid regular expression';
   }
-  if (re.test('')) return 'matches empty text, so it would redact everything';
+  if (matchesZeroWidth(re)) {
+    return 'can match empty text (between characters), so it would redact everything';
+  }
   return null;
 }
 
@@ -347,16 +351,36 @@ export interface LoadedProjectConfig {
   config: ProjectConfig;
   /** sha256 of the raw file; compared against the project's trusted hash. */
   hash: string | null;
+  /** Entries Mindly ignores because they cannot be used (an `ignore` glob that does not parse). */
+  warnings: string[];
 }
 
 export function loadProjectConfig(path: string): LoadedProjectConfig {
-  if (!existsSync(path)) return { config: ProjectConfigSchema.parse({}), hash: null };
+  if (!existsSync(path)) {
+    return { config: ProjectConfigSchema.parse({}), hash: null, warnings: [] };
+  }
   const raw = readRegularFileBounded(path, MAX_CONFIG_BYTES);
   let json: unknown;
   try {
     json = JSON.parse(raw);
   } catch (cause) {
     throw new MindlyError('invalid_input', 'project config is not valid JSON', { cause });
+  }
+  // A glob that does not parse would make every path check throw: it is left out, and said so.
+  const warnings: string[] = [];
+  if (
+    json !== null &&
+    typeof json === 'object' &&
+    Array.isArray((json as { ignore?: unknown }).ignore)
+  ) {
+    const ignore = (json as { ignore: unknown[] }).ignore.filter((entry) => {
+      if (typeof entry !== 'string') return true;
+      const why = unusableDenyPath(entry);
+      if (why !== null)
+        warnings.push(`ignore: left out the glob ${JSON.stringify(entry)}, which ${why}`);
+      return why === null;
+    });
+    json = { ...(json as Record<string, unknown>), ignore };
   }
   const parsed = ProjectConfigSchema.safeParse(json);
   if (!parsed.success) {
@@ -365,5 +389,5 @@ export function loadProjectConfig(path: string): LoadedProjectConfig {
       `invalid project config: ${z.prettifyError(parsed.error)}`,
     );
   }
-  return { config: parsed.data, hash: sha256(raw) };
+  return { config: parsed.data, hash: sha256(raw), warnings };
 }

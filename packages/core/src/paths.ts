@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, realpathSync, statSync } from 'node:f
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { MindlyError } from './errors.js';
-import { matchesAnyGlob } from './glob.js';
+import { matchesAnyGlob, matchesGlob } from './glob.js';
 import { DEFAULT_DENY_PATHS } from './redact.js';
 import { hasUnsafeChars } from './text.js';
 
@@ -122,5 +122,14 @@ export function tryResolveInsideRoot(root: string, input: string): ResolvedProje
 /** True when Mindly must never read or capture this project-relative path. */
 export function isDeniedPath(rel: string, extraDeny: readonly string[] = []): boolean {
   const opts = { nocase: true };
-  return matchesAnyGlob(rel, DEFAULT_DENY_PATHS, opts) || matchesAnyGlob(rel, extraDeny, opts);
+  if (matchesAnyGlob(rel, DEFAULT_DENY_PATHS, opts)) return true;
+  // Configured globs are checked when the config is read, and bad ones left out with a warning.
+  // One that slips through still must not throw out of a hook or a background job: skip it.
+  return extraDeny.some((glob) => {
+    try {
+      return matchesGlob(rel, glob, opts);
+    } catch {
+      return false;
+    }
+  });
 }

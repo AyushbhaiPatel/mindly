@@ -10,6 +10,7 @@ import {
   readUserConfig,
   UserConfigSchema,
 } from '../src/config.js';
+import { isDeniedPath } from '../src/paths.js';
 import { redactText } from '../src/redact.js';
 
 describe('bounded config reads', () => {
@@ -35,7 +36,21 @@ describe('bounded config reads', () => {
 });
 
 describe('redaction settings that cannot be used', () => {
-  const bad = ['', ' ', 'a*', 'x?', '(?:)', '|ACME', '['];
+  const bad = [
+    '',
+    ' ',
+    'a*',
+    'x?',
+    '(?:)',
+    '|ACME',
+    '[',
+    '\\b',
+    '(?=.)',
+    '(?<=a)',
+    '(?=x)',
+    '$',
+    '^',
+  ];
 
   it('refuses patterns that are empty, invalid or match empty text', () => {
     for (const pattern of bad) {
@@ -45,6 +60,10 @@ describe('redaction settings that cannot be used', () => {
     for (const glob of ['', '  ', 'config/{prod,staging.json']) {
       const r = UserConfigSchema.safeParse({ redaction: { denyPaths: [glob] } });
       expect(r.success, JSON.stringify(glob)).toBe(false);
+    }
+    for (const pattern of ['\\bsecret\\b', 'ACME-[A-Z0-9]{20,40}', 'x+', '(?<=key=)\\w+']) {
+      const r = UserConfigSchema.safeParse({ redaction: { extraPatterns: [pattern] } });
+      expect(r.success, pattern).toBe(true);
     }
     const ok = UserConfigSchema.safeParse({
       redaction: {
@@ -80,5 +99,38 @@ describe('redaction settings that cannot be used', () => {
     expect(redactText(text, { extraPatterns: loadUserConfig(file).redaction.extraPatterns })).toBe(
       'key [REDACTED] and Use pnpm',
     );
+  });
+});
+
+describe('redacting with a pattern that matches empty text', () => {
+  it('ignores it instead of marking every position', () => {
+    for (const pattern of ['\\b', '(?=.)', '', 'a*']) {
+      expect(redactText('deploy to prod', { extraPatterns: [pattern] }), pattern).toBe(
+        'deploy to prod',
+      );
+    }
+    expect(redactText('key ACME-1234 ok', { extraPatterns: ['\\bACME-\\d+\\b'] })).toBe(
+      'key [REDACTED] ok',
+    );
+  });
+});
+
+describe('project config ignore globs', () => {
+  it('leaves out a glob that does not parse, and says so', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syn-cfg-'));
+    const file = join(dir, 'config.json');
+    writeFileSync(file, JSON.stringify({ ignore: ['config/{prod', 'dist/**', ''] }));
+    const loaded = loadProjectConfig(file);
+    expect(loaded.config.ignore).toEqual(['dist/**']);
+    expect(loaded.warnings).toHaveLength(2);
+    expect(loaded.warnings[0]).toContain('left out the glob "config/{prod"');
+    expect(loaded.hash).toEqual(expect.any(String));
+  });
+
+  it('a path check skips a glob that does not parse instead of throwing', () => {
+    expect(() => isDeniedPath('src/a.ts', ['config/{prod'])).not.toThrow();
+    expect(isDeniedPath('src/a.ts', ['config/{prod'])).toBe(false);
+    expect(isDeniedPath('dist/x.js', ['config/{prod', 'dist/**'])).toBe(true);
+    expect(isDeniedPath('.env', ['config/{prod'])).toBe(true);
   });
 });
