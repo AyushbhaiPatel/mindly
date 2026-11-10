@@ -53,6 +53,11 @@ export interface NormalizedHookEvent {
     /** True for shell-like tools. */
     shell: boolean;
     edits: FileEdit[];
+    /**
+     * True when the tool changes more files than `edits` holds (a patch beyond the adapter's
+     * cap): the list is not the whole write, and must not be checked as if it were.
+     */
+    editsCut?: boolean;
     /** Shell command text, if any (only used for intent and mistake matching; never executed). */
     command: string | null;
     /** post_tool: whether the tool reported failure. */

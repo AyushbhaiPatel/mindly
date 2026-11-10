@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { codexAdapter as a, MAX_PATCH_BYTES, parseApplyPatch } from '../src/index.js';
+import {
+  codexAdapter as a,
+  MAX_PATCH_BYTES,
+  parseApplyPatch,
+  readApplyPatch,
+} from '../src/index.js';
 import { fixture, must, out, result } from './helpers.js';
 
 const f = (name: string) => fixture('codex', name);
@@ -100,6 +105,32 @@ describe('apply_patch parser', () => {
       '*** Begin Patch\n*** Add File: n.ts\n*** Move to: elsewhere.ts\n+z\n*** Update File: u.ts\n*** Move to:   \n+w\n*** End Patch',
     );
     expect(stray.map((e) => e.path)).toEqual(['n.ts', 'u.ts']);
+  });
+
+  it('counts sections, not edits, against the cap, and says when a patch was cut', () => {
+    const move = (i: number) =>
+      `*** Update File: src/old${i}.ts\n*** Move to: src/new${i}.ts\n-x\n+y`;
+    const moves = Array.from({ length: 250 }, (_, i) => move(i)).join('\n');
+    const protectedEdit = '*** Update File: prisma/migrations/001/migration.sql\n-a\n+b';
+    const patch = `*** Begin Patch\n${moves}\n${protectedEdit}\n*** End Patch`;
+    const read = readApplyPatch(patch);
+    // 250 moves are 500 edits; the section after them is still reported.
+    expect(read.edits).toHaveLength(501);
+    expect(read.edits.at(-1)?.path).toBe('prisma/migrations/001/migration.sql');
+    expect(read.cut).toBe(false);
+    expect(parseApplyPatch(patch)).toEqual(read.edits);
+
+    const many = Array.from({ length: 501 }, (_, i) => `*** Add File: f${i}.ts\n+x`).join('\n');
+    const over = readApplyPatch(`*** Begin Patch\n${many}\n*** End Patch`);
+    expect(over.edits).toHaveLength(500);
+    expect(over.cut).toBe(true);
+    // The adapter passes that on, so the engine does not take the list for the whole write.
+    const tool = (command: string) =>
+      a.parse('PreToolUse', { ...(f('PreToolUse.apply_patch') as object), tool_input: { command } })
+        ?.tool;
+    expect(tool(`*** Begin Patch\n${many}\n*** End Patch`)?.editsCut).toBe(true);
+    expect(tool(patch)?.editsCut).toBeUndefined();
+    expect(tool(patch)?.edits).toHaveLength(501);
   });
 
   it('ignores malformed sections and junk', () => {

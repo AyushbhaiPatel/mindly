@@ -1,5 +1,5 @@
 import type { FileEdit, NormalizedHookEvent } from '@mindly/core';
-import { findPatchText, parseApplyPatch } from '../codex/apply-patch.js';
+import { findPatchText, readApplyPatch } from '../codex/apply-patch.js';
 import {
   capText,
   isRecord,
@@ -69,8 +69,27 @@ function readPath(obj: unknown): string | null {
  * patches. Unknown shapes yield an empty list.
  */
 export function extractEdits(toolName: string, toolInput: unknown): FileEdit[] {
+  return readEdits(toolName, toolInput).edits;
+}
+
+/**
+ * {@link extractEdits}, and whether the input holds more edits than are reported (`cut`): a
+ * patch or edit list beyond the cap changes files that are not in the list.
+ */
+export function readEdits(
+  toolName: string,
+  toolInput: unknown,
+): { edits: FileEdit[]; cut: boolean } {
   const patch = findPatchText(toolInput);
-  if (patch !== null) return parseApplyPatch(patch);
+  if (patch !== null) return readApplyPatch(patch);
+  const listed = isRecord(toolInput) ? toolInput['edits'] : undefined;
+  return {
+    edits: editsOf(toolName, toolInput),
+    cut: Array.isArray(listed) && listed.length > MAX_EDITS,
+  };
+}
+
+function editsOf(toolName: string, toolInput: unknown): FileEdit[] {
   if (!isRecord(toolInput)) return [];
   const path = readPath(toolInput);
   if (path === null) return [];
@@ -165,9 +184,10 @@ export function buildTool(opts: BuildToolOptions): NonNullable<NormalizedHookEve
   const command = readCommand(opts.input, ['command', 'cmd']);
   const shell = opts.shell ?? cls.shell;
   let edits: FileEdit[] = [];
+  let editsCut = false;
   let writes = opts.writes ?? cls.writes;
   if (writes || (shell && command !== null && command.includes('*** Begin Patch'))) {
-    edits = extractEdits(opts.name, opts.input);
+    ({ edits, cut: editsCut } = readEdits(opts.name, opts.input));
     if (edits.length > 0) writes = true;
   }
   const hasResponse = opts.response !== undefined;
@@ -176,6 +196,7 @@ export function buildTool(opts: BuildToolOptions): NonNullable<NormalizedHookEve
     writes,
     shell,
     edits,
+    ...(editsCut ? { editsCut } : {}),
     command: shell ? command : null,
     failed: opts.failed ?? (hasResponse ? didFail(opts.response) : false),
     outputExcerpt: hasResponse ? outputExcerpt(opts.response) : null,

@@ -43,6 +43,17 @@ function push(lines: string[], len: number, line: string): number {
  * are ignored. It never throws.
  */
 export function parseApplyPatch(input: string): FileEdit[] {
+  return readApplyPatch(input).edits;
+}
+
+/**
+ * Like {@link parseApplyPatch}, and says whether the patch was `cut`: it holds more sections than
+ * are reported, or more text than is read. The cap counts sections, so a patch of moves (two
+ * edits each) is reported as fully as any other. A cut patch changes files that are not in
+ * `edits`; whoever checks the edits must not take them for the whole write.
+ */
+export function readApplyPatch(input: string): { edits: FileEdit[]; cut: boolean } {
+  let cut = input.length >= MAX_PATCH_BYTES;
   const text = input.length > MAX_PATCH_BYTES ? input.slice(0, MAX_PATCH_BYTES) : input;
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   const sections: Section[] = [];
@@ -53,6 +64,7 @@ export function parseApplyPatch(input: string): FileEdit[] {
     if (header) {
       current = null;
       const path = validPath(header[2] ?? '');
+      if (path !== null && sections.length >= MAX_EDITS) cut = true;
       if (path !== null && sections.length < MAX_EDITS) {
         current = {
           path,
@@ -98,7 +110,7 @@ export function parseApplyPatch(input: string): FileEdit[] {
     }
     edits.push({ path: s.path, addedText, removedText, wholeFile: s.kind !== 'Update' });
   }
-  return edits.slice(0, MAX_EDITS);
+  return { edits, cut };
 }
 
 /**
