@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmdirSync,
   statSync,
   unlinkSync,
@@ -35,6 +36,46 @@ const age = (file: string, ms: number): void => {
   utimesSync(file, t, t);
 };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** The heartbeat window: a lock whose PID says nothing is abandoned once unchanged for longer. */
+const WINDOW = 6 * SENTINEL_LOCK_HEARTBEAT_MS;
+/** A process in another PID namespace than the lock's holder, with clocks the test moves. */
+function observer(namespace = 'pid:[4026532002]'): {
+  opts: {
+    namespace: () => string;
+    alive: () => boolean;
+    monotonic: () => number;
+    boot: () => string | null;
+    now: () => number;
+  };
+  /** Lets `ms` pass on the monotonic clock (and the wall clock). */
+  wait(ms: number): void;
+  /** Steps the wall clock only (a time sync, a resume from suspend). */
+  step(ms: number): void;
+  boot: string | null;
+} {
+  let mono = 5_000_000;
+  let skew = 0;
+  const o = {
+    boot: 'boot-1' as string | null,
+    opts: {
+      namespace: () => namespace,
+      alive: () => false,
+      monotonic: () => mono,
+      boot: () => o.boot,
+      now: () => Date.now() + skew,
+    },
+    wait: (ms: number) => {
+      mono += ms;
+      skew += ms;
+    },
+    step: (ms: number) => {
+      skew += ms;
+    },
+  };
+  return o;
+}
+const notes = (file: string): string[] =>
+  readdirSync(dirname(file)).filter((f) => f.startsWith('lock.seen-'));
 
 describe('sentinel lock', () => {
   it('is held for as long as its process lives, however old', () => {
@@ -130,11 +171,12 @@ describe('sentinel lock', () => {
     // thread of this process may hold it. Held while it is touched, like any lock that the
     // PID says nothing about.
     writeFileSync(file, lockOf(process.pid, 'boot-1:100', 'pid:[1]'));
-    const same = { namespace: () => 'pid:[1]', identity: () => 'boot-1:100' };
+    const o = observer('pid:[1]');
+    const same = { ...o.opts, identity: () => 'boot-1:100' };
     expect(tryProcessLock(file, same)).toBeNull();
     // Where the system does not tell when a process started, neither.
     expect(tryProcessLock(file, { ...same, identity: () => null })).toBeNull();
-    age(file, 10 * SENTINEL_LOCK_HEARTBEAT_MS);
+    o.wait(WINDOW + 1000);
     tryProcessLock(file, same)!.release();
 
     // A lock an older version wrote records only a PID: held while that PID lives.
@@ -188,25 +230,105 @@ describe('sentinel lock', () => {
     expect(pidIn(file)).toBe('1');
   });
 
-  it('takes a lock of another namespace over once its holder stopped touching it', () => {
+  it('takes a lock of another namespace over only after seeing it untouched for the window', () => {
     const file = lockFile();
-    const here = { namespace: () => 'pid:[4026532002]', alive: () => false };
+    const o = observer();
     writeFileSync(file, lockOf(1, 'boot-1:100', 'pid:[4026532001]'));
-    // A few beats late: still held.
-    age(file, 3 * SENTINEL_LOCK_HEARTBEAT_MS);
-    expect(tryProcessLock(file, here)).toBeNull();
-    // Its holder crashed: nothing touched it for a minute and more.
-    age(file, 6 * SENTINEL_LOCK_HEARTBEAT_MS + 5000);
-    const taken = tryProcessLock(file, here)!;
+    // However old it looks, never at first sight: what was seen is noted next to the lock.
+    age(file, 60 * 60_000);
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    expect(notes(file)).toHaveLength(1);
+    // A few beats later: still held.
+    o.wait(3 * SENTINEL_LOCK_HEARTBEAT_MS);
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    // Its holder crashed: unchanged since the first look, more than the window ago.
+    o.wait(3 * SENTINEL_LOCK_HEARTBEAT_MS + 1000);
+    const taken = tryProcessLock(file, o.opts)!;
     expect(taken).not.toBeNull();
     expect(pidIn(file)).toBe(String(process.pid));
     taken.release();
+    expect(readdirSync(dirname(file)).filter((f) => !f.startsWith('lock.seen-'))).toEqual([]);
+  });
 
-    // Dated in the future (the clock was set back): as abandoned as one long in the past.
+  it('does not take a touched lock over, however the wall clock steps', () => {
+    const file = lockFile();
+    const content = lockOf(1, 'boot-1:100', 'pid:[4026532001]');
+    writeFileSync(file, content);
+    const o = observer();
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    // The clock jumps an hour ahead (a resume from suspend, a time sync): the lock looks an
+    // hour old, and on the clock that does not step no time has passed.
+    o.step(60 * 60_000);
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    // And an hour back: the lock is dated in the future.
+    o.step(-2 * 60 * 60_000);
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    // The holder is alive and touches its lock: each touch starts the count again.
+    for (let i = 1; i <= 8; i++) {
+      o.wait(SENTINEL_LOCK_HEARTBEAT_MS);
+      age(file, -i * 1000);
+      expect(tryProcessLock(file, o.opts)).toBeNull();
+    }
+    expect(readFileSync(file, 'utf8')).toBe(content);
+  });
+
+  it('counts on the wall clock across boots and machines, and distrusts odd notes', () => {
+    const file = lockFile();
     writeFileSync(file, lockOf(1, 'boot-1:100', 'pid:[4026532001]'));
-    age(file, -10 * 60_000);
-    tryProcessLock(file, here)!.release();
-    expect(existsSync(file)).toBe(false);
+    const o = observer();
+    // No boot id (not Linux): the note of one process is read by the next on the wall clock.
+    o.boot = null;
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    const [note] = notes(file);
+    const path = join(dirname(file), note as string);
+    const seen = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    expect(seen).toMatchObject({ id: 'feedfeedfeedfeedfeedfeed', boot: null });
+
+    // A note dated in the future (the clock was set back since) says nothing: start over.
+    o.step(-10 * 60_000);
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    // So does one older than a day.
+    const fresh = JSON.parse(readFileSync(path, 'utf8')) as { wall: number };
+    writeFileSync(path, JSON.stringify({ ...fresh, wall: fresh.wall - 25 * 60 * 60_000 }));
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    // And one about another lock, or not readable.
+    writeFileSync(path, JSON.stringify({ ...seen, id: 'another' }));
+    o.wait(WINDOW + 1000);
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    writeFileSync(path, '{');
+    o.wait(WINDOW + 1000);
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+
+    // After a reboot the monotonic clock started over: what was noted before it is not used.
+    o.boot = 'boot-2';
+    o.wait(WINDOW + 1000);
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    expect(notes(file)).toHaveLength(2);
+
+    // Unchanged for the window on the wall clock, where that is all there is.
+    o.boot = null;
+    o.step(WINDOW + 1000);
+    tryProcessLock(file, o.opts)!.release();
+  });
+
+  it('keeps one note per observer, and drops old ones', () => {
+    const file = lockFile();
+    writeFileSync(file, lockOf(1, 'boot-1:100', 'pid:[4026532001]'));
+    const a = observer('pid:[4026532002]');
+    const b = observer('pid:[4026532003]');
+    expect(tryProcessLock(file, a.opts)).toBeNull();
+    expect(tryProcessLock(file, b.opts)).toBeNull();
+    expect(notes(file)).toHaveLength(2);
+    // What one observer saw long ago does not count for another.
+    a.wait(WINDOW + 1000);
+    expect(tryProcessLock(file, b.opts)).toBeNull();
+    const taken = tryProcessLock(file, a.opts)!;
+    expect(taken).not.toBeNull();
+    taken.release();
+    // Notes nobody can believe any more go when the lock is next taken.
+    for (const n of notes(file)) age(join(dirname(file), n), 2 * 24 * 60 * 60_000);
+    tryProcessLock(file)!.release();
+    expect(readdirSync(dirname(file))).toEqual([]);
   });
 
   it('touches its lock while it holds it, and stops when it lets go', async () => {
@@ -216,10 +338,15 @@ describe('sentinel lock', () => {
     const before = statSync(file).mtimeMs;
     await sleep(120);
     expect(statSync(file).mtimeMs).toBeGreaterThan(before + 30 * 60_000);
-    // Seen from another namespace it is held for as long as that goes on: without the touch,
-    // an hour-old lock would count as abandoned there.
-    expect(tryProcessLock(file, { namespace: () => 'pid:[9]', alive: () => false })).toBeNull();
+    // Seen from another namespace it never stays unchanged for the window.
+    const o = observer();
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    await sleep(60);
+    o.wait(10 * 60_000);
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    expect(lock.held()).toBe(true);
     lock.release();
+    expect(lock.held()).toBe(false);
     expect(existsSync(file)).toBe(false);
 
     // A lock that was taken over is no longer touched by the process that lost it.
@@ -229,28 +356,78 @@ describe('sentinel lock', () => {
     const frozen = statSync(file).mtimeMs;
     await sleep(120);
     expect(statSync(file).mtimeMs).toBe(frozen);
+    expect(lost.held()).toBe(false);
     lost.release();
     expect(readFileSync(file, 'utf8')).toBe('424242');
+  });
+
+  it('keeps touching its lock after a read of it failed', async () => {
+    const file = lockFile();
+    const lock = tryProcessLock(file, { heartbeatMs: 20 })!;
+    // The file is away for a few beats (a takeover attempt has it renamed aside), then back.
+    renameSync(file, `${file}.away`);
+    await sleep(70);
+    expect(lock.held()).toBe(false);
+    renameSync(`${file}.away`, file);
+    expect(lock.held()).toBe(true);
+    age(file, 60 * 60_000);
+    const before = statSync(file).mtimeMs;
+    await sleep(120);
+    expect(statSync(file).mtimeMs).toBeGreaterThan(before + 30 * 60_000);
+    lock.release();
+    expect(existsSync(file)).toBe(false);
+
+    // A lock that stays away is gone: the holder gives it up, and never takes it for its own
+    // again, even if a file like it comes back.
+    const gone = tryProcessLock(file, { heartbeatMs: 20 })!;
+    renameSync(file, `${file}.away`);
+    await sleep(300);
+    renameSync(`${file}.away`, file);
+    expect(gone.held()).toBe(false);
+    gone.release();
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it('tells its holder when the lock was taken over', () => {
+    const file = lockFile();
+    // The holder's process is suspended (a paused container): it touches nothing.
+    const paused = tryProcessLock(file, { namespace: () => 'pid:[4026532001]' })!;
+    expect(paused.held()).toBe(true);
+    const o = observer();
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    o.wait(WINDOW + 1000);
+    const taker = tryProcessLock(file, o.opts)!;
+    expect(taker).not.toBeNull();
+    // It resumes: the lock is another's now, and stays so after it lets go.
+    expect(paused.held()).toBe(false);
+    expect(taker.held()).toBe(true);
+    paused.release();
+    expect(taker.held()).toBe(true);
+    taker.release();
+    expect(existsSync(file)).toBe(false);
   });
 
   it('puts a lock back when its holder touched it during the takeover', () => {
     const file = lockFile();
     const content = lockOf(1, 'boot-1:100', 'pid:[4026532001]');
     writeFileSync(file, content);
-    age(file, 10 * SENTINEL_LOCK_HEARTBEAT_MS);
+    const o = observer();
+    expect(tryProcessLock(file, o.opts)).toBeNull();
+    o.wait(WINDOW + 1000);
     // The holder was only slow: its heartbeat lands after this process judged the lock
-    // abandoned, before it is moved away. `now` is asked once per judgement.
-    let asked = 0;
+    // abandoned for the last time, before it is moved away. The monotonic clock is read once
+    // per judgement: before the takeover, and again under its guard.
+    let read = 0;
     const r = tryProcessLock(file, {
-      namespace: () => 'pid:[4026532002]',
-      now: () => {
-        if (++asked === 2) age(file, 0);
-        return Date.now();
+      ...o.opts,
+      monotonic: () => {
+        if (++read === 2) age(file, -1000);
+        return o.opts.monotonic();
       },
     });
     expect(r).toBeNull();
     expect(readFileSync(file, 'utf8')).toBe(content);
-    expect(readdirSync(dirname(file))).toEqual(['lock']);
+    expect(readdirSync(dirname(file)).filter((f) => !f.startsWith('lock.seen-'))).toEqual(['lock']);
   });
 
   it('knows its PID namespace where there is one', () => {
