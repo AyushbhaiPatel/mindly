@@ -1,4 +1,4 @@
-import { stripInvisible } from './text.js';
+import { hasHiddenChars, replaceInOriginal, withoutHiddenChars } from './hidden.js';
 
 /**
  * Secret redaction. Every piece of user or agent text passes through `redact()` before it is
@@ -144,12 +144,8 @@ function compileExtra(source: string): RegExp | null {
   return re;
 }
 
-export function redact(input: string, options: RedactOptions = {}): RedactionResult {
-  // Characters that render as nothing go first: one inside a secret hides it from every pattern,
-  // and removing it later (as any cleaning for display does) would put the secret back together.
-  let text = stripInvisible(
-    input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input,
-  );
+function redactVisible(input: string, options: RedactOptions = {}): RedactionResult {
+  let text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
   let count = 0;
   const kinds = new Set<string>();
 
@@ -220,3 +216,19 @@ export const DEFAULT_DENY_PATHS: readonly string[] = [
   '**/credentials.json',
   '**/service-account*.json',
 ];
+
+/**
+ * Replaces the secrets in `input`. Secrets are looked for in a copy without characters that
+ * render as nothing and without control characters (one inside a secret would hide it), and
+ * only the secrets are replaced in `input`: every other character, hidden or not, is kept.
+ */
+export function redact(input: string, options: RedactOptions = {}): RedactionResult {
+  const text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
+  if (!hasHiddenChars(text)) return redactVisible(text, options);
+  const visible = withoutHiddenChars(text);
+  const r = redactVisible(visible, options);
+  if (r.count === 0) return { ...r, text };
+  // When the two cannot be lined up, the text without hidden characters is returned: it holds no
+  // secret, which matters more than keeping those characters.
+  return { ...r, text: replaceInOriginal(text, visible, r.text, REDACTED) ?? r.text };
+}

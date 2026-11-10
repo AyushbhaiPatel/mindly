@@ -200,3 +200,28 @@ describe('redaction of text with invisible characters', () => {
     }
   });
 });
+
+describe('redaction keeps every character but the secrets', () => {
+  const token = ['ghp', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'].join('_');
+
+  it('leaves text without a secret exactly as it was', () => {
+    const text =
+      'family 👨\u200d👩\u200d👧 · Persian می\u200cخواهم · 葛\u{E0100}飾 · co\u00adoperate · ⚠\ufe0f · \u202eabc\u202c\r\n';
+    expect(redactText(text)).toBe(text);
+  });
+
+  it('replaces a split secret and keeps the hidden characters around it', () => {
+    const split = `${token.slice(0, 10)}\u200b\u0007${token.slice(10)}`;
+    const text = `👨\u200d👩 key=\u200d${split}\u2060 and ${token} done\u202e`;
+    expect(redactText(text)).toBe(
+      `👨\u200d👩 key=\u200d${REDACTED}\u2060 and ${REDACTED} done\u202e`,
+    );
+  });
+
+  it('keeps a prefix the pattern keeps, and the hidden characters elsewhere', () => {
+    const text = `password = "hunter2-very-secret"\nnext 👨\u200d👩`;
+    const out = redactText(text);
+    expect(out).not.toContain('hunter2');
+    expect(out).toContain('👨\u200d👩');
+  });
+});

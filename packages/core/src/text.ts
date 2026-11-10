@@ -33,10 +33,6 @@ const INVISIBLE_RE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 // eslint-disable-next-line no-control-regex
 const UNSAFE_IN_TOKEN_RE = /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/;
 
-/** Removes the characters that render as nothing (see INVISIBLE_RE). */
-export function stripInvisible(text: string): string {
-  return text.replace(INVISIBLE_RE, '');
-}
 // Our own context delimiters; content must never be able to close or forge a block.
 const DELIMITER_RE = /<\s*\/?\s*mindly[-_a-z]*/gi;
 
