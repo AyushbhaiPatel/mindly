@@ -212,13 +212,16 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 - Contract regexes allow at most two unbounded quantifiers (large bounded repeats count as
   unbounded) and eight quantifiers in total, and patterns whose optional parts and alternatives
   combine into too many ways to match are rejected, so the work per match stays polynomial. A
-  group that holds a quantifier or an alternation cannot be repeated, whether by `*`, `+` or a
-  count such as `{12}`. A pattern never runs over more than 200 characters at once: a longer line
-  is checked in overlapping 200-character windows, so all of it is read (a single match longer
-  than about 100 characters may be missed there), with the time budget checked after every
-  window. A stored contract
-  whose pattern fails these checks is not run: it reports an error explaining why, and
-  `mindly doctor` lists it.
+  repeated group (by `*`, `+` or a count such as `{12}`) must not hold a quantifier, `?` included,
+  or an alternation, and must match at least one character. A repeated part may not follow a
+  variable-length one that can match the same characters (`a?a?`, `a*a*`, `.*\s*`). A pattern
+  never runs over more than 200 characters at once: a longer line is checked in overlapping
+  200-character windows, so all of it is read (a single match longer than about 100 characters
+  may be missed there). The whole check runs in a separate context with a 100 ms timeout that
+  stops even a single runaway match, so no pattern holds a hook for longer; a pattern that runs
+  out of time is not run again, and its contract reports an error until it is replaced with a
+  simpler one. A stored contract whose pattern fails these checks is not run either: it reports
+  an error explaining why, and `mindly doctor` lists it.
 
 ## Data retention and deletion
 

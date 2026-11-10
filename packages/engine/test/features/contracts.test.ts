@@ -369,7 +369,7 @@ describe('safe regex subset', () => {
     '(?:foo|bar)\\d?',
     '[a-z]+',
     '.*a.*x',
-    'a?b?c?.*a.*x',
+    'a?b?c?x.*a.*x',
     'v\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}',
     '(?:api[_-]?key|secret|token|password)\\s*[:=]\\s*[\'"]',
     '(TODO|FIXME|XXX|HACK|BUG|NOTE|OPTIMIZE|REVIEW|DEPRECATED)\\s*:.*',
@@ -381,7 +381,9 @@ describe('safe regex subset', () => {
     '(?:ab){3}',
     '(\\d{2}-){2}\\d{4}',
     '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}',
-    '(a?b){3}',
+    '\\w+\\s+=',
+    '\\d{2}\\d?',
+    '^\\s*(?:export\\s)?function',
   ])('accepts %s', (p) => expect(checkSafePattern(p)).toBeNull());
 
   it.each([
@@ -418,15 +420,29 @@ describe('safe regex subset', () => {
     ['(\\w+\\s?){12}=', 'nested'],
     ['(a|aa){16}b', 'nested'],
     ['(a*){2}b', 'nested'],
-    ['(a?a?)+c', 'backtracking'],
-    ['(a?a?){16}c', 'backtracking'],
+    ['(a?a?)+c', 'nested'],
+    ['(a?a?){16}c', 'nested'],
+    ['(a?b){3}', 'nested'],
+    ['(a?){16}a{16}b', 'nested'],
+    ['(a?){16}a?a?a{16}b', 'nested'],
+    ['(?:a?){16}a{16}b', 'nested'],
+    ['(a{0,16}){4}b', 'nested'],
+    ['(?:)+x', 'at least one character'],
+    ['(?:^)*x', 'at least one character'],
+    ['a?a?a{16}b', 'same characters'],
+    ['a*a*b', 'same characters'],
+    ['.*\\s*x', 'same characters'],
+    ['\\d?\\d{2}', 'same characters'],
+    ['a?b?c?.*a.*x', 'same characters'],
+    ['a+(?:[ab]*[ab])x', 'same characters'],
+    ['[a-f]?[^g]+x', 'same characters'],
     ['[', 'compile'],
   ])('rejects %s', (p, why) => expect(checkSafePattern(p)).toMatch(why));
 });
 
 describe('regex budget', () => {
   it('keeps the worst allowed pattern polynomial in the line length', () => {
-    const worst = 'a?a?a?.*a.*x';
+    const worst = '.*a.*x';
     expect(checkSafePattern(worst)).toBeNull();
     const re = new RegExp(worst);
     const fastest = (line: string): number => {
@@ -449,17 +465,53 @@ describe('regex budget', () => {
     expect(longMs / Math.max(shortMs, 0.01)).toBeLessThan(32);
   });
 
-  it('stays within the budget on one very long line', async () => {
+  it.each([
+    '(a?){16}a{16}b',
+    '(a?){16}a?a?a{16}b',
+    '(a+)+b',
+    '(a|a)*b',
+    '(a|aa)+b',
+    '(\\w+\\s?)*$',
+    '(a+){12}b',
+    'a*a*b',
+    '.*a.*b',
+  ])('%s is refused, or one evaluation on hostile input stays quick', async (pattern) => {
     const { write, memory, contracts } = await withDecision();
-    write('src/min.js', 'a'.repeat(400 * 1024));
-    const spec = { path: 'src/min.js', pattern: 'a?a?a?.*a.*x' };
+    write('src/data.txt', `${'a'.repeat(200)}\n${'a '.repeat(100)}\n`);
+    const spec = { path: 'src/data.txt', pattern };
+    if (checkSafePattern(pattern) !== null) {
+      expect(codeOf(() => contracts.create(memory.id, 'pattern_absent', spec, USER))).toBe(
+        'invalid_input',
+      );
+      return;
+    }
     const start = performance.now();
+    contracts.create(memory.id, 'pattern_absent', spec, USER);
+    expect(performance.now() - start).toBeLessThan(200);
+  });
+
+  it('stops a pattern that runs out of time and does not run it again', async () => {
+    const { mindly, root, write, memory, contracts } = await withDecision();
+    write('src/min.js', 'a'.repeat(400 * 1024));
+    const spec = { path: 'src/min.js', pattern: '.*a.*x' };
+    let start = performance.now();
     const c = contracts.create(memory.id, 'pattern_absent', spec, USER);
-    expect(performance.now() - start).toBeLessThan(5000);
+    expect(performance.now() - start).toBeLessThan(1000);
     expect(c.state).toBe('error');
-    // A cheap pattern gets through the same line well inside the budget.
-    const cheap = { path: 'src/min.js', pattern: 'eval\\(' };
+    expect(c.lastMessage).toBe(
+      'pattern took longer than 100 ms on src/min.js and is no longer run; add a contract with a simpler pattern',
+    );
+    start = performance.now();
+    expect(contracts.evaluate(mindly.store.contracts.get(c.id), root).message).toBe(c.lastMessage);
+    expect(performance.now() - start).toBeLessThan(20);
+    // Another pattern on the same contract (and other contracts) run as usual.
+    const cheap = { ...spec, pattern: 'eval\\(' };
+    const changed = contracts.evaluate({ ...c, spec: cheap }, root);
+    expect(changed.state).toBe('passing');
     expect(contracts.create(memory.id, 'pattern_absent', cheap, USER).state).toBe('passing');
+    // What is remembered goes with the contract.
+    mindly.store.contracts.delete(c.id);
+    expect(mindly.store.contracts.slowPattern(c.id)).toBeNull();
   });
 
   it('explains why an existing contract with a now-rejected pattern cannot run', async () => {
@@ -473,18 +525,5 @@ describe('regex budget', () => {
       `pattern rejected as too expensive to evaluate safely: ${pattern} (pattern allows too much backtracking`,
     );
     expect(result.message).toContain('add a contract with a simpler pattern');
-  });
-
-  it('stops evaluating once the time budget is spent', async () => {
-    const { memory, contracts } = await withDecision();
-    const spec = { path: 'src/auth.ts', pattern: 'never-present' };
-    expect(contracts.create(memory.id, 'pattern_absent', spec, USER).state).toBe('passing');
-    let now = 0;
-    const clock = vi.spyOn(performance, 'now').mockImplementation(() => (now += 60));
-    try {
-      expect(contracts.create(memory.id, 'pattern_absent', spec, USER).state).toBe('error');
-    } finally {
-      clock.mockRestore();
-    }
   });
 });

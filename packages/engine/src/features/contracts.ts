@@ -1,4 +1,5 @@
 import { statSync } from 'node:fs';
+import { createContext, Script, type Context } from 'node:vm';
 import { z } from 'zod';
 import {
   fingerprint,
@@ -25,13 +26,18 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
  * Executable memory. A contract binds a memory (usually a decision) to a declarative check over
  * the repository, re-evaluated whenever the file it reads changes.
  *
- * Regex safety: JavaScript regexes cannot be interrupted once running, so a time check alone
- * cannot stop catastrophic backtracking. Patterns are therefore restricted to a conservative safe
- * subset at creation time (see `checkSafePattern`): at most 300 characters, no backreferences, no
- * lookaround, no repeated group that itself contains a quantifier or alternation (the classic
- * `(a+)+` / `(a|aa)*` shapes; a counted repeat such as `(a+){12}` is the same thing written out),
- * at most two unbounded quantifiers (a `{n,m}` with m > 16 counts as unbounded) and at most eight
- * quantifiers in total. Without nested quantifiers, the paths a backtracking matcher can try per
+ * Regex safety: a regex cannot be interrupted by the code running it, so a time check between
+ * lines cannot stop catastrophic backtracking. Patterns are therefore restricted to a conservative
+ * safe subset at creation time (see `checkSafePattern`): at most 300 characters, no
+ * backreferences, no lookaround, no repeated group that holds a quantifier (`?` included) or
+ * alternation or can match nothing (the classic `(a+)+` / `(a|aa)*` shapes; a counted repeat such
+ * as `(a+){12}` or `(a?){16}` is the same thing written out), no repeated part right after a
+ * variable-length one that can match the same characters (`a?a?a{16}`, `a*a*`, `.*\s*`), at
+ * most two unbounded quantifiers (a `{n,m}` with m > 16 counts as unbounded) and at most eight
+ * quantifiers in total. As a backstop for anything the subset lets through, the match runs in a
+ * separate context with a timeout (see `matchLines`), which does stop a running regex; a pattern
+ * that runs out of time once is not run again. Without nested quantifiers, the paths a
+ * backtracking matcher can try per
  * start position are bounded by counting them: a sequence multiplies the paths of its parts, an
  * alternation adds the paths of its branches (or counts once when its branches are distinct
  * literals, none a prefix of another, since only one can match), and a quantifier multiplies by
@@ -41,9 +47,8 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
  * tokens). That bounds the cost of one match attempt to roughly cubic in the length of the text
  * it runs over, so that text is never longer than `MATCH_WINDOW_CHARS`: a line that fits is
  * matched whole, a longer one (minified code, one-line JSON) in overlapping windows of that size
- * (see `matchLine`). Each window stays within a few milliseconds to a few tens of milliseconds,
- * which lets the 100 ms budget (checked after every window) take effect over at most 512 KB of
- * content.
+ * (see `MATCH_SOURCE`). Each window stays within a few milliseconds to a few tens of
+ * milliseconds, and the whole file, at most 512 KB, within the 100 ms timeout.
  *
  * `command` contracts are never executed here: only the user may create them, their argv hash is
  * pinned at creation, and the daemon runs them later through a trusted runner.
@@ -77,6 +82,37 @@ export interface ContractEvaluation {
  * message, or null when the pattern is acceptable.
  */
 export function checkSafePattern(pattern: string): string | null {
+  const cached = verdicts.get(pattern);
+  if (cached !== undefined) return cached;
+  const verdict = judgePattern(pattern);
+  if (verdicts.size >= VERDICT_CACHE_SIZE) verdicts.clear();
+  verdicts.set(pattern, verdict);
+  return verdict;
+}
+
+/** `checkSafePattern` is called on every evaluation, so its answers are kept. */
+const verdicts = new Map<string, string | null>();
+const VERDICT_CACHE_SIZE = 512;
+
+/** Characters a part of a pattern can match: sources of single-character atoms, or any. */
+type CharSet = readonly string[] | 'any';
+
+/** One atom of a sequence (a character, a class, a group) with its quantifier. */
+interface Atom {
+  /** Characters its first and last matched character can be. */
+  first: CharSet;
+  last: CharSet;
+  /** Whether one repeat of it always matches at least one character. */
+  consumes: boolean;
+  /** `^`, `$`, `\b`, `\B`: matches no character. */
+  anchor: boolean;
+  /** A group whose length varies by itself, through a quantifier inside it. */
+  variable: boolean;
+  min: number;
+  max: number;
+}
+
+function judgePattern(pattern: string): string | null {
   if (pattern.length === 0) return 'pattern is empty';
   if (pattern.length > MAX_PATTERN_LENGTH)
     return `pattern exceeds ${MAX_PATTERN_LENGTH} characters`;
@@ -85,6 +121,7 @@ export function checkSafePattern(pattern: string): string | null {
   } catch {
     return 'pattern does not compile';
   }
+  const ignoreCase = pattern.includes('(?i');
   interface Frame {
     quantified: boolean;
     alternation: boolean;
@@ -94,6 +131,17 @@ export function checkSafePattern(pattern: string): string | null {
     atom: number;
     branchStart: number;
     branches: string[];
+    /** The current branch's last atom, until the next one starts (its quantifier may follow). */
+    pending: Atom | null;
+    /** Last characters of the variable-length atoms since the branch's last mandatory one. */
+    open: CharSet[];
+    branchFirst: CharSet | null;
+    branchLast: CharSet | null;
+    branchConsumes: boolean;
+    /** Over all finished branches: first and last characters, and whether one can be empty. */
+    first: CharSet;
+    last: CharSet;
+    nullable: boolean;
   }
   const frame = (branchStart: number): Frame => ({
     quantified: false,
@@ -103,13 +151,53 @@ export function checkSafePattern(pattern: string): string | null {
     atom: 1,
     branchStart,
     branches: [],
+    pending: null,
+    open: [],
+    branchFirst: null,
+    branchLast: null,
+    branchConsumes: false,
+    first: [],
+    last: [],
+    nullable: false,
   });
+  let ambiguous = false;
+  /** Adds the atom that just ended to its branch: what it may start and end with, and overlaps. */
+  const settle = (f: Frame): void => {
+    const a = f.pending;
+    f.pending = null;
+    if (!a || a.anchor) return;
+    const min = a.consumes ? a.min : 0;
+    const quantified = a.min !== 1 || a.max !== 1;
+    // A repeated part right after a variable-length one that can take the same characters gives
+    // the matcher a choice at every such character: `a?a?a{16}`, `.*\s*`, `\d?\d{2}`,
+    // `a+(?:b*a)`.
+    if ((quantified || a.variable) && f.open.some((o) => charsOverlap(o, a.first, ignoreCase))) {
+      ambiguous = true;
+    }
+    if (a.min !== a.max || a.variable) {
+      if (min >= 1) f.open = [a.last];
+      else f.open.push(a.last);
+    } else if (min >= 1) {
+      f.open = [];
+    }
+    if (f.branchFirst === null) f.branchFirst = min >= 1 ? a.first : 'any';
+    f.branchLast = min >= 1 ? a.last : 'any';
+    if (min >= 1) f.branchConsumes = true;
+  };
   const endBranch = (f: Frame, end: number): void => {
+    settle(f);
     f.finished += f.current * f.atom;
     f.current = 1;
     f.atom = 1;
     f.branches.push(pattern.slice(f.branchStart, end));
     f.branchStart = end + 1;
+    f.first = unionChars(f.first, f.branchFirst ?? 'any');
+    f.last = unionChars(f.last, f.branchLast ?? 'any');
+    if (!f.branchConsumes) f.nullable = true;
+    f.open = [];
+    f.branchFirst = null;
+    f.branchLast = null;
+    f.branchConsumes = false;
   };
   const paths = (f: Frame): number => (exclusiveLiterals(f.branches) ? 1 : f.finished);
   const stack: Frame[] = [frame(0)];
@@ -118,28 +206,41 @@ export function checkSafePattern(pattern: string): string | null {
   let lastClosed: Frame | null = null;
   let i = 0;
   const top = (): Frame => stack[stack.length - 1] as Frame;
-  const atom = (cost: number): void => {
+  const atom = (cost: number, next: Omit<Atom, 'min' | 'max'>): void => {
     const f = top();
     f.current *= f.atom;
     f.atom = cost;
+    settle(f);
+    f.pending = { ...next, min: 1, max: 1 };
   };
+  const char = (source: string): Omit<Atom, 'min' | 'max'> => ({
+    first: [source],
+    last: [source],
+    consumes: true,
+    anchor: false,
+    variable: false,
+  });
+  const ANCHOR = { first: [], last: [], consumes: false, anchor: true, variable: false };
   while (i < pattern.length) {
     const ch = pattern[i] as string;
     if (ch === '\\') {
       const next = pattern[i + 1] ?? '';
       if (/[1-9]/.test(next) || next === 'k') return 'backreferences are not allowed';
-      atom(1);
-      i += 2;
+      const length = next === 'x' ? 4 : next === 'u' ? 6 : next === 'c' ? 3 : 2;
+      const source = pattern.slice(i, i + length);
+      atom(1, next === 'b' || next === 'B' ? ANCHOR : char(source));
+      i += length;
       lastClosed = null;
       continue;
     }
     if (ch === '[') {
       // Skip the character class, honouring escapes.
+      const start = i;
       i++;
       if (pattern[i] === '^') i++;
       if (pattern[i] === ']') i++;
       while (i < pattern.length && pattern[i] !== ']') i += pattern[i] === '\\' ? 2 : 1;
-      atom(1);
+      atom(1, char(pattern.slice(start, i + 1)));
       i++;
       lastClosed = null;
       continue;
@@ -164,7 +265,13 @@ export function checkSafePattern(pattern: string): string | null {
       endBranch(closed, i);
       // A group containing a quantifier or an alternation makes the enclosing group "quantified".
       if (closed.quantified || closed.alternation) top().quantified = true;
-      atom(paths(closed));
+      atom(paths(closed), {
+        first: closed.first,
+        last: closed.last,
+        consumes: !closed.nullable,
+        anchor: false,
+        variable: closed.quantified,
+      });
       lastClosed = closed;
       i++;
       continue;
@@ -189,25 +296,34 @@ export function checkSafePattern(pattern: string): string | null {
       const lower = Number(/^\{(\d+)/.exec(tok)?.[1] ?? (tok === '+' ? 1 : 0));
       const most = isUnbounded ? MATCH_WINDOW_CHARS : tok === '?' ? 1 : Number(upper ?? lower);
       // Anything that can match its atom more than once repeats it: `*`, `+`, `{n,}`, `{n,m}` and
-      // the counted `{n}` alike.
-      if (lastClosed && most > 1 && (lastClosed.quantified || lastClosed.alternation)) {
-        return 'nested quantifiers are not allowed';
+      // the counted `{n}` alike. A repeated group must take a character every time and leave the
+      // matcher one way through it: no quantifier (`?` included) or alternation inside.
+      if (lastClosed && most > 1) {
+        if (lastClosed.quantified || lastClosed.alternation) {
+          return 'nested quantifiers are not allowed: a repeated group must not hold a quantifier or alternatives';
+        }
+        if (lastClosed.nullable) return 'a repeated group must match at least one character';
       }
       if (isUnbounded) unbounded++;
       const f = top();
       if (most <= 1) f.atom += lower === 0 ? 1 : 0;
       // Each repeat walks the atom's own paths again (1 for a plain character or class).
       else f.atom = (most - Math.min(lower, most) + 1) * f.atom ** most;
-      // `?` and an exact count leave only one way through, so a group holding nothing else may
-      // still be repeated (`(\d{2}-){2}`).
-      if (tok !== '?' && !/^\{\d+\}$/.test(tok)) f.quantified = true;
+      // Only an exact count leaves one way through, so a group holding nothing else may still be
+      // repeated (`(\d{2}-){2}`).
+      if (!/^\{\d+\}$/.test(tok)) f.quantified = true;
+      if (f.pending) {
+        f.pending.min = lower;
+        f.pending.max = most;
+      }
       i += tok.length;
       // Skip a lazy/possessive marker.
       if (pattern[i] === '?') i++;
       lastClosed = null;
       continue;
     }
-    atom(1);
+    if (ch === '^' || ch === '$') atom(1, ANCHOR);
+    else atom(1, char(ch === '.' ? '.' : /[\w\s]/.test(ch) ? ch : `\\${ch}`));
     lastClosed = null;
     i++;
   }
@@ -221,7 +337,60 @@ export function checkSafePattern(pattern: string): string | null {
   if (paths(top()) > MAX_PATHS) {
     return 'pattern allows too much backtracking; use fewer optional parts or alternatives';
   }
+  if (ambiguous) {
+    return 'repeated parts next to each other can match the same characters (as in a?a? or .*\\s*), which makes matching slow; merge them, or put a fixed character between them';
+  }
   return null;
+}
+
+function unionChars(a: CharSet, b: CharSet): CharSet {
+  if (a === 'any' || b === 'any') return 'any';
+  return [...new Set([...a, ...b])];
+}
+
+/** Whether some character is in both sets. Unsure counts as yes. */
+function charsOverlap(a: CharSet, b: CharSet, ignoreCase: boolean): boolean {
+  if (a === 'any') return b === 'any' || b.length > 0;
+  if (b === 'any') return a.length > 0;
+  return a.some((x) => b.some((y) => atomsOverlap(x, y, ignoreCase)));
+}
+
+const overlaps = new Map<string, boolean>();
+
+/**
+ * Whether two single-character atoms (a character, an escape, a class or `.`) can match the same
+ * character. A plain character is tried against the other atom; otherwise every UTF-16 code unit
+ * is (a pattern without the `u` flag matches code units).
+ */
+function atomsOverlap(x: string, y: string, ignoreCase: boolean): boolean {
+  const key = `${ignoreCase ? 'i' : ''}\u0000${x}\u0000${y}`;
+  const known = overlaps.get(key);
+  if (known !== undefined) return known;
+  const result = singleCharsOverlap(x, y, ignoreCase);
+  if (overlaps.size >= VERDICT_CACHE_SIZE) overlaps.clear();
+  overlaps.set(key, result);
+  return result;
+}
+
+function singleCharsOverlap(x: string, y: string, ignoreCase: boolean): boolean {
+  try {
+    const flags = ignoreCase ? 'i' : '';
+    const rx = new RegExp(`^(?:${x})$`, flags);
+    const ry = new RegExp(`^(?:${y})$`, flags);
+    const plain = (s: string): string | null =>
+      s.length === 1 && s !== '.' ? s : /^\\\W$/.test(s) ? (s[1] as string) : null;
+    const px = plain(x);
+    if (px !== null) return ry.test(px);
+    const py = plain(y);
+    if (py !== null) return rx.test(py);
+    for (let c = 0; c <= 0xffff; c++) {
+      const s = String.fromCharCode(c);
+      if (rx.test(s) && ry.test(s)) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -375,7 +544,19 @@ export class ContractService {
             message: `pattern rejected as too expensive to evaluate safely: ${sanitizeLine(pattern, 120)} (${rejected}); add a contract with a simpler pattern`,
           };
         }
+        // A pattern that once ran out of time is not run again: every edit would pay the budget.
+        const tooSlow = {
+          state: 'error' as const,
+          message: `pattern took longer than ${PATTERN_BUDGET_MS} ms on ${rel} and is no longer run; add a contract with a simpler pattern`,
+        };
+        const patternHash = sha256(pattern);
+        const contracts = this.k.store.contracts;
+        if (contracts.slowPattern(contract.id) === patternHash) return tooSlow;
         const found = matchLines(pattern, content);
+        if (found === 'timeout') {
+          contracts.setSlowPattern(contract.id, patternHash);
+          return tooSlow;
+        }
         if (found === 'error') return { state: 'error', message: 'pattern could not be evaluated' };
         if (contract.kind === 'pattern_present') {
           return found
@@ -606,46 +787,66 @@ export class ContractService {
 }
 
 /**
- * Line-by-line match of a pattern that passed `checkSafePattern`, with a time budget. Returns
- * 'error' if the budget is exceeded. Lines end at LF or CRLF, so `$` works in either kind of file.
+ * The loop `matchLines` runs, as source for a separate context so it can be stopped. Lines end at
+ * LF or CRLF, so `$` works in either kind of file. A line of up to `windowChars` is matched whole.
+ * A longer one is matched in windows of that size, each overlapping the one before by `overlap`,
+ * so the cost of one match attempt stays bounded however long the line is. A window that does not
+ * start at the line's start only accepts a match from its second character on, and one that does
+ * not reach the line's end must leave its last character unmatched (`open`): every match found
+ * this way is a match in the full line (`^`, `$` and `\b` see the real neighbours), and every
+ * match of the full line up to about `overlap` characters long is found.
  */
-function matchLines(pattern: string, content: string): boolean | 'error' {
-  const whole = new RegExp(pattern, 'g');
-  // A window that stops short of the line's end must leave its last character unmatched: that
-  // keeps `$` from matching there and gives `\b` the real next character.
-  const open = new RegExp(`(?:${pattern})(?=[^])`, 'g');
-  const start = performance.now();
+const MATCH_SOURCE = `(() => {
+  const step = windowChars - overlap;
   let lineStart = 0;
   while (lineStart <= content.length) {
-    let lineEnd = content.indexOf('\n', lineStart);
+    let lineEnd = content.indexOf('\\n', lineStart);
     if (lineEnd === -1) lineEnd = content.length;
-    const end = lineEnd > lineStart && content[lineEnd - 1] === '\r' ? lineEnd - 1 : lineEnd;
-    const found = matchLine(whole, open, content.slice(lineStart, end), start);
-    if (found !== false) return found;
+    const end = lineEnd > lineStart && content[lineEnd - 1] === '\\r' ? lineEnd - 1 : lineEnd;
+    const line = content.slice(lineStart, end);
+    for (let at = 0; ; at += step) {
+      const last = at + windowChars >= line.length;
+      const re = last ? whole : open;
+      re.lastIndex = at === 0 ? 0 : 1;
+      if (re.test(at === 0 && last ? line : line.slice(at, at + windowChars))) return true;
+      if (last) break;
+    }
     lineStart = lineEnd + 1;
   }
   return false;
-}
+})()`;
+
+let matcher: { context: Context; script: Script } | null = null;
 
 /**
- * Matches one line. A line of up to `MATCH_WINDOW_CHARS` is matched whole. A longer one is matched
- * in windows of that size, each overlapping the one before by `MATCH_WINDOW_OVERLAP`, so the cost
- * stays bounded however long the line is. A window that does not start at the line's start only
- * accepts a match from its second character on, and one that does not reach the line's end must
- * leave its last character unmatched: every match found this way is a match in the full line
- * (`^`, `$` and `\b` see the real neighbours), and every match of the full line up to about
- * `MATCH_WINDOW_OVERLAP` characters long is found.
+ * Matches a pattern that passed `checkSafePattern` against `content`, line by line. A regex cannot
+ * be interrupted by the code that started it, so the loop runs in a separate context with a
+ * timeout, which stops it even inside a single match attempt: whatever the pattern, a hook is
+ * never held for much longer than `PATTERN_BUDGET_MS`. Returns 'timeout' when the budget ran out
+ * and 'error' when the pattern could not run at all.
  */
-function matchLine(whole: RegExp, open: RegExp, line: string, start: number): boolean | 'error' {
-  const step = MATCH_WINDOW_CHARS - MATCH_WINDOW_OVERLAP;
-  for (let at = 0; ; at += step) {
-    const last = at + MATCH_WINDOW_CHARS >= line.length;
-    const re = last ? whole : open;
-    re.lastIndex = at === 0 ? 0 : 1;
-    const text = at === 0 && last ? line : line.slice(at, at + MATCH_WINDOW_CHARS);
-    if (re.test(text)) return true;
-    if (performance.now() - start > PATTERN_BUDGET_MS) return 'error';
-    if (last) return false;
+function matchLines(pattern: string, content: string): boolean | 'timeout' | 'error' {
+  matcher ??= {
+    context: createContext(Object.create(null) as object),
+    script: new Script(MATCH_SOURCE),
+  };
+  const globals = matcher.context as Record<string, unknown>;
+  try {
+    globals['whole'] = new RegExp(pattern, 'g');
+    // A window that stops short of the line's end must leave its last character unmatched: that
+    // keeps `$` from matching there and gives `\b` the real next character.
+    globals['open'] = new RegExp(`(?:${pattern})(?=[^])`, 'g');
+    globals['content'] = content;
+    globals['windowChars'] = MATCH_WINDOW_CHARS;
+    globals['overlap'] = MATCH_WINDOW_OVERLAP;
+    return matcher.script.runInContext(matcher.context, { timeout: PATTERN_BUDGET_MS }) === true;
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    return code === 'ERR_SCRIPT_EXECUTION_TIMEOUT' ? 'timeout' : 'error';
+  } finally {
+    globals['content'] = '';
+    globals['whole'] = null;
+    globals['open'] = null;
   }
 }
 

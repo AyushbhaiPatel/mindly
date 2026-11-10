@@ -383,13 +383,32 @@ export class ContractRepo {
       .run(conclusiveKey(id), toJson(value), this.clock.now());
   }
 
-  /** Drops what is remembered for contracts that no longer exist (deleted with their memory). */
-  pruneConclusive(): void {
+  /**
+   * The hash of a pattern that ran out of time on this contract, so it is not run again; null when
+   * none did.
+   */
+  slowPattern(id: string): string | null {
+    const r = this.db.prepare('SELECT value FROM kv WHERE key = ?').get(slowKey(id)) as
+      Row | undefined;
+    const v = r ? json<unknown>(r, 'value', null) : null;
+    return typeof v === 'string' ? v : null;
+  }
+
+  setSlowPattern(id: string, patternHash: string): void {
     this.db
       .prepare(
-        `DELETE FROM kv WHERE key LIKE ? AND substr(key, ?) NOT IN (SELECT id FROM contracts)`,
+        `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
-      .run(`${CONCLUSIVE_PREFIX}%`, CONCLUSIVE_PREFIX.length + 1);
+      .run(slowKey(id), toJson(patternHash), this.clock.now());
+  }
+
+  /** Drops what is remembered for contracts that no longer exist (deleted with their memory). */
+  pruneConclusive(): void {
+    const prune = this.db.prepare(
+      `DELETE FROM kv WHERE key LIKE ? AND substr(key, ?) NOT IN (SELECT id FROM contracts)`,
+    );
+    for (const prefix of KV_PREFIXES) prune.run(`${prefix}%`, prefix.length + 1);
   }
 
   approve(id: string, hash: string | null): void {
@@ -398,7 +417,8 @@ export class ContractRepo {
 
   delete(id: string): void {
     this.db.prepare('DELETE FROM contracts WHERE id = ?').run(id);
-    this.db.prepare('DELETE FROM kv WHERE key = ?').run(conclusiveKey(id));
+    const drop = this.db.prepare('DELETE FROM kv WHERE key = ?');
+    for (const prefix of KV_PREFIXES) drop.run(`${prefix}${id}`);
   }
 }
 
@@ -406,7 +426,11 @@ export class ContractRepo {
 export type ContractConclusive = 'passing' | 'failing' | 'none';
 
 const CONCLUSIVE_PREFIX = 'contract:conclusive:';
+const SLOW_PREFIX = 'contract:slow:';
+/** Every kv entry kept per contract, removed with it. */
+const KV_PREFIXES = [CONCLUSIVE_PREFIX, SLOW_PREFIX] as const;
 const conclusiveKey = (id: string): string => `${CONCLUSIVE_PREFIX}${id}`;
+const slowKey = (id: string): string => `${SLOW_PREFIX}${id}`;
 
 // ---------------------------------------------------------------------------------------------
 // Snapshots (time machine)
