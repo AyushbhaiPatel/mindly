@@ -64,8 +64,10 @@ memory, which is then injected into every other agent.
   `grep` without `-r`, `echo`, `printf` without `-v`, and the builtins `cd`, `true`, `false`,
   `:`, `pwd`, `exit`, and `test` and `[` without `-v` or `-R`. Each of the file tools is read
   with the options it is known to take; any other option, or a long option abbreviated, makes the
-  line one not read fully (`cp -b`, `cp --parents`, `rm --rec`, `touch -r`, `rmdir -p`). The
-  rest of a line read fully is: words of plain characters (`*` and `?` included, unless they may
+  line one not read fully (`cp -b`, `cp --parents`, `cp -T`, `mv -T`, `rm --rec`, `touch -r`,
+  `rmdir -p`), as does `ln` with a single operand. A copy, move or link into a folder `mkdir`
+  made earlier on the line lands inside it; into anything else made earlier on the line, whether
+  it is a folder is not known, and the line is not read fully. The rest of a line read fully is: words of plain characters (`*` and `?` included, unless they may
   match what an earlier command of the line makes), single-quoted text, double-quoted text
   without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a plain
   path (`>`, `>>`, `2>`, `&>`), `2>&1`, `</dev/null`; a pipe into `head`, `tail`, `grep`, `wc` or
@@ -85,16 +87,18 @@ memory, which is then injected into every other agent.
   builtin (`export`, `set`, `source`, `read`, `[[`, …), a `[…]` class or `{a,b}`, `!`, a
   background `&`, and more than 4,000 commands. Such a line is never blocked, and never let
   through without a word. It may write the whole tree: whenever a file an enforced rule covers is
-  present in the project, or a folder a rule names is there, it gets one warning that names the
+  present in the project, or a folder a rule's scope names is there, it gets one warning that names the
   rule and what it covers; the write guards (a split's ownership of files) are asked the same
   way and only warn. The paths it names are read as far as the time allows, as possible writes
   only, so a folder it makes and fills is warned about too. Nothing of it is asked of git. Lines
   that now warn this way include any line with `$VAR` or `$(…)`, a loop or a function, a test
   run through a package manager, `npx`, a pipe into `sort` or `xargs`, `sed`, `find`, strict
   shell options, `export`, `source`, `[[ … ]]`, and a shell given code.
-- A shell tool call is always read as a shell line, even when its text holds a patch; only a
-  call that is nothing but a patch (its text, or `apply_patch` given one in a here-document) is
-  read as the edits of that patch.
+- A shell tool call is read as a shell line, and when its text holds a patch, the files the patch
+  names are possible writes besides. Only a call bash would run nothing of, `apply_patch` given a
+  patch in a here-document whose delimiter is quoted, as the whole command, is read as the edits
+  of that patch alone; a bare patch text, or a here-document bash expands, is shell code. A
+  separate patch tool is read as the edits it holds.
 - Rendered memory text is sanitised: control characters stripped, fence/delimiter sequences
   neutralised, length capped.
 

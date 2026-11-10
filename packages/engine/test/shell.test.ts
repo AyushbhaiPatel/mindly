@@ -1350,6 +1350,11 @@ describe('write targets of a shell command', () => {
       'env --spl "rm x"',
       'env -i git status',
       'cp -b a b',
+      'cp -rT d certs',
+      'cp -r --no-target-directory d certs',
+      'mv -T d certs',
+      'ln -f ../d/server.pem',
+      'ln -sf ../d/server.pem',
       'cp --parents a/b c',
       'rm --rec x',
       'touch -r ref x',
@@ -1403,6 +1408,13 @@ describe('write targets of a shell command', () => {
     ]) {
       expect(understoodLine(line), line).toBe(false);
     }
+    // A copy into a folder made earlier on the line lands inside it.
+    const into = readShellWrites('mkdir vendor && cp src/a.ts vendor', { understoodOnly: true });
+    expect(into.understood).toBe(true);
+    expect(into.targets.map((t) => t.path)).toContain('vendor/a.ts');
+    expect(readShellWrites('touch v && cp a.ts v', { understoodOnly: true }).understood).toBe(
+      false,
+    );
     // Not read fully, a line stands for the whole tree, a possible write, and nothing else.
     const unread = readShellWrites('rm $(cat list)', { top: '/w', understoodOnly: true });
     expect(unread.understood).toBe(false);
