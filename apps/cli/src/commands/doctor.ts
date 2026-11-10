@@ -1,6 +1,13 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { describeError, homePaths, mindlyHome, shortId, type HomePaths } from '@mindly/core';
+import {
+  describeError,
+  homePaths,
+  mindlyHome,
+  readUserConfig,
+  shortId,
+  type HomePaths,
+} from '@mindly/core';
 import { checkSafePattern, sentinelOf, type Mindly, type ProjectContext } from '@mindly/engine';
 import { gitVersion, lockfileIn, mirrorRemotes, versionAtLeast } from '@mindly/git';
 import { MIGRATIONS, schemaVersion, Store } from '@mindly/store';
@@ -381,6 +388,35 @@ function rejectedPatternItems(mindly: Mindly, project: ProjectContext): DoctorIt
   ];
 }
 
+/**
+ * Entries of the user config that Mindly ignores because they cannot be used (an empty
+ * redaction pattern, a glob that does not parse). Nothing when the file is fine; the file being
+ * unreadable is reported by the commands that need it.
+ */
+function configChecks(paths: HomePaths): DoctorItem[] {
+  let warnings: string[];
+  try {
+    warnings = readUserConfig(paths.config).warnings;
+  } catch (err) {
+    return [
+      item(
+        { name: 'config', status: 'fail', detail: describeError(err) },
+        'Setup',
+        `Your settings in ${paths.config} cannot be used: ${describeError(err)}`,
+        'Fix the file, or see the settings with: mindly config get',
+      ),
+    ];
+  }
+  return warnings.map((w) =>
+    item(
+      { name: 'config', status: 'warn', detail: w },
+      'Setup',
+      `A setting is ignored: ${w}`,
+      'Change it with mindly config set, or remove it with mindly config unset',
+    ),
+  );
+}
+
 /** Runs every check. Never prints or returns secrets (only paths, versions and states). */
 export async function runDoctor(out: Out): Promise<DoctorItem[]> {
   const env = out.io.env;
@@ -483,6 +519,7 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
         ),
       );
       items.push(...permissionChecks(paths));
+      items.push(...configChecks(paths));
       try {
         const store = Store.open(paths.db, { busyTimeoutMs: 2000 });
         try {

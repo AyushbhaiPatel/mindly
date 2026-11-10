@@ -12,10 +12,56 @@ import {
 } from 'node:fs';
 import { z } from 'zod';
 import { AgentKindSchema } from './domain.js';
+import { globToRegExp } from './glob.js';
 import { MindlyError } from './errors.js';
 import { sha256 } from './text.js';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
+
+/**
+ * Why a redaction pattern cannot be used, or null. A pattern that matches empty text (``, a
+ * lone space aside, `a*`, `x?`) would put a redaction marker between every character of
+ * everything Mindly stores, so it is refused like one that does not compile.
+ */
+export function unusableRedactionPattern(source: string): string | null {
+  if (source.trim() === '') return 'is empty';
+  let re: RegExp;
+  try {
+    re = new RegExp(source);
+  } catch {
+    return 'is not a valid regular expression';
+  }
+  if (re.test('')) return 'matches empty text, so it would redact everything';
+  return null;
+}
+
+/** Why a deny-list glob cannot be used, or null. */
+export function unusableDenyPath(glob: string): string | null {
+  if (glob.trim() === '') return 'is empty';
+  try {
+    globToRegExp(glob);
+  } catch (err) {
+    return `is not a valid glob (${err instanceof Error ? err.message : 'unreadable'})`;
+  }
+  return null;
+}
+
+const RedactionPatternSchema = z
+  .string()
+  .max(500)
+  .superRefine((p, ctx) => {
+    const why = unusableRedactionPattern(p);
+    if (why !== null)
+      ctx.addIssue({ code: 'custom', message: `pattern ${JSON.stringify(p)} ${why}` });
+  });
+
+const DenyPathSchema = z
+  .string()
+  .max(512)
+  .superRefine((g, ctx) => {
+    const why = unusableDenyPath(g);
+    if (why !== null) ctx.addIssue({ code: 'custom', message: `glob ${JSON.stringify(g)} ${why}` });
+  });
 
 const NotifyChannelSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('desktop') }),
@@ -110,8 +156,8 @@ export const UserConfigSchema = z.object({
     .prefault({}),
   redaction: z
     .object({
-      extraPatterns: z.array(z.string().max(500)).max(50).default([]),
-      denyPaths: z.array(z.string().max(512)).max(200).default([]),
+      extraPatterns: z.array(RedactionPatternSchema).max(50).default([]),
+      denyPaths: z.array(DenyPathSchema).max(200).default([]),
     })
     .prefault({}),
   checkpoints: z
@@ -192,13 +238,55 @@ function readBoundedJson(path: string): unknown {
   }
 }
 
-export function loadUserConfig(path: string): UserConfig {
-  if (!existsSync(path)) return defaultUserConfig();
-  const parsed = UserConfigSchema.safeParse(readBoundedJson(path));
+/**
+ * Removes the entries of a config read from disk that Mindly refuses to use (see
+ * `unusableRedactionPattern`, `unusableDenyPath`) and says what was removed. A hand-edited file
+ * with one bad redaction pattern then still loads, without that pattern, instead of either
+ * failing every command or redacting everything.
+ */
+export function dropUnusableEntries(raw: unknown): { config: unknown; warnings: string[] } {
+  const warnings: string[] = [];
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
+    return { config: raw, warnings };
+  const redaction = (raw as Record<string, unknown>)['redaction'];
+  if (redaction === null || typeof redaction !== 'object' || Array.isArray(redaction)) {
+    return { config: raw, warnings };
+  }
+  const cleaned: Record<string, unknown> = { ...(redaction as Record<string, unknown>) };
+  const lists: [string, (v: string) => string | null, string][] = [
+    ['extraPatterns', unusableRedactionPattern, 'pattern'],
+    ['denyPaths', unusableDenyPath, 'glob'],
+  ];
+  for (const [key, why, what] of lists) {
+    const list = cleaned[key];
+    if (!Array.isArray(list)) continue;
+    cleaned[key] = list.filter((entry: unknown) => {
+      if (typeof entry !== 'string') return true;
+      const reason = why(entry);
+      if (reason !== null) {
+        warnings.push(
+          `redaction.${key}: ignored the ${what} ${JSON.stringify(entry)}, which ${reason}`,
+        );
+      }
+      return reason === null;
+    });
+  }
+  return { config: { ...(raw as Record<string, unknown>), redaction: cleaned }, warnings };
+}
+
+/** Reads the user config, and what in it was ignored (see `dropUnusableEntries`). */
+export function readUserConfig(path: string): { config: UserConfig; warnings: string[] } {
+  if (!existsSync(path)) return { config: defaultUserConfig(), warnings: [] };
+  const { config, warnings } = dropUnusableEntries(readBoundedJson(path));
+  const parsed = UserConfigSchema.safeParse(config);
   if (!parsed.success) {
     throw new MindlyError('invalid_input', `invalid config: ${z.prettifyError(parsed.error)}`);
   }
-  return parsed.data;
+  return { config: parsed.data, warnings };
+}
+
+export function loadUserConfig(path: string): UserConfig {
+  return readUserConfig(path).config;
 }
 
 /** Atomically writes JSON with owner-only permissions. */

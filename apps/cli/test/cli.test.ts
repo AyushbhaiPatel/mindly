@@ -884,6 +884,67 @@ describe('doctor, config, export, misc', () => {
     expect((await cli(sb, ['config', 'set', 'notify.triggers', 'standup,nope'])).code).toBe(1);
   });
 
+  it('config clears a list for an empty value and trims a plain one', async () => {
+    const sb = sandbox();
+    const file = join(sb.mindlyHome, 'config.json');
+    for (const empty of ['', ' ', '""']) {
+      expect((await cli(sb, ['config', 'set', 'redaction.extraPatterns', empty])).code).toBe(0);
+      expect(json(readFileSync(file, 'utf8'))).toEqual({ redaction: { extraPatterns: [] } });
+    }
+    expect(
+      (await cli(sb, ['config', 'set', 'redaction.extraPatterns', '  ACME-\\d{6} '])).code,
+    ).toBe(0);
+    expect(json(readFileSync(file, 'utf8'))).toEqual({
+      redaction: { extraPatterns: ['ACME-\\d{6}'] },
+    });
+    // Patterns that would redact everything are refused, with the reason.
+    for (const pattern of ['a*', '(?:)', 'x?']) {
+      const r = await cli(sb, ['config', 'set', 'redaction.extraPatterns', pattern]);
+      expect(r.code, pattern).toBe(1);
+      expect(r.stderr).toContain('matches empty text');
+    }
+    const glob = await cli(sb, ['config', 'set', 'redaction.denyPaths', 'config/{prod']);
+    expect(glob.code).toBe(1);
+    expect(glob.stderr).toContain('is not a valid glob');
+    expect(
+      (await cli(sb, ['config', 'set', 'redaction.extraPatterns', JSON.stringify(['ok-\\d+', ''])]))
+        .code,
+    ).toBe(1);
+    // Nothing in the list redacts what it should not.
+    expect(
+      (await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm not npm'])).code,
+    ).toBe(0);
+    expect((await cli(sb, ['memory', 'list'])).stdout).toContain('Use pnpm not npm');
+  });
+
+  it('a hand-edited empty pattern is ignored with a warning, not applied', async () => {
+    const sb = sandbox();
+    mkdirSync(sb.mindlyHome, { recursive: true });
+    writeFileSync(
+      join(sb.mindlyHome, 'config.json'),
+      JSON.stringify({ redaction: { extraPatterns: ['', 'ACME-\\d{6}'] } }),
+    );
+    expect(
+      (await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm not npm'])).code,
+    ).toBe(0);
+    expect((await cli(sb, ['memory', 'list'])).stdout).toContain('Use pnpm not npm');
+    const get = await cli(sb, ['config', 'get', 'redaction.extraPatterns']);
+    expect(get.code).toBe(0);
+    expect(json(get.stdout)).toEqual(['ACME-\\d{6}']);
+    expect(get.stderr).toContain('ignored the pattern ""');
+    const doctor = await cli(sb, ['doctor', '--json']);
+    const checks = json<{ checks: { name: string; status: string; detail: string }[] }>(
+      doctor.stdout,
+    ).checks;
+    expect(checks.find((c) => c.name === 'config')).toMatchObject({
+      status: 'warn',
+      detail: expect.stringContaining('ignored the pattern ""'),
+    });
+    // Unsetting the list fixes the file.
+    expect((await cli(sb, ['config', 'unset', 'redaction.extraPatterns'])).code).toBe(0);
+    expect((await cli(sb, ['config', 'get', 'redaction.extraPatterns'])).stderr).toBe('');
+  });
+
   it('config keeps a list item that contains commas whole', async () => {
     const sb = sandbox();
     const file = join(sb.mindlyHome, 'config.json');

@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import {
   ensureHome,
-  loadUserConfig,
+  readUserConfig,
   mindlyHome,
   MindlyError,
   readRegularFileBounded,
@@ -107,9 +107,10 @@ function noSuchSetting(key: string): HintedError {
 
 /**
  * The value to store for what was typed, by the setting's type: a text setting takes the text as
- * typed (so a model called `4` stays text); a list takes a JSON array for several items, and any
- * other value as its one item (never split on commas: a pattern such as `{20,40}` or a glob such
- * as `{prod,staging}` holds commas of its own); anything else is JSON.
+ * typed (so a model called `4` stays text); a list takes a JSON array for several items, any
+ * other value, trimmed, as its one item (never split on commas: a pattern such as `{20,40}` or a
+ * glob such as `{prod,staging}` holds commas of its own), and an empty value as no items;
+ * anything else is JSON.
  */
 export function settingValue(setting: Setting | null, raw: string): unknown {
   const json = parseValue(raw);
@@ -118,7 +119,11 @@ export function settingValue(setting: Setting | null, raw: string): unknown {
   if (type === 'array' && !Array.isArray(json)) {
     const element = unwrap((setting?.schema.def as unknown as { element: z.ZodType }).element);
     const kind = element.schema.def.type;
-    if (kind === 'string' || kind === 'enum') return [typeof json === 'string' ? json : raw];
+    if (kind === 'string' || kind === 'enum') {
+      // Trimmed, and nothing at all clears the list: an empty item is never what was meant.
+      const item = (typeof json === 'string' ? json : raw).trim();
+      return item === '' ? [] : [item];
+    }
   }
   return json;
 }
@@ -166,7 +171,8 @@ export function configPathCmd(out: Out): number {
  * is not set (it is optional and has no default) prints `null`.
  */
 export function configGet(out: Out, key: string | undefined): number {
-  const config = loadUserConfig(configPath(out));
+  const { config, warnings } = readUserConfig(configPath(out));
+  for (const w of warnings) out.warn(`${w}. Fix it with: mindly config set or mindly config unset`);
   const parts = key === undefined ? [] : configKey(key);
   const value = getPath(config, parts);
   if (value === undefined) {
