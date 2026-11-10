@@ -1,9 +1,11 @@
 import { join } from 'node:path';
 import {
+  ancestorChain,
   createLogger,
   defaultUserConfig,
   describeError,
   fileSink,
+  hookAncestryKey,
   homePaths,
   loadUserConfig,
   mindlyHome,
@@ -105,7 +107,9 @@ export async function runHook(
     await Promise.resolve();
     const mindly = deps.open({ env: io.env, disableNotify: false });
     opened.mindly = mindly;
-    return mindly.hooks.handle(event);
+    const result = await mindly.hooks.handle(event);
+    rememberClient(mindly, event);
+    return result;
   })();
 
   let outcome: HookResult | 'timeout';
@@ -133,6 +137,31 @@ export async function runHook(
   logger.debug('hook handled', { agent, event: nativeEvent, ms: Date.now() - started });
   if (rendered.stdout !== '') io.stdout.write(rendered.stdout);
   return rendered.exitCode;
+}
+
+/**
+ * Records which processes started this hook, once per session. The hooks of an agent window and
+ * its MCP server are started by the same client process, so a server finds the session that is
+ * its own among several of one agent by comparing these with its own ancestors.
+ *
+ * On Linux this reads a few files under /proc; elsewhere it is one `ps` call, made for the first
+ * hook of a session only (an empty result is kept too, so it is not tried again). Whatever goes
+ * wrong is ignored: a hook never fails or waits because of it.
+ */
+export function rememberClient(mindly: unknown, evt: NormalizedHookEvent): void {
+  try {
+    const kv = (mindly as { store?: { kv?: Mindly['store']['kv'] } }).store?.kv;
+    if (!kv) return;
+    const key = hookAncestryKey(evt.agentKind, evt.externalSessionId);
+    if (evt.event === 'session_end') {
+      kv.delete(key);
+      return;
+    }
+    if (evt.event !== 'session_start' && kv.get<unknown>(key) !== null) return;
+    kv.set(key, ancestorChain(process.pid));
+  } catch {
+    // Not knowing the client only means the server falls back to its guess.
+  }
 }
 
 function closeQuietly(mindly: Pick<Mindly, 'close'> | null): void {
