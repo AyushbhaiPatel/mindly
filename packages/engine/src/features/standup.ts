@@ -346,16 +346,20 @@ export class StandupService {
       const turns = digest.agents.reduce((n, a) => n + a.turns, 0);
       const files = digest.agents.reduce((n, a) => n + a.filesChanged, 0);
       const waiting = needsYouCount(digest);
-      // The id comes from the day's dedupe key: every retry of one standup carries the same one.
+      // The dedupe key names the day, and each retry raises the standup afresh: the id follows
+      // the key, so every attempt at one day's standup carries the same one.
       const results = await this.k.ports.notifier.send(
-        withNotificationId({
-          trigger: 'standup',
-          title: `Mindly standup: ${name}`,
-          body: `${plural(sessions, 'session')}, ${plural(turns, 'turn')}, ${plural(files, 'file')} changed; ${waiting} item${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} you.`,
-          projectName: name,
-          priority: waiting > 0 ? 'default' : 'low',
-          dedupeKey: `standup:${projectId}:${new Date(digest.until).toISOString().slice(0, 10)}`,
-        }),
+        withNotificationId(
+          {
+            trigger: 'standup',
+            title: `Mindly standup: ${name}`,
+            body: `${plural(sessions, 'session')}, ${plural(turns, 'turn')}, ${plural(files, 'file')} changed; ${waiting} item${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} you.`,
+            projectName: name,
+            priority: waiting > 0 ? 'default' : 'low',
+            dedupeKey: `standup:${projectId}:${new Date(digest.until).toISOString().slice(0, 10)}`,
+          },
+          'key',
+        ),
         { ignoreTriggers: true },
       );
       return notifySettled(results);

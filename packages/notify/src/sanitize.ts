@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { redactText, sanitizeLine, sha256, MindlyError, truncate } from '@mindly/core';
+import { redactText, sanitizeLine, MindlyError, truncate } from '@mindly/core';
 import type { Notification, SafePayload } from './types.js';
 
 /** Maximum title length in characters. */
@@ -29,12 +29,9 @@ export function toSafePayload(n: Notification, extraPatterns: readonly string[] 
   const project =
     n.projectName === undefined ? null : safeLine(n.projectName, MAX_PROJECT_CHARS, extraPatterns);
   return {
-    id:
-      n.id !== undefined && /^[A-Za-z0-9_-]{1,64}$/.test(n.id)
-        ? n.id
-        : n.dedupeKey !== undefined
-          ? `k${sha256(n.dedupeKey).slice(0, 32)}`
-          : randomUUID(),
+    // Without an id from the caller this is a new one: a dedupe key can be shared by separate
+    // occurrences of an alert, so an id derived from it could make a receiver drop a real one.
+    id: n.id !== undefined && /^[A-Za-z0-9_-]{1,64}$/.test(n.id) ? n.id : randomUUID(),
     trigger: n.trigger,
     title,
     body: safeLine(n.body, MAX_BODY_CHARS, extraPatterns),

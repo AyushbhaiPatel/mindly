@@ -24,6 +24,8 @@ import { serviceOf } from './shared.js';
  */
 
 const PREFIX = 'notify.outbox:';
+/** This process's start time, for its presence mark. */
+const ownStart = processStart(process.pid);
 const LEASE_KEY = 'notify.outbox-lease';
 const SENDER_KEY = 'notify.outbox-sender';
 /** Attempts per entry, the first one included. */
@@ -67,6 +69,20 @@ interface Lease {
   until: number;
   /** The sender's process, for its presence mark: a mark whose process is gone is no sender. */
   pid?: number;
+  /** When that process started (Linux), so a process that took over the pid is not the sender. */
+  start?: string;
+}
+
+/** When the process `pid` started, in clock ticks since boot (Linux); null where unknown. */
+function processStart(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // Fields after the command name (which may hold spaces): state is field 3, starttime 22.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function processAlive(pid: number): boolean {
@@ -126,13 +142,22 @@ export interface OutboxFlush {
 const unattended = new WeakSet<Kernel>();
 
 /**
- * The id a notification keeps on every attempt: its own when it has a valid one, else one derived
- * from its dedupe key (the same alert raised again gets the same id), else a new one. Assign it
- * once, before the first attempt.
+ * The id a notification keeps on every attempt: its own when it has a valid one, else a new one.
+ * Assign it once, when the alert is raised, and pass the result to the first send and to the
+ * outbox. A dedupe key is not enough: a check that fails, is fixed and fails again a day later
+ * raises a new alert under the same key, and a receiver dropping repeats by id must not drop it.
+ * `occurrence` is for an alert whose dedupe key already names one occurrence and that is raised
+ * afresh on each try (the scheduled standup: one per day); the id then follows the key.
  */
-export function withNotificationId<T extends PagerNotification>(n: T): T & { id: string } {
+export function withNotificationId<T extends PagerNotification>(
+  n: T,
+  occurrence: 'new' | 'key' = 'new',
+): T & { id: string } {
   if (n.id !== undefined && /^[A-Za-z0-9_-]{1,64}$/.test(n.id)) return { ...n, id: n.id };
-  const id = n.dedupeKey !== undefined ? `k${sha256(n.dedupeKey).slice(0, 32)}` : uuidv7();
+  const id =
+    occurrence === 'key' && n.dedupeKey !== undefined
+      ? `k${sha256(n.dedupeKey).slice(0, 32)}`
+      : uuidv7();
   return { ...n, id };
 }
 
@@ -194,8 +219,13 @@ export class NotifyOutbox {
     try {
       const mark = this.k.store.kv.get<Lease>(SENDER_KEY);
       if (!mark || mark.until <= now || mark.until - now > MAX_LEASE_MS) return false;
-      // A sender that was killed leaves a fresh mark behind: it is not running.
-      return mark.pid === undefined || processAlive(mark.pid);
+      // A sender that was killed leaves a fresh mark behind: it is not running, and neither is a
+      // process that was given its pid since.
+      if (mark.pid === undefined) return true;
+      if (!processAlive(mark.pid)) return false;
+      if (mark.start === undefined) return true;
+      const start = processStart(mark.pid);
+      return start === null || start === mark.start;
     } catch {
       return false;
     }
@@ -214,6 +244,7 @@ export class NotifyOutbox {
         owner,
         until: now + SENDER_FRESH_MS,
         pid: process.pid,
+        ...(ownStart !== null ? { start: ownStart } : {}),
       } satisfies Lease);
       return true;
     });

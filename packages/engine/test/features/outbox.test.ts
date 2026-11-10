@@ -315,6 +315,22 @@ describe('the sender', () => {
     expect(env.sent).toHaveLength(1);
   });
 
+  it('does not count a sender whose process id now belongs to another process', async () => {
+    const env = make({ answer: () => sentOk });
+    const outbox = notifyOutbox(env.mindly);
+    const until = env.clock.t + 15_000;
+    // The sender died and its pid went to an unrelated process (here: this one).
+    env.mindly.store.kv.set('notify.outbox-sender', {
+      owner: 'x',
+      until,
+      pid: process.pid,
+      start: 'not-this-process',
+    });
+    expect(outbox.senderAlive()).toBe(false);
+    outbox.enqueue(page);
+    expect(outbox.needsSender()).toBe(true);
+  });
+
   it('waits while another process holds the outbox instead of leaving', async () => {
     const env = make({ answer: () => sentOk });
     const outbox = notifyOutbox(env.mindly);
@@ -345,14 +361,15 @@ describe('the sender', () => {
 });
 
 describe('notification id', () => {
-  it('is kept when valid, follows the dedupe key, and is made up otherwise', () => {
+  it('is kept when valid, new for each occurrence, and follows the key only when asked', () => {
     expect(withNotificationId({ ...page, id: 'abc_123' }).id).toBe('abc_123');
-    const a = withNotificationId({ ...page, id: 'not valid!' }).id;
-    const b = withNotificationId(page).id;
-    expect(a).toBe(b);
-    expect(b).toMatch(/^k[0-9a-f]{32}$/);
-    const noKey: Sent = { trigger: page.trigger, title: page.title, body: page.body };
-    expect(withNotificationId(noKey).id).not.toBe(withNotificationId(noKey).id);
+    // Two occurrences under one dedupe key are two alerts.
+    expect(withNotificationId(page).id).not.toBe(withNotificationId(page).id);
+    expect(withNotificationId({ ...page, id: 'not valid!' }).id).toMatch(/^[0-9a-f-]{36}$/);
+    // An alert whose key names its occurrence (one standup a day) keeps one id across retries.
+    const day = withNotificationId(page, 'key').id;
+    expect(day).toBe(withNotificationId(page, 'key').id);
+    expect(day).toMatch(/^k[0-9a-f]{32}$/);
   });
 
   it('is the one given to the first attempt when the outbox takes over', async () => {

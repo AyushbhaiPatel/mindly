@@ -2,7 +2,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLogger, nullSink, type Project, type Session } from '@mindly/core';
 import { commandHash, contractsOf, notifyOutbox, standupService, USER } from '@mindly/engine';
 import {
@@ -446,6 +446,31 @@ describe('pager delivery', () => {
       expect(hook.bodies.length - before).toBeLessThanOrEqual(STANDUP_MAX_ATTEMPTS);
       expect(hook.bodies.length - before).toBeGreaterThan(1);
     } finally {
+      await hook.close();
+    }
+  });
+
+  it('gives a new occurrence of an alert a new id, even with the same dedupe key', async () => {
+    const hook = await pagerEndpoint();
+    try {
+      const { d, clock } = await pagerDaemon(hook.url);
+      const alert = {
+        trigger: 'check_failed' as const,
+        title: 'A check fails on merged agent work',
+        body: 'Check "test" failed.',
+        dedupeKey: 'check_failed:proj:fp-test',
+      };
+      // Monday the check fails; it is fixed, and on Tuesday it fails again: a new alert.
+      await notify(d.jobs, alert);
+      clock.t += 24 * 60 * 60_000;
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 24 * 60 * 60_000);
+      await notify(d.jobs, alert);
+      const ids = hook.bodies.map((b) => (JSON.parse(b) as { id: string }).id);
+      expect(ids).toHaveLength(2);
+      expect(ids[1]).not.toBe(ids[0]);
+    } finally {
+      vi.useRealTimers();
       await hook.close();
     }
   });
