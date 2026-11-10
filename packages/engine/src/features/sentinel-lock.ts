@@ -3,7 +3,6 @@ import {
   closeSync,
   constants as fsConstants,
   copyFileSync,
-  existsSync,
   linkSync,
   openSync,
   readdirSync,
@@ -65,6 +64,8 @@ const HELD_RETRY_MS = 5;
 /** A holder that let go of a lock it found away looks for it again this often, this far apart. */
 const RELEASE_LATER_TRIES = 30;
 const RELEASE_LATER_MS = 1000;
+/** A note of a release older than this belongs to a lock its holder could not remove. */
+const RELEASE_SETTLED_MS = 2000;
 /** Acquisitions let go of, remembered per process. */
 const MAX_RELEASED_IDS = 1000;
 /** A note of what was seen of a lock is not believed past this age, nor when dated in the future. */
@@ -198,12 +199,26 @@ function releasedMark(file: string, id: string | null): string | null {
   return id !== null && /^[0-9a-f]{8,64}$/.test(id) ? `${file}.released-${id}` : null;
 }
 
-/** True when the acquisition `id` of the lock at `file` was let go of. */
-function wasReleased(file: string, id: string | null): boolean {
+/**
+ * True when the acquisition `id` of the lock at `file` was let go of. With `settledMs`, a note
+ * on disk counts only once it is that old: a holder notes its release before it removes its
+ * lock, and a lock in the middle of a normal release is not free to take over yet.
+ */
+function wasReleased(
+  file: string,
+  id: string | null,
+  settled?: { now: () => number; ms: number },
+): boolean {
   if (id === null) return false;
   if (releasedIds().has(id)) return true;
   const mark = releasedMark(file, id);
-  return mark !== null && existsSync(mark);
+  if (mark === null) return false;
+  try {
+    const at = statSync(mark).mtimeMs;
+    return settled === undefined || Math.abs(settled.now() - at) > settled.ms;
+  } catch {
+    return false;
+  }
 }
 
 /** The lock ids this process holds now, shared by every copy of this module in the process. */
@@ -363,11 +378,10 @@ function takeOver(
         if (mark) unlinkQuiet(mark);
         return true;
       }
-      // Its holder let go of it while it was aside: it is free, and dropped instead of put back
-      // (this attempt does not take it; the next one does).
+      // Its holder let go of it while it was aside: it is free, and dropped instead of put back.
       if (wasReleased(file, movedId)) {
         if (mark) unlinkQuiet(mark);
-        return false;
+        return true;
       }
       putBack(aside, file, link);
       return false;
@@ -605,8 +619,9 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
     if (age > maxAge) return true;
     const h = parseHolder(seen.raw);
     if (h === null) return Math.abs(age) > UNREADABLE_MAX_AGE_MS;
-    // Put back after its holder let go of it: free, whatever its PID says.
-    if (wasReleased(file, h.id)) return true;
+    // Put back after its holder let go of it, which it could not remove: free, whatever its
+    // PID says.
+    if (wasReleased(file, h.id, { now, ms: RELEASE_SETTLED_MS })) return true;
     const verdict = byPid(h);
     if (verdict !== 'unknown' || h.id === null) return verdict === 'gone';
     // Its holder touches it every `heartbeatMs` while it lives: abandoned once this observer
@@ -680,15 +695,18 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
          * takeover in those microseconds: the lock moved aside is put back, never over a newer
          * one.
          */
-        const dropOwn = (): void => {
+        const dropOwn = (): 'dropped' | 'away' | 'other' => {
           const aside = `${file}.release-${process.pid}-${randomBytes(6).toString('hex')}`;
           try {
             renameSync(file, aside);
           } catch {
-            return;
+            // Moved away (a takeover) since it was looked at: looked for again.
+            return 'away';
           }
           try {
-            if (parseHolder(readRaw(aside))?.id !== id) putBack(aside, file, link);
+            if (parseHolder(readRaw(aside))?.id === id) return 'dropped';
+            putBack(aside, file, link);
+            return 'other';
           } finally {
             unlinkQuiet(aside);
           }
@@ -703,6 +721,18 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
             ids.add(id);
             if (ids.size > MAX_RELEASED_IDS) ids.delete(ids.values().next().value as string);
             if (lost) return;
+            // Noted next to the lock before it is touched: a takeover that has it aside, or
+            // moves it aside from here on, finds the note when it would put it back, and drops
+            // it instead. Removed again once the lock is gone.
+            const mark = releasedMark(file, id);
+            try {
+              if (mark) writeFileSync(mark, '', { mode: 0o600 });
+            } catch {
+              // the lock is still looked for again below
+            }
+            const done = (): void => {
+              if (mark) unlinkQuiet(mark);
+            };
             // Only our own lock is removed: one that names another holder (ours was taken over
             // and the heartbeat did not notice yet) is left exactly as it is. One that is away
             // (a takeover has it aside to look at it) is looked for again for a moment.
@@ -711,25 +741,19 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
               pause(HELD_RETRY_MS);
               state = look();
             }
-            if (state === 'mine') return dropOwn();
-            if (state === 'other') return;
-            // Still away: it may be put back. Noted next to the lock, so that whoever finds it
-            // put back treats it as free, and looked for again for a while to remove it.
-            const mark = releasedMark(file, id);
-            try {
-              if (mark) writeFileSync(mark, '', { mode: 0o600 });
-            } catch {
-              // looked for again below all the same
-            }
+            if (state === 'other' || (state === 'mine' && dropOwn() !== 'away')) return done();
+            // Away, or moved away between the look and the move: it may be put back. Looked for
+            // again for a while to remove it; the note stays while it is away.
             let tries = 0;
             const later = setInterval(() => {
               const now = look();
-              if (now === 'mine') dropOwn();
-              if (now === 'unreadable' && ++tries < RELEASE_LATER_TRIES) return;
-              clearInterval(later);
-              // Kept while the lock is still away: whoever puts it back must find it.
-              if (mark && now !== 'unreadable') unlinkQuiet(mark);
+              if (now === 'other' || (now === 'mine' && dropOwn() !== 'away')) {
+                clearInterval(later);
+                return done();
+              }
+              if (++tries >= RELEASE_LATER_TRIES) clearInterval(later);
             }, RELEASE_LATER_MS);
+            // Never keeps a process (a one-shot `mindly sentinel run`) alive.
             later.unref();
           },
           held: () => {

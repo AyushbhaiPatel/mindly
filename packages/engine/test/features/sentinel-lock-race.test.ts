@@ -196,8 +196,9 @@ describe('sentinel lock races', () => {
         a.release();
       }
     };
+    let r: ReturnType<typeof tryProcessLock>;
     try {
-      const r = tryProcessLock(file, {
+      r = tryProcessLock(file, {
         ...observer,
         monotonic: () => {
           if (++reads === 2) {
@@ -207,14 +208,70 @@ describe('sentinel lock races', () => {
           return mono;
         },
       });
-      expect(r).toBeNull();
     } finally {
       hook.fn = null;
     }
     expect(releasedAside).toBe(true);
-    // Not put back: A let go of it. Nothing of it is left, and the lock is free.
+    // Not put back: A let go of it, so the takeover takes it. Nothing of A's lock is left.
+    expect(r).not.toBeNull();
+    expect(fs.readFileSync(file, 'utf8').split('\n')[0]).toBe(String(process.pid));
+    r!.release();
     expect(fs.readdirSync(join(file, '..')).filter((f) => !f.startsWith('lock.seen-'))).toEqual([]);
-    tryProcessLock(file)!.release();
+  });
+
+  it('never leaves its lock behind when it is moved aside between its look and its move', () => {
+    const file = lockFile();
+    const a = tryProcessLock(file)!;
+    const id = fs.readFileSync(file, 'utf8').split('\n')[1] as string;
+    // B, in another namespace (and here standing in for another process: it does not share
+    // A's memory of released locks), saw the lock unchanged for the window.
+    let mono = 0;
+    const observer = {
+      namespace: () => 'pid:[4026532002]',
+      host: () => 'host-1',
+      monotonic: () => mono,
+    };
+    expect(tryProcessLock(file, observer)).toBeNull();
+    mono += 6 * SENTINEL_LOCK_HEARTBEAT_MS + 1000;
+    let b: ReturnType<typeof tryProcessLock> = null;
+    let putBack = false;
+    hook.fn = (op, path) => {
+      // A found the lock its own and is about to move it: B moves it aside first. A's last
+      // heartbeat touched it while B judged it, so B would put it back.
+      if (op !== 'rename' || path !== file) return;
+      hook.fn = null;
+      const released = (globalThis as Record<symbol, Set<string> | undefined>)[
+        Symbol.for('mindly.sentinel.released')
+      ];
+      released?.delete(id);
+      let reads = 0;
+      b = tryProcessLock(file, {
+        ...observer,
+        link: (existing, to) => {
+          if (existing.includes('.stale-')) putBack = true;
+          fs.linkSync(existing, to);
+        },
+        monotonic: () => {
+          if (++reads === 2) {
+            const t = new Date(Date.now() + 1000);
+            fs.utimesSync(file, t, t);
+          }
+          return mono;
+        },
+      });
+      released?.add(id);
+    };
+    try {
+      a.release();
+    } finally {
+      hook.fn = null;
+    }
+    // B found A's note of the release: it did not put A's lock back, and took the lock.
+    expect(putBack).toBe(false);
+    expect(b).not.toBeNull();
+    expect(fs.readFileSync(file, 'utf8').split('\n')[1]).not.toBe(id);
+    b!.release();
+    expect(fs.readdirSync(join(file, '..')).filter((f) => !f.startsWith('lock.seen-'))).toEqual([]);
   });
 
   it('treats a lock put back after its holder let go of it as free', () => {
@@ -225,7 +282,12 @@ describe('sentinel lock races', () => {
     const here = { namespace: () => 'pid:[1]', host: () => 'host-1', alive: () => true };
     fs.writeFileSync(file, [process.ppid, id, '', 'pid:[1]', 'host-1'].join('\n'));
     expect(tryProcessLock(file, here)).toBeNull();
+    // Its holder noted the release; a moment later it may still be removing it itself.
     fs.writeFileSync(`${file}.released-${id}`, '');
+    expect(tryProcessLock(file, here)).toBeNull();
+    // A note that stays means it could not: the lock is free.
+    const t = new Date(Date.now() - 5000);
+    fs.utimesSync(`${file}.released-${id}`, t, t);
     const lock = tryProcessLock(file, here)!;
     expect(lock).not.toBeNull();
     lock.release();
