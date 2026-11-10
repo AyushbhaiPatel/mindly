@@ -4,6 +4,7 @@ import { normalizeLine, redactText, sanitizeForContext, sha256 } from '@mindly/c
 import { describe, expect, it, vi } from 'vitest';
 import {
   EARLIER_FORM_WORK,
+  EVIDENCE_SCAN_WORK,
   excerptPresent,
   excerptState,
   excerptWork,
@@ -780,6 +781,66 @@ describe('self-healing memory', () => {
       const [, ms] = timed(() => excerptState(content, stored, hash));
       expect(ms).toBeLessThan(20 * normalising + 5);
     }
+  });
+
+  it('looks for evidence in time linear in the file, whatever the file and the excerpt hold', async () => {
+    /** The best of three runs: the time of the work, not of compiling it. */
+    const timed = <T>(f: () => T): [T, number] => {
+      let best = Infinity;
+      let r = f();
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now();
+        r = f();
+        best = Math.min(best, performance.now() - t);
+      }
+      return [r, best];
+    };
+    /** Within the allowances, and a few passes over the file measured on this machine. */
+    const quick = (content: string, excerpt: string, hash: string | null) => {
+      const [found, ms] = timed(() => excerptWork(content, excerpt, hash));
+      expect(found.scanned).toBeLessThanOrEqual(EVIDENCE_SCAN_WORK);
+      expect(found.work).toBeLessThanOrEqual(EARLIER_FORM_WORK);
+      const [, normalising] = timed(() => normalizeBlock(content));
+      expect(ms).toBeLessThan(20 * normalising + 5);
+      return found.state;
+    };
+    // A long run of one character, where a built-in search takes time quadratic in it.
+    const run = 'a'.repeat(500_000);
+    expect(quick(run, `${'a'.repeat(200)}b${'a'.repeat(1799)}`, null)).toBe('absent');
+    expect(quick(run, `${'a'.repeat(200)}[REDACTED]${'a'.repeat(1780)}`, sha256('gone'))).not.toBe(
+      'absent',
+    );
+    // A line made safe away entirely, next to a line holding the kept text 120 000 times.
+    const lines = `${'\u0001'.repeat(250_000)}\nx${' x'.repeat(120_000)}`;
+    expect(quick(lines, 'x [REDACTED]', `lines:3:${sha256('gone')}`)).toBe('unknown');
+
+    // Twenty rows of one file in one re-check, through the hook path.
+    const { root, mindly, pid, cx, write } = await featureSetup();
+    const excerpts = Array.from(
+      { length: 20 },
+      (_, i) => `${'a'.repeat(200 + i)}b${'a'.repeat(1799 - i)}`,
+    );
+    write('src/data.txt', excerpts.join('\n'));
+    for (const [i, excerpt] of excerpts.entries()) {
+      mindly.memory.remember({
+        projectId: pid,
+        projectRoot: root,
+        kind: 'fact',
+        title: `fact ${i}`,
+        body: `fact ${i}`,
+        source: agentSource(cx),
+        evidence: [{ path: 'src/data.txt', excerpt }],
+      });
+    }
+    write('src/data.txt', run);
+    const [, oneRow] = timed(() => excerptState(run, excerpts[0] as string, null));
+    const t = performance.now();
+    const checks = selfHealingOf(mindly).recheckFile(pid, root, 'src/data.txt', null);
+    const all = performance.now() - t;
+    expect(checks.map((c) => c.state)).toEqual(excerpts.map(() => 'invalid'));
+    // The file is read and converted once; each row is one linear pass over it, and the rest is
+    // marking the memories stale (a few times one row's time here).
+    expect(all).toBeLessThan(60 * oneRow + 100);
   });
 
   it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {

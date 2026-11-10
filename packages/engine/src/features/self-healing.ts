@@ -61,8 +61,18 @@ const MAX_LEGACY_WORK = 1_000_000;
  * one place visited in the file.
  */
 const HASH_COST = 256;
+/**
+ * Characters of the file read while looking for an excerpt or a piece of one, for all evidence of
+ * one file together. Every look is linear in what it reads (see `eachPlace`); past this, a look
+ * not yet made answers `unknown` and the evidence keeps its validity.
+ */
+const MAX_SCAN_WORK = 24_000_000;
+/** Characters an excerpt lost just before its start that are tried as part of it, at most. */
+const MAX_LOST_BEFORE = 16;
 const DIGEST_COST = 512;
 const PLACE_COST = 16;
+/** The allowance for reading the file in looks for evidence, for tests (see `scan`). */
+export const EVIDENCE_SCAN_WORK = MAX_SCAN_WORK;
 /** The allowance of `MAX_LEGACY_WORK`, for tests that check the work stays within it. */
 export const EARLIER_FORM_WORK = MAX_LEGACY_WORK;
 
@@ -286,9 +296,19 @@ interface NormFile {
   safe(): SafeView;
   /**
    * False when `text` (kept text of a stored excerpt) cannot be in the file: its skeleton is not
-   * in the file's (see `skeleton`).
+   * in the file's (see `skeleton`); null when the look would go past the work allowed.
    */
-  mayHold(text: string): boolean;
+  mayHold(text: string): boolean | null;
+  /**
+   * Visits each place `needle` occurs in `text` (the file, or a view of it) from `from` (see
+   * `eachPlace`), reading it within the allowance for the file; false when the allowance would
+   * not cover reading the rest of `text` (nothing is read then).
+   */
+  scan(text: string, needle: string, from: number, visit: (at: number) => boolean): boolean;
+  /** Characters read so far (see `scan`). */
+  scanned(): number;
+  /** For each line of `content`: 1 when it is only characters made safe away. */
+  madeSafeAway(): Uint8Array;
   /**
    * Takes `chars` of hashing from the work allowed for evidence of earlier forms in this file;
    * false (and nothing taken) when it would go past it.
@@ -314,6 +334,51 @@ function skeleton(text: string): string {
   return text.replace(SKELETON_DROP_RE, '').replaceAll('‹', '<');
 }
 
+/** The UTF-16 code units of `text`, as one array (converted natively, in one pass). */
+function unitsOf(text: string): Uint16Array {
+  const bytes = Buffer.from(text, 'utf16le');
+  if (bytes.byteOffset % 2 === 0) {
+    return new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
+  }
+  return new Uint16Array(Uint8Array.from(bytes).buffer);
+}
+
+/**
+ * Calls `visit` with each place `needle` occurs in `text` (its code units) at or after `from`,
+ * in order, until it returns false. Linear in `text` and `needle` whatever they hold
+ * (Knuth-Morris-Pratt), where a built-in search can take time quadratic in them (a long run of
+ * one character). Returns how many code units of `text` it read.
+ */
+function eachPlace(
+  text: Uint16Array,
+  needle: string,
+  from: number,
+  visit: (at: number) => boolean,
+): number {
+  const m = needle.length;
+  if (m === 0 || m > text.length - from) return 0;
+  const want = unitsOf(needle);
+  const fail = new Int32Array(m);
+  for (let i = 1, k = 0; i < m; i++) {
+    const c = want[i] as number;
+    while (k > 0 && want[k] !== c) k = fail[k - 1] as number;
+    if (want[k] === c) k++;
+    fail[i] = k;
+  }
+  const n = text.length;
+  let i = from;
+  for (let k = 0; i < n; i++) {
+    const c = text[i] as number;
+    while (k > 0 && want[k] !== c) k = fail[k - 1] as number;
+    if (want[k] === c) k++;
+    if (k === m) {
+      if (!visit(i - m + 1)) return i + 1 - from;
+      k = fail[k - 1] as number;
+    }
+  }
+  return i - from;
+}
+
 /** Where each line of `text` starts. */
 function lineStartsOf(text: string): Int32Array {
   const s = [0];
@@ -329,7 +394,10 @@ function normFile(raw: string): NormFile {
   let safeStarts: Int32Array | null = null;
   let view: SafeView | null = null;
   let bones: string | null = null;
+  let away: Uint8Array | null = null;
+  const units = new Map<string, Uint16Array>();
   let work = 0;
+  let read = 0;
   const runs = new Map<number, Map<string, number>>();
   const file: NormFile = {
     content: normContent,
@@ -338,7 +406,42 @@ function normFile(raw: string): NormFile {
     safeLineStarts: () => (safeStarts ??= lineStartsOf(file.safe().text)),
     mayHold(text) {
       bones ??= skeleton(normContent);
-      return bones.includes(skeleton(text));
+      let found = false;
+      const scanned = file.scan(bones, skeleton(text), 0, () => {
+        found = true;
+        return false;
+      });
+      return scanned ? found : null;
+    },
+    scan(text, needle, from, visit) {
+      if (read + (text.length - from) > MAX_SCAN_WORK) return false;
+      let codes = units.get(text);
+      if (!codes) {
+        codes = unitsOf(text);
+        units.set(text, codes);
+      }
+      read += eachPlace(codes, needle, from, visit);
+      return true;
+    },
+    scanned: () => read,
+    madeSafeAway() {
+      if (!away) {
+        const at = file.lineStarts();
+        away = new Uint8Array(at.length);
+        for (let i = 0; i < at.length; i++) {
+          const to = i + 1 < at.length ? (at[i + 1] as number) - 1 : normContent.length;
+          let only = 1;
+          for (let p = at[i] as number; p < to; p++) {
+            const c = normContent.charCodeAt(p);
+            if (!isUnsafe(c) && !isSpace(c)) {
+              only = 0;
+              break;
+            }
+          }
+          away[i] = only;
+        }
+      }
+      return away;
     },
     spend(chars) {
       if (work + chars > MAX_LEGACY_WORK) return false;
@@ -401,10 +504,10 @@ export function excerptWork(
   content: string,
   excerpt: string,
   contentHash: string | null,
-): { state: ExcerptState; work: number } {
+): { state: ExcerptState; work: number; scanned: number } {
   const file = normFile(content);
   const state = excerptIn(file, excerpt, contentHash).state;
-  return { state, work: file.spent() };
+  return { state, work: file.spent(), scanned: file.scanned() };
 }
 
 /** What a look found, and, for evidence of the earliest form found in place, where. */
@@ -416,7 +519,16 @@ interface Look {
 
 function excerptIn(file: NormFile, excerpt: string, contentHash: string | null): Look {
   const normExcerpt = normalizeBlock(excerpt);
-  if (normExcerpt.length > 0 && file.content.includes(normExcerpt)) return { state: 'present' };
+  if (normExcerpt.length > 0) {
+    let found = false;
+    const scanned = file.scan(file.content, normExcerpt, 0, () => {
+      found = true;
+      return false;
+    });
+    if (found) return { state: 'present' };
+    // Not looked for within the work allowed for the file: nothing can be said.
+    if (!scanned) return { state: 'unknown' };
+  }
   if (!contentHash) return { state: 'absent' };
   const span = parseSpan(contentHash);
   if (span) return { state: spanIn(file.content, span) ? 'present' : 'absent' };
@@ -446,7 +558,11 @@ function earlierForm(
 ): Look {
   const kept = keptText(normExcerpt);
   const key = longest(kept.parts);
-  if (skeleton(key).length > 0 && !file.mayHold(key)) return { state: 'absent' };
+  if (skeleton(key).length > 0) {
+    const may = file.mayHold(key);
+    if (may === null) return { state: 'unknown' };
+    if (!may) return { state: 'absent' };
+  }
   const found =
     (lines === null ? placeKept(file, kept, hash) : null) ??
     placeLines(file, kept, lines, hash) ??
@@ -499,17 +615,6 @@ function keptText(normExcerpt: string): Kept {
   return { text, parts: text.split(REDACTED), cut };
 }
 
-/** True when line `i` of `norm` (lines start at `starts`) is only characters made safe away. */
-function lineMadeSafeAway(norm: string, starts: Int32Array, i: number): boolean {
-  const from = starts[i] as number;
-  const to = i + 1 < starts.length ? (starts[i + 1] as number) - 1 : norm.length;
-  for (let p = from; p < to; p++) {
-    const c = norm.charCodeAt(p);
-    if (!isUnsafe(c) && !isSpace(c)) return false;
-  }
-  return true;
-}
-
 /**
  * Evidence whose original was whole lines. The longest piece of what was kept lies on a known
  * line of the excerpt. Each place it occurs in the file made safe (which has the excerpt's
@@ -537,21 +642,23 @@ function placeLines(
   const viewStarts = file.safeLineStarts();
   const starts = file.lineStarts();
   const norm = file.content;
+  const away = file.madeSafeAway();
   let visited = 0;
-  for (let o = view.text.indexOf(key); o !== -1; o = view.text.indexOf(key, o + 1)) {
-    if (++visited > MAX_LEGACY_OCCURRENCES || !file.spend(PLACE_COST)) return null;
+  let found: { start: number; end: number } | null = null;
+  file.scan(view.text, key, 0, (o) => {
+    if (++visited > MAX_LEGACY_OCCURRENCES || !file.spend(PLACE_COST)) return false;
     const first = lineOf(viewStarts, o) - lineInExcerpt;
     const last = first + excerptLines - 1;
-    if (first < 0 || last >= viewStarts.length) continue;
+    if (first < 0 || last >= viewStarts.length) return true;
     const from = view.at[viewStarts[first] as number] as number;
     const lastEnd =
       last + 1 < viewStarts.length ? (viewStarts[last + 1] as number) - 2 : view.text.length - 1;
     const to = view.at[lastEnd] as number;
-    if (from < 0 || to < 0) continue;
+    if (from < 0 || to < 0) return true;
     const lineFrom = lineOf(starts, from);
     const lineTo = lineOf(starts, to);
-    const above = lineFrom > 0 && lineMadeSafeAway(norm, starts, lineFrom - 1) ? 1 : 0;
-    const below = lineTo + 1 < starts.length && lineMadeSafeAway(norm, starts, lineTo + 1) ? 1 : 0;
+    const above = lineFrom > 0 && away[lineFrom - 1] === 1 ? 1 : 0;
+    const below = lineTo + 1 < starts.length && away[lineTo + 1] === 1 ? 1 : 0;
     for (let up = 0; up <= above; up++) {
       for (let down = 0; down <= below; down++) {
         const a = lineFrom - up;
@@ -559,12 +666,16 @@ function placeLines(
         if (lines !== null && b - a + 1 !== lines) continue;
         const start = starts[a] as number;
         const end = b + 1 < starts.length ? (starts[b + 1] as number) - 1 : norm.length;
-        if (!file.spend(end - start + HASH_COST)) return null;
-        if (sha256(norm.slice(start, end)) === hash) return { start, end };
+        if (!file.spend(end - start + HASH_COST)) return false;
+        if (sha256(norm.slice(start, end)) === hash) {
+          found = { start, end };
+          return false;
+        }
       }
     }
-  }
-  return null;
+    return true;
+  });
+  return found;
 }
 
 /** The line of `starts` that holds position `pos`. */
@@ -602,11 +713,16 @@ function placeKept(
   const norm = file.content;
   const text = view.text;
   const heads: number[] = [];
-  for (let h = text.indexOf(head); h !== -1; h = text.indexOf(head, h + 1)) {
-    if (heads.length >= MAX_LEGACY_OCCURRENCES || !file.spend(PLACE_COST)) return null;
+  let complete = true;
+  const scanned = file.scan(text, head, 0, (h) => {
+    if (heads.length >= MAX_LEGACY_OCCURRENCES || !file.spend(PLACE_COST)) {
+      complete = false;
+      return false;
+    }
     heads.push(h);
-  }
-  if (heads.length === 0) return null;
+    return true;
+  });
+  if (!scanned || !complete || heads.length === 0) return null;
   let tries = 0;
   /** The original from the start at `h` to the tail ending at `tailEnd`; false: stop looking. */
   const pair = (h: number, tailEnd: number): { start: number; end: number } | false | null => {
@@ -616,6 +732,7 @@ function placeKept(
     let before = mapped;
     while (
       before > 0 &&
+      mapped - before < MAX_LOST_BEFORE &&
       isUnsafe(norm.charCodeAt(before - 1)) &&
       !isSpace(norm.charCodeAt(before - 1))
     ) {
@@ -672,19 +789,23 @@ function placeKept(
   let visited = 0;
   let lo = 0;
   let hi = 0;
-  for (let t = text.indexOf(tail, (heads[0] as number) + head.length); t !== -1;) {
-    if (++visited > MAX_LEGACY_OCCURRENCES || !file.spend(PLACE_COST)) return null;
+  let result: { start: number; end: number } | null = null;
+  file.scan(text, tail, (heads[0] as number) + head.length, (t) => {
+    if (++visited > MAX_LEGACY_OCCURRENCES || !file.spend(PLACE_COST)) return false;
     const tailEnd = t + tail.length;
     while (hi < heads.length && (heads[hi] as number) + head.length <= t) hi++;
     while (lo < hi && tailEnd - (heads[lo] as number) > MAX_ORIGINAL_CHARS) lo++;
     for (let i = hi - 1; i >= lo; i--) {
       const r = pair(heads[i] as number, tailEnd);
-      if (r !== null) return r || null;
+      if (r !== null) {
+        result = r || null;
+        return false;
+      }
     }
-    if (lo === heads.length) break;
-    t = text.indexOf(tail, t + 1);
-  }
-  return null;
+    // No head left that a later tail could close: done.
+    return lo < heads.length;
+  });
+  return result;
 }
 
 /**
