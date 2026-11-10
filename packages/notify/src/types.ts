@@ -32,6 +32,23 @@ export interface SendResult {
   reason?: string;
 }
 
+/** How one `send` call departs from the configured behaviour. */
+export interface SendOptions {
+  /**
+   * Send even when the trigger is not listed in `notify.triggers`. For notifications the user
+   * asked for in another way (a scheduled standup, a test of the channels).
+   */
+  ignoreTriggers?: boolean;
+  /** Skip dedupe and the hourly budget (a test of the channels). */
+  bypassLimits?: boolean;
+}
+
+/** Where the notifier reports what it could not send. Never receives URLs or payload text. */
+export interface NotifierLog {
+  warn(message: string, fields?: Record<string, unknown>): void;
+  debug(message: string, fields?: Record<string, unknown>): void;
+}
+
 /** Minimal `fetch` signature so tests can inject a fake. */
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 

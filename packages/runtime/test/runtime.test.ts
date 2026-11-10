@@ -3,7 +3,10 @@ import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createGitPort, openMindly } from '../src/index.js';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { UserConfigSchema } from '@mindly/core';
+import { createGitPort, createNotifierPort, openMindly } from '../src/index.js';
 
 function repo(): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-rt-')));
@@ -136,6 +139,56 @@ describe('linked worktrees', () => {
       expect(branches).toEqual(['feat/x', 'main']);
     } finally {
       mindly.close();
+    }
+  });
+});
+
+describe('notifier port', () => {
+  it("redacts with the user's patterns, reports what each channel did and logs a failure once", async () => {
+    const bodies: string[] = [];
+    let code = 200;
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c: Buffer) => (body += c.toString('utf8')));
+      req.on('end', () => {
+        bodies.push(body);
+        res.statusCode = code;
+        res.end('ok');
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const config = UserConfigSchema.parse({
+        notify: { channels: [{ type: 'webhook', url: `http://127.0.0.1:${port}/hook` }] },
+        redaction: { extraPatterns: ['ACME-[0-9]{6}'] },
+      });
+      const warned: unknown[] = [];
+      const pager = createNotifierPort(config.notify, {
+        redactPatterns: config.redaction.extraPatterns,
+        log: { warn: (_m, fields) => warned.push(fields), debug: () => undefined },
+      });
+      const n = {
+        trigger: 'check_failed' as const,
+        title: 'A check fails',
+        body: 'Check "deploy ACME-123456" failed in proj-ACME-654321.',
+        projectName: 'proj-ACME-654321',
+      };
+      expect(await pager.send(n)).toEqual([{ channel: 'webhook', status: 'sent' }]);
+      expect(bodies[0]).not.toMatch(/ACME-\d/);
+      expect(JSON.parse(bodies[0]!)).toMatchObject({ project: 'proj-[REDACTED]' });
+
+      code = 500;
+      for (let i = 0; i < 2; i++) {
+        expect(await pager.send(n)).toEqual([
+          { channel: 'webhook', status: 'failed', reason: 'webhook returned HTTP 500' },
+        ]);
+      }
+      expect(warned).toEqual([
+        { channel: 'webhook', reason: 'webhook returned HTTP 500', trigger: 'check_failed' },
+      ]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });

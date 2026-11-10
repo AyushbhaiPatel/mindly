@@ -31,6 +31,11 @@ export const defaultExecFile: ExecFileLike = (file, args, options) =>
 /** Result of a channel attempt before it is labelled with the channel name. */
 export type ChannelOutcome = { status: 'sent' } | { status: 'skipped'; reason: string };
 
+/** Escapes the characters the Desktop Notifications markup gives a meaning to. */
+export function escapeMarkup(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 /** Desktop notification via osascript (macOS) or notify-send (Linux). */
 export async function sendDesktop(
   p: SafePayload,
@@ -50,7 +55,9 @@ export async function sendDesktop(
   if (platform === 'linux') {
     const urgency = p.priority === 'high' ? 'critical' : p.priority === 'low' ? 'low' : 'normal';
     const title = p.project ? `${p.title} (${p.project})` : p.title;
-    await execFileImpl('notify-send', [`--urgency=${urgency}`, '--', title, p.body], {
+    // The summary is plain text; the body is markup to a notification server (bold, links,
+    // images), so its three special characters are written as entities.
+    await execFileImpl('notify-send', [`--urgency=${urgency}`, '--', title, escapeMarkup(p.body)], {
       timeout: CHANNEL_TIMEOUT_MS,
     });
     return { status: 'sent' };
@@ -95,7 +102,7 @@ const NTFY_PRIORITY = { low: '2', default: '3', high: '4' } as const;
 const TOPIC_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
 /**
- * ntfy publish: `POST <url>/<topic>` with a plain-text body and `Title`, `Priority`, `Tags`
+ * ntfy publish: `POST <url>/<topic>` (keeping the URL's query string) with a plain-text body and `Title`, `Priority`, `Tags`
  * headers. Header values are stripped of control characters (no CR/LF injection) and any
  * non-ASCII title is sent as an RFC 2047 encoded word, which ntfy decodes.
  */
@@ -106,7 +113,8 @@ export async function sendNtfy(
 ): Promise<ChannelOutcome> {
   const base = requireSecureUrl(channel.url, 'ntfy');
   if (!TOPIC_RE.test(channel.topic)) throw new MindlyError('invalid_input', 'ntfy topic invalid');
-  const target = `${base.origin}${base.pathname.replace(/\/+$/, '')}/${channel.topic}`;
+  // The query string stays: it is how an ntfy server takes an access token (`?auth=...`).
+  const target = `${base.origin}${base.pathname.replace(/\/+$/, '')}/${channel.topic}${base.search}`;
   const body = [p.project ? `[${p.project}]` : '', p.body || p.title].filter(Boolean).join(' ');
   await post(fetchImpl, target, 'ntfy', {
     headers: {

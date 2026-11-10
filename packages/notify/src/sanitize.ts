@@ -8,9 +8,17 @@ export const MAX_BODY_CHARS = 240;
 /** Maximum project name length in characters. */
 export const MAX_PROJECT_CHARS = 60;
 
-/** Redacts, collapses to a single line and caps a piece of notification text. */
+/** Longest text looked at; anything beyond is cut before it is cleaned. */
+const MAX_INPUT_CHARS = 8000;
+
+/**
+ * Collapses a piece of notification text to a single line, redacts it and caps it. Control and
+ * invisible characters go first: a token with a zero-width character inside it is not a token to
+ * the redactor, and would be put back together by the cleaning that follows.
+ */
 export function safeLine(text: string, max: number, extraPatterns: readonly string[] = []): string {
-  const flat = sanitizeLine(redactText(text, { extraPatterns }), max * 2);
+  const clean = sanitizeLine(text.slice(0, MAX_INPUT_CHARS), MAX_INPUT_CHARS);
+  const flat = sanitizeLine(redactText(clean, { extraPatterns }), max * 2);
   return truncate(flat, max);
 }
 

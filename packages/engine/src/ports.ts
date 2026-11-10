@@ -272,18 +272,53 @@ export type NotifyTrigger =
   | 'review_ready'
   | 'standup';
 
-export interface NotifierPort {
-  send(n: {
-    trigger: NotifyTrigger;
-    title: string;
-    body: string;
-    projectName?: string;
-    priority?: 'low' | 'default' | 'high';
-    dedupeKey?: string;
-  }): Promise<void>;
+/** A pager notification: titles and counts only, never code or prompt text. */
+export interface PagerNotification {
+  trigger: NotifyTrigger;
+  title: string;
+  body: string;
+  projectName?: string;
+  priority?: 'low' | 'default' | 'high';
+  dedupeKey?: string;
 }
 
-export const nullNotifier: NotifierPort = { send: async () => undefined };
+/** What one channel did with a notification. */
+export interface NotifyResult {
+  channel: string;
+  status: 'sent' | 'skipped' | 'failed';
+  /** `trigger_disabled`, `deduped`, `rate_limited`, `unsupported`, or a short description. */
+  reason?: string;
+}
+
+export interface NotifierPort {
+  /**
+   * Sends to every configured channel and never throws. Resolves with one result per channel
+   * (none when no channel is configured); a port that cannot tell resolves with nothing.
+   */
+  send(
+    n: PagerNotification,
+    options?: {
+      /** Send whatever `notify.triggers` lists (a scheduled standup, a test of the channels). */
+      ignoreTriggers?: boolean;
+      /** Skip dedupe and the hourly budget (a test of the channels). */
+      bypassLimits?: boolean;
+    },
+  ): Promise<readonly NotifyResult[] | undefined>;
+}
+
+/**
+ * Whether a notification needs no further attempt: it reached a channel, went out a moment ago
+ * under the same key, or there is nothing to send it to. False when a channel failed and none
+ * took it, or the hourly budget held it back.
+ */
+export function notifySettled(results: readonly NotifyResult[] | undefined): boolean {
+  if (!results || results.length === 0) return true;
+  if (results.some((r) => r.status === 'sent')) return true;
+  if (results.some((r) => r.status === 'failed')) return false;
+  return !results.some((r) => r.reason === 'rate_limited');
+}
+
+export const nullNotifier: NotifierPort = { send: async () => [] };
 
 export const nullLlm: LlmPort = {
   available: false,
