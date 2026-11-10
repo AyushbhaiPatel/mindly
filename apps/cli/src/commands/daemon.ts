@@ -128,12 +128,65 @@ function notAnswering(state: DaemonState): HintedError {
 }
 
 /**
- * Said when the running service is another version than this CLI (typically: Mindly was
- * upgraded and the service still runs the old code, serving the new dashboard from its old API).
+ * Orders two versions (`1.2.3`, `1.2.3-rc.1`): negative when `a` is older. Null when either is
+ * not a version this can read.
+ */
+export function compareVersions(a: string, b: string): number | null {
+  const parse = (v: string): { core: number[]; pre: string | null } | null => {
+    const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(v.trim());
+    return m ? { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? null } : null;
+  };
+  const x = parse(a);
+  const y = parse(b);
+  if (x === null || y === null) return null;
+  for (let i = 0; i < 3; i++) {
+    const d = (x.core[i] as number) - (y.core[i] as number);
+    if (d !== 0) return d;
+  }
+  // A pre-release comes before its release; two pre-releases compare part by part.
+  if (x.pre === y.pre) return 0;
+  if (x.pre === null) return 1;
+  if (y.pre === null) return -1;
+  const xs = x.pre.split('.');
+  const ys = y.pre.split('.');
+  for (let i = 0; i < Math.max(xs.length, ys.length); i++) {
+    const p = xs[i];
+    const q = ys[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) - Number(q);
+    if (pn) return -1;
+    if (qn) return 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+/** True when the running service is older than this CLI, so restarting it brings it up to date. */
+function serviceOutdated(state: DaemonState): boolean {
+  const order = compareVersions(state.version, MINDLY_VERSION);
+  return order !== null && order < 0;
+}
+
+/**
+ * Said when the running service is another version than this CLI. An older service (Mindly was
+ * upgraded and the service still runs the old code, serving the new dashboard from its old API)
+ * is restarted. A newer one is not: restarting it from here would run this older CLI's version,
+ * so it is this CLI that needs updating.
  */
 function versionNote(state: DaemonState): string | null {
   if (state.version === MINDLY_VERSION) return null;
-  return `It runs Mindly ${state.version}, and this is ${MINDLY_VERSION}: restart it to use this version (mindly daemon stop && mindly daemon start).`;
+  if (serviceOutdated(state)) {
+    return `It runs Mindly ${state.version}, and this is ${MINDLY_VERSION}: restart it to use this version (mindly daemon stop, then mindly daemon start).`;
+  }
+  const order = compareVersions(state.version, MINDLY_VERSION);
+  if (order !== null && order > 0) {
+    return `This mindly is ${MINDLY_VERSION}, older than the service (${state.version}): update this mindly; the service needs nothing.`;
+  }
+  return `It runs Mindly ${state.version}, and this is ${MINDLY_VERSION}.`;
 }
 
 /** The running daemon of this home (recorded, alive and answering as itself), or null. */
@@ -442,7 +495,7 @@ export async function daemonStatus(out: Out, o: { json?: boolean }): Promise<num
     out.json({
       running: kind === 'running',
       ...(state ? { state } : {}),
-      ...(kind === 'running' && state && state.version !== MINDLY_VERSION
+      ...(kind === 'running' && state && serviceOutdated(state)
         ? { outdated: true, cliVersion: MINDLY_VERSION }
         : {}),
     });
@@ -460,7 +513,12 @@ export async function daemonStatus(out: Out, o: { json?: boolean }): Promise<num
     const note = versionNote(state);
     if (note !== null) {
       sc.text(`${sc.mark('warn')} ${note}`, 2);
-      sc.next([{ cmd: 'mindly daemon stop && mindly daemon start', why: `run ${MINDLY_VERSION}` }]);
+      if (serviceOutdated(state)) {
+        sc.next([
+          { cmd: 'mindly daemon stop', why: 'stop the old version' },
+          { cmd: 'mindly daemon start', why: `then start ${MINDLY_VERSION}` },
+        ]);
+      }
     } else {
       sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
     }

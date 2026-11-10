@@ -1196,7 +1196,8 @@ describe('doctor, config, export, misc', () => {
       const status = await cli(sb, ['daemon', 'status']);
       expect(status.stdout).toContain('Version 0.0.1');
       expect(status.stdout).toContain(`It runs Mindly 0.0.1, and this is ${MINDLY_VERSION}`);
-      expect(status.stdout).toContain('mindly daemon stop && mindly daemon start');
+      expect(status.stdout).toContain('mindly daemon stop');
+      expect(status.stdout).not.toContain('&&');
       expect(
         json<{ running: boolean; outdated?: boolean }>(
           (await cli(sb, ['daemon', 'status', '--json'])).stdout,
@@ -1206,7 +1207,25 @@ describe('doctor, config, export, misc', () => {
       expect(again.code).toBe(0);
       expect(again.stdout).toContain('already running');
       expect(again.stderr).toContain('It runs Mindly 0.0.1');
-      expect(again.stderr).toContain('mindly daemon stop && mindly daemon start');
+      expect(again.stderr).toContain('mindly daemon stop, then mindly daemon start');
+
+      // A service newer than this CLI: restarting it from here would downgrade it.
+      writeFileSync(file, JSON.stringify({ ...state, version: '99.0.0' }));
+      const newer = await cli(sb, ['daemon', 'status']);
+      expect(newer.stdout).toContain(
+        `This mindly is ${MINDLY_VERSION}, older than the service (99.0.0)`,
+      );
+      expect(newer.stdout).toContain('update this mindly');
+      expect(newer.stdout).not.toContain('daemon stop');
+      expect(
+        json<{ outdated?: boolean }>((await cli(sb, ['daemon', 'status', '--json'])).stdout)
+          .outdated,
+      ).toBeUndefined();
+      const newerStart = await cli(sb, ['daemon', 'start']);
+      expect(newerStart.code).toBe(0);
+      expect(newerStart.stderr).toContain('older than the service');
+      expect(newerStart.stderr).not.toContain('daemon stop');
+      writeFileSync(file, JSON.stringify(state));
     } finally {
       if (started) await cli(sb, ['daemon', 'stop']);
     }
