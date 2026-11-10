@@ -359,6 +359,12 @@ export interface SplitUnmergedWork {
    * a confirmation never covers them.
    */
   opaque?: string[];
+  /**
+   * Git data in the part's worktree (nested repositories, submodules, git directories): an abort
+   * never deletes it short of a discard, so it keeps the worktree and its branch until it is
+   * moved out.
+   */
+  held?: string[];
 }
 
 /**
@@ -403,12 +409,6 @@ export interface SplitAbortResult {
   keptBranches: string[];
   /** Uncommitted work, and commits only a deleted branch had, that went away with the split. */
   discarded: SplitUnmergedWork[];
-  /**
-   * Nested git repositories moved out of the worktrees, whole (history, stash, hooks, ignored
-   * files and all), before they were removed: by part, from its path in the worktree to `to`, in
-   * `<git-common-dir>/mindly/kept/<split id>/<part>/`. Nothing in them was deleted.
-   */
-  keptRepos: { part: string; path: string; to: string }[];
 }
 
 export class SplitService {
@@ -864,7 +864,8 @@ export class SplitService {
       };
       if (!options.keepBranches) only = await this.onlyOnBranch(git, root, part, parts);
       state[part.key] = { tip: only.tip, content: files.content, files: files.files };
-      if (files.lost.length === 0 && only.commits.length === 0) continue;
+      const held = existsSync(part.worktree) ? await git.gitDataIn(root, part.worktree) : [];
+      if (files.lost.length === 0 && only.commits.length === 0 && held.length === 0) continue;
       work.push({
         part: part.key,
         title: part.title,
@@ -872,6 +873,7 @@ export class SplitService {
         ...(only.commits.length > 0 ? { commits: only.commits } : {}),
         ...(only.more || files.lost.length > PATHS_SHOWN ? { more: true as const } : {}),
         ...(files.opaque.length > 0 ? { opaque: files.opaque } : {}),
+        ...(held.length > 0 ? { held } : {}),
       });
     }
     return { work, state };
@@ -1346,12 +1348,18 @@ export class SplitService {
         error,
       });
     }
-    const discarded = check?.work ?? [];
+    // A part holding git data is kept whole (short of a discard): none of its work goes.
+    const heldBy = new Map(
+      (check?.work ?? []).filter((w) => (w.held ?? []).length > 0).map((w) => [w.part, w.held]),
+    );
+    const limited = !everything;
+    const discarded = (check?.work ?? []).filter((w) => !limited || !heldBy.has(w.part));
     // Unless everything may go, only what was confirmed may, or (unconfirmed) nothing: the same
     // before and after a merge.
-    const limited = !everything;
     if (limited && check) {
-      const fresh = confirmed ? unconfirmed(check, confirmed) : discarded;
+      const fresh = confirmed
+        ? unconfirmed({ ...check, work: discarded }, confirmed)
+        : discarded.filter((w) => w.paths.length > 0 || (w.commits ?? []).length > 0);
       if (fresh.length > 0) throw lossRefusal(fresh, confirmed !== undefined, split.status);
     }
     const pending = this.abortPending(split);
@@ -1369,14 +1377,18 @@ export class SplitService {
     const keptBranches: string[] = [];
     const unfinishedParts = new Set<string>();
     const keptBecause: Record<string, string> = {};
-    const keptRepos: SplitAbortResult['keptRepos'] = [];
     for (const part of parts) {
       const was = check?.state[part.key];
       let unfinished = false;
+      const held = limited ? heldBy.get(part.key) : undefined;
+      if (held && held.length > 0) {
+        unfinished = true;
+        keptBecause[part.worktree] = heldMessage(held);
+      }
       // Checked again right before the worktree goes: files written and commits made since are
       // not deleted.
       let now: Awaited<ReturnType<SplitService['worktreeState']>> | null = null;
-      if (limited && existsSync(part.worktree)) {
+      if (!unfinished && limited && existsSync(part.worktree)) {
         now = await this.worktreeState(git, root, part).catch(() => null);
         if (!now || !was || now.content !== was.content || now.opaque.length > 0) unfinished = true;
       }
@@ -1386,7 +1398,7 @@ export class SplitService {
           .catch(() => undefined);
         if (tip !== was.tip) unfinished = true;
       }
-      if (unfinished) keptBecause[part.worktree] = 'it got new work while the abort ran';
+      if (unfinished) keptBecause[part.worktree] ??= 'it got new work while the abort ran';
       // Confirmed: the files the user was shown go first, each only as it was then.
       const shown = confirmed?.work.find((w) => w.part === part.key);
       if (!unfinished && confirmed && now && shown && shown.paths.length > 0) {
@@ -1403,27 +1415,25 @@ export class SplitService {
           keptBecause[part.worktree] = why;
         }
       }
+      // Git data that appeared since the listing (a repository cloned after the yes) keeps it too.
+      if (!unfinished && limited && existsSync(part.worktree)) {
+        try {
+          const late = await git.gitDataIn(root, part.worktree);
+          if (late.length > 0) {
+            unfinished = true;
+            keptBecause[part.worktree] = heldMessage(late);
+          }
+        } catch (err) {
+          unfinished = true;
+          keptBecause[part.worktree] =
+            `could not check it for git data: ${sanitizeLine(err instanceof Error ? err.message : String(err), 300)}`;
+        }
+      }
       if (!unfinished && limited && existsSync(part.worktree)) {
         const why = await this.strayWork(git, root, part);
         if (why) {
           unfinished = true;
           keptBecause[part.worktree] = why;
-        }
-      }
-      // Nested repositories are never deleted (short of a discard): they move out whole first.
-      if (!unfinished && !everything && existsSync(part.worktree)) {
-        try {
-          const kept = await git.keepNestedRepos(root, part.worktree, [split.id, part.key]);
-          for (const m of kept.moved) keptRepos.push({ part: part.key, ...m });
-          if (kept.failed) {
-            unfinished = true;
-            keptBecause[part.worktree] =
-              `could not move the git repository ${sanitizeLine(kept.failed.path, 200)} out of it: ${sanitizeLine(kept.failed.reason, 200)}`;
-          }
-        } catch (err) {
-          unfinished = true;
-          keptBecause[part.worktree] =
-            `could not move its git repositories out of it: ${sanitizeLine(err instanceof Error ? err.message : String(err), 300)}`;
         }
       }
       if (!unfinished) {
@@ -1526,7 +1536,6 @@ export class SplitService {
         splitId: split.id,
         removedWorktrees: removedWorktrees.length,
         keptBranches,
-        keptRepos: keptRepos.map((r) => r.to),
         finished,
         unfinished: [...unfinishedParts],
       },
@@ -1540,7 +1549,6 @@ export class SplitService {
       deletedBranches,
       keptBranches,
       discarded: discarded.filter((w) => !unfinishedParts.has(w.part)),
-      keptRepos,
     };
   }
 
@@ -1637,6 +1645,11 @@ export class SplitService {
 }
 
 const abortPendingKey = (splitId: string): string => `split.abortPending:${splitId}`;
+
+/** Why a worktree holding git data (`held`) was kept, and what to do about it. */
+function heldMessage(held: readonly string[]): string {
+  return `it holds git data that abort never deletes: ${describePaths(held)}. Move it out of the worktree (or delete it yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything with mindly split abort --yes --discard`;
+}
 
 /** Why a worktree was kept when git did not remove it. */
 function removalRefused(err: unknown, worktree: string): string {
@@ -1781,6 +1794,7 @@ function hashFile(abs: string, h: Hash): void {
 function describeWork(w: SplitUnmergedWork): string {
   const what: string[] = [];
   if (w.paths.length > 0) what.push(`not committed: ${describePaths(w.paths)}`);
+  if (w.held?.length) what.push(`git data abort never deletes: ${describePaths(w.held)}`);
   const commits = w.commits ?? [];
   if (commits.length > 0) {
     what.push(

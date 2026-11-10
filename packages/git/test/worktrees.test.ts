@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError } from '@mindly/core';
@@ -10,8 +10,7 @@ import {
   deleteBranch,
   flaggedChanges,
   ignoredDeniedFiles,
-  keepNestedRepos,
-  nestedRepoPaths,
+  gitDataPaths,
   listFiles,
   listWorktrees,
   mergeIntoNewBranch,
@@ -19,6 +18,8 @@ import {
   restoreFromHead,
 } from '../src/index.js';
 import { commitAll, git, makeRepo, tempDir, write } from './helpers.js';
+
+const FILE = ['-c', 'protocol.file.allow=always'];
 
 /** The commits only `branch` has, as `branchOnlyWork` lists them. */
 async function only(
@@ -402,10 +403,12 @@ describe('worktrees', () => {
     expect(git(path, 'status', '--porcelain')).toBe(' M c.txt\n');
   });
 
-  it('finds every nested repository, wherever it is, and only the outermost', async () => {
+  it('finds nested repositories wherever they are, and only the outermost', async () => {
     const root = makeRepo({
       '.gitignore': 'tools/\nnode_modules/\nlib/\n/deps\nsrc/vendor/\n',
       'src/app/page.ts': 'p\n',
+      'a/f.txt': 'f\n',
+      'a/c/g.txt': 'g\n',
     });
     const repo = (rel: string, commit = true): void => {
       write(root, `${rel}/a.txt`, 'a\n');
@@ -415,94 +418,77 @@ describe('worktrees', () => {
     // Next to an empty CACHEDIR.TAG, in node_modules or site-packages: still found.
     write(root, 'tools/CACHEDIR.TAG', '');
     repo('tools/patched-dep');
-    // One inside it goes with it.
     repo('tools/patched-dep/inner');
     repo('node_modules/dep');
     repo('lib/python3.12/site-packages/pkg');
     repo('tools/empty', false);
-    // Not a repository (a stale gitfile): its files are only ignored files.
+    // Not a repository (a stale gitfile in an ignored folder): nothing of git's to keep.
     write(root, 'src/vendor/lib/.git', 'gitdir: /elsewhere\n');
-    // A new one, not ignored; and one made in a folder the outer repository tracks files in,
-    // which git looks past.
     repo('src/newrepo');
-    git(join(root, 'src/app'), 'init', '-q', '-b', 'main');
+    // Made in folders the repository tracks files in, which git looks past; one inside another
+    // and a sibling that sorts between them.
+    git(join(root, 'src/app'), 'init', '-q');
+    git(join(root, 'a'), 'init', '-q');
+    git(join(root, 'a/c'), 'init', '-q');
+    repo('a.b');
     const upstream = makeRepo({ 'mix.exs': 'x\n' });
     git(root, 'clone', '-q', upstream, join(root, 'deps/jason'));
-    expect((await nestedRepoPaths(root)).map((r) => `${r.kind} ${r.path}`)).toEqual([
-      'ignored deps/jason',
-      'ignored lib/python3.12/site-packages/pkg',
-      'ignored node_modules/dep',
-      'tracked src/app',
-      'untracked src/newrepo',
-      'ignored tools/empty',
-      'ignored tools/patched-dep',
+    expect(await gitDataPaths(root)).toEqual([
+      'a',
+      'a.b',
+      'deps/jason',
+      'lib/python3.12/site-packages/pkg',
+      'node_modules/dep',
+      'src/app',
+      'src/newrepo',
+      'tools/empty',
+      'tools/patched-dep',
     ]);
   });
 
-  it('moves nested repositories out whole, and puts back the files the worktree tracks', async () => {
+  it('finds git directories kept apart from their work tree, in ignored folders', async () => {
+    const root = makeRepo({ '.gitignore': '.cache/\n.repos/\n' });
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    // `git init --separate-git-dir` into an ignored folder.
+    write(path, 'lib/a.ts', 'a\n');
+    write(path, '.cache/keep', '');
+    git(path, 'init', '-q', '--separate-git-dir', join(path, '.cache/lib.git'), join(path, 'lib'));
+    commitAll(join(path, 'lib'), 'only here');
+    // A `.git` symlink to a bare repository in an ignored folder.
+    write(path, 'other/a.ts', 'a\n');
+    git(path, 'init', '-q', '--bare', join(path, '.repos/other.git'));
+    symlinkSync('../.repos/other.git', join(path, 'other/.git'));
+    git(join(path, 'other'), 'config', 'core.bare', 'false');
+    commitAll(join(path, 'other'), 'only here');
+    expect(await gitDataPaths(path)).toEqual([
+      '.cache/lib.git',
+      '.repos/other.git',
+      'lib',
+      'other',
+    ]);
+  });
+
+  it('finds submodules, their git directories and linked worktrees, initialised or not', async () => {
+    const inner = makeRepo({ 'i.ts': 'i\n' });
     const sub = makeRepo({ 'x.ts': 'x\n' });
-    const root = makeRepo({ '.gitignore': 'vendor/\n', 'src/app/page.ts': 'p\n' });
-    git(root, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'add', sub, 'mods/sub');
+    git(sub, ...FILE, 'submodule', '-q', 'add', inner, 'inner');
+    commitAll(sub, 'inner');
+    const root = makeRepo({ 'README.md': 'r\n' });
+    git(root, ...FILE, 'submodule', '-q', 'add', sub, 'mods/sub');
     commitAll(root, 'sub');
     const path = join(tempDir(), 'part');
     await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
-    // An absorbed submodule (its git directory in the worktree's own), with an edit.
-    git(path, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'update', '--init');
-    write(path, 'mods/sub/x.ts', 'edited\n');
-    // An ignored repository with a hook, a stash and a linked worktree elsewhere.
-    const lib = join(path, 'vendor/lib');
-    write(lib, 'a.ts', 'a\n');
-    git(lib, 'init', '-q', '-b', 'main');
-    commitAll(lib, 'lib');
-    write(lib, '.git/hooks/pre-push', '#!/bin/sh\n');
-    write(lib, 'a.ts', 'stashed\n');
-    git(lib, 'stash', '-q');
-    const elsewhere = join(tempDir(), 'exp');
-    git(lib, 'worktree', 'add', '-q', '--detach', elsewhere);
-    // A repository made in a tracked folder, with a commit only it has.
-    const app = join(path, 'src/app');
-    git(app, 'init', '-q', '-b', 'main');
-    commitAll(app, 'only here');
-    const holding = join(tempDir(), 'kept');
-    const kept = await keepNestedRepos(path, holding);
-    expect(kept.failed?.reason ?? null).toBeNull();
-    expect(kept.moved.map((m) => [m.path, m.to])).toEqual([
-      ['mods/sub', join(holding, 'mods/sub')],
-      ['src/app', join(holding, 'src/app')],
-      ['vendor/lib', join(holding, 'vendor/lib')],
-    ]);
-    expect(readFileSync(join(holding, 'mods/sub/x.ts'), 'utf8')).toBe('edited\n');
-    expect(git(join(holding, 'mods/sub'), 'status', '--porcelain')).toBe(' M x.ts\n');
-    expect(existsSync(join(holding, 'vendor/lib/.git/hooks/pre-push'))).toBe(true);
-    expect(git(join(holding, 'vendor/lib'), 'stash', 'list')).not.toBe('');
-    expect(git(elsewhere, 'status', '--porcelain')).toBe('');
-    expect(git(join(holding, 'src/app'), 'log', '--format=%s')).toBe('only here\n');
-    // The worktree has its own files back, and git removes it without being forced.
-    expect(readFileSync(join(path, 'src/app/page.ts'), 'utf8')).toBe('p\n');
-    expect(git(path, 'status', '--porcelain')).toBe('');
-    expect(await removeWorktree(root, path, { force: false })).toBe(true);
-  });
-
-  it('keeps a nested repository where it is when it cannot be renamed, and never copies', async () => {
-    const root = makeRepo({ '.gitignore': 'vendor/\n' });
-    const lib = join(root, 'vendor/lib');
-    write(lib, 'a.ts', 'a\n');
-    git(lib, 'init', '-q', '-b', 'main');
-    commitAll(lib, 'lib');
-    const shm = '/dev/shm';
-    const other = existsSync(shm) && statSync(shm).dev !== statSync(root).dev;
-    if (!other) return;
-    const holding = mkdtempSync(join(shm, 'kept-'));
-    try {
-      const kept = await keepNestedRepos(root, holding);
-      expect(kept.moved).toEqual([]);
-      expect(kept.failed?.path).toBe('vendor/lib');
-      expect(kept.failed?.reason).toMatch(/EXDEV/);
-      expect(existsSync(join(lib, '.git'))).toBe(true);
-      expect(existsSync(join(holding, 'vendor/lib'))).toBe(false);
-    } finally {
-      rmSync(holding, { recursive: true, force: true });
-    }
+    expect(await gitDataPaths(path)).toEqual([]);
+    git(path, ...FILE, 'submodule', '-q', 'update', '--init', '--recursive');
+    git(join(path, 'mods/sub'), 'worktree', 'add', '-q', '-b', 'feat', join(path, 'a-wt'));
+    const admin = git(path, 'rev-parse', '--absolute-git-dir').trim();
+    expect(await gitDataPaths(path)).toEqual(['a-wt', 'mods/sub', join(admin, 'modules')]);
+    // Deinitialised, its git directory (and an unpushed commit in it) is still there.
+    git(join(path, 'mods/sub'), 'commit', '-q', '--allow-empty', '-m', 'unpushed');
+    git(join(path, 'mods/sub'), 'worktree', 'remove', '--force', join(path, 'a-wt'));
+    git(path, 'submodule', 'deinit', '-q', '-f', 'mods/sub');
+    expect(await gitDataPaths(path)).toEqual([join(admin, 'modules')]);
   });
 
   it('lists nested repositories in time linear in the ignored folders', async () => {
@@ -512,7 +498,7 @@ describe('worktrees', () => {
     }
     try {
       const t = Date.now();
-      expect(await nestedRepoPaths(root)).toEqual([]);
+      expect(await gitDataPaths(root)).toEqual([]);
       // A pairwise comparison of the folders took over 15 s here.
       expect(Date.now() - t).toBeLessThan(8_000);
     } finally {

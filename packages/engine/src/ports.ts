@@ -237,25 +237,17 @@ export interface SplitGitPort {
    */
   restoreFromHead(repoRoot: string, worktree: string, paths: readonly string[]): Promise<void>;
   /**
-   * Moves every nested git repository of `worktree` (new ones, ones in ignored or tracked folders,
-   * submodules) whole, by renaming it, into the repository's holding folder
-   * (`<git-common-dir>/mindly/kept/<holding...>/<its path>`), then writes back the worktree's own
-   * files those folders held. Nothing is copied or deleted. `failed`: the one that could not be
-   * moved, and why (the rest stay); the worktree must then stay too.
+   * Git data in `worktree` that no listing of files can stand for, and that an abort never
+   * deletes short of a discard: nested repositories (new, ignored, or in a tracked folder),
+   * populated submodules and committed repositories, `.git` entries in tracked folders, git
+   * directories among untracked or ignored files, and a non-empty `modules` folder in its own
+   * git directory. Worktree-relative paths (that `modules` folder: absolute).
    */
-  keepNestedRepos(
-    repoRoot: string,
-    worktree: string,
-    holding: readonly string[],
-  ): Promise<{
-    moved: { path: string; to: string }[];
-    failed: { path: string; reason: string } | null;
-  }>;
+  gitDataIn(repoRoot: string, worktree: string): Promise<string[]>;
   /**
    * What removing `worktree` would delete that a listing counts, as it is now: untracked files
-   * and ignored files on the deny-list (and `secretDeny`), outside nested repositories (those
-   * are moved out). Looked at right before the removal: once the confirmed work is gone,
-   * anything here appeared since.
+   * and ignored files on the deny-list (and `secretDeny`). Looked at right before the removal:
+   * once the confirmed work is gone, anything here appeared since.
    */
   strayWork(repoRoot: string, worktree: string, secretDeny: readonly string[]): Promise<string[]>;
   /** Deletes a branch; with `expectedTip`, refuses (`conflict`) one that has moved since. */
@@ -279,8 +271,8 @@ export interface SplitGitPort {
    * from the branch tip, deny-listed ones included. `ignoredDenied`: ignored files on the secret
    * deny-list (a local `.env`), which no commit has and removing the worktree deletes. `denied`:
    * every deny-listed path of both, whose content must never be read. Edited files flagged
-   * skip-worktree or assume-unchanged are among `paths`. Nested repositories, and anything in
-   * them, are not: an abort moves them out whole (see `keepNestedRepos`). `extraDeny` adds globs that are never read (the user's and the project's) to the
+   * skip-worktree or assume-unchanged, and new nested repositories (as their folders), are among
+   * `paths`. `extraDeny` adds globs that are never read (the user's and the project's) to the
    * built-in list; `secretDeny` adds those of them that name secrets, the only ignored files
    * counted besides the built-in list.
    */

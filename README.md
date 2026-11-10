@@ -208,17 +208,23 @@ the worktrees and keep the part branches, so that no commit is lost; `mindly spl
 it listed, each only if it still holds what it held when you were asked: anything new or changed
 since stops it.
 
-Nested git repositories in a part's worktree are never deleted, short of `--yes --discard`: a
-new one, a submodule, one committed into the part, one made in a folder the part tracks, and one
-in an ignored folder (a dependency checkout such as the ones `mix deps.get` leaves in `deps/`).
-Before a worktree is removed, each is moved out whole, by renaming its folder, to
-`.git/mindly/kept/<split id>/<part>/<its path>` in your repository (the git common directory);
-a repository inside another goes with it. Its history, reflog, stash, hooks, config, index,
-submodules and every file, ignored ones included, stay as they were, and its linked worktrees
-elsewhere are pointed at the new place. Nothing needs confirming for that. The abort names each
-one and where it went: move a folder back where you want it, or delete it (`rm -rf`) once you
-are sure. When one cannot be renamed (another file system, permissions), the worktree is kept
-and the abort says why; nothing is ever copied and deleted instead.
+An abort never moves, rewrites or deletes git data inside a part's worktree, short of `--yes
+--discard`: a nested repository (a new one, one in an ignored folder such as a dependency
+checkout in `deps/` or `node_modules`, one made in a folder the part tracks), a submodule, a
+`.git` file, folder or link, a git directory among untracked or ignored files (a
+`--separate-git-dir`, a bare repository), or the git directories of the part's submodules,
+initialised or not. A part holding any of it keeps its worktree and branch, the abort stays
+unfinished, and it says, naming each path:
+
+```text
+it holds git data that abort never deletes: <paths>. Move it out of the worktree (or delete it
+yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything
+with mindly split abort --yes --discard
+```
+
+The other parts are removed as usual. A new nested repository, an edit in a folder holding a
+`.git`, or a submodule moved to another commit also counts as work not on the part branch:
+`mindly split merge` stops and names it, and `--force` merges without it and says so.
 
 Then worktrees are removed the way `git worktree remove` does without `--force`: git refuses one
 with modified or untracked files (an edited file flagged skip-worktree or assume-unchanged
@@ -228,10 +234,9 @@ deny-list or your `redaction.denyPaths` count as work, except installed ones: an
 `node_modules` or `site-packages`, and, apart from `.env*` and key files, anything in
 `__pycache__`, `.tox`, `.gradle`, `vendor/bundle` or a virtualenv (a `venv`, `.venv` or `env`
 folder holding `pyvenv.cfg`). Right before git removes a worktree, the abort looks once more for
-untracked files and counted ignored files, keeping the worktree if any appeared, and for nested
-repositories, which it moves out; git's own check covers untracked files after that, but an
-ignored file written in between goes with the worktree. When an abort keeps something, run
-`mindly split abort` again to finish.
+untracked files, counted ignored files and git data, keeping the worktree if any appeared;
+git's own check covers untracked files after that, but an ignored file written in between goes
+with the worktree. When an abort keeps something, run `mindly split abort` again to finish.
 
 ### Which agent is better at what, in your repo
 

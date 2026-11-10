@@ -3,10 +3,18 @@
  * and what must not stop it.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type * as GitModule from '@mindly/git';
+import { openMindly } from '@mindly/runtime';
 import { cli, git, sandbox, tempDir, write, type Sandbox } from './helpers.js';
 
 // Lets a test act while an abort runs: after each look at a part branch's commits, which abort
@@ -315,50 +323,28 @@ describe('split abort leaves the last word to git, confirmed or not', () => {
   });
 });
 
-describe('split abort moves nested repositories out whole, and never deletes one', () => {
-  /** Where the abort keeps `path` of a part's worktree: `.git/mindly/kept/<split id>/<part>/`. */
-  function keptAt(sb: Sandbox, key: string, path: string): string {
-    const kept = join(sb.repo, '.git', 'mindly', 'kept');
-    const [id] = readdirSync(kept);
-    return join(kept, id as string, key, path);
+describe('split abort never deletes git data in a worktree, short of a discard', () => {
+  interface Aborted {
+    finished: boolean;
+    keptWorktrees: string[];
+    keptBranches: string[];
+    keptBecause: Record<string, string>;
   }
+  const HELD = (paths: string): string =>
+    `it holds git data that abort never deletes: ${paths}. Move it out of the worktree (or delete it yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything with mindly split abort --yes --discard`;
 
-  /** `mindly split abort` with `args`; `during` runs once the abort is under way. */
-  async function abortWith(
-    sb: Sandbox,
-    args: string[],
-    during?: () => void,
-    look = 2,
-  ): Promise<Awaited<ReturnType<typeof cli>>> {
-    let looks = 0;
-    hook.afterBranchLook = (branch) => {
-      if (branch === 'mindly/billing/page' && ++looks === look) during?.();
-    };
-    try {
-      const r = await cli(
-        sb,
-        ['split', 'abort', ...args],
-        args.includes('--yes') ? {} : { answers: ['y'] },
-      );
-      expect(looks).toBeGreaterThanOrEqual(look);
-      return r;
-    } finally {
-      delete hook.afterBranchLook;
-    }
+  /** `split abort --yes --json`: the page part must be kept, held for `paths`. */
+  async function keptFor(sb: Sandbox, paths: string, args: string[] = []): Promise<Aborted> {
+    const r = await cli(sb, ['split', 'abort', '--yes', '--json', ...args]);
+    expect(r.code).toBe(1);
+    const a = JSON.parse(r.stdout) as Aborted;
+    const page = partDir(sb, 'page');
+    expect(a.finished).toBe(false);
+    expect(a.keptWorktrees).toEqual([page]);
+    expect(a.keptBranches).toContain('mindly/billing/page');
+    expect(a.keptBecause[page]).toBe(HELD(paths));
+    return a;
   }
-
-  /** An upstream repository cloned into `<page>/vendor/lib` (ignored by the outer one). */
-  function cloneVendor(page: string, prepare?: (up: string) => void): string {
-    const up = tempDir('r10-up-');
-    git(up, 'init', '-q', '-b', 'main');
-    write(up, 'lib.ts', 'export const lib = 1;\n');
-    prepare?.(up);
-    git(up, 'add', '-A');
-    git(up, 'commit', '-q', '-m', 'lib');
-    git(page, 'clone', '-q', up, 'vendor/lib');
-    return join(page, 'vendor/lib');
-  }
-  const ignoreVendor = (s: Sandbox): void => write(s.repo, '.gitignore', 'vendor/\n');
 
   /** A repository at `<dir>` with one commit of `files`. */
   function repoAt(dir: string, files: Record<string, string> = { 'a.ts': 'a\n' }): void {
@@ -368,7 +354,41 @@ describe('split abort moves nested repositories out whole, and never deletes one
     git(dir, 'commit', '-q', '-m', 'only copy');
   }
 
-  it('a submodule with uncommitted edits', async () => {
+  /** Marks every part done, as finished agents do, so that `split merge` may run. */
+  async function allDone(sb: Sandbox): Promise<void> {
+    const st = JSON.parse((await cli(sb, ['split', 'status', '--json'])).stdout) as {
+      parts: { part: { taskId: string } }[];
+    };
+    const mindly = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
+    try {
+      for (const p of st.parts) mindly.tasks.update(p.part.taskId, { status: 'done' }, null);
+    } finally {
+      mindly.close();
+    }
+  }
+
+  it('keeps a repository in an ignored folder, and finishes once it is moved out by hand', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', 'tools/\nnode_modules/\n'));
+    const page = partDir(sb, 'page');
+    // Next to an empty CACHEDIR.TAG or in node_modules: found all the same.
+    write(page, 'tools/CACHEDIR.TAG', '');
+    repoAt(join(page, 'tools/patched-dep'));
+    repoAt(join(page, 'node_modules/dep'));
+    const a = await keptFor(sb, 'node_modules/dep, tools/patched-dep');
+    // The other part went.
+    expect(existsSync(partDir(sb, 'api'))).toBe(false);
+    expect(git(join(page, 'tools/patched-dep'), 'log', '--format=%s')).toBe('only copy\n');
+    void a;
+    // The user moves them out and runs the abort again.
+    const away = tempDir('r10-away-');
+    renameSync(join(page, 'tools/patched-dep'), join(away, 'patched-dep'));
+    renameSync(join(page, 'node_modules/dep'), join(away, 'dep'));
+    expect((await cli(sb, ['split', 'abort', '--yes'])).code).toBe(0);
+    expect(existsSync(page)).toBe(false);
+    expect(git(join(away, 'patched-dep'), 'log', '--format=%s')).toBe('only copy\n');
+  });
+
+  it('keeps a submodule with uncommitted edits, and a discard deletes it', async () => {
     const sub = tempDir('r10-sub-');
     repoAt(sub, { 'lib.ts': 'export const lib = 1;\n' });
     const sb = await splitSandbox((s) => {
@@ -386,32 +406,57 @@ describe('split abort moves nested repositories out whole, and never deletes one
     const page = partDir(sb, 'page');
     git(page, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'update', '--init');
     write(page, 'src/app/vendor/lib.ts', 'export const lib = 2; // hours of work\n');
-    write(page, 'src/app/vendor/new.ts', 'export const fresh = 1;\n');
-    const r = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
-    expect(r.code).toBe(0);
-    expect(r.stdout).toContain('src/app/vendor ->');
-    expect(r.stdout).toContain('To bring one back, move its folder');
-    const kept = keptAt(sb, 'page', 'src/app/vendor');
-    expect(readFileSync(join(kept, 'lib.ts'), 'utf8')).toContain('hours of work');
-    expect(git(kept, 'status', '--porcelain')).toBe(' M lib.ts\n?? new.ts\n');
+    const admin = git(page, 'rev-parse', '--absolute-git-dir').trim();
+    await keptFor(sb, `src/app/vendor, ${join(admin, 'modules')}`);
+    expect(readFileSync(join(page, 'src/app/vendor/lib.ts'), 'utf8')).toContain('hours of work');
+    expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
     expect(existsSync(page)).toBe(false);
   });
 
-  it('a repository committed into the part, with no .gitmodules, and work in it', async () => {
-    const sb = await splitSandbox();
+  it('keeps a deinitialised submodule whose git directory holds an unpushed commit', async () => {
+    const sub = tempDir('r10-sub-');
+    repoAt(sub, { 'x.ts': 'x\n' });
+    const sb = await splitSandbox((s) => {
+      git(s.repo, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'add', sub, 'mods/sub');
+    });
     const page = partDir(sb, 'page');
-    const nested = join(page, 'src/app/vendor');
-    repoAt(nested, { 'lib.ts': 'export const lib = 1;\n' });
-    git(page, 'add', 'src/app/vendor');
-    git(page, 'commit', '-q', '-m', 'add vendor');
-    write(nested, 'wip.ts', 'export const wip = 1;\n');
-    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(0);
-    expect(readFileSync(join(keptAt(sb, 'page', 'src/app/vendor'), 'wip.ts'), 'utf8')).toBe(
-      'export const wip = 1;\n',
-    );
+    git(page, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'update', '--init');
+    git(join(page, 'mods/sub'), 'commit', '-q', '--allow-empty', '-m', 'unpushed');
+    git(page, 'submodule', 'deinit', '-q', '-f', 'mods/sub');
+    const admin = git(page, 'rev-parse', '--absolute-git-dir').trim();
+    for (let i = 0; i < 2; i++) await keptFor(sb, join(admin, 'modules'));
+    // Only a discard deletes it, as it says.
+    expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
   });
 
-  it('a repository made in a folder the part tracks, with a commit only it has', async () => {
+  it('keeps a repository whose git directory is in an ignored folder', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', '.cache/\n'));
+    const page = partDir(sb, 'page');
+    const lib = join(page, 'lib');
+    write(lib, 'a.ts', 'a\n');
+    write(page, '.cache/keep', '');
+    git(page, 'init', '-q', '--separate-git-dir', join(page, '.cache/lib.git'), lib);
+    git(lib, 'add', '-A');
+    git(lib, 'commit', '-q', '-m', 'only here');
+    await keptFor(sb, '.cache/lib.git, lib');
+    expect(git(lib, 'log', '--format=%s')).toBe('only here\n');
+  });
+
+  it('keeps a repository whose .git is a link into an ignored folder', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', '.repos/\n'));
+    const page = partDir(sb, 'page');
+    const lib = join(page, 'lib');
+    write(lib, 'a.ts', 'a\n');
+    git(page, 'init', '-q', '--bare', join(page, '.repos/lib.git'));
+    symlinkSync('../.repos/lib.git', join(lib, '.git'));
+    git(lib, 'config', 'core.bare', 'false');
+    git(lib, 'add', '-A');
+    git(lib, 'commit', '-q', '-m', 'only here');
+    await keptFor(sb, '.repos/lib.git, lib');
+    expect(git(lib, 'log', '--format=%s')).toBe('only here\n');
+  });
+
+  it('keeps a repository made in a folder the part tracks, with a commit only it has', async () => {
     const sb = await splitSandbox();
     const page = partDir(sb, 'page');
     const app = join(page, 'src/app');
@@ -422,126 +467,81 @@ describe('split abort moves nested repositories out whole, and never deletes one
     write(app, 'page.ts', 'export const page = 2; // the experiment\n');
     git(app, 'commit', '-q', '-am', 'experiment');
     git(app, 'checkout', '-q', 'main');
-    // git looks past it: the part looks clean.
-    expect(git(page, 'status', '--porcelain')).toBe('');
-    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(0);
-    const kept = keptAt(sb, 'page', 'src/app');
-    expect(git(kept, 'log', '--format=%s', 'experiment').split('\n')[0]).toBe('experiment');
-    expect(existsSync(page)).toBe(false);
+    // A staged change of the part's own, in that folder.
+    write(page, 'src/app/new.ts', 'staged\n');
+    git(page, 'add', 'src/app/new.ts');
+    const staged = git(page, 'rev-parse', ':src/app/new.ts').trim();
+    await keptFor(sb, 'src/app');
+    expect(git(app, 'log', '--format=%s', 'experiment').split('\n')[0]).toBe('experiment');
+    expect(git(page, 'rev-parse', ':src/app/new.ts').trim()).toBe(staged);
   });
 
-  it('repositories in ignored folders, wherever they are, and one inside another', async () => {
-    const sb = await splitSandbox((s) =>
-      write(s.repo, '.gitignore', 'tools/\nnode_modules/\nlib/\n'),
-    );
+  it("leaves a copy of the user's own linked worktree, and that worktree, alone", async () => {
+    const sb = await splitSandbox();
     const page = partDir(sb, 'page');
-    write(page, 'tools/CACHEDIR.TAG', '');
-    for (const rel of [
-      'tools/patched-dep',
-      'node_modules/dep',
-      'lib/python3.12/site-packages/pkg',
-    ]) {
-      repoAt(join(page, rel));
-    }
-    repoAt(join(page, 'tools/patched-dep/deps/inner'));
-    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(0);
-    for (const rel of [
-      'tools/patched-dep',
-      'node_modules/dep',
-      'lib/python3.12/site-packages/pkg',
-    ]) {
-      expect(git(keptAt(sb, 'page', rel), 'log', '--format=%s')).toBe('only copy\n');
-    }
-    expect(git(keptAt(sb, 'page', 'tools/patched-dep/deps/inner'), 'log', '--format=%s')).toBe(
-      'only copy\n',
-    );
+    const mine = `${sb.repo}-mine`;
+    git(sb.repo, 'worktree', 'add', '-q', '-b', 'mine', mine);
+    write(mine, 'wip.ts', 'my wip\n');
+    git(mine, 'add', 'wip.ts');
+    execFileSync('cp', ['-r', mine, join(page, 'scratch')]);
+    const entry = (): string =>
+      git(sb.repo, 'worktree', 'list', '--porcelain')
+        .split('\n\n')
+        .find((e) => e.startsWith(`worktree ${mine}\n`)) ?? '';
+    const before = entry();
+    expect(before).toContain('branch refs/heads/mine');
+    const mineGit = readFileSync(join(mine, '.git'), 'utf8');
+    await keptFor(sb, 'scratch');
+    expect(readFileSync(join(mine, '.git'), 'utf8')).toBe(mineGit);
+    git(sb.repo, 'worktree', 'prune');
+    expect(entry()).toBe(before);
+    expect(git(mine, 'status', '--porcelain')).toBe('A  wip.ts\n');
   });
 
-  it('a clean dependency checkout is moved too, and --discard deletes it', async () => {
-    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', '/deps\n'));
-    const upstream = tempDir('r10-dep-');
-    repoAt(upstream, { 'mix.exs': 'x\n' });
-    git(sb.repo, 'clone', '-q', upstream, join(partDir(sb, 'page'), 'deps/jason'));
-    const r = await cli(sb, ['split', 'abort', '--yes', '--discard']);
-    expect(r.code).toBe(0);
-    expect(existsSync(join(sb.repo, '.git', 'mindly', 'kept'))).toBe(false);
-    expect(existsSync(partDir(sb, 'page'))).toBe(false);
-  });
-
-  it('what no local check can prove is elsewhere: a local tag, a hand-made remote ref, an ignored .env, a skip-worktree edit', async () => {
-    const sb = await splitSandbox(ignoreVendor);
-    const lib = cloneVendor(partDir(sb, 'page'), (up) => write(up, '.gitignore', '.env\n'));
-    write(lib, 'lib.ts', 'export const lib = 2;\n');
-    git(lib, 'commit', '-q', '-am', 'patch');
-    git(lib, 'tag', 'my-patch');
-    git(lib, 'update-ref', 'refs/remotes/origin/wip', 'HEAD');
-    write(lib, '.env', 'STRIPE_KEY=sk_live_only_copy\n');
-    git(lib, 'update-index', '--skip-worktree', 'lib.ts');
-    write(lib, 'lib.ts', 'export const lib = 42;\n');
-    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(0);
-    const kept = keptAt(sb, 'page', 'vendor/lib');
-    expect(git(kept, 'tag')).toBe('my-patch\n');
-    expect(git(kept, 'rev-parse', 'origin/wip').trim()).toBe(
-      git(kept, 'rev-parse', 'my-patch').trim(),
-    );
-    expect(readFileSync(join(kept, '.env'), 'utf8')).toContain('sk_live_only_copy');
-    expect(readFileSync(join(kept, 'lib.ts'), 'utf8')).toBe('export const lib = 42;\n');
-  });
-
-  it('a linked worktree elsewhere keeps working, with its detached commit', async () => {
-    const sb = await splitSandbox(ignoreVendor);
-    const lib = cloneVendor(partDir(sb, 'page'));
-    const wt = join(tempDir('r10-wt-'), 'exp');
-    git(lib, 'worktree', 'add', '-q', '--detach', wt);
-    write(wt, 'lib.ts', 'export const lib = 3;\n');
-    git(wt, 'commit', '-q', '-am', 'experiment');
-    const commit = git(wt, 'rev-parse', 'HEAD').trim();
-    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(0);
-    expect(git(wt, 'rev-parse', 'HEAD').trim()).toBe(commit);
-    expect(git(wt, 'status', '--porcelain')).toBe('');
-  });
-
-  /** A repository at `<page>/vendor/lib` with a submodule at `deps/sub`. */
-  function vendorWithSubmodule(page: string): string {
-    const sub = tempDir('r10-sub-');
-    repoAt(sub, { 'x.ts': 'x\n' });
-    const lib = join(page, 'vendor/lib');
-    repoAt(lib, { 'lib.ts': 'export const lib = 1;\n', '.gitignore': 'notes/\n' });
-    git(lib, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'deps/sub');
-    git(lib, 'commit', '-q', '-m', 'sub');
-    return lib;
-  }
-
-  it('work done in a nested repository after the yes, in all its forms', async () => {
-    const sb = await splitSandbox(ignoreVendor);
-    const page = partDir(sb, 'page');
-    const lib = vendorWithSubmodule(page);
-    write(lib, 'main.ts', 'export const v = 2;\n');
-    const r = await abortWith(sb, [], () => {
-      // In its submodule: an edit and a stash; a hook; an ignored file; a same-size edit.
-      write(lib, 'deps/sub/notes.md', 'a day of design notes\n');
-      write(lib, 'deps/sub/x.ts', 'stashed work\n');
-      git(join(lib, 'deps/sub'), 'stash', '-q', '--', 'x.ts');
-      write(lib, '.git/hooks/pre-push', '#!/bin/sh\n# release checks\n');
-      write(lib, 'notes/design.md', 'new\n');
-      writeFileSync(join(lib, 'main.ts'), 'export const v = 9;\n');
-    });
-    expect(r.code).toBe(0);
-    const kept = keptAt(sb, 'page', 'vendor/lib');
-    expect(readFileSync(join(kept, 'deps/sub/notes.md'), 'utf8')).toBe('a day of design notes\n');
-    expect(git(join(kept, 'deps/sub'), 'stash', 'list')).not.toBe('');
-    expect(existsSync(join(kept, '.git/hooks/pre-push'))).toBe(true);
-    expect(readFileSync(join(kept, 'notes/design.md'), 'utf8')).toBe('new\n');
-    expect(readFileSync(join(kept, 'main.ts'), 'utf8')).toBe('export const v = 9;\n');
-  });
-
-  it('a repository made after the yes is moved too', async () => {
+  it('keeps a repository made after the yes, right before the worktree would go', async () => {
     const sb = await splitSandbox();
     const page = partDir(sb, 'page');
     write(page, 'src/app/billing.ts', 'export const billing = 1;\n');
-    const r = await abortWith(sb, [], () => repoAt(join(page, 'src/app/late')), 3);
-    expect(r.code).toBe(0);
-    expect(git(keptAt(sb, 'page', 'src/app/late'), 'log', '--format=%s')).toBe('only copy\n');
+    let looks = 0;
+    hook.afterBranchLook = (branch) => {
+      if (branch === 'mindly/billing/page' && ++looks === 3) repoAt(join(page, 'src/app/late'));
+    };
+    let r: Awaited<ReturnType<typeof cli>>;
+    try {
+      r = await cli(sb, ['split', 'abort', '--json'], { answers: ['y'] });
+    } finally {
+      delete hook.afterBranchLook;
+    }
+    expect(looks).toBe(3);
+    expect(r.code).toBe(1);
+    const a = JSON.parse(r.stdout) as Aborted;
+    expect(a.keptBecause[page]).toBe(HELD('src/app/late'));
+    expect(git(join(page, 'src/app/late'), 'log', '--format=%s')).toBe('only copy\n');
+  });
+
+  it('a merge stops at an edit in a folder holding a .git, a submodule bump or a new repository', async () => {
+    const sub = tempDir('r10-sub-');
+    repoAt(sub, { 'x.ts': 'x\n' });
+    const sb = await splitSandbox((s) => {
+      git(s.repo, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'add', sub, 'src/app/sub');
+    });
+    const page = partDir(sb, 'page');
+    write(page, 'src/app/page.ts', 'export const page = 2;\n');
+    git(join(page, 'src/api'), 'init', '-q');
+    git(page, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'update', '--init');
+    write(page, 'src/app/sub/x.ts', 'two\n');
+    git(join(page, 'src/app/sub'), 'commit', '-q', '-am', 'two');
+    repoAt(join(page, 'src/app/tool'));
+    await allDone(sb);
+    const merged = await cli(sb, ['split', 'merge']);
+    expect(merged.code).not.toBe(0);
+    for (const p of ['src/app/page.ts', 'src/app/sub', 'src/app/tool']) {
+      expect(merged.stderr).toContain(p);
+    }
+    // --force merges without them, and says so.
+    const forced = await cli(sb, ['split', 'merge', '--force']);
+    expect(forced.code).toBe(0);
+    expect(forced.stdout).toContain('src/app/tool');
   });
 
   it('takes about as long as before with dependency checkouts full of files', async () => {
@@ -561,7 +561,7 @@ describe('split abort moves nested repositories out whole, and never deletes one
     expect((await cli(sb, ['split', 'status'])).code).toBe(0);
     const status = Date.now() - t;
     t = Date.now();
-    expect((await cli(sb, ['split', 'abort', '--keep-branches'], { answers: ['y'] })).code).toBe(0);
+    expect((await cli(sb, ['split', 'abort', '--keep-branches'], { answers: ['y'] })).code).toBe(1);
     const abort = Date.now() - t;
     // Nothing in them is read: no more than a few git listings of their folders.
     expect(status).toBeLessThan(2_000);

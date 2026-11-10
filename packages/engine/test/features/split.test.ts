@@ -55,9 +55,8 @@ function fakeSplitGit(root: string) {
   // Ignored files on the deny-list (by worktree), and which paths are deny-listed.
   const ignoredDenied = new Map<string, string[]>();
   const denied = new Set<string>();
-  // Nested repositories (by worktree), moved out before a worktree goes, or the one that cannot be.
-  const nestedRepos = new Map<string, string[]>();
-  const cannotMove = new Map<string, { path: string; reason: string }>();
+  // Git data an abort never deletes (by worktree).
+  const gitData = new Map<string, string[]>();
   // What appeared right before a removal (by worktree).
   const stray = new Map<string, string[]>();
   // Commits only a branch has (by branch), as `branchOnlyWork` reports them; the branch tip is
@@ -90,16 +89,7 @@ function fakeSplitGit(root: string) {
     restoreFromHead: async (_root, worktree, paths) => {
       calls.restored.push({ worktree, paths: [...paths] });
     },
-    keepNestedRepos: async (_root, worktree, holding) => {
-      const failed = cannotMove.get(worktree) ?? null;
-      if (failed) return { moved: [], failed };
-      const moved = (nestedRepos.get(worktree) ?? []).map((path) => ({
-        path,
-        to: join(root, '.git', 'mindly', 'kept', ...holding, path),
-      }));
-      nestedRepos.delete(worktree);
-      return { moved, failed: null };
-    },
+    gitDataIn: async (_root, worktree) => gitData.get(worktree) ?? [],
     strayWork: async (_root, worktree) => stray.get(worktree) ?? [],
     deleteBranch: async (_root, b, expectedTip) => {
       if (expectedTip !== undefined && branches.has(b) && tipOf(b) !== expectedTip) {
@@ -152,8 +142,7 @@ function fakeSplitGit(root: string) {
     uncommitted,
     ignoredDenied,
     denied,
-    nestedRepos,
-    cannotMove,
+    gitData,
     stray,
     onlyOn,
     calls,
@@ -1375,7 +1364,7 @@ describe('split through hook events', () => {
     expect(readFileSync(join(edited.page, 'src', 'app', 'wip.ts'), 'utf8')).toBe('more\n');
   });
 
-  it('moves nested repositories out before a worktree goes, and keeps it when it cannot', async () => {
+  it('keeps a worktree holding git data, says what to do, and lets the rest go', async () => {
     const { svc, pid, fake } = await setup();
     const created = await svc.create({
       projectId: pid,
@@ -1388,29 +1377,30 @@ describe('split through hook events', () => {
       (typeof created.parts)[number],
       (typeof created.parts)[number],
     ];
-    fake.nestedRepos.set(api.worktree, ['vendor/lib']);
-    fake.cannotMove.set(page.worktree, { path: 'deps/x', reason: 'EXDEV: cross-device link' });
-    // Nothing to confirm: moving a repository loses nothing.
-    expect((await svc.abortCheck(created.split.id)).work).toEqual([]);
-    const first = await svc.abort(created.split.id);
-    expect(first.keptRepos).toEqual([
-      {
-        part: 'api',
-        path: 'vendor/lib',
-        to: expect.stringMatching(new RegExp(`/mindly/kept/${created.split.id}/api/vendor/lib$`)),
-      },
+    fake.gitData.set(page.worktree, ['vendor/lib']);
+    // Uncommitted work beside it is not refused for: nothing of that part goes.
+    fake.uncommitted.set(page.worktree, ['src/app/wip.ts']);
+    const check = await svc.abortCheck(created.split.id);
+    expect(check.work).toEqual([
+      expect.objectContaining({ part: 'page', held: ['vendor/lib'], paths: ['src/app/wip.ts'] }),
     ]);
-    expect(first.removedWorktrees).toEqual([api.worktree]);
+    const first = await svc.abort(created.split.id);
     expect(first.finished).toBe(false);
+    expect(first.removedWorktrees).toEqual([api.worktree]);
+    expect(first.keptWorktrees).toEqual([page.worktree]);
+    expect(first.keptBranches).toEqual([page.branch]);
     expect(first.keptBecause[page.worktree]).toBe(
-      'could not move the git repository deps/x out of it: EXDEV: cross-device link',
+      'it holds git data that abort never deletes: vendor/lib. Move it out of the worktree (or delete it yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything with mindly split abort --yes --discard',
     );
+    expect(first.discarded).toEqual([]);
     expect(existsSync(page.worktree)).toBe(true);
-    fake.cannotMove.delete(page.worktree);
+    // Moved out by hand: the rerun goes on as for any other work.
+    fake.gitData.delete(page.worktree);
+    fake.uncommitted.delete(page.worktree);
     expect((await svc.abort(created.split.id)).finished).toBe(true);
   });
 
-  it('moves no repository on a discard: everything goes', async () => {
+  it('keeps a worktree that got git data right before it would go', async () => {
     const { svc, pid, fake } = await setup();
     const created = await svc.create({
       projectId: pid,
@@ -1420,10 +1410,34 @@ describe('split through hook events', () => {
       connectedAgents: null,
     });
     const page = (created.parts as { worktree: string }[])[1] as { worktree: string };
-    fake.nestedRepos.set(page.worktree, ['vendor/lib']);
+    let looks = 0;
+    const gitDataIn = fake.port.gitDataIn;
+    fake.port.gitDataIn = async (root, wt) => {
+      if (wt === page.worktree && ++looks === 2) return ['late'];
+      return gitDataIn(root, wt);
+    };
+    const aborted = await svc.abort(created.split.id);
+    expect(looks).toBe(2);
+    expect(aborted.finished).toBe(false);
+    expect(aborted.keptBecause[page.worktree]).toMatch(
+      /^it holds git data that abort never deletes: late\./,
+    );
+  });
+
+  it('a discard deletes a worktree holding git data', async () => {
+    const { svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const page = (created.parts as { worktree: string }[])[1] as { worktree: string };
+    fake.gitData.set(page.worktree, ['vendor/lib']);
     const aborted = await svc.abort(created.split.id, { discardUncommitted: true });
-    expect(aborted.keptRepos).toEqual([]);
     expect(aborted.finished).toBe(true);
+    expect(existsSync(page.worktree)).toBe(false);
   });
 
   it('keeps a worktree that got work its listing counts after the last look at it', async () => {

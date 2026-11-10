@@ -214,6 +214,9 @@ export function unmergedLine(w: SplitUnmergedWork): string {
   };
   const what: string[] = [];
   if (w.paths.length > 0) what.push(list(w.paths));
+  if (w.held?.length) {
+    what.push(`git data abort never deletes, so its worktree stays: ${list(w.held)}`);
+  }
   const commits = w.commits ?? [];
   if (commits.length > 0) {
     what.push(`${count(commits.length, 'commit')} only on its branch: ${list(commits)}`);
@@ -351,19 +354,6 @@ export function renderAborted(sc: Screen, a: SplitAbortResult): void {
       2,
     );
     for (const w of a.discarded) sc.text(unmergedLine(w), 4);
-  }
-  if (a.keptRepos.length > 0) {
-    sc.text(
-      `${sc.mark('ok')} Moved ${count(a.keptRepos.length, 'git repository', 'git repositories')} out of the worktrees first, whole (history, stash, hooks and every file):`,
-      2,
-    );
-    for (const r of a.keptRepos) {
-      sc.text(`Part "${clean(r.part, 60)}": ${clean(r.path, 200)} -> ${clean(r.to, 300)}`, 4);
-    }
-    sc.note(
-      'To bring one back, move its folder where you want it (mv); to delete one, remove its folder (rm -rf).',
-      2,
-    );
   }
   if (a.split.integrationBranch)
     sc.note(`The merged branch ${a.split.integrationBranch} stays.`, 2);

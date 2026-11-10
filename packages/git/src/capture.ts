@@ -83,6 +83,11 @@ export interface CapturedCommit {
   parent: string | null;
   /** Repository-relative paths that were changed but left out because they are denied. */
   skipped: string[];
+  /**
+   * New nested repositories (untracked folders git does not descend into), left out of the
+   * tree: recording one would point at a commit only it holds, or fail when it has none.
+   */
+  nested: string[];
 }
 
 /**
@@ -152,11 +157,14 @@ export async function captureWorktreeCommit(
 
     const extraDeny = options.extraDeny ?? [];
     const skipped = new Set<string>();
+    const nested = new Set<string>();
     const toAdd: string[] = [];
     for (const p of new Set([...unstaged, ...untracked])) {
-      // A new nested repository (listed as its folder): not part of this tree. Adding it would
-      // record a commit that only it holds, or fail when it has none.
-      if (p.endsWith('/')) continue;
+      // A new nested repository, listed as its folder: left out (see `nested`).
+      if (p.endsWith('/')) {
+        nested.add(p.slice(0, -1));
+        continue;
+      }
       if (isDeniedPath(p, extraDeny)) skipped.add(p);
       else toAdd.push(p);
     }
@@ -190,7 +198,7 @@ export async function captureWorktreeCommit(
       parent ? [parent] : [],
       options.message ?? 'mindly capture',
     );
-    return { commit, tree, parent, skipped: [...skipped].sort() };
+    return { commit, tree, parent, skipped: [...skipped].sort(), nested: [...nested].sort() };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

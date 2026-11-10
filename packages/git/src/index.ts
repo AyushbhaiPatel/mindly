@@ -82,9 +82,7 @@ export {
   PACKAGE_DIRS,
   flaggedChanges,
   ignoredDeniedFiles,
-  keepNestedRepos,
-  keptReposDir,
-  nestedRepoPaths,
+  gitDataPaths,
   listFiles,
   mergeIntoNewBranch,
   removeWorktree,
@@ -95,8 +93,6 @@ export type {
   BranchOnlyWork,
   MergeIntoBranchResult,
   MergeSource,
-  KeptRepo,
-  NestedRepo,
 } from './worktrees.js';
 
 export { DEFAULT_CHECK_OUTPUT_BYTES, checkEnv, runChecks } from './checks.js';
