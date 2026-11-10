@@ -290,8 +290,10 @@ const cases: {
     want: ['warn', 'deny'],
   },
   {
-    name: 'source of a process substitution',
-    command: `source <(echo "export GIT_EXTERNAL_DIFF=${EXT}"); git diff v1`,
+    // A file rather than `<(…)`: macOS's bash 3.2 does not read a process substitution with
+    // `source`, so the command would not write anything there.
+    name: 'source of a file',
+    command: `printf '%s\\n' "export GIT_EXTERNAL_DIFF=${EXT}" > env.sh; source ./env.sh; git diff v1`,
     want: ['warn', 'deny'],
   },
   {
