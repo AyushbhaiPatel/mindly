@@ -452,6 +452,114 @@ describe('self-healing memory', () => {
     expect(mindly.store.memories.get(m.id).trust).not.toBe('stale');
   });
 
+  it('places earlier evidence that is part of a line however it was made safe', () => {
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    /** As an earlier version stored `original`: redacted, made safe, the bare hash. */
+    const legacy = (original: string) => ({
+      stored: sanitizeForContext(redactText(original), 2000),
+      hash: sha256(normalizeBlock(original)),
+    });
+    const shapes: [string, string, string][] = [
+      // name, the excerpt as found, the rest of its line around it
+      ['a joiner in the kept text', `badge: "👩‍💻 maintainers", token: "${secret}"`, 'TEAM'],
+      ['a neutralised delimiter', `note: "<mindly-context> here", token: "${secret}"`, 'X'],
+      ['plain', `badge: "maintainers", token: "${secret}"`, 'TEAM'],
+    ];
+    for (const [name, original, id] of shapes) {
+      const { stored, hash } = legacy(original);
+      expect(stored, name).toContain('[REDACTED]');
+      const content = `// header\nconst ${id} = { ${original}, region: "eu" };\nexport {};\n`;
+      expect(excerptState(content, stored, hash), name).toBe('present');
+      expect(excerptState(content.replace(secret, 'sk_live_other'), stored, hash), name).toBe(
+        'absent',
+      );
+    }
+
+    // Redaction made it longer than an excerpt may be, so it was stored cut short.
+    const long = `password=Xy7kQ2pZ ${'lorem ipsum '.repeat(166)}end`.slice(0, 1999);
+    const cut = legacy(long);
+    expect(redactText(long).length).toBeGreaterThan(2000);
+    expect(cut.stored.endsWith('…')).toBe(true);
+    const line = `// header\nconst LONG = "${long} and more";\nexport {};\n`;
+    expect(excerptState(line, cut.stored, cut.hash)).toBe('present');
+    expect(excerptState(line.replace('Xy7kQ2pZ', 'Qq1wW2eE'), cut.stored, cut.hash)).toBe('absent');
+    // Past where it was cut, only the hash knows the text: a change there is seen too.
+    const changedEnd = line.replace(long, `${long.slice(0, -1)}#`);
+    expect(changedEnd).not.toBe(line);
+    expect(excerptState(changedEnd, cut.stored, cut.hash)).toBe('absent');
+  });
+
+  it('re-checks earlier multi-line evidence of a large file within the hook budget', async () => {
+    const timed = <T>(f: () => T): [T, number] => {
+      const t = performance.now();
+      const r = f();
+      return [r, performance.now() - t];
+    };
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    const lines: string[] = [];
+    for (let i = 0, size = 0; size < 500 * 1024; i++) {
+      const l = `  "key${i}": "value${i}",`;
+      lines.push(l);
+      size += l.length + 1;
+    }
+    const block = (n: number, at: number) => {
+      const b = Array.from({ length: n }, (_, i) => `g${i}: 1,`);
+      b[at] = `token: "${secret}",`;
+      return b.join('\n');
+    };
+    const { root, mindly, pid, cc, write } = await featureSetup();
+    // Three blocks of 140 to 180 lines that were in the file and are gone now.
+    const blocks = [block(140, 70), block(160, 80), block(180, 90)];
+    write('src/big.json', `${blocks.join('\n')}\n${lines.join('\n')}\n`);
+    const ids = blocks.map(
+      (b, j) =>
+        mindly.memory.remember({
+          projectId: pid,
+          projectRoot: root,
+          kind: 'fact',
+          title: `block ${j}`,
+          body: 'b',
+          source: agentSource(cc),
+          evidence: [{ path: 'src/big.json', excerpt: b }],
+        }).id,
+    );
+    // As an earlier version stored them.
+    for (const [j, b] of blocks.entries()) {
+      mindly.store.db
+        .prepare('UPDATE memory_evidence SET excerpt = ?, content_hash = ? WHERE memory_id = ?')
+        .run(sanitizeForContext(redactText(b), 2000), sha256(normalizeBlock(b)), ids[j] as string);
+    }
+    const [same, sameMs] = timed(() =>
+      selfHealingOf(mindly).recheckFile(pid, root, 'src/big.json', null),
+    );
+    expect(same.map((c) => c.state)).toEqual(['valid', 'valid', 'valid']);
+    write('src/big.json', `${lines.join('\n')}\n`);
+    const [gone, goneMs] = timed(() =>
+      selfHealingOf(mindly).recheckFile(pid, root, 'src/big.json', null),
+    );
+    expect(gone.map((c) => c.state)).toEqual(['invalid', 'invalid', 'invalid']);
+    // Tens of milliseconds on an idle machine (the whole-line hashing alone took ~600 ms).
+    expect(Math.max(sameMs, goneMs)).toBeLessThan(500);
+  });
+
+  it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {
+    // Opens with a redaction, so only runs of 200 whole lines could place it: in a 500 KB file
+    // that is more hashing than one check may do.
+    const lines: string[] = [];
+    for (let i = 0, size = 0; size < 500 * 1024; i++) {
+      lines.push(`g${i}: ${i},`);
+      size += 12;
+    }
+    const original = `abcdef123456\n${lines.slice(0, 199).join('\n')}`;
+    const stored = `[REDACTED]\n${lines.slice(0, 199).join('\n')}`;
+    const hash = sha256(normalizeBlock(original));
+    expect(excerptState(`other\n${lines.join('\n')}`, stored, hash)).toBe('unknown');
+    // A small file is decided, both ways.
+    const small = lines.slice(0, 400).join('\n');
+    expect(excerptState(`other\n${small}`, stored, hash)).toBe('absent');
+    expect(excerptState(`abcdef123456\n${small}`, stored, hash)).toBe('present');
+  });
+
   it('finds redacted evidence past the first 20,000 lines of a file', async () => {
     const { root, mindly, pid, cc, write } = await featureSetup();
     const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
