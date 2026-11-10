@@ -103,6 +103,15 @@ export async function runHook(
     timer = setTimeout(() => resolve('timeout'), timeoutMs);
   });
   const opened: { mindly: Pick<Mindly, 'hooks' | 'close'> | null } = { mindly: null };
+  // A notification this hook raised is sent by a separate process: a hook never waits for a
+  // pager. Whatever way the hook ends, a raised notification gets its sender.
+  const handOff = (): void => {
+    try {
+      if (opened.mindly) deps.afterAnswer?.(opened.mindly, io.env);
+    } catch {
+      // The notification stays in the outbox for the daemon or the next sender.
+    }
+  };
   const work = (async (): Promise<HookResult> => {
     // Yield once so the deadline timer is armed before any synchronous database work.
     await Promise.resolve();
@@ -116,13 +125,16 @@ export async function runHook(
     outcome = await Promise.race([work, deadline]);
   } catch (err) {
     clearTimeout(timer);
+    handOff();
     closeQuietly(opened.mindly);
     return fail('hook failed', { error: describeError(err) });
   }
   clearTimeout(timer);
   if (outcome === 'timeout') {
-    // The handler keeps running in the background; main.ts exits the process right away.
+    // The handler keeps running in the background; main.ts exits the process right away. A
+    // notification it raised before the deadline still gets its sender.
     work.catch(() => undefined);
+    handOff();
     return fail('deadline exceeded', { timeoutMs });
   }
   closeQuietly(opened.mindly);
@@ -131,12 +143,12 @@ export async function runHook(
   try {
     rendered = adapter.render(event, outcome);
   } catch (err) {
+    handOff();
     return fail('render failed', { error: describeError(err) });
   }
   logger.debug('hook handled', { agent, event: nativeEvent, ms: Date.now() - started });
   if (rendered.stdout !== '') io.stdout.write(rendered.stdout);
-  // A notification this hook raised is sent by a separate process: a hook never waits for a pager.
-  if (opened.mindly) deps.afterAnswer?.(opened.mindly, io.env);
+  handOff();
   return rendered.exitCode;
 }
 

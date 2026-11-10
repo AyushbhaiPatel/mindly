@@ -230,7 +230,9 @@ export class NotifyOutbox {
       this.k.store.kv.set(`${PREFIX}${key}`, entry);
       // Read after the entry is written: a sender that stops clears its mark before its last look
       // at the outbox, so either it sees this entry or no fresh mark is found here.
-      if (!this.senderAlive()) unattended.add(this.k);
+      // A hook runs this: it checks the sender's start time only where that is cheap (/proc),
+      // never by running `ps`.
+      if (!this.senderAlive(this.k.clock.now(), { startTime: 'cheap' })) unattended.add(this.k);
     } catch (err) {
       this.k.logger.warn('notification could not be queued', {
         error: err instanceof Error ? err.message : String(err),
@@ -244,7 +246,16 @@ export class NotifyOutbox {
   }
 
   /** Whether a sender is running (its presence mark is fresh). */
-  senderAlive(now: number = this.k.clock.now()): boolean {
+  senderAlive(
+    now: number = this.k.clock.now(),
+    opts: {
+      /**
+       * `full` (default) also asks `ps` for the start time where there is no /proc; `cheap`
+       * reads /proc only and otherwise checks the pid alone (for hooks, which must not wait).
+       */
+      startTime?: 'full' | 'cheap';
+    } = {},
+  ): boolean {
     try {
       const mark = this.k.store.kv.get<Lease>(SENDER_KEY);
       if (!mark || mark.until <= now || mark.until - now > MAX_LEASE_MS) return false;
@@ -253,7 +264,9 @@ export class NotifyOutbox {
       if (mark.pid === undefined) return true;
       if (!processAlive(mark.pid)) return false;
       if (mark.start === undefined) return true;
-      const start = processStartTime(mark.pid);
+      const procfs = existsSync('/proc/self/stat');
+      if (!procfs && opts.startTime === 'cheap') return true;
+      const start = processStartTime(mark.pid, procfs ? 'auto' : 'ps');
       return start === null || start === mark.start;
     } catch {
       return false;

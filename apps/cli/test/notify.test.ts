@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { cli, sandbox, type Sandbox } from './helpers.js';
+import { runHook } from '../src/index.js';
+import { cli, fixture, sandbox, testIo, type Sandbox } from './helpers.js';
 
 /** A webhook endpoint on 127.0.0.1: answers `status.code` after `status.delayMs`. */
 async function endpoint(): Promise<{
@@ -309,4 +310,26 @@ describe('a notification raised in a hook', () => {
       await hook.close();
     }
   }, 40_000);
+});
+
+describe('a hook that runs past its deadline', () => {
+  it('still starts a sender for the page it raised', async () => {
+    const sb = sandbox();
+    expect((await cli(sb, ['config', 'set', 'hooks.timeoutMs', '200'])).code).toBe(0);
+    const io = testIo(sb, {
+      stdin: JSON.stringify({ ...fixture('claude-code.SessionStart'), cwd: sb.repo }),
+    });
+    const handedOff: unknown[] = [];
+    const mindly = {
+      // The page is written, then the handler overruns the deadline.
+      hooks: { handle: () => new Promise(() => undefined) } as never,
+      close: () => undefined,
+    };
+    const code = await runHook('claude-code', 'SessionStart', io, {
+      open: () => mindly,
+      afterAnswer: (m) => handedOff.push(m),
+    });
+    expect(code).toBe(0);
+    expect(handedOff).toEqual([mindly]);
+  });
 });
