@@ -605,6 +605,31 @@ describe('redact', () => {
     ).toBe(header(REDACTED, REDACTED));
   });
 
+  it.each([
+    // Spaces may stand on either side of `=` (RFC 7235), before an unquoted value too.
+    'curl -H \'Authorization: Digest username="u", nonce="n", uri="/", response = PW\' x',
+    'curl -H \'Authorization: Digest username="u", realm="r", response= PW\' x',
+    'curl -H \'Authorization: Digest username="u", nonce="n", response=\tPW\' x',
+    'curl -H \'Authorization: Digest username="u",response= "PW"\' x',
+    'curl -H \'Authorization: Digest username="u",response =  PW\' x',
+    "curl -H 'Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request, SignedHeaders=host;x-amz-date, Signature = PW' x",
+    // SigV4a, and a header whose scheme is on the line after a continuation.
+    "curl -H 'Authorization: AWS4-ECDSA-P256-SHA256 Credential=AKIDEXAMPLE/20150830/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=PW' x",
+    'curl https://x.test \\\n  -H "Authorization: \\\n    Digest username=\\"u\\", response=\\"PW\\""',
+  ])('redacts a Digest or AWS Signature secret: %j', (template) => {
+    const secret = 'f00dfacecafebeef1234567890abcdef';
+    const out = redactText(template.replace('PW', secret));
+    expect(out).not.toContain(secret);
+    expect(out).toContain(REDACTED);
+  });
+
+  it('keeps a spaced value that is the next parameter for that parameter', () => {
+    const line = `curl -H 'Authorization: Digest username="u", nonce= realm="r", response= abc==' x`;
+    expect(redactText(line)).toBe(
+      `curl -H 'Authorization: Digest username="u", nonce= realm="r", response= ${REDACTED}' x`,
+    );
+  });
+
   it('reads every secret Digest parameter after an empty one', () => {
     const names = ['response', 'nonce', 'cnonce', 'opaque', 'Signature', 'username', 'realm'];
     const secrets = ['response', 'nonce', 'cnonce', 'opaque', 'Signature'];

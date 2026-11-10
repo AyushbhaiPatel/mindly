@@ -73,16 +73,21 @@ const AUTH_HEADER = /(?:proxy-)?authorization[ \t]*:[ \t]*/giy;
 
 /** The scheme before the credentials in an `Authorization` header, kept as written. */
 const AUTH_SCHEME =
-  /(bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|aws4-hmac-sha256|hoba|mutual|vapid)[ \t]+/iy;
-
-/** Schemes whose credentials are `name=value` parameters: Digest, AWS Signature Version 4. */
-const PARAM_SCHEMES = new Set(['digest', 'aws4-hmac-sha256']);
+  /(bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|aws4-[a-z0-9-]+|hoba|mutual|vapid)[ \t]+/iy;
 
 /**
- * A `Digest` or `AWS4-HMAC-SHA256` `Authorization` header (or JSON key), whose credentials are
- * `name=value` parameters.
+ * Schemes whose credentials are `name=value` parameters: Digest, and AWS Signature Version 4 in
+ * any of its forms (`AWS4-HMAC-SHA256`, SigV4a's `AWS4-ECDSA-P256-SHA256`).
  */
-const PARAM_HEADER = /authorization["']?[ \t]*[:=][ \t]*["'\\]*(?:digest|aws4-hmac-sha256)\b/i;
+const PARAM_SCHEME = /^(?:digest|aws4-[a-z0-9-]+)$/i;
+
+/**
+ * A `Digest` or `AWS4-...` `Authorization` header (or JSON key), whose credentials are
+ * `name=value` parameters. The scheme may be on the next physical line of the logical line, after
+ * a continuation (`-H "Authorization: \` and then `Digest ...`).
+ */
+const PARAM_HEADER =
+  /authorization["']?[ \t]*[:=][ \t\r\n"'\\^`]*(?:digest|aws4-[a-z0-9-]+)(?![A-Za-z0-9-])/i;
 
 /**
  * The name of a parameter whose value is a secret or proves one, and its `=`: read anywhere on a
@@ -95,8 +100,12 @@ const SECRET_PARAM =
  * A Digest or AWS Signature parameter at the start of a header value (`username=`, `Credential=`):
  * the value is parameters, read by `params`. Any other value is one token, as for `Basic`.
  */
-const PARAM_START =
-  /^(?:username|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash|credential|signedheaders|signature|password)[ \t]*=/i;
+const PARAM_NAMES =
+  'username|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash|credential|signedheaders|signature|password';
+const PARAM_START = new RegExp(`^(?:${PARAM_NAMES})[ \\t]*=`, 'i');
+
+/** One of those parameters where a value would start, after spaces: then that value is empty. */
+const PARAM_NAME = new RegExp(`(?:${PARAM_NAMES})[ \\t]*=`, 'iy');
 
 /** A credential after a scheme is one token of at least this many characters, no spaces. */
 const MIN_SCHEME_TOKEN = 8;
@@ -396,7 +405,7 @@ class Finder {
     if (to - from < (scheme !== null ? MIN_SCHEME_TOKEN : MIN_BARE_TOKEN)) return;
     // Digest and AWS Signature parameters (`username="u"`) are read by `params`, on the line; a
     // single token after those schemes (`Digest dXNlcm5h...==`) is redacted as one.
-    const params = PARAM_SCHEMES.has((scheme?.[1] ?? '').toLowerCase());
+    const params = PARAM_SCHEME.test(scheme?.[1] ?? '');
     if (params && PARAM_START.test(text.slice(from, to))) return;
     this.push(from, to);
   }
@@ -406,9 +415,9 @@ class Finder {
    * parameter named in `SECRET_PARAM`, wherever it is on the line: the same name elsewhere on the
    * line is redacted too, which garbles that value and nothing else. A value in quotes (`"..."`,
    * `\"...\"`) runs to the next same quote on the line, or to the end of the line when it never
-   * closes; any other runs to a space, comma, quote or backslash. Spaces after the `=` are read
-   * only before a quoted value: in `nonce= response="..."` the value of `nonce` is empty, and
-   * `response` is read as its own parameter.
+   * closes; any other runs to a space, comma, quote or backslash. Spaces may stand on either side
+   * of the `=` (`response = abc`), but a parameter after them is no value: in
+   * `nonce= response="..."` the value of `nonce` is empty, and `response` is read as its own.
    *
    * Names are looked for again just inside a quoted value (`username="John, response="..."`),
    * which costs nothing more: a quoted value ends at the next same quote, so the values of one
@@ -434,14 +443,15 @@ class Finder {
         SECRET_PARAM.lastIndex = open + 1 - start;
         continue;
       }
-      if (spaced) continue;
-      let to = value;
+      PARAM_NAME.lastIndex = open;
+      if (spaced && PARAM_NAME.test(text)) continue;
+      let to = open;
       while (to < end) {
         const c = text[to] ?? '';
         if (isSpace(c) || c === ',' || isQuoting(c)) break;
         to++;
       }
-      this.push(value, to);
+      this.push(open, to);
       SECRET_PARAM.lastIndex = Math.max(SECRET_PARAM.lastIndex, to - start);
     }
   }
