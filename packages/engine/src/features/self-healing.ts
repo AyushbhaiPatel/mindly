@@ -3,6 +3,7 @@ import { REDACTED, sha256, type MemoryEvidence, type Session } from '@mindly/cor
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
 import { stripManagedSection } from '../memory/managed-section.js';
+import { parseCitedLines } from '../memory/evidence-hash.js';
 import { normalizeBlock, readBounded, type MemoryService } from '../memory/service.js';
 import type { Mindly } from '../mindly.js';
 import {
@@ -22,8 +23,8 @@ export interface EvidenceCheck {
   memoryId: string;
   path: string;
   /**
-   * `unknown` when the file could not be read (too large, unreadable, denied), or when a redacted
-   * excerpt could not be placed within the work allowed for one check.
+   * `unknown` when the file could not be read (too large, unreadable, denied), or when evidence
+   * stored with the earlier kind of hash could not be placed in it.
    */
   state: 'valid' | 'invalid' | 'unknown';
   /** True when this check marked the memory stale. */
@@ -42,23 +43,44 @@ export interface SweepResult {
 
 /** The longest original a stored excerpt can stand for (excerpts are capped at 2000 characters). */
 const MAX_ORIGINAL_CHARS = 4000;
-/** Candidate texts hashed while looking for the original of one redacted excerpt. */
-const MAX_REDACTED_TRIES = 20_000;
-/** Places inside one line, and neighbouring lines, tried for an edge that was redacted. */
-const MAX_EDGE_IN_LINE = 48;
-const MAX_EDGE_LINES = 20;
-/** Where a value can start or end inside a line. */
-const BOUNDARY = /[\s"'`,;:=(){}[\]<>]/;
+/** Candidate texts hashed for one excerpt stored with the earlier kind of hash. */
+const MAX_LEGACY_TRIES = 300;
 
-/** What a look for an excerpt says: it is there, it is not, or that could not be told in budget. */
+/** What a look for an excerpt says: it is there, it is not, or that could not be told. */
 export type ExcerptState = 'present' | 'absent' | 'unknown';
 
+/** A file as evidence is compared against it: normalised once, with its line runs hashed on demand. */
+interface NormFile {
+  content: string;
+  /** True when some run of `n` whole lines of the file has this hash. */
+  hasLines(n: number, hash: string): boolean;
+}
+
+function normFile(normContent: string): NormFile {
+  let lines: string[] | null = null;
+  const runs = new Map<number, Set<string>>();
+  return {
+    content: normContent,
+    hasLines(n, hash) {
+      let set = runs.get(n);
+      if (!set) {
+        lines ??= normContent.split('\n').slice(0, MAX_WINDOW_LINES);
+        set = new Set<string>();
+        for (let i = 0; i + n <= lines.length; i++) {
+          set.add(sha256(n === 1 ? (lines[i] as string) : lines.slice(i, i + n).join('\n')));
+        }
+        runs.set(n, set);
+      }
+      return set.has(hash);
+    },
+  };
+}
+
 /**
- * Decides whether an evidence excerpt is still present in `content`. Matches the normalised
- * stored excerpt as a substring, the way it was accepted when the memory was stored. A stored
- * excerpt that was redacted or sanitised differs from the original, so the original is looked
- * for through the stored content hash: any run of whole normalised lines, or a text placed by
- * what the redaction left of the excerpt, whose hash equals it.
+ * Decides whether an evidence excerpt is still present in `content`: the normalised stored
+ * excerpt is in it as a substring, the way it was accepted, or the lines it was taken from are
+ * (see `citedLinesHash`): some run of that many whole lines has the stored hash. That is exact
+ * whatever the redaction did to the stored text, and costs one pass over the file.
  */
 export function excerptPresent(
   content: string,
@@ -68,126 +90,60 @@ export function excerptPresent(
   return excerptState(content, excerpt, contentHash) === 'present';
 }
 
-/** `excerptPresent` that also says when the answer could not be worked out within its budget. */
+/**
+ * `excerptPresent` that also says when it could not tell. That only happens for evidence stored
+ * with the earlier kind of hash (of the excerpt itself, not of its lines).
+ */
 export function excerptState(
   content: string,
   excerpt: string,
   contentHash: string | null,
 ): ExcerptState {
-  return excerptIn(normalizeBlock(content), excerpt, contentHash);
+  return excerptIn(normFile(normalizeBlock(content)), excerpt, contentHash);
 }
 
-/** `excerptState` for content that is already normalised (a file is normalised once). */
-function excerptIn(normContent: string, excerpt: string, contentHash: string | null): ExcerptState {
+function excerptIn(file: NormFile, excerpt: string, contentHash: string | null): ExcerptState {
   const normExcerpt = normalizeBlock(excerpt);
-  if (normExcerpt.length > 0 && normContent.includes(normExcerpt)) return 'present';
+  if (normExcerpt.length > 0 && file.content.includes(normExcerpt)) return 'present';
   if (!contentHash) return 'absent';
+  const cited = parseCitedLines(contentHash);
+  if (cited) return file.hasLines(cited.lines, cited.hash) ? 'present' : 'absent';
+
+  // Stored with the hash of the excerpt itself.
   if (normExcerpt.length > 0 && sha256(normExcerpt) === contentHash) {
     // The stored excerpt is the original; the substring test above is authoritative.
     return 'absent';
   }
-  const n = Math.max(1, normExcerpt.split('\n').length);
-  const lines = normContent.split('\n').slice(0, MAX_WINDOW_LINES);
-  for (let i = 0; i + n <= lines.length; i++) {
-    if (sha256(lines.slice(i, i + n).join('\n')) === contentHash) return 'present';
-  }
-  return redactedIn(normContent, normExcerpt, contentHash);
-}
-
-/** Where the original may start when the excerpt opens with a redaction: nearest places first. */
-function edgeStarts(content: string, anchor: number): number[] {
-  const lineStart = content.lastIndexOf('\n', anchor - 1) + 1;
-  const out = [lineStart];
-  for (let i = anchor - 1; i > lineStart && out.length < MAX_EDGE_IN_LINE; i--) {
-    if (BOUNDARY.test(content[i - 1] as string)) out.push(i);
-  }
-  // A redaction can have taken whole lines before this one (a key block).
-  let at = lineStart;
-  for (let n = 0; n < MAX_EDGE_LINES && at > 0; n++) {
-    at = content.lastIndexOf('\n', at - 2) + 1;
-    out.push(at);
-  }
-  return out;
-}
-
-/** Where the original may end when the excerpt closes with a redaction: nearest places first. */
-function edgeEnds(content: string, anchorEnd: number): number[] {
-  const nl = content.indexOf('\n', anchorEnd);
-  const lineEnd = nl === -1 ? content.length : nl;
-  const out = [lineEnd];
-  for (let i = anchorEnd + 1; i < lineEnd && out.length < MAX_EDGE_IN_LINE; i++) {
-    if (BOUNDARY.test(content[i] as string)) out.push(i);
-  }
-  let at = lineEnd;
-  for (let n = 0; n < MAX_EDGE_LINES && at < content.length; n++) {
-    const next = content.indexOf('\n', at + 1);
-    at = next === -1 ? content.length : next;
-    out.push(at);
-  }
-  return out;
+  // The stored excerpt was redacted: the original was a run of whole lines, or a part of one.
+  if (file.hasLines(Math.max(1, normExcerpt.split('\n').length), contentHash)) return 'present';
+  return legacyPartIn(file.content, normExcerpt, contentHash);
 }
 
 /**
- * Looks for the original of a redacted excerpt that is not a run of whole lines (a part of a
- * line, or text whose redaction removed lines). The stored hash is the judge throughout: a
- * candidate counts only when its hash is the stored one.
- *
- * What the redaction left of the excerpt is as it was, so the original lies around an occurrence
- * of that text. An edge that is fixed text gives the start or end exactly. An edge that was
- * redacted is tried at the places a value can start or end: the boundary of its line, the
- * separators inside the line, and the lines next to it. An excerpt that is nothing but a
- * redaction is tried as each value of the file. When the candidates run past the budget the
- * answer is `unknown`, never `absent`.
+ * Evidence stored with the hash of its excerpt, where the excerpt was part of a line and was
+ * redacted. The text before the first redaction and after the last one is as it was, so the
+ * original starts at an occurrence of the first and ends at an occurrence of the second, and the
+ * hash says which pair. An excerpt that opens or closes with a redaction has no such start or
+ * end and cannot be placed. A few hundred candidates are tried at most; past that the answer is
+ * `unknown` and the evidence keeps the validity it had.
  */
-function redactedIn(normContent: string, normExcerpt: string, contentHash: string): ExcerptState {
+function legacyPartIn(normContent: string, normExcerpt: string, contentHash: string): ExcerptState {
   const parts = normExcerpt.split(REDACTED);
-  if (parts.length < 2) return 'absent';
+  const head = parts[0] as string;
+  const tail = parts[parts.length - 1] as string;
+  if (parts.length < 2 || head === '' || tail === '') return 'absent';
   let tries = 0;
-  const is = (start: number, end: number): boolean | null => {
-    if (end <= start || end - start > MAX_ORIGINAL_CHARS) return false;
-    if (++tries > MAX_REDACTED_TRIES) return null;
-    return sha256(normContent.slice(start, end)) === contentHash;
-  };
-  const fixed = parts.filter((p) => p !== '');
-  if (fixed.length === 0) {
-    // Only a secret was quoted: it stood between two separators.
-    let start = 0;
-    for (let i = 0; i <= normContent.length; i++) {
-      if (i < normContent.length && !BOUNDARY.test(normContent[i] as string)) continue;
-      if (i > start) {
-        const hit = is(start, i);
-        if (hit === null) return 'unknown';
-        if (hit) return 'present';
-      }
-      start = i + 1;
+  for (let t = normContent.indexOf(tail); t !== -1; t = normContent.indexOf(tail, t + 1)) {
+    const end = t + tail.length;
+    // Starts before this end, nearest first, as far back as an excerpt can reach.
+    for (
+      let h = normContent.lastIndexOf(head, t - head.length);
+      h !== -1 && end - h <= MAX_ORIGINAL_CHARS;
+      h = h === 0 ? -1 : normContent.lastIndexOf(head, h - 1)
+    ) {
+      if (++tries > MAX_LEGACY_TRIES) return 'unknown';
+      if (sha256(normContent.slice(h, end)) === contentHash) return 'present';
     }
-    return 'absent';
-  }
-  const head = fixed[0] as string;
-  const tail = fixed[fixed.length - 1] as string;
-  const openEdge = parts[0] === '';
-  const closeEdge = parts[parts.length - 1] === '';
-  for (let a = normContent.indexOf(head); a !== -1; a = normContent.indexOf(head, a + 1)) {
-    const starts = openEdge ? edgeStarts(normContent, a) : [a];
-    let from = a + head.length;
-    for (;;) {
-      // With one piece of fixed text, that piece is both ends.
-      const t = fixed.length === 1 ? a : normContent.indexOf(tail, from);
-      if (t === -1) break;
-      const anchorEnd = t + (fixed.length === 1 ? head.length : tail.length);
-      if (anchorEnd - a > MAX_ORIGINAL_CHARS) break;
-      const ends = closeEdge ? edgeEnds(normContent, anchorEnd) : [anchorEnd];
-      for (const start of starts) {
-        for (const end of ends) {
-          const hit = is(start, end);
-          if (hit === null) return 'unknown';
-          if (hit) return 'present';
-        }
-      }
-      if (fixed.length === 1) break;
-      from = t + 1;
-    }
-    if (++tries > MAX_REDACTED_TRIES) return 'unknown';
   }
   return 'absent';
 }
@@ -272,7 +228,7 @@ export class SelfHealingService {
     // Rules Mindly wrote into an instruction file are not evidence for those same rules.
     return content === null
       ? { kind: 'unreadable' }
-      : { kind: 'present', content: normalizeBlock(stripManagedSection(content)) };
+      : { kind: 'present', file: normFile(normalizeBlock(stripManagedSection(content))) };
   }
 
   private check(
@@ -291,9 +247,9 @@ export class SelfHealingService {
         ? 'absent'
         : e.excerpt === null
           ? 'present'
-          : excerptIn(file.content, e.excerpt, e.contentHash);
+          : excerptIn(file.file, e.excerpt, e.contentHash);
     if (found === 'unknown') {
-      // Too many places the redacted text could be: what was known before stays as it is.
+      // Evidence with the earlier kind of hash that could not be placed: it stays as it was.
       return { ...base, state: 'unknown', markedStale: false, restored: false };
     }
     const valid = found === 'present';
@@ -328,9 +284,8 @@ export class SelfHealingService {
   }
 }
 
-/** `content` is normalised (`normalizeBlock`) once, for every evidence row of the file. */
-type FileState =
-  { kind: 'present'; content: string } | { kind: 'missing' } | { kind: 'unreadable' };
+/** A present file is normalised once, for every evidence row that points at it. */
+type FileState = { kind: 'present'; file: NormFile } | { kind: 'missing' } | { kind: 'unreadable' };
 
 /** Feature module: re-verifies memory evidence on `files.changed`. */
 export const selfHealingModule = (mindly: Mindly): void => {

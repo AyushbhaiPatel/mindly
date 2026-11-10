@@ -9,7 +9,6 @@ import {
   redactText,
   sanitizeForContext,
   sanitizeLine,
-  sha256,
   MindlyError,
   tryResolveInsideRoot,
   type Memory,
@@ -19,6 +18,7 @@ import {
 } from '@mindly/core';
 import type { MemoryFilter, MemoryPatch, MemorySearchHit } from '@mindly/store';
 import type { Kernel } from '../kernel.js';
+import { citedLinesHash } from './evidence-hash.js';
 import { stripManagedSection } from './managed-section.js';
 
 export const MAX_TITLE = 160;
@@ -308,7 +308,8 @@ export class MemoryService {
     return {
       rel: resolved.rel,
       excerpt: this.clean(excerpt, 2000),
-      hash: sha256(normExcerpt),
+      // The lines of the file the excerpt was taken from: what a later check can compare exactly.
+      hash: citedLinesHash(normalizeBlock(stripManagedSection(content ?? '')), normExcerpt),
       valid,
     };
   }
