@@ -94,6 +94,8 @@ function guarded(scopes: Record<string, string[]>) {
       });
     }
   })();
+  // A test that stops before asking closes the store under it: that is not an error of its own.
+  ready.catch(() => undefined);
   const shell = async (command: string, cwd = dir) => {
     await ready;
     return mindly.hooks.handle({

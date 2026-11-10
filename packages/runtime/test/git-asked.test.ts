@@ -9,8 +9,8 @@
 // - refs moved by commands read as looking: `branch --set-upstream-to`, `tag -a`,
 //   `remote add -f`, and the read-only `branch --contains` / `tag --points-at` / `push` that
 //   should not stop a later command from being asked;
-// - what git itself is changed into on the line: an exported `GIT_DIR`, `.git` written or
-//   copied over, `.gitignore` rewritten.
+// - what git itself is changed into on the line: an exported `GIT_DIR`, `.git` written
+//   in place, `.gitignore` rewritten.
 import { describe, expect, it } from 'vitest';
 import { file, guarded, pem, runInCopy } from './written.js';
 
@@ -215,11 +215,10 @@ const cases: {
   },
   {
     name: 'cp -r a clone .git over ours, then reset --hard',
-    known: true,
     prepare: (g) => {
       g.git('clone', '-q', '-b', 'certs-change', g.dir, `${g.dir}-clone2`);
     },
-    command: (g) => `cp -r ${g.dir}-clone2/.git . && git reset -q --hard`,
+    command: (g) => `rm -rf .git && cp -r ${g.dir}-clone2/.git .git && git reset -q --hard`,
     writes: ['certs/server.pem'],
     want: ['deny', 'warn'],
   },
