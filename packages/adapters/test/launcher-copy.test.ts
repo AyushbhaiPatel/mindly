@@ -1,15 +1,15 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { applyInstallSteps, createClaudeCodeAdapter } from '../src/index.js';
+import { applyInstallSteps, createClaudeCodeAdapter, isMindlyStatusLine } from '../src/index.js';
 import { tempDir } from './helpers.js';
 
 const claude = createClaudeCodeAdapter({ env: {} });
 
-/** What `npx mindly-cli@<version> init` records: Node running the copy in the Mindly home. */
-const copied = (version: string): string[] => [
-  '/usr/local/bin/node',
-  `/home/a/.mindly/lib/${version}/node_modules/mindly-cli/dist/main.js`,
+/** What `npx mindly-cli init` records: Node running the launcher in the Mindly home. */
+const launched = (node = '/usr/local/bin/node'): string[] => [
+  node,
+  '/home/a/.mindly/bin/mindly.cjs',
 ];
 
 function settingsIn(home: string): string {
@@ -19,32 +19,51 @@ function settingsIn(home: string): string {
   return settings;
 }
 
-describe('the launcher copy kept by npx init', () => {
-  it('a later init from a global install replaces its hooks', async () => {
-    const home = tempDir();
-    const settings = settingsIn(home);
-    for (const command of [copied('0.5.0'), ['/usr/local/bin/mindly']]) {
-      applyInstallSteps(await claude.planInstall({ command, homeDir: home, projectRoot: null }));
-    }
-    const hooks = JSON.parse(readFileSync(settings, 'utf8')).hooks as Record<string, unknown[]>;
-    expect(JSON.stringify(hooks)).not.toContain('/lib/0.5.0/');
-    expect(hooks['Stop']).toHaveLength(1);
+interface Written {
+  statusLine?: { command: string };
+  hooks: Record<string, { hooks: { command: string }[] }[]>;
+}
+
+describe('the launcher kept by npx init', () => {
+  it("has a status line any later install recognises as Mindly's", () => {
+    const line = (command: string) => ({ type: 'command', command });
+    expect(
+      isMindlyStatusLine(line('/usr/local/bin/node /home/a/.mindly/bin/mindly.cjs statusline'), [
+        '/usr/local/bin/mindly',
+      ]),
+    ).toBe(true);
+    expect(isMindlyStatusLine(line('node /home/a/tools/bin/other.cjs statusline'))).toBe(false);
+    expect(isMindlyStatusLine(line('node /home/a/.mindly/bin/mindly.cjs statusline | x'))).toBe(
+      false,
+    );
   });
 
-  it('init from a newer version takes over the hooks and the status line', async () => {
+  it('a later init from a global install replaces its hooks and status line', async () => {
     const home = tempDir();
     const settings = settingsIn(home);
-    for (const v of ['0.5.0', '0.6.0']) {
+    for (const command of [launched(), ['/usr/local/bin/mindly']]) {
+      applyInstallSteps(await claude.planInstall({ command, homeDir: home, projectRoot: null }));
+    }
+    const written = JSON.parse(readFileSync(settings, 'utf8')) as Written;
+    expect(JSON.stringify(written)).not.toContain('mindly.cjs');
+    expect(written.statusLine?.command).toBe('/usr/local/bin/mindly statusline');
+    expect(written.hooks['Stop']).toHaveLength(1);
+  });
+
+  it('init with another Node updates the status line along with the hooks', async () => {
+    const home = tempDir();
+    const settings = settingsIn(home);
+    for (const node of [
+      '/home/a/.nvm/versions/node/v22.11.0/bin/node',
+      '/home/a/.nvm/versions/node/v22.12.0/bin/node',
+    ]) {
       applyInstallSteps(
-        await claude.planInstall({ command: copied(v), homeDir: home, projectRoot: null }),
+        await claude.planInstall({ command: launched(node), homeDir: home, projectRoot: null }),
       );
     }
-    const written = JSON.parse(readFileSync(settings, 'utf8')) as {
-      statusLine: { command: string };
-      hooks: Record<string, unknown[]>;
-    };
-    expect(written.statusLine.command).toBe(`${copied('0.6.0').join(' ')} statusline`);
-    expect(JSON.stringify(written.hooks)).not.toContain('/lib/0.5.0/');
+    const written = JSON.parse(readFileSync(settings, 'utf8')) as Written;
+    expect(written.statusLine?.command).toContain('v22.12.0');
+    expect(JSON.stringify(written)).not.toContain('v22.11.0');
     expect(written.hooks['Stop']).toHaveLength(1);
   });
 
@@ -52,7 +71,7 @@ describe('the launcher copy kept by npx init', () => {
     const home = tempDir();
     const settings = settingsIn(home);
     applyInstallSteps(
-      await claude.planInstall({ command: copied('0.5.0'), homeDir: home, projectRoot: null }),
+      await claude.planInstall({ command: launched(), homeDir: home, projectRoot: null }),
     );
     applyInstallSteps(
       await claude.planUninstall({
@@ -61,6 +80,6 @@ describe('the launcher copy kept by npx init', () => {
         projectRoot: null,
       }),
     );
-    expect(readFileSync(settings, 'utf8')).not.toContain('mindly-cli');
+    expect(readFileSync(settings, 'utf8')).not.toContain('mindly');
   });
 });
