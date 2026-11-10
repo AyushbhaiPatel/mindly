@@ -51,6 +51,8 @@ const BASH_MAJOR = Number(
 const NAMEREFS = BASH_MAJOR >= 43;
 /** `mapfile` came with bash 4.0. */
 const BASH4 = BASH_MAJOR >= 40;
+/** `printf -v` into an array element came with bash 4.1. */
+const PRINTF_ELEMENT = BASH_MAJOR >= 41;
 /** Whether a command runs here at all (`rbash` and `env -S` are not everywhere). */
 const works = (command: string): boolean => {
   try {
@@ -455,6 +457,7 @@ const cases: {
     prep: FIVE_HOME,
     command: `printf -v 'a[HOME=5]' x; ${COMMIT}`,
     want: ['warn', 'deny'],
+    runs: PRINTF_ELEMENT,
   },
   {
     name: 'arithmetic in a subscript read writes',
@@ -614,6 +617,7 @@ const cases: {
     name: 'git in a subscript printf -v writes',
     command: "printf -v 'a[$(git checkout -q v1 -- certs/server.pem)]' x",
     want: ['warn', 'deny'],
+    runs: PRINTF_ELEMENT,
   },
   {
     name: 'git in a subscript evaluated later',
