@@ -328,6 +328,54 @@ describe('write targets of a shell command', () => {
     }
   });
 
+  it('reads git option values as values, never as flags or paths', () => {
+    expect(targets('git restore -sSTABLE certs/a.pem')).toEqual(['certs/a.pem', 'certs/a.pem/**']);
+    expect(targets('git restore --sou v1 certs/a.pem')).toEqual(['certs/a.pem', 'certs/a.pem/**']);
+    expect(targets('git --attr-source HEAD restore certs/a.pem')).toEqual([
+      'certs/a.pem',
+      'certs/a.pem/**',
+    ]);
+    expect(targets('git config -f certs/a.pem a.b c')).toEqual(['certs/a.pem']);
+    expect(targets('git archive -o certs/a.pem HEAD')).toEqual(['certs/a.pem']);
+    expect(targets('git merge-file certs/a.pem base other')).toEqual([
+      'certs/a.pem',
+      'certs/a.pem/**',
+    ]);
+    expect(targets('git checkout-index -f certs/a.pem')).toEqual(['certs/a.pem', 'certs/a.pem/**']);
+    for (const cmd of [
+      'git stash push -um wip',
+      'git stash push -km "wip"',
+      'git clean -fdeconfig.json',
+      'git merge --stat --no-edit main',
+      'git rebase --summary main',
+      'git apply --stat --apply p.diff',
+      'git bisect start HEAD v2',
+      'git sparse-checkout set src',
+      'git checkout-index -f -a',
+      'git read-tree -u --reset v1',
+      'git worktree add wt v1',
+      'git checkout -p',
+      'git restore -p',
+      'git some-alias',
+    ]) {
+      expect(
+        read(cmd).filter((x) => x.certain),
+        cmd,
+      ).toEqual([]);
+      expect(
+        read(cmd).some((x) => !x.certain),
+        cmd,
+      ).toBe(true);
+    }
+    // Case does not count with icase pathspecs.
+    expect(read("git checkout -- ':(icase)CERTS/A.PEM'")[0]).toMatchObject({ nocase: true });
+    // Paths in a working tree named apart; one outside the tree is said.
+    expect(targets('git --work-tree=sub checkout -- a.pem')).toEqual(['sub/a.pem', 'sub/a.pem/**']);
+    expect(readShellWrites('git --work-tree=/elsewhere checkout -- a.pem').limit).toContain(
+      'another working tree',
+    );
+  });
+
   it('reads git commands that only move the index or refs as writing nothing', () => {
     for (const cmd of [
       'git add -A',
@@ -352,6 +400,13 @@ describe('write targets of a shell command', () => {
       'git checkout',
       'git apply --check x.patch',
       'git clean -n',
+      'git rm -n certs/a.pem',
+      'git mv -n a b',
+      'git config --get a.b',
+      'git config -f tool.ini --list',
+      'git bisect log',
+      'git stash show -p',
+      'git remote -v',
     ]) {
       expect(read(cmd), cmd).toEqual([]);
     }

@@ -454,7 +454,7 @@ describe('git commands and lines, checked against what they write', () => {
     const g = setUp();
     try {
       g.git('clone', '-q', '-b', 'certs-change', g.dir, `${g.dir}-clone2`);
-      const command = `cp -r ${g.dir}-clone2/.git . && git reset -q --hard`;
+      const command = `rm -rf .git && cp -r ${g.dir}-clone2/.git .git && git reset -q --hard`;
       await check(g, command, ['certs/server.pem'], 'warn');
     } finally {
       g.mindly.close();

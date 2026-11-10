@@ -732,6 +732,40 @@ describe('hook flow', () => {
     expect(huge.decision).toBe('deny');
   });
 
+  it('refuses a write to a path with control or bidi characters, never passing it over', async () => {
+    const { root, mindly } = setup();
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Certificates are issued by hand',
+      body: 'Ask first.',
+      scopePaths: ['**/*.pem'],
+      source: USER,
+      enforce: true,
+    });
+    const pre = (tool: NonNullable<ReturnType<typeof writeTool>>) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool }));
+    // A name that reads as `server.pem` once a right-to-left override flips it, and one with a
+    // control character in it.
+    for (const name of ['certs/server\u202Emep.txt', 'certs/ser\u0007ver.pem']) {
+      const edit = await pre(writeTool(name, 'x') as NonNullable<ReturnType<typeof writeTool>>);
+      expect(edit.decision, JSON.stringify(name)).toBe('deny');
+      expect(edit.reason, JSON.stringify(name)).toContain('control or bidi characters');
+      const shell = await pre(
+        shellTool(`rm -f '${name}'`) as NonNullable<ReturnType<typeof shellTool>>,
+      );
+      expect(shell.decision, JSON.stringify(name)).toBe('deny');
+      expect(shell.reason, JSON.stringify(name)).toContain('control or bidi characters');
+      // Reading it is not a write.
+      const read = await pre(
+        shellTool(`cat '${name}'`) as NonNullable<ReturnType<typeof shellTool>>,
+      );
+      expect(read.decision, JSON.stringify(name)).toBeNull();
+    }
+  });
+
   it('finds other working trees once and refuses what it cannot place', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-')));
     const other = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-wt-')));

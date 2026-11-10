@@ -4,6 +4,7 @@ import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path
 import {
   EMPTY_HOOK_RESULT,
   globToRegExp,
+  hasUnsafeChars,
   isDeniedPath,
   matchesAnyGlob,
   redactText,
@@ -89,6 +90,8 @@ interface CheckedPath {
    * still matched against rules and guards by name, and nothing about them is stored.
    */
   own: boolean;
+  /** Letter case does not count when matching rules (`git --icase-pathspecs`). */
+  nocase?: boolean;
 }
 
 /** Where a path is: the working tree of the project that holds it. */
@@ -105,6 +108,8 @@ interface Writes {
   landings: Located[];
   /** Paths that may be in the project but could not be placed (see {@link MAX_TREE_LOOKUPS}). */
   unchecked: number;
+  /** Paths refused as unsafe to place: control or bidi characters, or far too long. */
+  unsafe: number;
 }
 
 /** A rule the user marked as enforced, and what it covers of a tool call. */
@@ -398,14 +403,20 @@ export class HookHandler {
     cwd: string,
     paths: readonly string[],
     trees: TreeLookups | null = { roots: [], dirs: new Map() },
-  ): Promise<{ paths: CheckedPath[]; unchecked: number }> {
+  ): Promise<{ paths: CheckedPath[]; unchecked: number; unsafe: number }> {
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
     const out: CheckedPath[] = [];
     const seen = new Set<string>();
     // What does not fit is counted as not checked, never dropped as fine.
     let unchecked = Math.max(0, paths.length - MAX_CHECKED_PATHS);
+    let unsafe = 0;
     for (const p of paths.slice(0, MAX_CHECKED_PATHS)) {
-      if (typeof p !== 'string' || p.length === 0 || p.length > 4096) continue;
+      if (typeof p !== 'string' || p.length === 0) continue;
+      // A path that cannot be placed safely is never passed over as outside the project.
+      if (hasUnsafeChars(p) || p.length > 4096) {
+        unsafe++;
+        continue;
+      }
       const found = await this.locate(
         project,
         treeRoot,
@@ -418,7 +429,7 @@ export class HookHandler {
       seen.add(found.abs);
       out.push({ rel: found.rel, abs: found.abs, own: found.own });
     }
-    return { paths: out, unchecked };
+    return { paths: out, unchecked, unsafe };
   }
 
   /**
@@ -451,8 +462,8 @@ export class HookHandler {
     ownTreeOnly = false,
     timeUp: () => boolean = () => false,
   ): Promise<{ certain: Writes; possible: Writes; limit: string | null }> {
-    const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0 };
-    const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0 };
+    const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
+    const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
     // The command is read as text; where it runs, the home directory and the repository root
     // are handed in so `~`, `$HOME` and `$(git rev-parse --show-toplevel)` can be placed.
@@ -483,6 +494,10 @@ export class HookHandler {
           ? { tracked: false, untracked: true, ignored: t.how === 'clean-ignored' }
           : t.touches;
       const place = async (abs: string): Promise<Located | null> => {
+        if (hasUnsafeChars(abs) || abs.length > 4096) {
+          into.unsafe++;
+          return null;
+        }
         const found = await this.locate(project, treeRoot, abs, late ? null : trees);
         if (found === 'unknown') into.unchecked++;
         return found === 'unknown' ? null : found;
@@ -490,7 +505,12 @@ export class HookHandler {
       const file = (at: Located | null): void => {
         if (at === null || at.rel === '' || seen.has(`${t.certain}:${at.abs}`)) return;
         seen.add(`${t.certain}:${at.abs}`);
-        into.paths.push({ rel: at.rel, abs: at.abs, own: at.own });
+        into.paths.push({
+          rel: at.rel,
+          abs: at.abs,
+          own: at.own,
+          ...(t.nocase ? { nocase: true } : {}),
+        });
       };
       const scope = (at: Located, segments: readonly string[], base = at.abs): void => {
         // Runs of `**` are one, and a pattern too deep to compare counts as its directory.
@@ -634,10 +654,11 @@ export class HookHandler {
     search: ScopeSearch,
   ): { deny: RuleHit | null; warn: RuleHit[] } {
     const warn: RuleHit[] = [];
-    const paths = writes.paths.map((p) => p.rel);
     for (const rule of rules) {
       const globs = rule.scope.paths;
-      const covers = paths.filter((p) => matchesAnyGlob(p, globs));
+      const covers = writes.paths
+        .filter((p) => matchesAnyGlob(p.rel, globs, p.nocase ? { nocase: true } : {}))
+        .map((p) => p.rel);
       const maybe: string[] = [];
       const unsearched: string[] = [];
       let wholeTree = false;
@@ -709,11 +730,16 @@ export class HookHandler {
     const pending = this.k.store.saves.caughtFor(pid, session.id, WATCHED_SAVE_KINDS);
     const toolName = sanitizeLine(tool.name, 40);
     if (tool.writes && tool.edits.length > 0) {
-      const { paths: checked, unchecked } = await this.checkedPaths(
+      const {
+        paths: checked,
+        unchecked,
+        unsafe,
+      } = await this.checkedPaths(
         project,
         evt.cwd,
         tool.edits.map((e) => e.path),
       );
+      if (unsafe > 0) return unsafeDenial();
       // A patch too large to report in full is refused: the files that were cut are unknown.
       if (unchecked > 0 || tool.editsCut === true) {
         return uncheckedDenial(unchecked, tool.editsCut === true);
@@ -749,6 +775,7 @@ export class HookHandler {
               scopes: [],
               landings: [],
               unchecked: 0,
+              unsafe: 0,
             },
             new ScopeSearch(null, 0),
           ).deny;
@@ -788,6 +815,7 @@ export class HookHandler {
         false,
         () => performance.now() > until - budget / 2,
       );
+      if (certain.unsafe > 0) return unsafeDenial();
       if (certain.unchecked > 0) return uncheckedDenial(certain.unchecked, false);
       const written = certain.paths.map((p) => p.rel);
       const named = possible.paths.map((p) => p.rel);
@@ -1270,6 +1298,16 @@ function nearestDirectory(path: string): string | null {
 function coveredBy(rule: Memory, paths: readonly string[]): string[] {
   const covered = paths.filter((p) => matchesAnyGlob(p, rule.scope.paths));
   return covered.length > 0 ? covered : [...paths];
+}
+
+/** A write to a path that cannot be placed safely: refused, never passed over. */
+function unsafeDenial(): HookResult {
+  return {
+    ...EMPTY_HOOK_RESULT,
+    decision: 'deny',
+    reason:
+      'Mindly refused this call: a path it writes contains control or bidi characters (or is too long), so it cannot be checked against the project rules. Use the plain file name.',
+  };
 }
 
 function uncheckedDenial(count: number, cut: boolean): HookResult {
