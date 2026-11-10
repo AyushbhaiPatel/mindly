@@ -57,30 +57,44 @@ memory, which is then injected into every other agent.
   repository's config, variables exported before the session, a remote whose URL is a path on
   this machine, and the files a clone from elsewhere brings.
 - Only a shell command Mindly can read fully is checked exactly, and only such a command is ever
-  blocked. A line is read fully when every part of it is plain: words of plain characters (`*`
-  and `?` included, matched against the files that exist), single-quoted text, double-quoted
-  text without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a
-  plain path (`>`, `>>`, `2>`, `&>`), `2>&1`, `</dev/null`; a pipe into a program that only
-  filters (`head`, `tail`, `grep`, `sort`, `uniq`, `wc`, `cut`, `tr`, `cat`, `less`, `jq`,
-  `column`, and `tee` to a plain path, which counts as a write); assignments of plain values;
-  the builtins `cd`, `echo`, `printf` without `-v`, `true`, `false`, `:`, `test` and `[`
-  without `-v` or `-R`, `pwd` and `exit`; `if`, `then`, `elif`, `else` and `fi`; and programs
-  given plain words, with only `env` (without `-S`), `sudo`, `doas`, `nice`, `nohup`,
-  `timeout`, `stdbuf` or `npx` in front of them. On such a line the paths a command names, the
-  files git writes its output to and the folders it fills are blocked when a rule covers them,
-  and what may change the whole tree is a warning, as described above.
-- Anything else is not read fully: a variable or a substitution (`$VAR`, `$(…)`, a backtick), a
-  backslash, a subshell or group, a function, a loop, a here-document or here-string, a process
-  substitution, code fed to a shell (`bash -c`, `| sh`), any other builtin (`export`, `set`,
-  `source`, `read`, `[[`, …), a `[…]` class or `{a,b}`, `!`, a background `&`, a pipe into a
-  program that does more than filter (`xargs`), a program not known here that is given git
-  (`taskset`, `script -c`), and more than 4,000 commands. Such a line is never blocked, and never
-  let through without a word: whenever a file an enforced rule covers is present in the project,
-  it gets one warning that names the rule and the covered files it may write. What it does is
-  not read at all, so nothing in it is asked of git or decided by other guards. Lines that now
-  warn this way include any line with `$VAR` or `$(…)` (a commit message from a variable, a
-  `cd` to the top of the repository), a loop or a function, a pipe into `xargs`, strict shell
-  options (`set -euo pipefail`), `export`, `source`, `[[ … ]]`, and a shell given code.
+  blocked. A line is read fully when every part of it is plain and every program on it is one
+  whose writes Mindly models completely, given only options it reads as the program does. The
+  programs read fully are `git` (with its own tables of subcommands and options), `rm`, `mv`,
+  `cp`, `mkdir`, `rmdir`, `touch`, `ln`, `chmod`, `chown`, `cat`, `ls`, `head`, `tail`, `wc`,
+  `grep` without `-r`, `echo`, `printf` without `-v`, and the builtins `cd`, `true`, `false`,
+  `:`, `pwd`, `exit`, and `test` and `[` without `-v` or `-R`. Each of the file tools is read
+  with the options it is known to take; any other option, or a long option abbreviated, makes the
+  line one not read fully (`cp -b`, `cp --parents`, `rm --rec`, `touch -r`, `rmdir -p`). The
+  rest of a line read fully is: words of plain characters (`*` and `?` included, unless they may
+  match what an earlier command of the line makes), single-quoted text, double-quoted text
+  without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a plain
+  path (`>`, `>>`, `2>`, `&>`), `2>&1`, `</dev/null`; a pipe into `head`, `tail`, `grep`, `wc` or
+  `cat`; assignments by the shell's rules (a name and `=` outside quotes, whatever the quoting of
+  the value) to lower-case variables or to harmless upper-case ones (locale, time zone, terminal,
+  author, pager or editor); `env` with no option of its own in front of a program; and `if`,
+  `then`, `elif`, `else` and `fi`. On such a line the paths a command names, the files git writes
+  its output to and the folders it fills are blocked when a rule covers them, and what may change
+  the whole tree is a warning, as described above.
+- Anything else is not read fully: any other program (`sort`, `uniq`, `awk`, `sed`, `rg`,
+  `find`, `tar`, interpreters such as `python`, `node`, `ruby` and `perl`, `npx`, `tsc` and other
+  compilers, package managers, formatters, test runners, anything not known here), a program by
+  its path, `env` with options, `sudo` and other launchers, an assignment to `HOME`, `PWD`,
+  `OLDPWD`, `CDPATH` or any other upper-case variable, a variable or a substitution (`$VAR`,
+  `$(…)`, a backtick), a backslash, a subshell or group, a function, a loop, a here-document or
+  here-string, a process substitution, code fed to a shell (`bash -c`, `| sh`), any other
+  builtin (`export`, `set`, `source`, `read`, `[[`, …), a `[…]` class or `{a,b}`, `!`, a
+  background `&`, and more than 4,000 commands. Such a line is never blocked, and never let
+  through without a word. It may write the whole tree: whenever a file an enforced rule covers is
+  present in the project, or a folder a rule names is there, it gets one warning that names the
+  rule and what it covers; the write guards (a split's ownership of files) are asked the same
+  way and only warn. The paths it names are read as far as the time allows, as possible writes
+  only, so a folder it makes and fills is warned about too. Nothing of it is asked of git. Lines
+  that now warn this way include any line with `$VAR` or `$(…)`, a loop or a function, a test
+  run through a package manager, `npx`, a pipe into `sort` or `xargs`, `sed`, `find`, strict
+  shell options, `export`, `source`, `[[ … ]]`, and a shell given code.
+- A shell tool call is always read as a shell line, even when its text holds a patch; only a
+  call that is nothing but a patch (its text, or `apply_patch` given one in a here-document) is
+  read as the edits of that patch.
 - Rendered memory text is sanitised: control characters stripped, fence/delimiter sequences
   neutralised, length capped.
 

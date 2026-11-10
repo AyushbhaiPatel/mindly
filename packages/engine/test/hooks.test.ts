@@ -108,7 +108,6 @@ describe('hook flow', () => {
     const shell = (command: string) =>
       mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
     for (const command of [
-      "sed -i 's/a/b/' src/generated/api.ts",
       'echo y > src/generated/api.ts',
       'echo y>src/generated/api.ts',
       'rm src/generated/api.ts',
@@ -118,19 +117,29 @@ describe('hook flow', () => {
       'cp src/auth.ts src/generated',
       'mv src/generated/api.ts src/api.ts',
       'git checkout -- src/generated',
-      `python -c "open('src/generated/api.ts','w').write('x')"`,
     ]) {
       const r = await shell(command);
       expect(r.decision, command).toBe('deny');
       expect(r.reason, command).toContain('Never edit generated code');
     }
+    // A program whose writes are not modelled completely (sed, an interpreter, a test runner, a
+    // package manager) makes a line not read fully: a warning while a covered file is there.
     for (const command of [
-      'cat src/generated/api.ts 2>/dev/null',
+      "sed -i 's/a/b/' src/generated/api.ts",
+      `python -c "open('src/generated/api.ts','w').write('x')"`,
       'grep -rn export src/generated | sort',
       'npx vitest run src/generated/api.test.ts',
+      'npm test',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision, command).toBeNull();
+      expect(r.context, command).toContain('could not read this command fully');
+      expect(r.context, command).toContain('Never edit generated code');
+    }
+    for (const command of [
+      'cat src/generated/api.ts 2>/dev/null',
       'git diff -- src/generated/api.ts > /tmp/api.diff',
       'rm src/auth.ts',
-      'npm test',
     ]) {
       const r = await shell(command);
       expect(r.decision, command).toBeNull();
@@ -304,12 +313,9 @@ describe('hook flow', () => {
     // A rule that names its directory also holds for files a command brings into it.
     for (const command of [
       'cp -R /tmp/migrations packages/db/prisma/',
-      'tar xf a.tar -C packages/db/prisma/migrations',
-      'find packages/db -type f -delete',
       'git checkout HEAD~1 packages',
       'git rm -r packages',
       'git clean -fdx packages/db',
-      'sudo -u root rm packages/db/prisma/migrations/001.sql',
       'cd packages/db && cd - && rm packages/db/prisma/migrations/001.sql',
     ]) {
       const r = await shell(command);
@@ -322,6 +328,10 @@ describe('hook flow', () => {
       'rm $(pwd)/packages/db/prisma/migrations/001.sql',
       "bash <<'EOF'\nrm packages/db/prisma/migrations/001.sql\nEOF",
       'rm packages/db/prisma/migrations/00[1].sql',
+      // Programs whose writes are not modelled completely.
+      'tar xf a.tar -C packages/db/prisma/migrations',
+      'find packages/db -type f -delete',
+      'sudo -u root rm packages/db/prisma/migrations/001.sql',
     ]) {
       const r = await shell(command);
       expect(r.decision, command).toBeNull();
@@ -397,9 +407,6 @@ describe('hook flow', () => {
       'rm -rf **/dist',
       'mv dist dist.old',
       'chmod -R u+w dist',
-      'eslint --fix src',
-      'prettier --write src',
-      'prettier --write "src/**/*.ts"',
       'git checkout -- src',
       'git restore src/',
       'git clean -fdx dist',
@@ -407,12 +414,23 @@ describe('hook flow', () => {
       'rm -f *.log',
       'rm -rf *.tsbuildinfo',
       'rm -rf coverage .next out',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision, command).toBeNull();
+      expect(r.context ?? '', command).not.toContain('enforced');
+    }
+    // Programs whose writes are not modelled completely (a formatter, find): not read fully,
+    // a warning while a covered file is anywhere in the project, never a block.
+    for (const command of [
+      'eslint --fix src',
+      'prettier --write src',
+      'prettier --write "src/**/*.ts"',
       "find . -name '*.js' -delete",
       'find dist -type f -delete',
     ]) {
       const r = await shell(command);
       expect(r.decision, command).toBeNull();
-      expect(r.context ?? '', command).not.toContain('enforced');
+      expect(r.context, command).toContain('could not read this command fully');
     }
     // The same commands are blocked as soon as a file the rule covers is really there.
     writeFileSync(join(root, 'dist', 'm7', 'leaf.pem'), '');
@@ -427,7 +445,6 @@ describe('hook flow', () => {
       ['rm -rf certs', 'certs/server.pem', 'Certificates are issued by hand'],
       ['rm -rf .', '.pem', 'Certificates are issued by hand'],
       ['rm -f *.pem', 'old.pem', 'Certificates are issued by hand'],
-      ["find . -name '*.pem' -delete", '.pem', 'Certificates are issued by hand'],
     ] as const) {
       const r = await shell(command);
       expect(r.decision, command).toBe('deny');
@@ -441,12 +458,16 @@ describe('hook flow', () => {
     // A top-level wildcard is one level: it does not see what lies in folders.
     expect((await shell('rm -f *.log')).decision).toBeNull();
     expect((await shell('rm -f *.env')).decision).toBeNull();
-    // A formatter only rewrites the kinds of file it knows: a covered file of another kind is
-    // none of its business. A change of mode is a warning, not a block.
-    for (const command of ['prettier --write .', 'eslint --fix .', 'black dist']) {
+    // Programs not read fully warn, never block. A change of mode is a warning, not a block.
+    for (const command of [
+      "find . -name '*.pem' -delete",
+      'prettier --write .',
+      'eslint --fix .',
+      'black dist',
+    ]) {
       const r = await shell(command);
       expect(r.decision, command).toBeNull();
-      expect(r.context ?? '', command).not.toContain('Certificates are issued by hand');
+      expect(r.context, command).toContain('could not read this command fully');
     }
     const mode = await shell('chmod -R 755 .');
     expect(mode.decision).toBeNull();
@@ -486,8 +507,8 @@ describe('hook flow', () => {
       expect(r.decision).toBeNull();
       expect(r.context).toContain('could not search all of dist');
       expect(r.context).toContain('Certificates are issued by hand');
-      // A possible write that could not be looked through says nothing.
-      expect((await shell('mytool dist')).context ?? '').not.toContain('Certificates');
+      // A program not read fully is never blocked.
+      expect((await shell('mytool dist')).decision).toBeNull();
       // What the command names outright is still blocked, with or without a search.
       writeFileSync(join(root, 'dist', 'server.pem'), '');
       expect((await shell('rm dist/server.pem')).decision).toBe('deny');
@@ -531,7 +552,6 @@ describe('hook flow', () => {
         'rm -rf certs build',
         'rm -rf build && rm -rf certs',
         'rm -rf *',
-        "find . -name '*.pem' -delete",
         'rm -f */*.pem',
       ]) {
         const r = await shell(command);
@@ -605,9 +625,13 @@ describe('hook flow', () => {
     writeFileSync(join(root, 'certs', 'OLD.PEM'), '');
     const shell = (command: string) =>
       mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
-    expect((await shell("find . -iname '*.pem' -delete")).decision).toBeNull();
+    expect((await shell('rm -f certs/*.pem')).decision).toBeNull();
     writeFileSync(join(root, 'certs', 'new.pem'), '');
-    expect((await shell("find . -iname '*.PEM' -delete")).decision).toBe('deny');
+    expect((await shell('rm -f certs/*.pem')).decision).toBe('deny');
+    // find is not read fully: a warning, never a block.
+    const found = await shell("find . -iname '*.PEM' -delete");
+    expect(found.decision).toBeNull();
+    expect(found.context).toContain('could not read this command fully');
   });
 
   it('still places plain paths when the time for the rest has run out', async () => {
@@ -870,7 +894,7 @@ describe('hook flow', () => {
       process.env['HOME'] = dirname(root);
       for (const command of [
         `rm ~/${name}/src/generated/api.ts`,
-        `cd ~/${name} && sed -i 's/a/b/' src/generated/api.ts`,
+        `cd ~/${name} && rm src/generated/api.ts`,
         `cd ~ && rm -rf ${name}/src`,
         `echo x > ~/${name}/src/generated/new.ts`,
       ]) {

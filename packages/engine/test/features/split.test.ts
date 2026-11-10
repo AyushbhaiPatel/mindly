@@ -436,11 +436,13 @@ describe('split through hook events', () => {
     const read = await shell('cat src/app/page.ts | grep page');
     expect(read.decision ?? null).toBeNull();
     expect(read.context ?? '').not.toContain('owned by part');
-    for (const command of ['sed -i "" s/a/b/ src/app/page.ts', 'cat tpl > src/app/page.ts']) {
-      const r = await shell(command);
-      expect(r.decision ?? null).toBeNull();
-      expect(r.context).toContain('src/app/page.ts is owned by part "Part page"');
-    }
+    const named = await shell('cat tpl > src/app/page.ts');
+    expect(named.decision ?? null).toBeNull();
+    expect(named.context).toContain('src/app/page.ts is owned by part "Part page"');
+    // A line not read fully (sed is not modelled completely) may write anything: a warning.
+    const sed = await shell('sed -i "" s/a/b/ src/app/page.ts');
+    expect(sed.decision ?? null).toBeNull();
+    expect(sed.context).toContain('reaches files owned by part "Part page"');
     const own = await shell('echo x > src/api/new.ts');
     expect(own.context ?? '').not.toContain('owned by part');
   });
@@ -467,10 +469,7 @@ describe('split through hook events', () => {
       'cat src/api/billing.ts',
       'cat src/api/billing.ts 2>/dev/null',
       'cat src/api/billing.ts || true',
-      'sed -n 1,40p src/api/billing.ts',
-      'grep -n plan src/api/billing.ts | sort | uniq',
-      'npx vitest run src/api/billing.test.ts',
-      'npx tsc --noEmit -p src/api/tsconfig.json',
+      'grep -n plan src/api/billing.ts | head',
       'git diff main -- src/api/billing.ts > /tmp/api.diff',
       'echo x > src/app/page.ts',
     ]) {
@@ -478,9 +477,28 @@ describe('split through hook events', () => {
       expect(r.decision ?? null, command).toBeNull();
       expect(r.context ?? '', command).not.toContain('owned by part');
     }
+    // A line not read fully (a program not modelled completely, a loop, code fed to a shell, a
+    // brace expansion) may write anything: the guard warns, and never blocks, even in strict mode.
+    for (const command of [
+      'sed -n 1,40p src/api/billing.ts',
+      'grep -n plan src/api/billing.ts | sort | uniq',
+      'npx vitest run src/api/billing.test.ts',
+      'npx tsc --noEmit -p src/api/tsconfig.json',
+      'cd src/api && sed -i s/a/b/ billing.ts',
+      "find . -name '*.ts' -delete",
+      "find . -name '*.js' -delete",
+      'for f in src/*.ts; do echo $f; done',
+      'black .',
+      'gofmt -w .',
+      "bash -c 'echo x > src/api/billing.ts'",
+      'rm -rf src/{api,app}',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision ?? null, command).toBeNull();
+      expect(r.context ?? '', command).toContain('reaches files owned by part "Part api"');
+    }
     for (const [command, what] of [
       ['echo x>src/api/billing.ts', 'src/api/billing.ts'],
-      ['cd src/api && sed -i s/a/b/ billing.ts', 'src/api/billing.ts'],
       ['mv src/api/billing.ts src/app/billing.ts', 'src/api/billing.ts'],
       // A whole directory is judged by what it can reach, not by listing it.
       ['rm -rf src/api', 'src/api/**'],
@@ -491,7 +509,6 @@ describe('split through hook events', () => {
       ['rm src/api/*.ts', 'src/api/billing.ts'],
       ['rm -f src/**/*.ts', 'src/api/billing.ts'],
       ['cd src && rm -rf *', 'src/api/billing.ts'],
-      ["find . -name '*.ts' -delete", 'src/api/billing.ts'],
     ] as const) {
       const r = await shell(command);
       expect(r.decision, command).toBe('deny');
@@ -513,11 +530,6 @@ describe('split through hook events', () => {
       'rm -f src/**/*.js',
       'rm -rf src/*/dist',
       'rm -rf packages/*/dist',
-      "find . -name '*.js' -delete",
-      'for f in src/*.ts; do echo $f; done',
-      // A formatter over the whole tree only rewrites the kinds of file it knows.
-      'black .',
-      'gofmt -w .',
     ]) {
       const r = await shell(command);
       expect(r.decision ?? null, command).toBeNull();
@@ -541,10 +553,10 @@ describe('split through hook events', () => {
       expect(r.context ?? '', command).not.toContain('owned by part');
       expect(r.context ?? '', command).not.toContain('reaches files owned');
     }
-    // A program Mindly does not know is warned about the file, not blocked.
+    // A program Mindly does not know is not read fully: warned about, not blocked.
     const unknown = await shell('node scripts/codemod.js src/api/billing.ts');
     expect(unknown.decision ?? null).toBeNull();
-    expect(unknown.context).toContain('src/api/billing.ts is owned by part "Part api"');
+    expect(unknown.context).toContain('reaches files owned by part "Part api"');
   });
 
   it("guards writes that reach into another part's worktree or the main checkout", async () => {

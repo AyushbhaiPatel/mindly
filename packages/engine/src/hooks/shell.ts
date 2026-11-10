@@ -3467,13 +3467,7 @@ function readCode(source: string): CodeFinding {
  * in both directions, so a read is not blocked and a plain write is not missed.
  */
 export function readShellWrites(command: string, options: ShellReadOptions = {}): ShellReading {
-  if (options.understoodOnly) {
-    const fully = understanding(command);
-    if (fully !== true) {
-      const unread = unreadLine(options.top ?? null);
-      return typeof fully === 'string' ? { ...unread, limit: fully } : unread;
-    }
-  }
+  const fully = options.understoodOnly ? understanding(command) : true;
   const reading: Reading = {
     out: new Map(),
     limit: null,
@@ -3481,6 +3475,8 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     top: options.top ?? null,
     timeUp: options.timeUp ?? (() => false),
     commands: 0,
+    // A line not read fully is only read for the paths it names, within a smaller budget.
+    maxCommands: fully === true ? MAX_COMMANDS : MAX_UNREAD_COMMANDS,
     gitEnv: false,
     later: [],
     deferred: new Set(),
@@ -3488,11 +3484,32 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     splitChars: 0,
     linked: options.linked ?? null,
     linksMade: false,
+    made: [],
+    unmatched: false,
   };
   collectTargets(command, '', 0, reading);
   // A variable git reads is set somewhere on the line: the git commands read before it may change
   // the whole tree too.
   if (reading.gitEnv) for (const then of reading.later) then();
+  // A line not read fully, or with a wildcard that may match what the line makes first (`mkdir
+  // keys && cp x k*/`): what it writes is not known here. It may write the whole tree, and what
+  // it names is a possible write, never a certain one.
+  if (fully !== true || (options.understoodOnly && reading.unmatched)) {
+    const unread = unreadLine(options.top ?? null);
+    // What it names may be written, and files of names not known here may land in it (`mkdir
+    // vendor && cp x v*/`).
+    const named = [...reading.out.values()].flatMap((t) => [
+      { ...t, certain: false },
+      ...(t.how === 'write' && !t.glob
+        ? [{ ...t, certain: false, how: 'land' as const, entries: [], sources: [] }]
+        : []),
+    ]);
+    return {
+      ...unread,
+      targets: [...named.slice(0, MAX_TARGETS - 1), ...unread.targets],
+      limit: typeof fully === 'string' ? fully : null,
+    };
+  }
   return {
     targets: [...reading.out.values()],
     limit: reading.limit,
@@ -3500,78 +3517,240 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
   };
 }
 
+/** Simple commands read of a line not read fully, for the paths it names. */
+const MAX_UNREAD_COMMANDS = 2000;
+
 /** Simple commands a line read fully may hold; one with more is read as not read fully. */
 const MAX_UNDERSTOOD_COMMANDS = 4000;
 
-/** Builtins a line read fully may use, while their words keep them harmless. */
-const UNDERSTOOD_BUILTINS = new Set([
-  'cd',
-  'echo',
-  'printf',
-  'true',
-  'false',
-  ':',
-  'test',
-  '[',
-  'pwd',
-  'exit',
-]);
+/** A word as the one pass over a line sees it. */
+interface PlainWord {
+  text: string;
+  /** Some of it was quoted. */
+  quoted: boolean;
+  /** Where in `text` the first quoted part starts; -1 for none. */
+  quoteAt: number;
+}
+
+/**
+ * How a program's words are read when Mindly reads it fully: the single letters and the long
+ * names of its options as the reader takes them, those of them that take the next word as a
+ * value, and `any` for a program none of whose options writes a file or runs a program. A long
+ * name must be given whole; an abbreviation, or an option not listed, makes the line one not read
+ * fully. `refuse`: options that make even an `any` program one not read fully.
+ */
+interface ReadFully {
+  letters?: string;
+  long?: readonly string[];
+  /** Letters that take the next word, given alone (`-t dir`). */
+  values?: string;
+  /** Long names that take the next word, or a value after `=`. */
+  longValues?: readonly string[];
+  any?: boolean;
+  refuse?: RegExp;
+}
+
+/**
+ * The programs whose writes the reader models completely, with every option it takes as the
+ * program does. Any other program makes a line one not read fully: sort, uniq, awk, sed, rg,
+ * interpreters, compilers, package managers and anything not known here.
+ */
+const READ_FULLY: Readonly<Record<string, ReadFully>> = {
+  // git: its own tables say what each subcommand and option does, and anything not known there
+  // is a possible change of the whole tree.
+  git: { any: true },
+  rm: {
+    letters: 'fridIv',
+    long: [
+      '--force',
+      '--recursive',
+      '--dir',
+      '--interactive',
+      '--verbose',
+      '--preserve-root',
+      '--no-preserve-root',
+      '--one-file-system',
+    ],
+  },
+  mv: {
+    letters: 'finuvT',
+    values: 't',
+    long: [
+      '--force',
+      '--interactive',
+      '--no-clobber',
+      '--update',
+      '--verbose',
+      '--no-target-directory',
+      '--strip-trailing-slashes',
+    ],
+    longValues: ['--target-directory'],
+  },
+  cp: {
+    letters: 'aRrdfiHLlnPpsuvxT',
+    values: 't',
+    long: [
+      '--archive',
+      '--recursive',
+      '--force',
+      '--interactive',
+      '--no-clobber',
+      '--dereference',
+      '--no-dereference',
+      '--link',
+      '--symbolic-link',
+      '--preserve',
+      '--no-preserve',
+      '--update',
+      '--verbose',
+      '--one-file-system',
+      '--no-target-directory',
+      '--remove-destination',
+      '--strip-trailing-slashes',
+      '--attributes-only',
+      '--sparse',
+      '--reflink',
+    ],
+    longValues: ['--target-directory'],
+  },
+  ln: {
+    letters: 'sfnvrLPT',
+    values: 't',
+    long: [
+      '--symbolic',
+      '--force',
+      '--no-dereference',
+      '--verbose',
+      '--relative',
+      '--logical',
+      '--physical',
+      '--no-target-directory',
+    ],
+    longValues: ['--target-directory'],
+  },
+  mkdir: { letters: 'pv', values: 'm', long: ['--parents', '--verbose'], longValues: ['--mode'] },
+  rmdir: { letters: 'v', long: ['--ignore-fail-on-non-empty', '--verbose'] },
+  touch: { letters: 'acmh', long: ['--no-create', '--no-dereference', '--time'] },
+  chmod: {
+    letters: 'Rvcf',
+    long: [
+      '--recursive',
+      '--verbose',
+      '--changes',
+      '--silent',
+      '--quiet',
+      '--preserve-root',
+      '--no-preserve-root',
+    ],
+  },
+  chown: {
+    letters: 'RvcfhHLP',
+    long: [
+      '--recursive',
+      '--verbose',
+      '--changes',
+      '--silent',
+      '--quiet',
+      '--dereference',
+      '--no-dereference',
+      '--preserve-root',
+      '--no-preserve-root',
+    ],
+  },
+  cat: { any: true },
+  ls: { any: true },
+  head: { any: true },
+  tail: { any: true },
+  wc: { any: true },
+  // Not into folders: what it reads there is not read here.
+  grep: { any: true, refuse: /^-[^-]*[rRd]|^--(recursive|dereference-recursive|directories)/ },
+  echo: { any: true },
+  printf: { any: true, refuse: /^-[^-]*v/ },
+  // Builtins that change nothing git runs with while their words are plain text.
+  cd: {},
+  true: { any: true },
+  false: { any: true },
+  ':': { any: true },
+  pwd: { any: true },
+  exit: {},
+  test: { any: true, refuse: /^-[vR]$/ },
+  '[': { any: true, refuse: /^-[vR]$/ },
+};
 
 /** Programs a pipe may feed on a line read fully: they only filter what they are given. */
-const UNDERSTOOD_FILTERS = new Set([
-  'head',
-  'tail',
-  'grep',
-  'egrep',
-  'fgrep',
-  'sort',
-  'uniq',
-  'wc',
-  'cut',
-  'tr',
-  'cat',
-  'less',
-  'more',
-  'jq',
-  'column',
-  'tee',
-]);
-
-/** Programs that run another in front of it, which a line read fully may use. */
-const UNDERSTOOD_LAUNCHERS = new Set([
-  'env',
-  'sudo',
-  'doas',
-  'nice',
-  'nohup',
-  'timeout',
-  'stdbuf',
-  'npx',
-  'pnpx',
-  'bunx',
-]);
+const READ_FULLY_FILTERS = new Set(['head', 'tail', 'grep', 'wc', 'cat']);
 
 /** Keywords around commands that a line read fully may use. */
 const UNDERSTOOD_KEYWORDS = new Set(['if', 'then', 'elif', 'else']);
 
-/** A word that names git, or a text that holds it as a word: a program given it may run it. */
-const NAMES_GIT = /(^|[\s;&|/])git(\s|$)/;
+/**
+ * Whether a wildcard path may match one of `made` (paths written earlier on the line), or a
+ * folder above one: part by part, `*` and `?` within a part, `**` across parts.
+ */
+function mayMatchMade(pattern: string, made: readonly string[]): boolean {
+  if (made.length === 0) return false;
+  const parts = pattern.split('/');
+  if (parts.includes('**')) return made.length > 0;
+  const res = parts.map(
+    (p) =>
+      new RegExp(
+        `^${p
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+          .replace(/\*/g, '.*')
+          .replace(/\?/g, '.')}$`,
+      ),
+  );
+  return made.some((m) => {
+    const ms = m.split('/');
+    const n = Math.min(ms.length, res.length);
+    for (let i = 0; i < n; i++) if (!(res[i] as RegExp).test(ms[i] as string)) return false;
+    return true;
+  });
+}
+
+/** Whether a program's words are all ones its table reads as the program does. */
+function optionsReadFully(table: ReadFully, args: readonly PlainWord[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const t = (args[i] as PlainWord).text;
+    if (t === '--') return true;
+    if (table.refuse?.test(t)) return false;
+    if (table.any || !t.startsWith('-') || t === '-') continue;
+    if (t.startsWith('--')) {
+      const eq = t.indexOf('=');
+      const name = eq === -1 ? t : t.slice(0, eq);
+      if ((table.longValues ?? []).includes(name)) {
+        if (eq === -1) i++;
+        continue;
+      }
+      if (!(table.long ?? []).includes(name)) return false;
+      continue;
+    }
+    // A cluster of letters; one that takes a value stands alone, its value the next word.
+    const letters = t.slice(1);
+    if (letters.length === 1 && (table.values ?? '').includes(letters)) {
+      i++;
+      continue;
+    }
+    if (![...letters].every((l) => (table.letters ?? '').includes(l))) return false;
+  }
+  return true;
+}
 
 /**
  * Whether a command line is one Mindly reads fully, and so checks exactly: every part of it is
- * plain text the reader takes as the shell does. Words of plain characters, single-quoted text,
- * double-quoted text with no `$`, backtick or backslash; `&&`, `||`, `;` and line ends between
- * commands; `>`, `>>`, `2>`, `&>` to a plain path, `2>&1`, `</dev/null`; a pipe into a program
- * that only filters what it is given (`head`, `grep`, `tee` to a plain path, …); assignments
- * of plain values (one git reads makes git's commands possible changes of the whole tree, as
- * the reader says); unquoted `*` and `?`, matched against the files that exist; the builtins
- * `cd`, `echo`, `printf` without `-v`, `true`, `false`, `:`, `test` and `[` without `-v` / `-R`,
- * `pwd`, `exit`; the keywords of `if`; and programs given plain words, in front of which only
- * `env` (without `-S`), `sudo`, `nice`, `nohup`, `timeout`, `stdbuf` or `npx` may stand.
- * Anything else (a `$`, a backtick, a backslash, parentheses, braces, a `[…]` class, `!`, a
- * here-document or here-string, a process substitution, a background `&`, a function, a loop,
- * any other builtin, a shell given code, a program not known here given git, more than a few
- * thousand commands) makes it a line not read fully. One pass over the text.
+ * plain text the reader takes as the shell does, and every program on it is one whose writes the
+ * reader models completely, given only options it reads as the program does (see
+ * {@link READ_FULLY}). Words of plain characters (`*` and `?` included, as long as they cannot
+ * match what an earlier command of the line makes), single-quoted text, double-quoted text with no
+ * `$`, backtick or backslash; `&&`, `||`, `;` and line ends between commands; `>`, `>>`, `2>`,
+ * `&>` to a plain path, `2>&1`, `</dev/null`; a pipe into `head`, `tail`, `grep`, `wc` or `cat`;
+ * assignments by the shell's rules, to lower-case variables or harmless upper-case ones (`LANG`,
+ * `TZ`); `env` with no option of its own; and the keywords of `if`. Anything else (a `$`, a
+ * backtick, a backslash, parentheses, braces, a `[…]` class, `!`, a here-document or
+ * here-string, a process substitution, a background `&`, a function, a loop, any other builtin,
+ * any other program or option, a program given by its path, an assignment to `HOME`, `PWD`,
+ * `CDPATH` or another variable a program reads, more than a few thousand commands) makes it a line
+ * not read fully. One pass over the text.
  */
 export function understoodLine(command: string): boolean {
   return understanding(command) === true;
@@ -3588,24 +3767,23 @@ function understanding(command: string): true | false | string {
 
 /** The one pass of {@link understoodLine}; `said.tooMany`: it stopped for the count alone. */
 function scanLine(command: string, said: { tooMany: boolean }): boolean {
-  interface Plain {
-    text: string;
-    quoted: boolean;
-  }
-  const commands: { words: Plain[]; piped: boolean }[] = [];
-  let words: Plain[] = [];
+  const commands: { words: PlainWord[]; piped: boolean }[] = [];
+  let words: PlainWord[] = [];
   let piped = false;
   let text = '';
   let quoted = false;
+  // Where in the word the first quoted text starts (`A='x'`: after `A=`); -1 for none.
+  let quoteAt = -1;
   let open = false;
   // A bracket outside quotes is only `[` or `]` as a word of its own (`test`).
   let bracket = false;
   const endWord = (): boolean => {
     if (!open) return true;
     if (bracket && !(text === '[' || text === ']')) return false;
-    words.push({ text, quoted });
+    words.push({ text, quoted, quoteAt });
     text = '';
     quoted = false;
+    quoteAt = -1;
     open = false;
     bracket = false;
     return true;
@@ -3647,6 +3825,7 @@ function scanLine(command: string, said: { tooMany: boolean }): boolean {
     if (c === "'") {
       const end = s.indexOf("'", i + 1);
       if (end === -1) return false;
+      if (!quoted) quoteAt = text.length;
       text += s.slice(i + 1, end);
       quoted = true;
       open = true;
@@ -3661,6 +3840,7 @@ function scanLine(command: string, said: { tooMany: boolean }): boolean {
         end++;
       }
       if (end >= s.length) return false;
+      if (!quoted) quoteAt = text.length;
       text += s.slice(i + 1, end);
       quoted = true;
       open = true;
@@ -3732,6 +3912,7 @@ function scanLine(command: string, said: { tooMany: boolean }): boolean {
     if (target === 'null' && text !== '/dev/null') return false;
     text = '';
     quoted = false;
+    quoteAt = -1;
     open = false;
     target = null;
     return true;
@@ -3742,72 +3923,41 @@ function scanLine(command: string, said: { tooMany: boolean }): boolean {
 }
 
 /** Whether a simple command of plain words is one the reader takes as the shell does. */
-function understoodCommand(
-  all: readonly { text: string; quoted: boolean }[],
-  piped: boolean,
-): boolean {
+function understoodCommand(all: readonly PlainWord[], piped: boolean): boolean {
   let at = 0;
   // Keywords of `if` in front of the command; `fi` on its own.
   while (at < all.length && !all[at]?.quoted && UNDERSTOOD_KEYWORDS.has(all[at]?.text ?? '')) at++;
   if (at === all.length) return at > 0 || all.length === 0;
-  if (all.length - at === 1 && all[at]?.text === 'fi') return true;
-  let launched = false;
-  for (let guard = 0; guard < 16; guard++) {
-    // Assignments: lower-case, or a harmless upper-case one.
+  if (all.length - at === 1 && all[at]?.text === 'fi' && !all[at]?.quoted) return true;
+  for (let launched = false; ; launched = true) {
+    // Assignments by the shell's rules: a name and `=` outside quotes, whatever the value. One
+    // to a variable git or a builtin reads (`HOME`, `PWD`, `CDPATH`, any upper-case one but the
+    // harmless) is not read here.
     while (at < all.length) {
-      const w = all[at] as { text: string; quoted: boolean };
-      // Any name: the reader takes one that may change what git does as it does today.
-      if (w.quoted || !/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w.text)) break;
+      const w = all[at] as PlainWord;
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)(\+?)=/.exec(w.text);
+      if (!m || (w.quoteAt !== -1 && w.quoteAt < m[0].length)) break;
+      const name = m[1] as string;
+      const value = w.text.slice(m[0].length);
+      if (!/^[a-z_][a-z0-9_]*$/.test(name) && !harmlessVariable(name, value, m[2] === '+'))
+        return false;
       at++;
     }
     const first = all[at];
     if (first === undefined) return !launched;
-    const name = first.text;
-    const args = all.slice(at + 1);
-    if (piped) {
-      // What a pipe feeds: a filter, given plain words.
-      if (!UNDERSTOOD_FILTERS.has(programName(word(name)))) return false;
-      return true;
-    }
-    if (UNDERSTOOD_BUILTINS.has(name)) {
-      if (name === 'printf' && args.some((w) => /^-[^-]*v/.test(w.text))) return false;
-      if ((name === 'test' || name === '[') && args.some((w) => /^-[vR]$/.test(w.text)))
-        return false;
-      return true;
-    }
-    if (Object.hasOwn(SHELL_BUILTINS, name) && name !== 'which') return false;
-    const program = programName(word(name));
-    // Code fed to a shell.
-    if (SHELLS.has(program)) return false;
-    if (Object.hasOwn(LAUNCHERS, program)) {
-      if (!UNDERSTOOD_LAUNCHERS.has(program)) return false;
-      if (program === 'env' && args.some((w) => /^-[^-]*S|^--split-string/.test(w.text)))
-        return false;
-      // Its options, as the reader takes them; then the program it runs.
-      const launcher = LAUNCHERS[program] as { values?: string[]; skip?: number };
+    // `env` with no option of its own, then more assignments and the program.
+    if (first.text === 'env' && !launched) {
       at++;
-      while (at < all.length) {
-        const o = (all[at] as { text: string }).text;
-        if (o === '--') {
-          at++;
-          break;
-        }
-        if (!o.startsWith('-') || o === '-') break;
-        at += !o.includes('=') && (launcher.values ?? []).includes(o) ? 2 : 1;
-      }
-      at += launcher.skip ?? 0;
-      launched = true;
+      if (all[at]?.text.startsWith('-')) return false;
       continue;
     }
-    // A program not known here given git, as a word or in code it is given (`taskset git …`,
-    // `script -c 'git …'`), may run it with settings of its own.
-    if (program !== 'git' && program !== 'echo' && program !== 'printf') {
-      if (args.some((w) => (w.quoted ? NAMES_GIT.test(w.text) : /(^|\/)git$/.test(w.text))))
-        return false;
-    }
-    return true;
+    // A program by its name alone: one by its path may be anything.
+    if (first.text.includes('/')) return false;
+    const table = Object.hasOwn(READ_FULLY, first.text) ? READ_FULLY[first.text] : undefined;
+    if (table === undefined) return false;
+    if (piped && !READ_FULLY_FILTERS.has(first.text)) return false;
+    return optionsReadFully(table, all.slice(at + 1));
   }
-  return false;
 }
 
 /** A reading of a line not read fully: what it may write is the whole working tree. */
@@ -3847,6 +3997,8 @@ interface Reading {
   timeUp: () => boolean;
   /** Simple commands read so far, over every nested reading. */
   commands: number;
+  /** Simple commands read at most. */
+  maxCommands: number;
   /**
    * Something on the line, anywhere and in any shell, may set a variable git reads: every git
    * command on it may then change the whole tree.
@@ -3864,6 +4016,10 @@ interface Reading {
   linked: ((path: string) => boolean) | null;
   /** A command read so far makes symbolic links (`ln -s`). */
   linksMade: boolean;
+  /** Paths earlier commands of the line write, as placed. */
+  made: string[];
+  /** A wildcard may match what an earlier command of the line makes. */
+  unmatched: boolean;
 }
 
 /**
@@ -4004,6 +4160,11 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     }));
     for (const form of forms) {
       const path = place(form.text, tilde(w), from);
+      // A wildcard the shell matches against what is there when it runs: one that may match
+      // what an earlier command of the line makes (`mkdir keys && cp x k*/`) is not read here.
+      if (path !== null && form.glob && !item.pattern && mayMatchMade(path, r.made)) {
+        r.unmatched = true;
+      }
       if (path === null && from === null && !posix.isAbsolute(form.text)) {
         r.limit ??= 'a command runs in a folder the text does not tell';
       }
@@ -4131,6 +4292,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       where.base,
     );
 
+  // How many targets earlier commands of this reading wrote.
+  let made = r.out.size;
   let before: SimpleCommand | null = null;
   // Where the shell was before the last `cd`, for the command after `cd … ||`: that one runs
   // only when the `cd` failed.
@@ -4151,8 +4314,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     }
     // A command line can hold more commands than there is time or reason to read.
     r.commands++;
-    if (r.commands > MAX_COMMANDS) {
-      r.limit ??= `more than ${MAX_COMMANDS} commands`;
+    if (r.commands > r.maxCommands) {
+      r.limit ??= `more than ${r.maxCommands} commands`;
       return;
     }
     if (r.commands % 64 === 0 && r.timeUp()) {
@@ -4424,6 +4587,11 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // A program that may make or move a symbolic link (`ln -s`, `cp -P` / `-a` / `-R`, `mv`, an
     // archive unpacked, git checking one out): a later `cd` may pass through it.
     if (makesLinks(words)) r.linksMade = true;
+    // What it writes is there for the wildcards of later commands.
+    if (r.out.size > made && r.made.length < MAX_TARGETS) {
+      r.made = [...r.out.values()].map((t) => t.path).slice(0, MAX_TARGETS);
+    }
+    made = r.out.size;
   }
 }
 

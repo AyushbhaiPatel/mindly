@@ -669,6 +669,7 @@ export class HookHandler {
     rules: readonly Memory[],
     writes: Writes,
     search: ScopeSearch,
+    root: string | null = null,
   ): { deny: RuleHit | null; warn: RuleHit[] } {
     const warn: RuleHit[] = [];
     for (const rule of rules) {
@@ -689,7 +690,18 @@ export class HookHandler {
         const found = search.covered(s, reaching);
         // A formatter only rewrites the kinds of file it knows; the others are not its business.
         const rewritten = found.files.filter((f) => writesKind(s, f));
+        // What may change any file of the tree reaches a folder a rule names when the folder is
+        // there, whatever files it holds.
+        const folders =
+          s.existing !== undefined && root !== null
+            ? reaching.filter(
+                (g) =>
+                  !/[*?[\]{}]/.test(g.replace(/\/\*\*$/, '')) &&
+                  isDirectory(join(root, g.replace(/\/\*\*$/, ''))),
+              )
+            : [];
         if (rewritten.length > 0) covers.push(...rewritten.slice(0, 5));
+        else if (folders.length > 0) covers.push(...folders.slice(0, 5));
         else if (!found.complete) {
           unsearched.push(...found.unsearched);
           if (s.existing !== undefined) wholeTree = true;
@@ -856,11 +868,22 @@ export class HookHandler {
       const guard = await guarded(certain, written);
       // What may only be read, and where files of unknown names land (an archive unpacked, a
       // copy whose sources cannot be seen), is never a block here: a warning at most.
-      // A line not read fully stands for the whole tree only for the project's enforced rules,
-      // checked below; other guards are asked about what a line read fully writes.
+      // What may only be read is a warning at most. A line not read fully may write anything:
+      // the guards are asked about the whole tree as it is written, never about a listing, and
+      // what they say is a warning, never a block.
       const soft: WriteGuardResult = understood
         ? await guarded(possible, named)
-        : { warnings: [], deny: null };
+        : {
+            warnings: (
+              await this.consultGuards(
+                project,
+                session,
+                [],
+                possible.scopes.map((x) => x.pattern),
+              )
+            ).warnings,
+            deny: null,
+          };
       const landed = await this.consultGuards(
         project,
         session,
@@ -881,9 +904,9 @@ export class HookHandler {
           enforced.map((m) => ({ scope, globs: globsReaching(scope, m.scope.paths) })),
         ),
       );
-      const rules = this.enforcedRules(enforced, certain, search);
+      const rules = this.enforcedRules(enforced, certain, search, project.root);
       const rule = rules.deny;
-      const softRules = rule ? null : this.enforcedRules(enforced, possible, search);
+      const softRules = rule ? null : this.enforcedRules(enforced, possible, search, project.root);
       if (mistakes.length > 0 || pending.length > 0 || rule) {
         const recorded = certain.paths.filter((p) => p.own).map((p) => p.rel);
         this.appendToolEvent(pid, session, 'tool.before', {
