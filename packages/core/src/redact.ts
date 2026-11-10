@@ -35,8 +35,11 @@ interface MatchContext {
 interface LineMemo {
   start: number;
   end: number;
-  /** Where the first HTTP client is named on the line, or -1. */
-  client: number;
+  /**
+   * The line's commands, as triples: where one starts, where it ends, and where the first HTTP
+   * client is named in it (-1 for none).
+   */
+  commands: number[];
 }
 
 /** Type names that follow `password:` in code (TypeScript, Python, Go, …), never secrets. */
@@ -112,15 +115,20 @@ function lastNameWord(prefix: string): string {
 
 /**
  * An ordinary word of a sentence: letters of any script with an inner hyphen or apostrophe, at
- * most 24 characters and no capital after a lower-case letter; or a number of up to four digits.
- * Brackets, quotes and sentence punctuation around it do not count. A token that mixes letters
- * and digits is never plain.
+ * most 24 characters, with a capital inside it only once and only in a word of up to 12 letters
+ * (a name such as `GitHub`); or a number of up to four digits, a range or a minimum (`8–64`,
+ * `8+`). Brackets, quotes and sentence punctuation around it do not count. A token that mixes
+ * letters and digits is never plain.
  */
 function isPlainWord(word: string): boolean {
   const core = word.replace(/^[("'“‘«]+/, '').replace(/[)"'”’».,:;!?…]+$/, '');
   if (core === '') return word.length <= 3;
-  if (/^\d{1,4}$/.test(core)) return true;
-  return core.length <= 24 && /^\p{L}+(?:['’-]\p{L}+)*$/u.test(core) && !/\p{Ll}\p{Lu}/u.test(core);
+  // A number, a range or a minimum: `8`, `8-64`, `8–64`, `8+`.
+  if (/^\d{1,4}(?:[-–—]\d{1,4})?\+?$/.test(core)) return true;
+  if (core.length > 24 || !/^\p{L}+(?:['’-]\p{L}+)*$/u.test(core)) return false;
+  // One capital inside a short word is a name (`GitHub`, `iPhone`); more is an identifier.
+  const inner = core.match(/\p{Ll}\p{Lu}/gu)?.length ?? 0;
+  return inner === 0 || (inner === 1 && core.length <= 12);
 }
 
 /** True for two or more ordinary words: a sentence or a label, not a token. */
@@ -160,47 +168,152 @@ function startsDisplayText(prefix: string, value: string, at: MatchContext): boo
 }
 
 /**
- * An HTTP client named as a word, with or without a directory or `.exe`: `curl`, `/usr/bin/curl`,
- * `C:\tools\CURL.EXE`. For these, `-u name:value` means credentials.
+ * An HTTP client, for which `-u name:value` means credentials. Named as a word after any
+ * non-word character, with or without a directory or `.exe` (`!curl`, `C:\me>curl`,
+ * `/usr/bin/curl`, `CURL.EXE`), including builds such as `curl_chrome116` or
+ * `curl-impersonate`; or a variable that holds one: `$CURL`, `${WGET}`, `CURL_OPTS=...`. A
+ * client behind a shell function or alias defined elsewhere is not recognised.
  */
-const HTTP_CLIENT =
-  /(?:^|[\s"'`(=;|&/\\])(?:curl|wget|curlie|aria2c|ab|lftp)(?:\.exe)?(?=$|[\s"'`);|&])/i;
+const HTTP_CLIENT = new RegExp(
+  [
+    '(?<![\\p{L}\\p{N}_])(?:',
+    '(?:curl(?:[-_][A-Za-z0-9_-]{1,40}|\\d{1,4})?|wget2?|curlie|aria2c|ab|lftp|hurl|httpstat)',
+    '(?:\\.exe)?(?![\\p{L}\\p{N}_])',
+    // `$CURL`, `${HTTP_CLIENT}`; proxy settings such as `$HTTP_PROXY` are not clients.
+    '|\\$\\{?(?![A-Za-z0-9_]{0,40}proxy(?![A-Za-z0-9_]))[A-Za-z0-9_]{0,40}(?:curl|wget|http)[A-Za-z0-9_]{0,40}',
+    '|[A-Za-z0-9_]{0,40}(?:curl|wget)[A-Za-z0-9_]{0,40}=',
+    ')',
+  ].join(''),
+  'iu',
+);
 
-/** True when the newline at `i` is escaped with a backslash, so the line goes on after it. */
-function isContinuation(text: string, i: number): boolean {
+/** curl's short options that take no value, so they can come before `u` in one cluster. */
+const CURL_FLAG_CLUSTER = '[0-6aBfGgIijJkLlMNnOpqRsSvVZ#]{0,10}';
+
+/** A user flag: `-u`, `-U`, a curl cluster ending in one (`-su`), `--user`, `--proxy-user`. */
+const USER_FLAG = `-${CURL_FLAG_CLUSTER}[uU]|--(?:proxy-)?user`;
+
+/**
+ * A line that begins with whitespace and an option (`  -u admin:pw`, `  --header ...`): a
+ * command wrapped over several lines without continuation characters, read as one line. A list
+ * item (`  - item`) has a space after its dash and is not an option.
+ */
+const WRAPPED_FLAG_LINE = /[ \t]+--?[A-Za-z0-9#]/y;
+
+/**
+ * True when the newline at `i` does not end the command: it is escaped (a backslash, or after a
+ * space a cmd `^` or a PowerShell backtick), or the next line is an indented option.
+ */
+function joinsNextLine(text: string, i: number): boolean {
   const before = text[i - 1] === '\r' ? i - 2 : i - 1;
-  return text[before] === '\\';
+  const ch = text[before];
+  if (ch === '\\') return true;
+  if ((ch === '^' || ch === '`') && (text[before - 1] === ' ' || text[before - 1] === '\t')) {
+    return true;
+  }
+  WRAPPED_FLAG_LINE.lastIndex = i + 1;
+  return WRAPPED_FLAG_LINE.test(text);
+}
+
+function isBlank(code: number): boolean {
+  return code === 32 || code === 9 || code === 13 || code === 10 || Number.isNaN(code);
 }
 
 /**
- * True when an HTTP client is named earlier on the line `pos` is on. A line is a physical line,
- * joined with the next across a backslash before the newline. Nothing else is parsed: the client
- * may sit inside `sh -c "..."`, after `&&` or in a sentence, and any other program's `-u` (a
- * user, a group, a URL, a unit) is never touched.
+ * Splits a line into commands at unquoted `|`, `||`, `&&`, `;` and a standalone `&` (an `&`
+ * inside a word, as in `?a=1&b=2`, is part of a URL). Quotes are followed within each physical
+ * line only; an unbalanced quote runs to the end of that line, which keeps more in one command.
+ */
+function splitCommands(text: string, start: number, end: number): number[] {
+  const out: number[] = [];
+  let from = start;
+  let quote = 0;
+  const push = (to: number): void => {
+    HTTP_CLIENT.lastIndex = 0;
+    const found = HTTP_CLIENT.exec(text.slice(from, to));
+    out.push(from, to, found === null ? -1 : from + found.index);
+  };
+  for (let i = start; i < end; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 10) {
+      quote = 0;
+    } else if (quote !== 0) {
+      if (c === quote) quote = 0;
+      else if (c === 92 && quote === 34) i++;
+    } else if (c === 92) {
+      i++;
+    } else if (c === 34 || c === 39) {
+      quote = c;
+    } else if (c === 124 || c === 59) {
+      push(i);
+      from = i + 1;
+    } else if (c === 38) {
+      const prev = text.charCodeAt(i - 1);
+      const next = text.charCodeAt(i + 1);
+      if (next === 38) {
+        push(i);
+        from = i + 2;
+        i++;
+      } else if (prev !== 62 && next !== 62 && (isBlank(prev) || isBlank(next))) {
+        push(i);
+        from = i + 1;
+      }
+    }
+  }
+  push(end);
+  return out;
+}
+
+/**
+ * True when an HTTP client is named earlier in the command `pos` is in. A line is a physical
+ * line, joined with the next across an escaped newline or an indented option. Within it, the
+ * client must come after the last command separator before `pos`: `curl ... && docker run -u
+ * app:staff` leaves docker's user alone, while a client inside `sh -c "..."`, after `#` or in a
+ * sentence still counts. Any other program's `-u` (a user, a group, a URL) is never touched.
  */
 function httpClientBefore(at: MatchContext, pos: number): boolean {
   const { text, line } = at;
   if (pos < line.start || pos >= line.end) {
     let start = text.lastIndexOf('\n', pos - 1);
-    while (start > 0 && isContinuation(text, start)) start = text.lastIndexOf('\n', start - 1);
+    while (start > 0 && joinsNextLine(text, start)) start = text.lastIndexOf('\n', start - 1);
     let end = text.indexOf('\n', pos);
-    while (end !== -1 && isContinuation(text, end)) end = text.indexOf('\n', end + 1);
+    while (end !== -1 && joinsNextLine(text, end)) end = text.indexOf('\n', end + 1);
     line.start = start + 1;
     line.end = end === -1 ? text.length : end;
-    HTTP_CLIENT.lastIndex = 0;
-    const found = HTTP_CLIENT.exec(text.slice(line.start, line.end));
-    line.client = found === null ? -1 : line.start + found.index;
+    line.commands = splitCommands(text, line.start, line.end);
   }
-  return line.client !== -1 && line.client < pos;
+  const cmds = line.commands;
+  let lo = 0;
+  let hi = cmds.length / 3 - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if ((cmds[mid * 3] ?? 0) <= pos) lo = mid;
+    else hi = mid - 1;
+  }
+  const client = cmds[lo * 3 + 2] ?? -1;
+  return client !== -1 && client < pos;
 }
 
-/** Skip for the `-u name:value` rules: not on an HTTP client's line, or not a literal secret. */
+/** True when the flag that starts `flagGroup` sits in a command that names an HTTP client. */
+function clientBeforeFlag(flagGroup: string, at: MatchContext): boolean {
+  return httpClientBefore(at, at.start + Math.max(0, flagGroup.search(/\S/)));
+}
+
+/**
+ * Skip for the `-u name:value` rules: not in an HTTP client's command, or not a literal secret.
+ * A cluster of short flags (`-avu user@host:/data`) is rsync's or scp's, never curl's, when the
+ * name holds an `@` or the value is a path.
+ */
 function isNotHttpCredentials(groups: readonly string[], at: MatchContext): boolean {
+  const flag = groups[1] ?? '';
+  const name = groups[2] ?? '';
   const value = groups[3] ?? '';
   if (value.startsWith('$') || value.startsWith('//')) return true;
-  // The match may begin with the whitespace before the flag, which can be the line break.
-  const flag = at.start + (/^\s/.test(groups[1] ?? '') ? 1 : 0);
-  return !httpClientBefore(at, flag);
+  if (value === '' && name.startsWith('$')) return true;
+  if (/^\s?-[^-\s"'=]{2,}/.test(flag) && (name.includes('@') || value.startsWith('/'))) {
+    return true;
+  }
+  return !clientBeforeFlag(flag, at);
 }
 
 const RULES: Rule[] = [
@@ -250,18 +363,69 @@ const RULES: Rule[] = [
   },
   {
     kind: 'cli_credentials',
-    // `curl -u user:password`, `--user user:password`, `--user=user:password`, `--proxy-user` and
-    // combined short flags ending in u (`-su`). Only on a line that names an HTTP client first.
-    re: /((?:^|\s)(?:-[A-Za-z]{0,8}u|--(?:proxy-)?user)(?:\s{1,5}|=)["']?)([^\s:"'`]{1,200}):([^\s"'`]{1,200})/g,
+    // `curl -u "user:a pass phrase"`: a quoted value is taken whole.
+    re: new RegExp(
+      `((?:^|\\s)(?:${USER_FLAG})(?:\\s{1,5}|=)")([^"\\n:]{0,200}):([^"\\n]{1,400})(?=")`,
+      'g',
+    ),
     replace: `$1$2:${REDACTED}`,
     skip: isNotHttpCredentials,
   },
   {
     kind: 'cli_credentials',
-    // `curl -uuser:password`, with no space after the flag.
-    re: /((?:^|\s)-u["']?)([^\s:"'`=-][^\s:"'`]{0,200}):([^\s"'`]{1,200})/g,
+    re: new RegExp(
+      `((?:^|\\s)(?:${USER_FLAG})(?:\\s{1,5}|=)')([^'\\n:]{0,200}):([^'\\n]{1,400})(?=')`,
+      'g',
+    ),
     replace: `$1$2:${REDACTED}`,
     skip: isNotHttpCredentials,
+  },
+  {
+    kind: 'cli_credentials',
+    // `curl -u user:password`, `--user user:password`, `--user=user:password`, `-U` and
+    // `--proxy-user`, and a curl cluster ending in u (`-su`). Only in a command that names an
+    // HTTP client first. `-u :token` has no user and is redacted all the same.
+    re: new RegExp(
+      `((?:^|\\s)(?:${USER_FLAG})(?:\\s{1,5}|=)["']?)([^\\s:"'\`]{0,200}):([^\\s"'\`]{1,200})`,
+      'g',
+    ),
+    replace: `$1$2:${REDACTED}`,
+    skip: isNotHttpCredentials,
+  },
+  {
+    kind: 'cli_credentials',
+    // `curl -u apikey:`: a key given as the user name, with an empty password.
+    re: new RegExp(
+      `((?:^|\\s)(?:${USER_FLAG})(?:\\s{1,5}|=)["']?)([^\\s:"'\`]{1,200})():(?=$|[\\s"'\`])`,
+      'g',
+    ),
+    replace: `$1${REDACTED}:`,
+    skip: isNotHttpCredentials,
+  },
+  {
+    kind: 'cli_credentials',
+    // `curl -uuser:password`, with no space after the flag.
+    re: /((?:^|\s)-[uU]["']?)([^\s:"'`=-][^\s:"'`]{0,200}):([^\s"'`]{1,200})/g,
+    replace: `$1$2:${REDACTED}`,
+    skip: isNotHttpCredentials,
+  },
+  {
+    kind: 'cli_credentials',
+    // `curl --cert client.pem:password`. A Windows drive letter is part of the file name.
+    re: /((?:^|\s)--(?:proxy-)?cert(?:\s{1,5}|=)["']?((?:[A-Za-z]:[\\/])?[^\s:"'`]{1,300}):)([^\s"'`]{1,200})/g,
+    replace: `$1${REDACTED}`,
+    skip: (g, at) =>
+      (g[3] ?? '').startsWith('$') ||
+      // `C:\certs\client.pem` with no password: the colon is the drive letter's.
+      (/^[A-Za-z]$/.test(g[2] ?? '') && /^[\\/]/.test(g[3] ?? '')) ||
+      !clientBeforeFlag(g[1] ?? '', at),
+  },
+  {
+    kind: 'cli_credentials',
+    // curl options whose value is a secret: `--tlspassword`, `--oauth2-bearer`, `--pass`.
+    re: /((?:^|\s)--(?:proxy-)?(?:tlspassword|oauth2-bearer|pass)(?:\s{1,5}|=)["']?)([^\s"'`]{1,4000})/g,
+    replace: `$1${REDACTED}`,
+    skip: (g, at) => /^[-$]/.test(g[2] ?? '') || !clientBeforeFlag(g[1] ?? '', at),
   },
   {
     kind: 'cli_credentials',
@@ -342,7 +506,7 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
 
   const apply = (kind: string, re: RegExp, replace: string, skip?: Rule['skip']): void => {
     re.lastIndex = 0;
-    const line: LineMemo = { start: 0, end: 0, client: -1 };
+    const line: LineMemo = { start: 0, end: 0, commands: [] };
     text = text.replace(re, (...args: unknown[]) => {
       const match = String(args[0]);
       const groups = args.map((a) => (typeof a === 'string' ? a : ''));

@@ -85,6 +85,10 @@ describe('redact', () => {
     'passwordError: "Password must be at least 8 characters"',
     'tokenError: "Invalid authentication token"',
     'tokenError: "Token expired, re-authenticate"',
+    'tokenPlaceholder: "Paste your GitHub token"',
+    'passwordError: "Use 8+ characters"',
+    'passwordError: "Must be 8–64 characters"',
+    'passwordHint: "Between 8-64 characters, any iPhone keyboard"',
     '"password_hint": "At least twelve characters"',
     "apiKeyHelp: 'Shown once after you create the key.'",
     'token_type: "Bearer access"',
@@ -114,7 +118,9 @@ describe('redact', () => {
     ['auth_token_type = "Bearer Zx81kQ0pLm3nB7vC9tY2uR5w"', 'Zx81kQ0pLm3nB7vC9tY2uR5w'],
     ['DB_PASSWORD_LABEL="hunter2SecretValue9 "', 'hunter2SecretValue9'],
     ["password_hint='hunter2SecretValue9 '", 'hunter2SecretValue9'],
-    ['password_label: "hunter SecretValue"', 'SecretValue'],
+    ['password_label: "hunter CorrectHorseBattery"', 'CorrectHorseBattery'],
+    ['passwordError: "use MySecretValue"', 'MySecretValue'],
+    [`tokenHint: "paste ${'Ab'.repeat(7)}"`, 'Ab'.repeat(7)],
     ['passwordLabel = "correct horse battery9 staple"', 'battery9'],
     ['passwordError = "code 12345 expired"', '12345'],
     [`passwordHint = "starts ${'x'.repeat(25)} ends"`, 'x'.repeat(25)],
@@ -175,6 +181,37 @@ describe('redact', () => {
     ['wget -uadmin:PW x.test', 'PW'],
     ['curl -su admin:PW x.test', 'PW'],
     ['curl --proxy-user admin:PW -x proxy.test:3128 x.test', 'PW'],
+    // Other spellings of a client.
+    ['!curl -u admin:PW https://x.test', 'PW'],
+    ['C:\\Users\\me>curl -u admin:PW https://x.test', 'PW'],
+    ['$CURL -u admin:PW https://x.test', 'PW'],
+    ['"$CURL" -u admin:PW https://x.test', 'PW'],
+    ['${CURL} -u admin:PW https://x.test', 'PW'],
+    ['CURL_OPTS="--silent -u admin:PW" ./run.sh', 'PW'],
+    ['curl_chrome116 -u admin:PW https://x.test', 'PW'],
+    ['curl-impersonate -u admin:PW https://x.test', 'PW'],
+    ['hurl --user admin:PW tests.hurl', 'PW'],
+    ['httpstat https://x.test -u admin:PW', 'PW'],
+    // Windows continuations and a command wrapped without one.
+    ['curl https://x.test ^\n  -u admin:PW', 'PW'],
+    ['curl.exe https://x.test `\n  -u admin:PW', 'PW'],
+    ['curl.exe https://x.test `\r\n  -u admin:PW', 'PW'],
+    ['curl https://x.test\n    -u admin:PW', 'PW'],
+    ['curl https://x.test\n  -H "Accept: */*"\n  -u admin:PW', 'PW'],
+    // More of curl's credential options.
+    ['curl -U admin:PW -x proxy.test:3128 x.test', 'PW'],
+    ['curl -sSU admin:PW -x proxy.test:3128 x.test', 'PW'],
+    ['curl -sSu admin:PW x.test', 'PW'],
+    ['curl --cert client.pem:PW https://x.test', 'PW'],
+    ['curl --cert C:\\certs\\client.pem:PW https://x.test', 'PW'],
+    ['curl --tlspassword PW https://x.test', 'PW'],
+    ['curl --oauth2-bearer PW https://x.test', 'PW'],
+    ['curl --key key.pem --pass PW https://x.test', 'PW'],
+    ['curl -u :PW https://x.test', 'PW'],
+    ['curl -u PW: https://x.test', 'PW'],
+    ['curl --user "PW:" https://x.test', 'PW'],
+    ['curl -u "admin:my secret pass PW" https://x.test', 'my secret pass'],
+    ["curl -u 'admin:my secret pass PW' https://x.test", 'my secret pass'],
   ])('redacts a secret passed as a command-line argument: %s', (template, placeholder) => {
     const secret = placeholder === 'PW' ? 'hunter2SecretValue9' : placeholder;
     const command = template.replace('PW', 'hunter2SecretValue9');
@@ -216,6 +253,29 @@ describe('redact', () => {
     'curl http://localhost:3000/sign-u http://localhost:8080/health',
     'curl -u "$USER:$PASS" https://x.test',
     'curl -x http://proxy.test:3128 --proxy-user $PROXY_USER:$PROXY_PASS x.test',
+    'curl --cert client.pem https://x.test',
+    'curl --cert C:\\certs\\client.pem https://x.test',
+    'curl --key key.pem --pass $KEY_PASS https://x.test',
+    'curl -u $CLIENT_ID: https://x.test',
+    // A client in an earlier command of the same line does not own a later command's -u.
+    'curl -fsSL https://x.test/install.sh | sh && docker run --rm -u 1000:1000 image',
+    'curl https://x.test && docker run -u postgres:postgres pg',
+    'ab -n 10 https://x.test/ && sudo -u app:app ls',
+    'wget -qO- https://x.test; docker run -u app:staff image',
+    'curl https://x.test & docker run -u app:staff image',
+    'curl https://x.test || docker run -u app:staff image',
+    'wget -qO- https://x.test && rsync -avzu user@host:/data/ .',
+    // A cluster that is not curl's, or an rsync-style target.
+    'curl https://x.test then rsync -avzu user@host:/data/ .',
+    'curl https://x.test then rsync -avu user@host:/data/ .',
+    // A variable for a proxy is not a client.
+    'docker run -e HTTPS_PROXY=$HTTP_PROXY -u app:staff image',
+    // Lines that only end in a backtick or caret are not continued.
+    'Run `curl`\ndocker run -u app:staff image',
+    'curl https://x.test^\ndocker run -u app:staff image',
+    // Only an indented option continues a wrapped command, not a list item or another command.
+    'curl https://x.test\n  - docker run -u app:staff image',
+    'curl https://x.test\n  docker run -u app:staff image',
     // The client is named after the flag, or on another line.
     'docker run -u app:staff image curl https://x.test',
     'curl https://x.test\ndocker run -u app:staff image',
@@ -224,6 +284,14 @@ describe('redact', () => {
     'Pass --password and then the host name',
   ])('leaves command lines without a literal secret alone: %s', (command) => {
     expect(redact(command)).toEqual({ text: command, count: 0, kinds: [] });
+  });
+
+  it('keeps prose that names a client before another command in the same sentence', () => {
+    // Known limit: without a separator the sentence is one command, so this is redacted.
+    const text = 'Use curl to check health, then run docker run -u 1000:1000 image';
+    expect(redact(text).text).toBe(
+      `Use curl to check health, then run docker run -u 1000:${REDACTED} image`,
+    );
   });
 
   it('does not redact 2,500 user:group arguments any differently from the first', () => {
@@ -284,6 +352,9 @@ describe('redact', () => {
     ['many user flags, no client', ' -u a:bcd'.repeat(110_000)],
     ['many curl lines', 'curl -u a:bcd x\n'.repeat(62_000)],
     ['many continued lines', 'curl x \\\n -u a:bcd \\\n'.repeat(50_000)],
+    ['many wrapped lines', 'curl x\n  -u a:bcd\n'.repeat(62_000)],
+    ['many commands', 'curl x; a -u a:bcd\n'.repeat(52_000)],
+    ['many ampersands', 'curl x&y & -u a:bcd '.repeat(48_000)],
     ['unclosed quotes', 'password="'.repeat(20_000)],
   ])('stays fast on %s', (_name, input) => {
     expect(input.length).toBeGreaterThanOrEqual(190_000);

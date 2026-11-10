@@ -57,15 +57,20 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   stored or sent: private keys, common provider tokens (AWS, GitHub, Slack, Stripe, OpenAI,
   Anthropic, Google, npm, JWTs), credentials in URLs, and values next to secret-like names:
   `.env`-style assignments (a quoted value is removed whole), command-line flags such as
-  `--token <value>` and `--password <value>`, `docker login -p <value>`, and
-  `-u user:<value>` / `--user user:<value>` on a line that names an HTTP client (curl, wget,
-  curlie, aria2c, ab, lftp) before the flag. Any other program's `-u` is a user, a group or a
-  URL and is left as written, so stored commands stay runnable.
+  `--token <value>` and `--password <value>`, `docker login -p <value>`, and curl-style
+  credentials (`-u user:<value>`, `--user`, `-U` / `--proxy-user`, `--cert file:<value>`,
+  `--pass`, `--tlspassword`, `--oauth2-bearer`) in a command that names an HTTP client (curl and
+  its builds, wget, curlie, aria2c, ab, lftp, hurl, httpstat, or a `$CURL`-style variable) before
+  the flag. A command ends at an unquoted `|`, `&&`, `||`, `;` or standalone `&`; a line goes on
+  across `\`, `^` or a PowerShell backtick, and into an indented option line. Any other program's
+  `-u` is a user, a group or a URL and is left as written, so stored commands stay runnable. A
+  client behind a shell alias or function is not recognised, and a sentence that names curl
+  before another command (`use curl, then run docker run -u 1000:1000`) is redacted.
   Task titles, plan steps and blockers go through the same pass. Type annotations and references
   such as `process.env.X` or `$TOKEN` are left alone, since they hold no secret. So is quoted UI
   text, but only when both the name says so (it ends in `placeholder`, `label`, `hint`, `help`,
   `tooltip`, `caption`, `heading` or `error`) and the value is two or more plain words, as in
-  `passwordPlaceholder="Enter your password"`. A passphrase made of plain words stored under
+  `tokenPlaceholder="Paste your GitHub token"`. A passphrase made of plain words stored under
   such a name is therefore not redacted.
 - Paths matching the default deny-list are never read for evidence and their content is never
   captured: `.env`, `.env.*`, `.env-*`, `.env_*`, `.envrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
