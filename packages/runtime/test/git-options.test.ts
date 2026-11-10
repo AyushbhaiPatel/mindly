@@ -958,9 +958,14 @@ notReadFully.push(
   {
     name: 'npx --call under timeout',
     command: "timeout 5 npx --call 'rm certs/server.pem'",
-    runs: has('npx'),
+    runs: has('npx') && has('timeout'),
   },
-  { name: 'env --spl', command: "env --spl 'rm certs/server.pem'", runs: ENV_SPLIT },
+  {
+    name: 'env --spl',
+    command: "env --spl 'rm certs/server.pem'",
+    // GNU env takes abbreviated long options; BSD env (macOS) does not.
+    runs: works("env --spl 'true'"),
+  },
   { name: 'HOME set, then ~', command: 'HOME=certs; rm ~/server.pem' },
   { name: 'HOME set, then cd', command: 'HOME=certs; cd; rm server.pem' },
   // Filters and programs that write, besides what they read.
