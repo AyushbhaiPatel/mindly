@@ -17,10 +17,19 @@ interface Rule {
   /** Replacement; `$1` style groups keep non-secret context such as the variable name. */
   replace: string;
   /**
-   * Returns true for matches that are clearly not secrets. Receives the capture groups and the
-   * few characters that follow the match.
+   * Returns true for matches that are clearly not secrets. Receives the capture groups and
+   * where the match sits in the text.
    */
-  skip?: (groups: readonly string[], after: string) => boolean;
+  skip?: (groups: readonly string[], at: MatchContext) => boolean;
+}
+
+/** Where a match sits: the whole text, and the offsets the match starts and ends at. */
+interface MatchContext {
+  text: string;
+  start: number;
+  end: number;
+  /** Command-line lookups left for this call; see `programAt`. */
+  budget: { scans: number };
 }
 
 /** Type names that follow `password:` in code (TypeScript, Python, Go, …), never secrets. */
@@ -76,16 +85,14 @@ const SECRET_WORDS =
 const SECRET_NAME = `[A-Za-z0-9_.-]{0,60}(?:${SECRET_WORDS})[A-Za-z0-9_.-]{0,60}`;
 
 /**
- * Last words of a name that say it holds display text or metadata about a secret, not the secret
- * (`passwordPlaceholder`, `token_type`, `passwordError`).
+ * Last words of a name that only ever name display text or a kind, never the secret itself
+ * (`passwordPlaceholder`, `token_type`, `passwordError`). Kept short on purpose: words such as
+ * `text`, `input`, `message` or `note` also name fields that hold the secret.
  */
 const DISPLAY_WORDS = new Set(
-  (
-    'placeholder label hint help helper message msg error err title text description desc prompt ' +
-    'type name field input pattern policy rule rules regex format length len min max strength ' +
-    'tooltip caption heading legend warning info note validation requirement requirements ' +
-    'instructions summary question reminder'
-  ).split(' '),
+  'placeholder label hint help tooltip caption heading title error description prompt type'.split(
+    ' ',
+  ),
 );
 
 /** True when the name in an assignment prefix (`passwordLabel: '`) ends in a display word. */
@@ -98,14 +105,167 @@ function isDisplayName(prefix: string): boolean {
   return DISPLAY_WORDS.has((words[words.length - 1] ?? '').toLowerCase());
 }
 
+/** An ordinary word: letters only, capitals only at the start (or throughout), no longer than 14. */
+const PLAIN_WORD = /^[("]?(?:[A-Z]?[a-z]{1,13}(?:['-][a-z]{1,10})?|[A-Z]{1,6})[)"]?[.,:;!?]{0,3}$/;
+
+/** True for two or more ordinary words: a sentence or a label, not a token or a passphrase. */
+function isPlainWords(value: string): boolean {
+  const words = value.trim().split(/\s+/);
+  return words.length >= 2 && words.length <= 40 && words.every((w) => PLAIN_WORD.test(w));
+}
+
 /**
- * A quoted value with spaces in it is prose more often than a passphrase. It is redacted when the
- * name really names a secret (`"password": "correct horse battery staple"`), and left alone when
- * the name says it is UI text or metadata (`passwordPlaceholder="Enter your password"`).
+ * A quoted value is display text, not a secret, only when both hold: the name says so
+ * (`passwordPlaceholder`, `token_type`) and the value reads as plain words (`"Enter your
+ * password"`). Anything with a digit, a long or mixed-case word or a single word is still
+ * redacted, whatever the name ends in.
  */
 function isDisplayText(prefix: string, value: string): boolean {
-  return /\s/.test(value) && isDisplayName(prefix);
+  return isDisplayName(prefix) && isPlainWords(value);
 }
+
+/**
+ * The same test for the unquoted-value rule, which only matched the first word of a quoted
+ * string: the rest of the string, up to its closing quote, is read from the text.
+ */
+function startsDisplayText(prefix: string, value: string, at: MatchContext): boolean {
+  const quote = prefix.slice(-1);
+  if ((quote !== '"' && quote !== "'") || !isDisplayName(prefix)) return false;
+  const rest = at.text.slice(at.end, at.end + 400);
+  const close = rest.search(quote === '"' ? /["\n]/ : /['\n]/);
+  return close !== -1 && rest[close] === quote && isPlainWords(value + rest.slice(0, close));
+}
+
+/**
+ * Programs whose `-u` / `--user` takes a user (or `user:group`, or a git remote and refspec), not
+ * credentials. Rewriting those arguments would leave a stored command that cannot be run again.
+ */
+const USER_FLAG_PROGRAMS = new Set(
+  (
+    'docker podman nerdctl kubectl oc crictl buildah chown install rsync tar id systemd-run git ' +
+    'docker-compose'
+  ).split(' '),
+);
+
+/** Programs that run another command as a user: `sudo -u postgres psql`. */
+const RUN_AS_PROGRAMS = new Set(['sudo', 'su', 'runuser', 'doas']);
+
+/** Programs where `-uname:password` (no space) is credentials. */
+const HTTP_PROGRAMS = new Set(['curl', 'wget', 'curlie', 'aria2c', 'ab', 'lftp']);
+
+/** How far back a command line is read to find its program. */
+const COMMAND_SCAN_CHARS = 2000;
+
+/** How many leading words of a command line are looked at to find its program. */
+const COMMAND_WORDS = 16;
+
+/**
+ * The words of the command line that ends at `end`, quotes removed. A command line starts after
+ * an unquoted `;`, `|`, `&`, `(` or newline; quotes and a backslash before a newline do not end
+ * it, so a URL with `&` in it or a continued line stays part of the same command.
+ */
+function commandWords(text: string, end: number): string[] {
+  // Word boundaries are collected as offsets and only turned into strings at the end, so a text
+  // with many matches does not build a string per character.
+  let bounds: number[] = [];
+  let wordStart = -1;
+  let quote = 0;
+  const close = (i: number): void => {
+    if (wordStart !== -1) bounds.push(wordStart, i);
+    wordStart = -1;
+  };
+  for (let i = Math.max(0, end - COMMAND_SCAN_CHARS); i < end; i++) {
+    const ch = text.charCodeAt(i);
+    if (quote !== 0) {
+      if (ch === quote) quote = 0;
+    } else if (ch === 92 /* \ */) {
+      const next = text.charCodeAt(i + 1);
+      if (next === 10 || (next === 13 && text.charCodeAt(i + 2) === 10)) {
+        close(i);
+        i += next === 10 ? 1 : 2;
+      } else {
+        if (wordStart === -1) wordStart = i;
+        i++;
+      }
+    } else if (ch === 34 /* " */ || ch === 39 /* ' */) {
+      quote = ch;
+      if (wordStart === -1) wordStart = i;
+    } else if (ch === 59 || ch === 124 || ch === 38 || ch === 40 || ch === 10) {
+      // ; | & ( and newline start a new command line.
+      bounds = [];
+      wordStart = -1;
+    } else if (ch === 32 || ch === 9 || ch === 13) {
+      close(i);
+    } else if (wordStart === -1) {
+      wordStart = i;
+    }
+  }
+  close(end);
+  // The program is among the first words; the rest of a long line is not needed.
+  const words: string[] = [];
+  for (let k = 0; k < bounds.length && k < 2 * COMMAND_WORDS; k += 2) {
+    words.push(text.slice(bounds[k], bounds[k + 1]).replace(/["'\\]/g, ''));
+  }
+  return words;
+}
+
+/** `/usr/bin/Docker.exe` -> `docker`; an argument that is not a bare program name -> ''. */
+function programName(word: string): string {
+  const m = /^(?:[./~][^\s:]{0,200}\/)?([A-Za-z][A-Za-z0-9._-]{0,40}?)(?:\.exe)?$/i.exec(word);
+  return (m?.[1] ?? '').toLowerCase();
+}
+
+/**
+ * The program a `-u` flag at the end of `words` belongs to: the run-as program itself when only
+ * its own options stand between it and the flag (`sudo -n -u`), else the command it runs.
+ */
+function programOfFlag(words: readonly string[]): string {
+  let i = 0;
+  while (i < words.length) {
+    const word = words[i] ?? '';
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+      i++;
+      continue;
+    }
+    const name = programName(word);
+    if (!RUN_AS_PROGRAMS.has(name) && name !== 'env' && name !== 'time' && name !== 'nohup') {
+      return name;
+    }
+    // Skip the run-as program's own options, and the value of those that take one.
+    let j = i + 1;
+    while (j < words.length && (words[j] ?? '').startsWith('-')) {
+      j += /^(?:-[ugUhpCDRT]|--user|--group|--host|--prompt)$/.test(words[j] ?? '') ? 2 : 1;
+    }
+    if (j >= words.length) return name;
+    i = j;
+  }
+  return '';
+}
+
+/**
+ * True when `-u name:value` is clearly a user and group (or a remote and refspec) and not
+ * credentials. Credentials are the default: an unknown program gets its value redacted.
+ */
+function isUserGroupArgument(name: string, value: string, at: MatchContext): boolean {
+  if (/^\d+$/.test(name) && /^\d+$/.test(value)) return true;
+  if (name === value && /^[a-z_][a-z0-9_-]{0,31}$/.test(name)) return true;
+  const program = programAt(at);
+  return USER_FLAG_PROGRAMS.has(program) || RUN_AS_PROGRAMS.has(program);
+}
+
+/**
+ * The program of the command line a match sits on. Each lookup reads back up to
+ * `COMMAND_SCAN_CHARS`, so one call only gets so many: past that the program is unknown (''),
+ * which callers treat as "may be credentials". Hostile input cannot buy more work than that.
+ */
+function programAt(at: MatchContext): string {
+  if (at.budget.scans <= 0) return '';
+  at.budget.scans--;
+  return programOfFlag(commandWords(at.text, at.start));
+}
+
+/** Command-line lookups one `redact()` call may do. */
+const MAX_COMMAND_SCANS = 2000;
 
 const RULES: Rule[] = [
   {
@@ -154,17 +314,25 @@ const RULES: Rule[] = [
   },
   {
     kind: 'cli_credentials',
-    // `curl -u user:password` / `wget --user user:password`. Only for HTTP clients, where the
-    // flag means credentials: for docker, sudo or chown-style arguments it is a user:group pair,
-    // and a stored command has to stay runnable.
-    re: /\b((?:curl|wget)\s[^\n|;&]{0,300}?(?:-u|--user)\s{1,5}["']?[^\s:"'`]{1,200}:)([^\s"'`]{3,200})/g,
-    replace: `$1${REDACTED}`,
-    skip: (g) => (g[2] ?? '').startsWith('$'),
+    // `-u user:password` / `--user user:password` / `--user=user:password` (curl, wget and other
+    // HTTP tools). Credentials unless it is clearly a user:group argument of docker, sudo, chown
+    // and the like, which must stay as written.
+    re: /((?:^|\s)(?:-u|--user)(?:\s{1,5}|=)["']?)([^\s:"'`]{1,200}):([^\s"'`]{3,200})/g,
+    replace: `$1$2:${REDACTED}`,
+    skip: (g, at) =>
+      (g[3] ?? '').startsWith('$') || isUserGroupArgument(g[2] ?? '', g[3] ?? '', at),
+  },
+  {
+    kind: 'cli_credentials',
+    // `curl -uuser:password`, with no space: only where the program is known to be an HTTP client.
+    re: /((?:^|\s)-u["']?)([^\s:"'`=-][^\s:"'`]{0,200}):([^\s"'`]{3,200})/g,
+    replace: `$1$2:${REDACTED}`,
+    skip: (g, at) => (g[3] ?? '').startsWith('$') || !HTTP_PROGRAMS.has(programAt(at)),
   },
   {
     kind: 'cli_credentials',
     // `docker login -p value`: `-p` means a password only for this command.
-    re: /\b(docker\s{1,5}login\s[^\n|;&]{0,200}?-p\s{1,5}["']?)([^\s"'`]{3,4000})/g,
+    re: /\b((?:docker|podman|nerdctl)(?:\.exe)?\s{1,5}login\s(?:[^\n|;&]{0,300}?\s)?-p\s{1,5}["']?)([^\s"'`]{3,4000})/gi,
     replace: `$1${REDACTED}`,
     skip: (g) => (g[2] ?? '').startsWith('$'),
   },
@@ -200,9 +368,9 @@ const RULES: Rule[] = [
     re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}["']?)([^\\s"'\`,;]{6,4000})`, 'gi'),
     replace: `$1${REDACTED}`,
     // The first word of a quoted display string is not a secret either.
-    skip: (g, after) =>
-      (/["']$/.test(g[1] ?? '') && /^[ \t]/.test(after) && isDisplayName(g[1] ?? '')) ||
-      isNonSecretValue(g[1] ?? '', g[2] ?? '', after),
+    skip: (g, at) =>
+      startsDisplayText(g[1] ?? '', g[2] ?? '', at) ||
+      isNonSecretValue(g[1] ?? '', g[2] ?? '', at.text.slice(at.end, at.end + 12)),
   },
 ];
 
@@ -236,6 +404,7 @@ function compileExtra(source: string): RegExp | null {
 export function redact(input: string, options: RedactOptions = {}): RedactionResult {
   let text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
   let count = 0;
+  const budget = { scans: MAX_COMMAND_SCANS };
   const kinds = new Set<string>();
 
   const apply = (kind: string, re: RegExp, replace: string, skip?: Rule['skip']): void => {
@@ -246,14 +415,16 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
       // Do not double-count a value that is already redacted. Only the secret part is looked
       // at (the match without its kept prefix), and only when nothing else is left in it: a
       // value that merely ends in an earlier redaction still has a secret in front of it.
-      const prefix = replace.startsWith('$1') ? (groups[1] ?? '') : '';
-      const secret = match.startsWith(prefix) ? match.slice(prefix.length) : match;
+      const kept = replace
+        .slice(0, Math.max(0, replace.indexOf(REDACTED)))
+        .replace(/\$(\d)/g, (_m, g: string) => groups[Number(g)] ?? '');
+      const secret = match.startsWith(kept) ? match.slice(kept.length) : match;
       if (secret.includes(REDACTED) && !/[A-Za-z0-9]/.test(secret.split(REDACTED).join(''))) {
         return match;
       }
       const offset = args.find((a) => typeof a === 'number');
-      const end = (typeof offset === 'number' ? offset : 0) + match.length;
-      if (skip?.(groups, text.slice(end, end + 12))) return match;
+      const start = typeof offset === 'number' ? offset : 0;
+      if (skip?.(groups, { text, start, end: start + match.length, budget })) return match;
       count++;
       kinds.add(kind);
       return replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? ''));

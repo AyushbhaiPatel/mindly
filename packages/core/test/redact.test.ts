@@ -82,19 +82,41 @@ describe('redact', () => {
     "passwordLabel: 'Your password'",
     'passwordError = "Passwords do not match"',
     '"password_hint": "At least twelve characters"',
-    "apiKeyDescription: 'Shown once after you create the key'",
+    "apiKeyDescription: 'Shown once after you create the key.'",
+    'password_hint = "my real passphrase here"',
   ])('leaves quoted display text next to a secret-like name alone: %s', (code) => {
     expect(redact(code)).toEqual({ text: code, count: 0, kinds: [] });
   });
 
-  it('still redacts single-word quoted values whatever the name ends in', () => {
-    // Without a space in it the value is treated as before, display name or not.
-    expect(redact('token_type: "abc123def456"').text).toBe(`token_type: "${REDACTED}"`);
-    expect(redact("passwordHint = 'Summerwind'").text).toBe(`passwordHint = '${REDACTED}'`);
-    expect(redact('"db.password": "correct horse battery staple"').text).toBe(
-      `"db.password": "${REDACTED}"`,
-    );
-    expect(redact("clientSecret = 'two words'").text).toBe(`clientSecret = '${REDACTED}'`);
+  it.each([
+    // The name does not say "display text": words like input, text or note also hold secrets.
+    ['const passwordInput = "correct horse battery staple"', 'correct horse battery staple'],
+    ['passwordText: "correct horse battery staple"', 'correct horse battery staple'],
+    ['SECRET_MESSAGE="launch code 0000 1111"', 'launch code 0000 1111'],
+    ['secret_note = "root pw is hunter2SecretValue9"', 'hunter2SecretValue9'],
+    ['credentials_text = "admin hunter2SecretValue9"', 'hunter2SecretValue9'],
+    ['token_info: "Bearer Zx81kQ0pLm3nB7vC9tY2uR5w"', 'Zx81kQ0pLm3nB7vC9tY2uR5w'],
+    ['config.password.text = "hunter2 SecretValue9"', 'SecretValue9'],
+    ['password-message: "hunter2 SecretValue9"', 'SecretValue9'],
+    ['client_secret_format: "Zx81kQ0pLm3nB7vC9tY2 uR5wZx81kQ0pLm3nB7vC"', 'uR5wZx81kQ0pLm3nB7vC'],
+    // The name says "display text" but the value does not read as plain words.
+    ['auth_token_type = "Bearer Zx81kQ0pLm3nB7vC9tY2uR5w"', 'Zx81kQ0pLm3nB7vC9tY2uR5w'],
+    ['DB_PASSWORD_INPUT="hunter2SecretValue9 "', 'hunter2SecretValue9'],
+    ["password_type='hunter2SecretValue9 '", 'hunter2SecretValue9'],
+    ['password_title: "hunter SecretValue"', 'SecretValue'],
+    ['passwordLabel = "correct horse battery9 staple"', 'battery9'],
+    ['token_type: "abc123def456"', 'abc123def456'],
+    ["passwordHint = 'Summerwind'", 'Summerwind'],
+    // A real secret name: the quoted value goes whole.
+    ['"password": "correct horse battery staple"', 'horse battery staple'],
+    ['"db.password": "correct horse battery staple"', 'horse battery staple'],
+    ['db_password = "p@ss,word-1234567"', 'word-1234567'],
+    ["clientSecret = 'two words'", 'two words'],
+  ])('redacts a quoted value that may be a secret: %s', (code, secret) => {
+    const out = redact(code);
+    expect(out.text).not.toContain(secret);
+    expect(out.text).toContain(REDACTED);
+    expect(redact(out.text).count).toBe(0);
   });
 
   it.each([
@@ -102,14 +124,44 @@ describe('redact', () => {
     ['mysql --password hunter2SecretValue9 -e "select 1"', 'hunter2SecretValue9'],
     ['tool --db-password "hunter2SecretValue9"', 'hunter2SecretValue9'],
     ['docker login -u bob -p hunter2SecretValue9 registry.test', 'hunter2SecretValue9'],
+    ['podman login -p hunter2SecretValue9 registry.test', 'hunter2SecretValue9'],
     ['curl -u admin:hunter2SecretValue9 https://x.test', 'hunter2SecretValue9'],
     ['curl --user "admin:hunter2SecretValue9" https://x.test', 'hunter2SecretValue9'],
     ['curl -sS -X POST -u admin:12345678 https://x.test', '12345678'],
     ['wget --user admin:hunter2SecretValue9 https://x.test', 'hunter2SecretValue9'],
+    ['curl "https://x.test/api?a=1&b=2" -u admin:hunter2SecretValue9', 'hunter2SecretValue9'],
+    ['curl https://x.test/api?a=1&b=2 -u admin:hunter2SecretValue9', 'hunter2SecretValue9'],
+    [
+      'curl https://x.test \\\n  -H "Accept: */*" \\\n  -u admin:hunter2SecretValue9',
+      'hunter2SecretValue9',
+    ],
+    [
+      'curl -H "Accept: text/html;q=0.9" -u admin:hunter2SecretValue9 x.test',
+      'hunter2SecretValue9',
+    ],
+    ['curl -d "a=1&b=2" -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    ['curl -H "X: a|b" -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    [
+      `curl -H "X-Long: ${'v'.repeat(400)}" -u admin:hunter2SecretValue9 x.test`,
+      'hunter2SecretValue9',
+    ],
+    ['curl.exe -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    ['CURL -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    ['curlie -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    ['ab -u admin:hunter2SecretValue9 x.test/', 'hunter2SecretValue9'],
+    ['aria2c -u admin:hunter2SecretValue9 x.test/f', 'hunter2SecretValue9'],
+    ['mytool sync --user admin:hunter2SecretValue9', 'hunter2SecretValue9'],
+    ['sudo curl -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    ['sudo -u deploy curl -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    ['docker ps; curl -u admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    ['curl --user=admin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    ['curl -uadmin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
+    ['wget -uadmin:hunter2SecretValue9 x.test', 'hunter2SecretValue9'],
   ])('redacts a secret passed as a command-line argument: %s', (command, secret) => {
     const out = redact(command);
     expect(out.text).not.toContain(secret);
     expect(out.text).toContain(REDACTED);
+    expect(out.text).toContain(command.slice(0, command.indexOf(secret)));
     expect(redact(out.text).count).toBe(0);
   });
 
@@ -117,17 +169,28 @@ describe('redact', () => {
     'docker login --password-stdin registry.example.com',
     'docker run -u 1000:1000 -p 8080:80 image',
     'docker run -u node:node image',
+    'docker run -u node:staff -e "A=1;B=2" image',
+    '/usr/bin/docker exec -u deploy:staff app ls',
     'podman run --user www-data:www-data image',
-    'kubectl exec -u deploy:deploy pod -- ls',
+    'podman run --user=deploy:staff image',
+    'kubectl exec -u deploy:staff pod -- ls',
     'sudo -u postgres:postgres psql',
-    'sometool --user alice:staff run',
+    'sudo -n -u deploy:staff ./release.sh',
+    'sudo -u root docker run -u deploy:staff image',
+    'chown -u deploy:staff file',
+    'sometool --user 1000:1000 run',
+    'sometool --user alice:alice run',
+    'git push -u origin main:main',
+    'git push -u origin:refs/heads/topic',
+    'curl http://localhost:3000/sign-u http://localhost:8080/health',
+    'docker login registry.test/app-p latest',
+    'mysql -uroot:app -e "select 1"',
     'tool --token-file ./token.txt',
     'tool --token "$API_TOKEN" --password $DB_PASSWORD',
     'curl -u "$USER:$PASS" https://x.test',
-    'git push -u origin main:main',
     'Pass --password and then the host name',
   ])('leaves command lines without a literal secret alone: %s', (command) => {
-    expect(redact(command).count).toBe(0);
+    expect(redact(command)).toEqual({ text: command, count: 0, kinds: [] });
   });
 
   it('removes credentials from URLs but keeps the host', () => {
@@ -176,6 +239,8 @@ describe('redact', () => {
     redact('--token '.repeat(100_000));
     redact('docker login '.repeat(60_000));
     redact('curl -u a'.repeat(100_000));
+    redact(' -u a:bcd'.repeat(20_000));
+    redact('docker run -u a:bcd '.repeat(10_000));
     redact('password="'.repeat(80_000));
     expect(Date.now() - start).toBeLessThan(2000);
   });
