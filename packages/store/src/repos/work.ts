@@ -592,6 +592,24 @@ export class ConflictRepo {
     return n;
   }
 
+  /**
+   * How many conflicts were opened and resolved at or after `since`, and how many are open now
+   * (acknowledged ones included). Counted in the database, so the numbers hold however many
+   * conflicts a project has collected.
+   */
+  counts(projectId: string, since: number): { opened: number; resolved: number; open: number } {
+    const r = this.db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(created_at >= ?), 0) AS opened,
+           COALESCE(SUM(status = 'resolved' AND resolved_at IS NOT NULL AND resolved_at >= ?), 0) AS resolved,
+           COALESCE(SUM(status IN ('open', 'acknowledged')), 0) AS open
+         FROM conflicts WHERE project_id = ?`,
+      )
+      .get(since, since, projectId) as Row;
+    return { opened: num(r, 'opened'), resolved: num(r, 'resolved'), open: num(r, 'open') };
+  }
+
   list(
     projectId: string,
     opts: { statuses?: readonly ConflictStatus[]; sessionId?: string; limit?: number } = {},
