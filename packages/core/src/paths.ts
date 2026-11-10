@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, realpathSync, statSync } from 'node:f
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { MindlyError } from './errors.js';
-import { matchesAnyGlob } from './glob.js';
+import { globToRegExp, matchesAnyGlob } from './glob.js';
 import { DEFAULT_DENY_PATHS } from './redact.js';
 import { hasUnsafeChars } from './text.js';
 
@@ -125,4 +125,36 @@ export function tryResolveInsideRoot(root: string, input: string): ResolvedProje
 export function isDeniedPath(rel: string, extraDeny: readonly string[] = []): boolean {
   const opts = { nocase: true };
   return matchesAnyGlob(rel, DEFAULT_DENY_PATHS, opts) || matchesAnyGlob(rel, extraDeny, opts);
+}
+
+/**
+ * {@link isDeniedPath} for many paths: each pattern is compiled once. A pattern without a slash
+ * matches the last segment anywhere, as it does there.
+ */
+export function deniedPathTest(extraDeny: readonly string[] = []): (rel: string) => boolean {
+  const opts = { nocase: true };
+  let tests: { anywhere: boolean; re: RegExp; tail: string }[];
+  try {
+    tests = [...DEFAULT_DENY_PATHS, ...extraDeny].map((g) => {
+      // What every matching path ends with, compared before the expression is run.
+      const last = g.slice(g.lastIndexOf('/') + 1);
+      const tail = /[[{]/.test(last) ? '' : last.slice(last.search(/[^*?]*$/)).toLowerCase();
+      return {
+        anywhere: !g.includes('/'),
+        re: globToRegExp(g.includes('/') ? g.replace(/^\.\//, '') : g, opts),
+        tail,
+      };
+    });
+  } catch {
+    // A pattern that does not compile is left to the one-path test, which says so.
+    return (rel) => isDeniedPath(rel, extraDeny);
+  }
+  return (rel) => {
+    const path = rel.replace(/^\.\//, '');
+    const base = path.slice(path.lastIndexOf('/') + 1);
+    const lower = path.toLowerCase();
+    return tests.some(
+      (t) => (t.tail === '' || lower.endsWith(t.tail)) && t.re.test(t.anywhere ? base : path),
+    );
+  };
 }

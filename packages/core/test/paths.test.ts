@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ensureHome, isDeniedPath, resolveInsideRoot, mindlyHome } from '../src/paths.js';
+import {
+  deniedPathTest,
+  ensureHome,
+  isDeniedPath,
+  resolveInsideRoot,
+  mindlyHome,
+} from '../src/paths.js';
 
 describe('resolveInsideRoot', () => {
   const root = mkdtempSync(join(tmpdir(), 'syn-root-'));
@@ -53,6 +59,32 @@ describe('isDeniedPath', () => {
   it('allows normal source and custom deny-lists', () => {
     expect(isDeniedPath('src/env.ts')).toBe(false);
     expect(isDeniedPath('vault/x.txt', ['vault/**'])).toBe(true);
+  });
+  it('says the same when compiled once for many paths', () => {
+    const extra = ['vault/**', '*.sqlite', 'docs/{a,b}.md', 'build/x?.bin'];
+    const denied = deniedPathTest(extra);
+    for (const p of [
+      '.env',
+      './.env',
+      'config/.env.production',
+      'keys/server.pem',
+      'keys/SERVER.PEM',
+      'home/.ssh/config',
+      '.npmrc',
+      'src/env.ts',
+      'src/pem.ts',
+      'vault/x.txt',
+      'a/vault/x.txt',
+      'data/app.sqlite',
+      'docs/a.md',
+      'docs/c.md',
+      'build/x1.bin',
+      'build/x12.bin',
+      'secrets/k.txt',
+      'SECRETS/k.txt',
+    ]) {
+      expect(denied(p), p).toBe(isDeniedPath(p, extra));
+    }
   });
 });
 
