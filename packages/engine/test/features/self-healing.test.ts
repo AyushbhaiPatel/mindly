@@ -1,6 +1,6 @@
 import { copyFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { normalizeLine, sha256 } from '@mindly/core';
+import { normalizeLine, redactText, sanitizeForContext, sha256 } from '@mindly/core';
 import { describe, expect, it, vi } from 'vitest';
 import { excerptPresent, excerptState, normalizeBlock, selfHealingOf } from '../../src/index.js';
 import { evidenceHash } from '../../src/memory/evidence-hash.js';
@@ -415,6 +415,41 @@ describe('self-healing memory', () => {
     expect(checks.map((c) => c.state)).toEqual(['invalid']);
     // Tens of milliseconds on an idle machine (it took seconds); room left for a busy one.
     expect(Math.max(goneMs, lookalikeMs, recheckMs)).toBeLessThan(500);
+  });
+
+  it('finds earlier evidence that was made safe as well as redacted while its line is there', async () => {
+    const zwj = '‍';
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    // A whole line with an emoji sequence (joined by an invisible character) and a secret.
+    const original = `const TEAM = { badge: "👩${zwj}💻 maintainers of the api client", token: "${secret}" };`;
+    // As an earlier version stored it: redacted and made safe, with the bare hash of the original.
+    const stored = sanitizeForContext(redactText(original), 2000);
+    const legacyHash = sha256(normalizeBlock(original));
+    expect(stored).toContain('[REDACTED]');
+    expect(stored).not.toContain(zwj);
+    const content = `// header\n${original}\nexport {};\n`;
+    expect(excerptState(content, stored, legacyHash)).toBe('present');
+    expect(excerptState(content.replace('maintainers', 'owners'), stored, legacyHash)).toBe(
+      'absent',
+    );
+
+    const { root, mindly, pid, cc, write } = await featureSetup();
+    write('src/team.ts', content);
+    const m = mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'fact',
+      title: 'The team badge is in team.ts',
+      body: 'b',
+      source: agentSource(cc),
+      evidence: [{ path: 'src/team.ts', excerpt: original }],
+    });
+    mindly.store.db
+      .prepare('UPDATE memory_evidence SET excerpt = ?, content_hash = ? WHERE memory_id = ?')
+      .run(stored, legacyHash, m.id);
+    expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ checked: 1, invalid: 0 });
+    expect(mindly.store.memories.evidenceFor(m.id)[0]!.valid).toBe(true);
+    expect(mindly.store.memories.get(m.id).trust).not.toBe('stale');
   });
 
   it('finds redacted evidence past the first 20,000 lines of a file', async () => {

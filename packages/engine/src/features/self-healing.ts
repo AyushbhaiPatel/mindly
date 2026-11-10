@@ -1,5 +1,11 @@
 import { statSync, type Stats } from 'node:fs';
-import { REDACTED, sha256, type MemoryEvidence, type Session } from '@mindly/core';
+import {
+  REDACTED,
+  sanitizeForContext,
+  sha256,
+  type MemoryEvidence,
+  type Session,
+} from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
 import { stripManagedSection } from '../memory/managed-section.js';
@@ -56,13 +62,21 @@ interface NormFile {
   content: string;
   /** True when some run of `n` whole lines of the file has this hash. */
   hasLines(n: number, hash: string): boolean;
+  /**
+   * The file made safe the way a stored excerpt was (`sanitizeForContext`), then normalised: what
+   * the unredacted pieces of a stored excerpt can be compared with as they are.
+   */
+  sanitised(): string;
 }
 
-function normFile(normContent: string): NormFile {
+/** `raw`: the file as read; `normContent`: it normalised. */
+function normFile(raw: string, normContent: string = normalizeBlock(raw)): NormFile {
   let lines: string[] | null = null;
+  let sanitised: string | null = null;
   const runs = new Map<number, Set<string>>();
   return {
     content: normContent,
+    sanitised: () => (sanitised ??= normalizeBlock(sanitizeForContext(raw, Infinity))),
     hasLines(n, hash) {
       let set = runs.get(n);
       if (!set) {
@@ -102,7 +116,7 @@ export function excerptState(
   excerpt: string,
   contentHash: string | null,
 ): ExcerptState {
-  return excerptIn(normFile(normalizeBlock(content)), excerpt, contentHash);
+  return excerptIn(normFile(content), excerpt, contentHash);
 }
 
 function excerptIn(file: NormFile, excerpt: string, contentHash: string | null): ExcerptState {
@@ -121,11 +135,15 @@ function excerptIn(file: NormFile, excerpt: string, contentHash: string | null):
     return 'absent';
   }
   // Stored redacted by an earlier version: the original was a run of whole lines, or a part of one.
-  // Either way it holds the text the redaction left; when the longest piece of it is not in the
-  // file there is nothing to hash. (A piece with a neutralised delimiter differs from the file.)
-  const key = normExcerpt.split(REDACTED).reduce((a, b) => (b.length > a.length ? b : a), '');
-  if (key.length > 0 && !key.includes('‹') && !file.content.includes(key)) return 'absent';
   if (file.hasLines(Math.max(1, normExcerpt.split('\n').length), contentHash)) return 'present';
+  // A part of one holds the text the redaction left. That text was also made safe and may have
+  // been cut short (`…`), so it is compared with the file made safe the same way; when its longest
+  // piece is not there, there is nothing to hash.
+  const key = normExcerpt
+    .replace(/…$/, '')
+    .split(REDACTED)
+    .reduce((a, b) => (b.length > a.length ? b : a), '');
+  if (key.length > 0 && !file.sanitised().includes(key)) return 'absent';
   return legacyPartIn(file.content, normExcerpt, contentHash);
 }
 
@@ -257,7 +275,7 @@ export class SelfHealingService {
       kind: 'present',
       seen: `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`,
       // Rules Mindly wrote into an instruction file are not evidence for those same rules.
-      file: () => (file ??= normFile(normalizeBlock(stripManagedSection(content)))),
+      file: () => (file ??= normFile(stripManagedSection(content))),
     };
   }
 
