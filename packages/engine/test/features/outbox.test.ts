@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { REDACTED } from '@mindly/core';
 import {
@@ -330,9 +331,17 @@ describe('the sender', () => {
         pid: process.pid,
         start: 'not-this-process',
       });
+      // The sender's own check compares start times (/proc, or `ps` where there is none).
       expect(outbox.senderAlive()).toBe(false);
       outbox.enqueue(page);
-      expect(outbox.needsSender()).toBe(true);
+      if (existsSync('/proc/self/stat')) {
+        // A hook compares start times too where /proc makes that cheap: it starts a sender.
+        expect(outbox.needsSender()).toBe(true);
+      } else {
+        // Elsewhere a hook goes by the pid alone and never runs `ps` (the documented limit in
+        // docs/security.md): it takes the live process for the sender and starts none.
+        expect(outbox.needsSender()).toBe(false);
+      }
     },
   );
 
