@@ -34,8 +34,8 @@ const DELIMITER_RE = /<\s*\/?\s*mindly[-_a-z]*/gi;
  * characters or invisible/bidi characters that could forge structure in rendered context.
  */
 export function hasUnsafeChars(value: string): boolean {
-  // eslint-disable-next-line no-control-regex
   return (
+    // eslint-disable-next-line no-control-regex
     /[\u0000-\u001F\u007F-\u009F]/.test(value) || new RegExp(INVISIBLE_RE.source, 'u').test(value)
   );
 }
