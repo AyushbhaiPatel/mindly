@@ -292,10 +292,15 @@ describe('redact', () => {
     ["it's sh -c 'curl -o out -u '\\''admin:PW'\\'' -o out https://x.test'", 'PW'],
     ['"$(command -v curl)" -u admin:PW https://x.test', 'PW'],
     ['"$(which curl)" -u admin:PW https://x.test', 'PW'],
-    // A quoted body over several lines before the flag, and a value on the next line.
-    ['curl -d \'{\n  "a": 1\n}\' -u admin:PW https://x.test', 'PW'],
-    ['curl -X POST https://x.test \\\n  -d \'{\n    "name": "x"\n  }\' \\\n  -u admin:PW', 'PW'],
-    ['curl -u\r\nadmin:PW https://x.test', 'PW'],
+    // Passwords with parentheses, credentials inside a quoted command, JSON.
+    ['C:\\> curl.exe -u admin:Qx7(Mm4)PW https://x.test', 'Qx7(Mm4)PW'],
+    ['curl -u admin:Pa55)w0rdPW https://x.test', 'Pa55)w0rdPW'],
+    ['curl --user=admin:Qx7Mm4(PW https://x.test', 'Qx7Mm4(PW'],
+    ['lftp -c "open -u admin,PW ftp.example.com; mirror -R dist /www"', 'PW'],
+    ['lftp -e "open -u admin,PW ftp.example.com; mirror"', 'PW'],
+    ['sh -c "lftp -u admin,PW ftp.example.com"', 'PW'],
+    ['sh -c "ab -A admin:PW http://x.test/"', 'PW'],
+    ['curl -u admin:"PW" https://x.test', 'PW'],
     // -H at the end of a cluster, and the credential syntax of ab and lftp.
     ['curl -sH "Authorization: PW" https://x.test', 'PW'],
     ["curl -sSH 'Authorization: Digest PW' https://x.test", 'PW'],
@@ -360,13 +365,7 @@ describe('redact', () => {
     'curl --cert C:\\certs\\client.pem https://x.test',
     'curl --key key.pem --pass $KEY_PASS https://x.test',
     'curl -u $CLIENT_ID: https://x.test',
-    // A client in an earlier command of the same line does not own a later command's -u.
-    'curl -fsSL https://x.test/install.sh | sh && docker run --rm -u 1000:1000 image',
-    'curl https://x.test && docker run -u postgres:postgres pg',
-    'ab -n 10 https://x.test/ && sudo -u app:app ls',
-    'wget -qO- https://x.test; docker run -u app:staff image',
-    'curl https://x.test & docker run -u app:staff image',
-    'curl https://x.test || docker run -u app:staff image',
+    // A cluster that is not curl's, or an rsync target after one.
     'wget -qO- https://x.test && rsync -avzu user@host:/data/ .',
     // A cluster that is not curl's.
     'curl https://x.test then rsync -avzu user@host:/data/ .',
@@ -378,9 +377,6 @@ describe('redact', () => {
     // Only an indented option continues a wrapped command, not a list item or another command.
     'curl https://x.test\n  - docker run -u app:staff image',
     'curl https://x.test\n  docker run -u app:staff image',
-    // A sentence above an indented option is not a command.
-    'use curl here\n    -u 1000:1000 is the uid:gid',
-    'Check it with curl first.\n  -u app:staff runs it as the app user',
     // An rsync, scp or ssh after the client owns its cluster and target.
     'curl https://x.test then rsync -avu user@host:/data/ .',
     'curl -O https://x.test/f && scp -ru deploy@host:/srv/app .',
@@ -409,8 +405,6 @@ describe('redact', () => {
     // A scheme with nothing after it, ab's file to PUT, a client only named in a pattern.
     'curl https://x.test -H "Authorization: Bearer" -d a',
     'ab -u put.json -n 10 http://x.test/',
-    'grep -r "curl" . | sort -u a:b',
-    'git grep "curl" -- \'*.sh\' && git log -u a:b',
     'docker run -e URL=$HTTP_TOOL_URL -u app:staff image',
     'sudo -u deploy docker run image\n    -u app:staff',
     'sudo -n docker run image\n    -u app:staff',
@@ -434,12 +428,81 @@ describe('redact', () => {
     expect(redact(command)).toEqual({ text: command, count: 0, kinds: [] });
   });
 
-  it('keeps prose that names a client before another command in the same sentence', () => {
-    // Known limit: without a separator the sentence is one command, so this is redacted.
-    const text = 'Use curl to check health, then run docker run -u 1000:1000 image';
-    expect(redact(text).text).toBe(
-      `Use curl to check health, then run docker run -u 1000:${REDACTED} image`,
-    );
+  it.each([
+    'Use curl to check health, then run docker run -u 1000:1000 image',
+    'curl -fsSL https://x.test/install.sh | sh && docker run --rm -u 1000:1000 image',
+    'curl https://x.test && docker run -u postgres:postgres pg',
+    'ab -n 10 https://x.test/ && sudo -u app:app ls',
+    'wget -qO- https://x.test; docker run -u app:staff image',
+    'curl https://x.test & docker run -u app:staff image',
+    'grep -r "curl" . | sort -u a:b',
+    'use curl here\n    -u 1000:1000 is the uid:gid',
+  ])('redacts only the value after another program on a line that names a client: %s', (text) => {
+    // The accepted trade-off of reading by line: a `-u x:y` after a client on the same line has
+    // its value redacted, whatever program it belongs to. One value garbled, nothing leaked, and
+    // nothing else on the line or any other line touched.
+    const out = redact(text).text;
+    expect(out).toBe(text.replace(/(-u [^\s:]+:)[^\s]+/, `$1${REDACTED}`));
+  });
+
+  it('leaves lines that only mention a client in another line alone', () => {
+    for (const text of [
+      'RUN apk add --no-cache "curl"\nRUN docker run -u 1000:1000 img',
+      '{"tool":"Bash","command":"which curl"}\n{"tool":"Bash","command":"docker exec -u 0:0 web id"}',
+      'if shutil.which("curl") is None:\n    sys.exit(1)\nos.system("docker run -u 1000:1000 img")',
+      '{"tool":"Bash","command":"curl -s https://x.test/health","exit":0}\n{"tool":"Bash","command":"ps -u postgres:postgres"}',
+      '{"a":"curl x"}\n{"b":"git log -u --since=12:30"}',
+      "The curl output is in 'out.txt\ndocker run -u 1000:1000 img\nnext'",
+      'curl x "\ndocker run -u 1000:1000 img\n"',
+      "- curl's progress meter is noisy\n- run `docker exec -u 0:0 web sh`\n- that's all",
+    ]) {
+      expect(redact(text)).toEqual({ text, count: 0, kinds: [] });
+    }
+  });
+
+  it('keeps JSON and other quoting around a redacted secret byte for byte', () => {
+    const pw = 'hunter2SecretValue9';
+    for (const text of [
+      `{"command":"curl -u admin:${pw}"}`,
+      `{"tool_input":{"command":"curl -u admin:${pw} x"}}`,
+      `{"command":"sh -c \\"curl -u admin:${pw}\\""}`,
+      `{"tool_input":{"command":"bash -c \\"curl -H 'Authorization: Bearer ${pw}' http://x\\""}}`,
+      `["curl -u 'admin:${pw}' x"]`,
+      `curl -u "admin:${pw}" x`,
+    ]) {
+      expect(redactText(text)).toBe(text.replace(pw, REDACTED));
+    }
+  });
+
+  it('finds a secret after a long JSONL log of tool calls', () => {
+    let log = '';
+    for (let i = 0; i < 196; i++) {
+      const line = {
+        role: 'tool',
+        command: `curl -s https://x.test/items/${i}`,
+        output: 'x'.repeat(2000),
+      };
+      log += `${JSON.stringify(line)}\n`;
+    }
+    const text = `${'x'.repeat(168_000)}\n${log}Don't forget: curl -H 'Accept: json' -u admin:hunter2SecretValue9 https://x.test`;
+    expect(redactText(text)).not.toContain('hunter2SecretValue9');
+  });
+
+  it('finds a secret a megabyte into a command, in under 100 ms', () => {
+    const text = `curl -d '${'x'.repeat(999_000)}' -u admin:hunter2SecretValue9`;
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const started = performance.now();
+      expect(redactText(text)).not.toContain('hunter2SecretValue9');
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(best).toBeLessThan(100);
+  });
+
+  it('does not join lines across an open quote or after a flag at the end of a line', () => {
+    // Known gaps of reading by line: the line that holds `-u` names no client.
+    expect(redactText('curl -d \'{\n  "a": 1\n}\' -u admin:x1y2z3')).toContain('x1y2z3');
+    expect(redactText('curl -u\r\nadmin:x1y2z3 https://x.test')).toContain('x1y2z3');
   });
 
   it('reads runner options in one pass, however they repeat', () => {
@@ -468,7 +531,8 @@ describe('redact', () => {
   it.each([
     ['Run `curl -su admin:PW`, then check.', 'Run `curl -su admin:[R]`, then check.'],
     ['| `curl -u admin:PW` | works |', '| `curl -u admin:[R]` | works |'],
-    ['echo $(curl -u admin:PW)', 'echo $(curl -u admin:[R])'],
+    // A parenthesis is part of an unquoted value (`admin:Qx7(Mm4)`), so this one goes with it.
+    ['echo $(curl -u admin:PW)', 'echo $(curl -u admin:[R]'],
     [
       'TOKEN=`curl -su admin:PW https://x.test/token`',
       'TOKEN=`curl -su admin:[R] https://x.test/token`',
@@ -499,6 +563,10 @@ describe('redact', () => {
     ['commands nested twice', `sh -c "ssh h 'curl -u a:bcd x'" `],
     ['unclosed quotes', "curl ' -u a:b\n"],
     ['httpie items', 'http -va a:b -A bearer -a tok Authorization:x '],
+    ['curl -s lines', 'curl -s https://example.com/health\n'],
+    ['curl lines with nothing else', 'curl\n'],
+    ['ab words', 'ab '],
+    ['prose naming wget', 'Use wget to fetch the file and then unpack it into the build dir.\n'],
     ['remote-copy words', 'curl rsync -su a@b:/c '],
   ])('reads 250 KB of %s in under 100 ms', (_name, unit) => {
     const text = unit.length > 250_000 ? unit : unit.repeat(Math.ceil(250_000 / unit.length));

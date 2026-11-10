@@ -2,10 +2,12 @@
   "about": [
     "Command lines for the redaction tests.",
     "`commands`: each holds the secret S3CR3T; `parentRedacted` says whether redaction as of",
-    "b9305ce removed it, and `mustRedact` whether it must be removed now.",
+    "b9305ce removed it, and `mustRedact` whether it must be removed now. `knownMiss` marks",
+    "a secret b9305ce removed that the line rule does not (a value on the next line).",
     "`exact`: generated command lines in which only the secret Zq9S3CR3Tw7 may change.",
-    "`benign`: lines with no secret; each must stay as written, or, where `parent` is given,",
-    "may change no more than redaction as of b9305ce changed it."
+    "`benign`: lines with no secret. `parent` is what b9305ce made of one it changed, and",
+    "`expected` what it must become now: a line that names a client before another",
+    "program's `-u x:y` has that value redacted too, the documented trade-off."
   ],
   "commands": [
     {
@@ -741,7 +743,7 @@
     {
       "text": "curl x \\\n  # comment\n  -u admin:S3CR3T",
       "parentRedacted": false,
-      "mustRedact": false
+      "mustRedact": true
     },
     {
       "text": "curl x\n\n  -u admin:S3CR3T",
@@ -776,7 +778,8 @@
     {
       "text": "curl -u\r\nadmin:S3CR3T",
       "parentRedacted": true,
-      "mustRedact": true
+      "mustRedact": true,
+      "knownMiss": true
     },
     {
       "text": "sudo -E curl -u admin:S3CR3T x",
@@ -926,7 +929,7 @@
     {
       "text": "curl ssh -su admin@ex.com:S3CR3T",
       "parentRedacted": false,
-      "mustRedact": false
+      "mustRedact": true
     },
     {
       "text": "docker run --rm curlimages/curl -u admin:S3CR3T x",
@@ -1161,17 +1164,17 @@
     {
       "text": "curl -X POST https://x \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"name\": \"x\"\n  }' \\\n  -u admin:S3CR3T",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -d '{\n  \"a\": 1\n}' -u admin:S3CR3T https://x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "curl -d \"line1\nline2\" -u admin:S3CR3T https://x",
       "parentRedacted": false,
-      "mustRedact": true
+      "mustRedact": false
     },
     {
       "text": "ab -A admin:S3CR3T -n 10 http://x/",
@@ -3084,18 +3087,22 @@
   "benign": [
     {
       "text": "Use curl or docker run -u 1000:1000 img",
-      "parent": "Use curl or docker run -u 1000:[REDACTED] img"
+      "parent": "Use curl or docker run -u 1000:[REDACTED] img",
+      "expected": "Use curl or docker run -u 1000:[REDACTED] img"
     },
     {
       "text": "Install curl and wget, then run `ps -u root:wheel`.",
-      "parent": "Install curl and wget, then run `ps -u root:[REDACTED]`."
+      "parent": "Install curl and wget, then run `ps -u root:[REDACTED]`.",
+      "expected": "Install curl and wget, then run `ps -u root:[REDACTED]`."
     },
     {
-      "text": "curl is installed; docker run -u 1000:1000 alpine id"
+      "text": "curl is installed; docker run -u 1000:1000 alpine id",
+      "expected": "curl is installed; docker run -u 1000:[REDACTED] alpine id"
     },
     {
       "text": "The curl docs say -u user:password is unsafe; use --netrc. Also sort -u a:b works.",
-      "parent": "The curl docs say -u user:[REDACTED] is unsafe; use --netrc. Also sort -u a:b works."
+      "parent": "The curl docs say -u user:[REDACTED] is unsafe; use --netrc. Also sort -u a:b works.",
+      "expected": "The curl docs say -u user:[REDACTED] is unsafe; use --netrc. Also sort -u a:[REDACTED] works."
     },
     {
       "text": "We fetch with curl. Then git log -u --since=2:00",
@@ -3139,29 +3146,35 @@
     },
     {
       "text": "kubectl run tmp --image=curlimages/curl -- -u admin:pass",
-      "parent": "kubectl run tmp --image=curlimages/curl -- -u admin:[REDACTED]"
+      "parent": "kubectl run tmp --image=curlimages/curl -- -u admin:[REDACTED]",
+      "expected": "kubectl run tmp --image=curlimages/curl -- -u admin:[REDACTED]"
     },
     {
       "text": "curl https://x  # then: docker run -u 1000:1000 img",
-      "parent": "curl https://x  # then: docker run -u 1000:[REDACTED] img"
+      "parent": "curl https://x  # then: docker run -u 1000:[REDACTED] img",
+      "expected": "curl https://x  # then: docker run -u 1000:[REDACTED] img"
     },
     {
-      "text": "Use http or https; for ls -a a:b see docs."
+      "text": "Use http or https; for ls -a a:b see docs.",
+      "expected": "Use http or https; for ls -a a:[REDACTED] see docs."
     },
     {
       "text": "python -m http.server 8000 & ls -a x:y"
     },
     {
-      "text": "ab -n 100 -c 10 http://localhost:8080/ && ps -u root:wheel"
+      "text": "ab -n 100 -c 10 http://localhost:8080/ && ps -u root:wheel",
+      "expected": "ab -n 100 -c 10 http://localhost:8080/ && ps -u root:[REDACTED]"
     },
     {
-      "text": "wget -q -O - x | tar -xz && chown -R app:app . && install -u a:b"
+      "text": "wget -q -O - x | tar -xz && chown -R app:app . && install -u a:b",
+      "expected": "wget -q -O - x | tar -xz && chown -R app:app . && install -u a:[REDACTED]"
     },
     {
       "text": "The URL http://example.com/a?x=1&u=a:b is fine"
     },
     {
-      "text": "curl x 2>&1 | tee log; id -u root:x"
+      "text": "curl x 2>&1 | tee log; id -u root:x",
+      "expected": "curl x 2>&1 | tee log; id -u root:[REDACTED]"
     },
     {
       "text": "const out = execSync(`curl -s ${url}`); spawn('docker', ['run', '-u', '1000:1000', img]);"
@@ -3225,7 +3238,8 @@
     },
     {
       "text": "wget --user-agent=\"Mozilla\" -U x:y http://x",
-      "parent": "wget --user-agent=\"Mozilla\" -U x:[REDACTED] http://x"
+      "parent": "wget --user-agent=\"Mozilla\" -U x:[REDACTED] http://x",
+      "expected": "wget --user-agent=\"Mozilla\" -U x:[REDACTED] http://x"
     },
     {
       "text": "curl -A \"Mozilla/5.0 (X11; Linux) a:b\" http://x"
@@ -3249,7 +3263,8 @@
       "text": "nmap -sU -p 161 host; curl http://host"
     },
     {
-      "text": "echo \"use curl\"; useradd -u 1001 bob; usermod -u 1002:x bob"
+      "text": "echo \"use curl\"; useradd -u 1001 bob; usermod -u 1002:x bob",
+      "expected": "echo \"use curl\"; useradd -u 1001 bob; usermod -u 1002:[REDACTED] bob"
     },
     {
       "text": "fetch-with-curl.sh -u admin:pass",
@@ -3257,13 +3272,16 @@
     },
     {
       "text": "\"curl\" and \"docker run -u 1000:1000 img\"",
-      "parent": "\"curl\" and \"docker run -u 1000:[REDACTED] img\""
+      "parent": "\"curl\" and \"docker run -u 1000:[REDACTED] img\"",
+      "expected": "\"curl\" and \"docker run -u 1000:[REDACTED] img\""
     },
     {
-      "text": "watch -n 1 'curl -s x' ; ps -u postgres:x"
+      "text": "watch -n 1 'curl -s x' ; ps -u postgres:x",
+      "expected": "watch -n 1 'curl -s x' ; ps -u postgres:[REDACTED]"
     },
     {
-      "text": "ssh host curl x && ssh other -o User=a sort -u a:b"
+      "text": "ssh host curl x && ssh other -o User=a sort -u a:b",
+      "expected": "ssh host curl x && ssh other -o User=a sort -u a:[REDACTED]"
     },
     {
       "text": "sudo -u www-data curl http://x"
@@ -3285,28 +3303,34 @@
     },
     {
       "text": "git commit -m \"fix curl -u handling\" -u a:b",
-      "parent": "git commit -m \"fix curl -u handling\" -u a:[REDACTED]"
+      "parent": "git commit -m \"fix curl -u handling\" -u a:[REDACTED]",
+      "expected": "git commit -m \"fix curl -u handling\" -u a:[REDACTED]"
     },
     {
       "text": "echo \"curl -u\" -u a:b",
-      "parent": "echo \"curl -u\" -u a:[REDACTED]"
+      "parent": "echo \"curl -u\" -u a:[REDACTED]",
+      "expected": "echo \"curl -u\" -u a:[REDACTED]"
     },
     {
       "text": "Readme: `curl -u admin:password` is a placeholder; `sort -u x:y` is not.",
-      "parent": "Readme: `curl -u admin:[REDACTED]` is a placeholder; `sort -u x:y` is not."
+      "parent": "Readme: `curl -u admin:[REDACTED]` is a placeholder; `sort -u x:y` is not.",
+      "expected": "Readme: `curl -u admin:[REDACTED]` is a placeholder; `sort -u x:[REDACTED]` is not."
     },
     {
       "text": "grep -r \"curl\" . | sort -u"
     },
     {
-      "text": "grep -r \"curl\" . | sort -u a:b"
+      "text": "grep -r \"curl\" . | sort -u a:b",
+      "expected": "grep -r \"curl\" . | sort -u a:[REDACTED]"
     },
     {
       "text": "grep -rn 'curl -u' src/ -u x:y",
-      "parent": "grep -rn 'curl -u' src/ -u x:[REDACTED]"
+      "parent": "grep -rn 'curl -u' src/ -u x:[REDACTED]",
+      "expected": "grep -rn 'curl -u' src/ -u x:[REDACTED]"
     },
     {
-      "text": "git grep \"curl\" -- '*.sh' && git log -u a:b\n"
+      "text": "git grep \"curl\" -- '*.sh' && git log -u a:b\n",
+      "expected": "git grep \"curl\" -- '*.sh' && git log -u a:[REDACTED]\n"
     }
   ]
 }

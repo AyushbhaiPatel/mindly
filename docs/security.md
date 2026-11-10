@@ -58,27 +58,25 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   Anthropic, Google, npm, JWTs), credentials in URLs, and values next to secret-like names:
   `.env`-style assignments (a quoted value is removed whole), command-line flags such as
   `--token <value>` and `--password <value>`, `docker login -p <value>`, and the credentials
-  HTTP clients take on a command line. Command lines are read as shell commands: lines are joined
-  across `\`, `^` or a PowerShell backtick and into indented option lines, split into commands
-  at unquoted `|`, `&&`, `||`, `;` or a standalone `&`, and split into words with their quotes
-  removed. A quoted argument is one word, and is read again as commands of its own
-  (`sh -c "curl ..."`), two levels deep. Every client named anywhere in the text, quoted or not,
-  is also read forward to the end of its command with loose quoting, so an apostrophe earlier
-  in a sentence, quoting nested deeper than that, or a quoted body over several lines before the
-  flag does not hide the credentials. In a command that names curl (or its builds, wget,
-  curlie, aria2c, ab, lftp, hurl, httpstat, or a variable named after one such as `$CURL` or
-  `$HTTP_CLIENT`, but not `$HTTP_PORT` or `$HTTPBIN`) before the flag, `-u user:<value>`,
-  `--user`, `-U` / `--proxy-user`, `--cert file:<value>`, `--pass`, `--tlspassword`,
-  `--oauth2-bearer` and `-H "Authorization: <value>"` (also at the end of a cluster such as
-  `-sH`) are redacted, as are ab's `-A` / `-P user:<value>` and lftp's `-u user,<value>`. In a command that runs
-  httpie or xh, so are `-a` / `--auth user:<value>` (and a bare `-a <token>` with `-A bearer` or
-  `jwt`), `--bearer <value>` and `Authorization:<value>` items. Runners and their options before
-  the client (`sudo -u deploy`, `time -f "%e"`, `env A=1`, `/usr/bin/time`) are read word by
-  word. A short-flag cluster such as `-su` is credentials even for an email user name, unless
-  rsync, scp or ssh is run as a command after the client. Any other program's `-u` is a user, a
-  group or a URL and is left as written, so stored commands stay runnable. A client behind a
-  shell alias or function is not recognised, and a sentence that names curl before another
-  command (`use curl, then run docker run -u 1000:1000`) is redacted.
+  HTTP clients take on a command line. These are found by one rule, read line by line, that
+  quoting cannot get wrong because it does not use quoting to find commands. Lines are joined
+  only across a continuation (`\`, or `^` or a PowerShell backtick after a space) and into
+  indented option lines directly under a line that names a client, never across an open quote.
+  On a line that names a client earlier, anywhere and quoted or not (curl and its builds, wget,
+  curlie, aria2c, ab, lftp, hurl, httpstat, httpie, xh, or a variable named after one such as
+  `$CURL` or `$HTTP_CLIENT`, but not `$HTTP_PORT` or `$HTTPBIN`), the value after `-u`,
+  `--user`, `-U` / `--proxy-user` (alone or at the end of a cluster such as `-su`), ab's `-A` /
+  `-P`, httpie's and xh's `-a` / `--auth`, `--cert file:`, `--pass`, `--tlspassword`,
+  `--oauth2-bearer` and `--bearer`, and an `Authorization:` header or item, is redacted. The
+  value is the run after the option, to its matching quote if it starts with one; in
+  `user:<value>` (lftp: `user,<value>`) only the secret goes, and `(`, `)`, `;` and `|` in an
+  unquoted value stay part of it. A bare user name or a `$VARIABLE` is left alone, and so is an
+  rsync target `user@host:/path` after a cluster. Nothing is capped or skipped: the work is one
+  pass per line.
+  The trade-off: on a line that names a client, another program's `-u x:y` after it has its
+  value redacted too (`curl … && docker run -u 1000:[REDACTED]`), which garbles that value and
+  nothing else. Known gaps: a value on the line after its flag, a flag on a line that only a
+  multi-line quoted body joins to the client, and a client behind a shell alias or function.
   Task titles, plan steps and blockers go through the same pass. Type annotations and references
   such as `process.env.X` or `$TOKEN` are left alone, since they hold no secret. So is quoted UI
   text, but only when both the name says so (it ends in `placeholder`, `label`, `hint`, `help`,
