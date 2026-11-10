@@ -478,6 +478,8 @@ const MAX_BARE_WORDS = 12;
 const MAX_COMMANDS = 20_000;
 /** Longest path, and longest working directory, that is followed. */
 const MAX_PATH_CHARS = 4096;
+/** git commands of one command line that are asked about. */
+const MAX_QUESTIONS = 8;
 /** Sources of one copy that are kept by name. */
 const MAX_ENTRIES = 64;
 /** Words one brace expansion (`{a,b}`, `{1..9}`) may turn into. */
@@ -1035,6 +1037,8 @@ interface Item {
   entries?: { name: string; from: Word | null }[];
   /** The path is a pattern the program expands itself, whatever the quoting. */
   pattern?: boolean;
+  /** Stands for a git question when git cannot answer it. */
+  fallback?: number | undefined;
   dotfiles?: boolean;
   nocase?: boolean;
   touches?: FileKinds;
@@ -1051,12 +1055,9 @@ type Verdict =
   | {
       kind: 'git';
       dir: Word | null;
-      /** Paths it names as written. */
-      paths: GitPath[];
-      /** It may write any file of these kinds in the working tree, without naming them. */
-      whole: FileKinds | null;
+      asks: GitAsk[];
+      trusted: boolean;
       nocase: boolean;
-      how?: 'clean' | 'clean-ignored';
       /** Shell code it runs (`git rebase --exec`). */
       exec?: string[];
     }
@@ -1533,41 +1534,143 @@ function readTar(words: readonly Word[]): Verdict {
   return READS;
 }
 
-/** A path a git command names as written, as the command gives it. */
-interface GitPath {
-  word: Word;
-  /** The word is a path only when such a file or directory exists (else a branch name). */
+/** What a git command asks of git; see {@link GitQuestion}. */
+interface GitAsk {
+  against: string[];
+  pathspecs: Word[];
+  untracked?: boolean;
+  ignored?: boolean;
   ifExists?: boolean;
-  /** Only tracked files under it are touched (`git rm`). */
   tracked?: boolean;
+  mayFail?: boolean;
+  guess?: boolean;
+  listTree?: boolean;
+  /** git is not asked: only the stand-in counts (`git pull`, whose answer cannot be known). */
+  unasked?: boolean;
+  /** The stand-in is a possible write, said as a warning when a covered file is there. */
+  possible?: boolean;
+  unlessAncestor?: [string, string];
+  /** The files that exist and that it can touch, should git not answer. */
+  touches: FileKinds;
 }
 
 /** git's options before the subcommand that take a value as the next word. */
 const GIT_VALUED = ['-c', '--git-dir', '--work-tree', '--namespace', '--config-env'];
 
+/**
+ * Options before the subcommand that make git read its pathspecs, or find its files, differently
+ * from how the question is asked: its answer is not taken.
+ */
+const GIT_ELSEWHERE =
+  /^--(git-dir|work-tree|namespace|glob-pathspecs|noglob-pathspecs|literal-pathspecs|icase-pathspecs)(=|$)/;
+
+/** git's tree with nothing in it: where `git switch --orphan` goes. */
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
 const TRACKED_FILES: FileKinds = { tracked: true, untracked: false, ignored: false };
-/** Any file that is there, whatever git makes of it. */
-const ANY_FILE: FileKinds = { tracked: true, untracked: true, ignored: true };
 
 /** git's own options before the subcommand, and the subcommand with what follows it. */
 function gitCommand(words: readonly Word[]): {
   dir: Word | null;
   rest: Word[];
+  trusted: boolean;
   nocase: boolean;
 } {
   const rest = words.slice(1);
   let dir: Word | null = null;
+  let trusted = true;
   let nocase = false;
   while (rest[0] && isFlag(rest[0])) {
     const flag = rest.shift() as Word;
+    if (GIT_ELSEWHERE.test(flag.text)) trusted = false;
     if (/^--icase-pathspecs$/.test(flag.text)) nocase = true;
     if (flag.text === '-C') {
       // Each `-C` is taken from where the one before it led.
       const to = rest.shift() ?? null;
       dir = to === null || dir === null || to.text.startsWith('/') ? to : joinWords(dir, to);
-    } else if (GIT_VALUED.includes(flag.text)) rest.shift();
+    } else if (GIT_VALUED.includes(flag.text)) {
+      const value = rest.shift();
+      // A setting that moves the working tree or changes how paths are matched.
+      if (
+        flag.text === '-c' &&
+        /^core\.(worktree|ignorecase|sparsecheckout)/i.test(value?.text ?? '')
+      )
+        trusted = false;
+    }
   }
-  return { dir, rest, nocase };
+  return { dir, rest, trusted, nocase };
+}
+
+/** git subcommands that leave refs, the index and the working tree as they are. */
+const GIT_LOOKS = new Set([
+  ...READ_ONLY_GIT,
+  'rev-parse',
+  'describe',
+  'shortlog',
+  'ls-tree',
+  'ls-remote',
+  'cat-file',
+  'merge-base',
+  'rev-list',
+  'check-ignore',
+  'check-attr',
+  'check-ref-format',
+  'show-ref',
+  'show-branch',
+  'for-each-ref',
+  'name-rev',
+  'whatchanged',
+  'diff-files',
+  'diff-index',
+  'diff-tree',
+  'range-diff',
+  'cherry',
+  'count-objects',
+  'annotate',
+  'reflog',
+  'help',
+  'version',
+  'var',
+  'verify-commit',
+  'verify-tag',
+  'format-patch',
+]);
+
+/**
+ * Whether a git command can change what git would answer for a later command of the same line:
+ * anything but looking (`status`, `log`, `diff`, `stash list`, listing branches, reading config).
+ */
+function gitChanges(words: readonly Word[]): boolean {
+  const { rest } = gitCommand(words);
+  const sub = rest[0]?.text;
+  if (sub === undefined || GIT_LOOKS.has(sub)) return false;
+  const command = [word('git'), ...rest.slice(1)];
+  const args = plainArgs(command);
+  switch (sub) {
+    case 'remote':
+      return ['update', 'prune', 'set-head', 'rename', 'remove', 'rm'].includes(
+        args[0]?.text ?? '',
+      );
+    case 'stash':
+      return !['list', 'show', 'create'].includes(rest[1]?.text ?? 'push');
+    case 'branch':
+    case 'tag':
+      return (
+        !hasFlag(command, /^(-l|--list|-a|--all|-r|--remotes|-v|-vv)$/) &&
+        (args.length > 0 || hasFlag(command, /^-[a-zA-Z]*[fmMcCdD]/))
+      );
+    case 'worktree':
+      return args[0]?.text !== 'list';
+    case 'submodule':
+      return !['status', 'summary'].includes(args[0]?.text ?? 'status');
+    case 'config':
+      return !(
+        hasFlag(command, /^(--get|--get-all|--get-regexp|-l|--list)$/) ||
+        (args.length <= 1 && !hasFlag(command, /^--(unset|add|replace-all|rename-section)/))
+      );
+    default:
+      return true;
+  }
 }
 
 /**
@@ -1620,6 +1723,21 @@ function gitArgs(
  */
 const surelyPathspec = (w: Word): boolean =>
   /[*?[]/.test(w.text) || w.text.startsWith(':') || /^\.\.?(\/|$)|\/$/.test(w.text);
+
+/**
+ * A branch switch to `target`: every file that differs between HEAD and it is written. Forced,
+ * every local change is thrown away on top: what differs between the working tree and it.
+ */
+function switchTo(target: string, force: boolean, guess: boolean): GitAsk | null {
+  if (target === 'HEAD' && !force) return null;
+  return {
+    against: force ? [target] : ['HEAD', target],
+    pathspecs: [],
+    mayFail: true,
+    guess,
+    touches: TRACKED_FILES,
+  };
+}
 
 /** A pathspec's magic (`:(top,icase)x`, `:/x`, `:!x`) and what follows it. */
 function pathspecMagic(text: string): {
@@ -1676,14 +1794,9 @@ function gitWildcards(text: string): string[] {
   return [`${dir}${start}*${tail}`, `${dir}${start}*/**/*${tail}`];
 }
 
-/**
- * git: which subcommands rewrite or remove working files, read from the text alone. The paths a
- * command names are written. A command that changes the working tree without naming paths (a
- * branch switch, `reset --hard`, a stash, a merge) may write any tracked file: it is said as
- * such, for a warning. Commands that only move the index or refs write no file.
- */
+/** git: which subcommands rewrite or remove the working files they are given. */
 function readGit(words: readonly Word[]): Verdict {
-  const { dir, rest, nocase } = gitCommand(words);
+  const { dir, rest, trusted, nocase } = gitCommand(words);
   const sub = rest[0]?.text;
   if (sub === undefined) return READS;
   const command = [word('git'), ...rest.slice(1)];
@@ -1706,29 +1819,39 @@ function readGit(words: readonly Word[]): Verdict {
     dir ? list.map((w) => joinWords(dir, w)) : [...list];
   const dashes = rest.findIndex((w) => w.text === '--');
   const afterDashes = dashes === -1 ? [] : rest.slice(dashes + 1);
-  const named = (paths: readonly (Word | GitPath)[], whole: FileKinds | null = null): Verdict => {
-    const list = paths.map((p): GitPath => ('word' in p ? p : { word: p }));
-    return list.length === 0 && whole === null
-      ? READS
-      : { kind: 'git', dir, paths: list, whole, nocase };
+  /**
+   * A command that brings files back from the index or a revision. What it changes is what
+   * differs: git is asked (`git diff` against `against`, with the pathspecs exactly as given).
+   */
+  const ask = (...asks: (GitAsk | null)[]): Verdict => {
+    const kept = asks.filter((a): a is GitAsk => a !== null);
+    return kept.length === 0 ? READS : { kind: 'git', dir, asks: kept, trusted, nocase };
   };
-  // What it may do to the whole tree is checked against any file that is there: what git counts
-  // as tracked or ignored is its business, and an earlier command may change it.
-  const whole = (): Verdict => named([], ANY_FILE);
   // Paths read from a file (or standard input) are not known here.
   if (hasFlag(command, /^--pathspec-from-file(=|$)/))
     return { kind: 'unread', why: 'git reads the paths it changes from a file' };
   switch (sub) {
     case 'restore': {
+      const staged = hasOption(command, 'S', ['--staged']);
+      const worktree = hasOption(command, 'W', ['--worktree']);
       // `--staged` alone only moves the index; the file on disk stays.
-      if (hasOption(command, 'S', ['--staged']) && !hasOption(command, 'W', ['--worktree']))
-        return READS;
-      return named(gitArgs(command, 's', ['--source']).args);
+      if (staged && !worktree) return READS;
+      const { args, values } = gitArgs(command, 's', ['--source']);
+      const source = values.get('s') ?? values.get('--source') ?? null;
+      if (args.length === 0) return READS;
+      // From the index by default; with `--staged` both come from HEAD, or from the source.
+      const against = source ? [source.text] : staged ? ['HEAD'] : [];
+      return ask({ against, pathspecs: args, touches: TRACKED_FILES });
     }
     case 'rm': {
       if (hasFlag(command, /^--cached$/)) return READS;
-      // It removes the tracked files its pathspecs match.
-      return named(argsWithout(command, []).map((w) => ({ word: w, tracked: true })));
+      // It removes the tracked files its pathspecs match, as git reads them.
+      const paths = argsWithout(command, []);
+      return ask(
+        paths.length > 0
+          ? { against: [], pathspecs: paths, tracked: true, touches: TRACKED_FILES }
+          : null,
+      );
     }
     case 'mv': {
       const given = argsWithout(command, []);
@@ -1741,52 +1864,103 @@ function readGit(words: readonly Word[]): Verdict {
     }
     case 'clean': {
       if (hasOption(command, 'n', ['--dry-run'])) return READS;
-      // Untracked files; ignored ones too with -x / -X, or when an exclude pattern takes a file
-      // back out of what is ignored (`-e '!.env'`). Without a path, all of them where it runs.
+      // Without a path it cleans where it runs; ignored files only with -x / -X, or when an
+      // exclude pattern takes a file back out of what is ignored (`-e '!.env'`).
       const { args, all } = gitArgs(command, 'e', ['--exclude']);
       const unignores = all.some((v) => v?.text.startsWith('!') ?? false);
-      const ignored = hasOption(command, 'xX', []) || unignores;
-      const kinds = { tracked: false, untracked: true, ignored };
-      return {
-        kind: 'git',
-        dir,
-        paths: args.map((w) => ({ word: w })),
-        whole: args.length === 0 ? kinds : null,
-        nocase,
-        how: ignored ? 'clean-ignored' : 'clean',
-      };
+      const how = hasOption(command, 'xX', []) || unignores ? 'clean-ignored' : 'clean';
+      // Its paths are pathspecs: git's wildcards cross folders, `:/` is the top of the tree,
+      // and pathspecs that only leave files out stand for everything else.
+      const items: Item[] = [];
+      for (const w of args) {
+        const magic = pathspecMagic(w.text);
+        if (magic.exclude) continue;
+        const bare = magic.rest === '' ? '.' : magic.rest;
+        const patterns = magic.literal || magic.glob ? [bare] : gitWildcards(bare);
+        for (const p of patterns) {
+          const text = magic.top ? `${TOP}/${p}` : p;
+          const placed = magic.top ? word(text) : (under([word(text)])[0] as Word);
+          items.push({
+            word: { ...placed, mask: (magic.literal ? 'q' : 'u').repeat(placed.text.length) },
+            tree: true,
+            how,
+            dotfiles: true,
+            nocase: magic.icase,
+          });
+        }
+      }
+      return writes(...(items.length > 0 ? items : trees(under([word('.')]), { how })));
     }
     case 'checkout': {
       const force = hasOption(command, 'f', ['--force']);
       const { args, values } = gitArgs(command, 'bB', ['--orphan']);
-      // Paths after `--` (from the index, or from a revision before it).
-      if (dashes !== -1) return named(afterDashes);
-      // These only make sense with paths.
-      if (hasFlag(command, /^(--ours|--theirs|-p|--patch)$/)) return named(args);
-      // A new branch made here, without a start point, changes no file.
+      if (dashes !== -1) {
+        // A revision before `--` brings the files from there; without one, from the index.
+        const before = gitArgs([word('git'), ...rest.slice(1, dashes)], 'bB', ['--orphan']).args;
+        const revision = before[0];
+        return ask({
+          against: revision ? [revision.text] : [],
+          pathspecs: afterDashes,
+          touches: TRACKED_FILES,
+        });
+      }
+      // These only make sense with paths, from the index.
+      if (hasFlag(command, /^(--ours|--theirs|-p|--patch)$/))
+        return ask({ against: [], pathspecs: args, touches: TRACKED_FILES });
+      // A new branch is made at a start point (HEAD by default), and switched to.
       if (values.has('b') || values.has('B') || values.has('--orphan'))
-        return args.length > 0 || force ? whole() : READS;
+        return ask(switchTo(args[0]?.text ?? 'HEAD', force, false));
       const first = args[0];
-      if (first === undefined) return force ? whole() : READS;
-      // A revision followed by paths, or paths only: the first word is a path when one exists.
-      if (args.length >= 2) return named([{ word: first, ifExists: true }, ...args.slice(1)]);
-      // One word: a pathspec, or a path when one exists, or a branch to switch to.
-      if (surelyPathspec(first)) return named([first]);
-      return named([{ word: first, ifExists: true }], ANY_FILE);
+      if (first === undefined) return ask(force ? switchTo('HEAD', true, false) : null);
+      const target = first.text === '-' ? '@{-1}' : first.text;
+      if (args.length >= 2) {
+        // A revision followed by paths; or, when there is no revision of that name, paths only.
+        return ask(
+          { against: [], pathspecs: args, ifExists: true, touches: TRACKED_FILES },
+          { against: [target], pathspecs: args.slice(1), mayFail: true, touches: TRACKED_FILES },
+        );
+      }
+      // One word: a wildcard or magic is a pathspec. Any other word is a path when such a file
+      // exists, and a branch to switch to when there is one of that name (or a remote one).
+      if (surelyPathspec(first))
+        return ask({ against: [], pathspecs: [first], touches: TRACKED_FILES });
+      return ask(
+        { against: [], pathspecs: [first], ifExists: true, touches: TRACKED_FILES },
+        switchTo(target, force, true),
+      );
     }
     case 'switch': {
       const force = hasOption(command, 'f', ['--force', '--discard-changes']);
       const { args, values } = gitArgs(command, 'cC', ['--create', '--force-create', '--orphan']);
+      // An orphan branch starts from nothing: every tracked file goes.
+      if (values.has('--orphan')) return ask(switchTo(EMPTY_TREE, force, false));
       const creates = ['c', 'C', '--create', '--force-create'].some((k) => values.has(k));
-      // A new branch made here, without a start point, changes no file.
-      if (creates && args.length === 0 && !force) return READS;
-      if (!creates && args.length === 0 && !values.has('--orphan')) return READS;
-      return whole();
+      const first = args[0]?.text ?? (creates ? 'HEAD' : null);
+      if (first === null) return READS;
+      return ask(switchTo(first === '-' ? '@{-1}' : first, force, !creates));
     }
     case 'stash': {
-      const verb = rest[1]?.text;
-      if (verb === 'pop' || verb === 'apply' || verb === 'branch') return whole();
       // `git stash [push] [--] [paths]` puts changes away: the files go back to HEAD.
+      const verb = rest[1]?.text;
+      if (verb === 'pop' || verb === 'apply' || verb === 'branch') {
+        // It brings back what was put away: what changed between the stash's base and it, and
+        // the untracked files it holds (its third parent). `branch` first switches to its base.
+        const given = argsWithout([word('git'), ...rest.slice(2)], []);
+        const named = given[verb === 'branch' ? 1 : 0]?.text ?? 'stash@{0}';
+        const s = /^\d+$/.test(named) ? `stash@{${named}}` : named;
+        const any: FileKinds = { tracked: true, untracked: true, ignored: false };
+        return ask(
+          verb === 'branch' ? switchTo(`${s}^1`, false, false) : null,
+          { against: [`${s}^1`, s], pathspecs: [], mayFail: true, touches: any },
+          {
+            against: [`${s}^3`],
+            pathspecs: [],
+            mayFail: true,
+            listTree: true,
+            touches: any,
+          },
+        );
+      }
       if (
         verb !== undefined &&
         verb !== 'push' &&
@@ -1798,11 +1972,25 @@ function readGit(words: readonly Word[]): Verdict {
       const tail = [word('git'), ...rest.slice(verb === 'push' || verb === 'save' ? 2 : 1)];
       const paths =
         dashes !== -1 ? afterDashes : verb === 'save' ? [] : argsWithout(tail, ['-m', '--message']);
-      return paths.length > 0 ? named(paths) : whole();
+      const all = hasOption(tail, 'a', ['--all']);
+      const untracked = all || hasOption(tail, 'u', ['--include-untracked']);
+      return ask({
+        against: ['HEAD'],
+        pathspecs: paths,
+        untracked,
+        ignored: all,
+        touches: { tracked: true, untracked, ignored: all },
+      });
     }
-    case 'reset':
+    case 'reset': {
       // With paths, or without --hard, it only moves the index.
-      return hasFlag(command, /^--(hard|merge|keep)$/) ? whole() : READS;
+      if (!hasFlag(command, /^--(hard|merge|keep)$/)) return READS;
+      const revision = argsWithout(command, [])[0]?.text ?? 'HEAD';
+      // `--keep` and `--merge` keep local changes (or stop): what changes is what differs
+      // between HEAD and where the branch goes.
+      if (!hasFlag(command, /^--hard$/)) return ask(switchTo(revision, false, false));
+      return ask({ against: [revision], pathspecs: [], touches: TRACKED_FILES });
+    }
     case 'merge':
     case 'cherry-pick':
     case 'revert':
@@ -1811,12 +1999,93 @@ function readGit(words: readonly Word[]): Verdict {
     case 'am':
     case 'apply': {
       if (hasFlag(command, /^--(check|stat|numstat|summary|cached)$/)) return READS;
-      // The commands a rebase runs after each commit are read like any other shell code.
-      const exec =
-        sub === 'rebase'
-          ? gitArgs(command, 'x', ['--exec']).all.flatMap((w) => (w ? [w.text] : []))
-          : [];
-      return { ...(whole() as Extract<Verdict, { kind: 'git' }>), exec };
+      // Files the command line does not name. What a merge brings in is what changed on the
+      // other side since the two met; a commit picked or reverted, what it changed; a rebase,
+      // what differs between HEAD and where it goes. Whatever else (a pull, a patch, carrying
+      // on after a stop) is a possible write of the tracked files.
+      const unknown: GitAsk = {
+        against: [],
+        pathspecs: [],
+        unasked: true,
+        possible: true,
+        touches: TRACKED_FILES,
+      };
+      if (
+        hasFlag(command, /^--(abort|continue|skip|quit)$/) ||
+        sub === 'pull' ||
+        sub === 'am' ||
+        sub === 'apply'
+      )
+        return ask(unknown);
+      const valued = sub === 'merge' ? 'msX' : sub === 'rebase' ? 'sXx' : 'mX';
+      const { args, values } = gitArgs(command, valued, [
+        '--message',
+        '--strategy',
+        '--strategy-option',
+        '--onto',
+        '--exec',
+        '--mainline',
+        '--gpg-sign',
+      ]);
+      const revs = args.map((w) => (w.text === '-' ? '@{-1}' : w.text)).filter((x) => x !== '');
+      const changes = (against: string[]): GitAsk => ({
+        against,
+        pathspecs: [],
+        mayFail: true,
+        touches: TRACKED_FILES,
+      });
+      // Local changes put away and brought back around it (`--autostash`) are rewritten too.
+      const autostash = hasFlag(command, /^--autostash$/)
+        ? { against: ['HEAD'], pathspecs: [], touches: TRACKED_FILES }
+        : null;
+      if (sub === 'merge') {
+        // What the other side changed since the two met. Without one named, the upstream.
+        const to = revs.length > 0 ? revs : ['@{upstream}'];
+        return ask(autostash, ...to.map((x) => changes([`HEAD...${x}`])));
+      }
+      if (sub === 'rebase') {
+        if (revs.length === 0 && hasFlag(command, /^--root$/)) return ask(unknown);
+        // `git rebase [--onto X] U [B]`: B is checked out first; then the tree goes to X and B's
+        // commits since U are replayed on it. Every file that differs between B and X is written,
+        // and every file those commits touch. A branch already on U (and no --onto) stays.
+        const onto = optionValue(command, ['--onto'])?.text;
+        const upstream = revs[0] ?? '@{upstream}';
+        const branch = revs[1];
+        const base = branch ?? 'HEAD';
+        const stays =
+          onto === undefined &&
+          !hasFlag(command, /^(-i|--interactive|-f|--force-rebase|--no-ff|-x|--exec)$/);
+        const replay = (against: string[]): GitAsk => ({
+          ...changes(against),
+          ...(stays ? { unlessAncestor: [upstream, base] as [string, string] } : {}),
+        });
+        const rebase = ask(
+          autostash,
+          branch !== undefined ? switchTo(branch, false, false) : null,
+          replay([base, onto ?? upstream]),
+          replay([`${upstream}...${base}`]),
+        );
+        // The commands it runs after each commit are read like any other shell code.
+        const exec = gitArgs(command, 'x', ['--exec']).all.flatMap((w) => (w ? [w.text] : []));
+        return rebase.kind === 'git' ? { ...rebase, exec } : rebase;
+      }
+      if (revs.length === 0) return ask(unknown);
+      // A commit picked or reverted: what it changed against its parent (the one `-m` names). A
+      // range `A..B` (either end HEAD when left out): what B's side changed since it left A; a
+      // symmetric `A...B`, both sides.
+      const parent = values.get('m')?.text ?? values.get('--mainline')?.text ?? '1';
+      return ask(
+        autostash,
+        ...revs.flatMap((x) => {
+          const range = /^(.*?)(\.\.\.?)(.*)$/.exec(x);
+          if (range === null) return [changes([`${x}^${parent}`, x])];
+          const a = range[1] || 'HEAD';
+          const b = range[3] || 'HEAD';
+          return range[2] === '...'
+            ? [changes([`${a}...${b}`]), changes([`${b}...${a}`])]
+            : [changes([`${a}...${b}`])];
+        }),
+      );
     }
     default:
       // They change files the command line does not name.
@@ -1826,6 +2095,48 @@ function readGit(words: readonly Word[]): Verdict {
         bare: false,
       };
   }
+}
+
+/**
+ * A git command whose writes git itself can tell: the files that differ between the working
+ * tree and `against` (the index when empty), limited by the pathspecs exactly as given.
+ */
+export interface GitQuestion {
+  /** Where git runs: the directory the command runs in, placed like a target's path. */
+  cwd: string;
+  /**
+   * What the working tree is compared with: nothing (the index) or one revision. Two revisions
+   * (HEAD and where a branch switch goes) are compared with each other.
+   */
+  against: string[];
+  /** Pathspecs as the command gives them; empty means the whole tree. */
+  pathspecs: string[];
+  /** Untracked files the pathspecs match are removed too (`git stash -u`). */
+  untracked: boolean;
+  /** Ignored files the pathspecs match are removed too (`git stash -a`). */
+  ignored: boolean;
+  /** Asked only when the first pathspec names a file or directory that exists. */
+  ifExists: boolean;
+  /** The tracked files the pathspecs match are what is written (`git rm`), not what differs. */
+  tracked: boolean;
+  /**
+   * The revisions are words that may name no revision (`git checkout x`, where `x` may be a
+   * path): when there is none, git would write nothing for this reading. With `guess`, a remote
+   * branch of that name stands for a missing one, as `git checkout x` makes `x` from `origin/x`.
+   */
+  mayFail: boolean;
+  guess: boolean;
+  /** Every file of the one revision is written (the untracked files a stash holds). */
+  listTree: boolean;
+  /**
+   * Nothing is written when the first revision is already in the second's history (a rebase onto
+   * an upstream the branch is on stops there).
+   */
+  unlessAncestor?: [string, string];
+  /**
+   * Targets of {@link ShellReading.targets} whose `fallback` is this question's index stand for
+   * it when git cannot answer.
+   */
 }
 
 /** A file a shell command names as something it writes. */
@@ -1855,6 +2166,11 @@ export interface ShellTarget {
    * ignored ones too (`-x`). Either way only files that exist are touched.
    */
   how: 'write' | 'land' | 'clean' | 'clean-ignored';
+  /**
+   * Set on targets that stand in for a git question (see {@link GitQuestion}) and only count
+   * when git could not answer it: its index in {@link ShellReading.questions}.
+   */
+  fallback: number | null;
   /**
    * For a copy: when the path is a directory, the names that land inside it (`cp a.ts dir`
    * writes `dir/a.ts`; `.` stands for the content of the source itself, `*` for names that are
@@ -1894,6 +2210,8 @@ export interface FileKinds {
 /** What reading a command found. */
 export interface ShellReading {
   targets: ShellTarget[];
+  /** git commands whose writes git can tell (`git checkout -- x`, `git restore`, `reset --hard`). */
+  questions: GitQuestion[];
   /**
    * Set when a limit cut the reading short (a very long command, too many targets, nesting too
    * deep, a path too long, no time left): what was not read may write files, so the targets are
@@ -2150,10 +2468,13 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     top: options.top ?? null,
     timeUp: options.timeUp ?? (() => false),
     commands: 0,
+    questions: [],
+    moved: false,
   };
   collectTargets(command, '', 0, reading);
   return {
     targets: [...reading.out.values()],
+    questions: reading.questions,
     limit: reading.limit,
   };
 }
@@ -2171,6 +2492,12 @@ interface Reading {
   timeUp: () => boolean;
   /** Simple commands read so far, over every nested reading. */
   commands: number;
+  questions: GitQuestion[];
+  /**
+   * A command read so far may have changed what git would answer for a later one: a git command
+   * that is not only looking, a program or script that may run git, a `cd` out of the tree.
+   */
+  moved: boolean;
 }
 
 /**
@@ -2296,11 +2623,12 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     for (const form of forms) {
       const path = place(form.text, tilde(w), from);
       if (path === null || /^\/(dev|proc)\//.test(path)) continue;
+      const fallback = item.fallback ?? null;
       const touches = item.touches ?? null;
       const kinds = touches
         ? `${touches.tracked ? 't' : ''}${touches.untracked ? 'u' : ''}${touches.ignored ? 'i' : ''}`
         : '';
-      const key = `${path}\0${form.glob ? 'g' : ''}${item.ifExists ? 'e' : ''}${item.nocase ? 'c' : ''}${how}\0${kinds}`;
+      const key = `${path}\0${form.glob ? 'g' : ''}${item.ifExists ? 'e' : ''}${item.nocase ? 'c' : ''}${how}\0${fallback}\0${kinds}`;
       const known = r.out.get(key);
       if (known) {
         known.tree ||= item.tree ?? false;
@@ -2335,6 +2663,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         certain,
         only,
         ifExists: item.ifExists ?? false,
+        fallback,
         touches,
       });
     }
@@ -2438,6 +2767,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         if (verdict.how === 'pushd' && stack.length < 256) stack.push(dir);
         previous = dir;
         dir = next;
+        // Into another repository, maybe: git commands there may move what later ones ask about.
+        if (!insideTop(next)) r.moved = true;
         break;
       }
       case 'writes':
@@ -2453,68 +2784,90 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           r.limit ??= 'a git command runs in a folder the text does not tell';
           break;
         }
+        // What git says now is what the command would do now: not once an earlier command of
+        // the line may have changed it, nor with settings that change where git finds its files
+        // or how it reads its paths. After such a command, the paths it names are written; what it
+        // does to the whole tree (a switch, a merge, a pop) is a possible write.
+        const settled =
+          verdict.trusted &&
+          !r.moved &&
+          !cmd.words.some((w) =>
+            /^GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|OBJECT_DIRECTORY|NAMESPACE|[A-Z_]*PATHSPECS)=/.test(
+              w.text,
+            ),
+          );
         // The whole working tree, for a command given no path: from its top when it is the tree
         // the command line starts in.
         const top = r.top !== null && insideTop(at);
-        const how = verdict.how ?? 'write';
-        const possibly = (kinds: FileKinds): void =>
-          // `git clean` cleans where it runs; the others change the whole working tree.
-          add(
-            {
-              word: word(top && verdict.how === undefined ? TOP : '.'),
-              tree: true,
-              certain: false,
-              how,
-              touches: kinds,
-            },
-            at,
-          );
-        if (verdict.whole !== null) possibly(verdict.whole);
         for (const code of verdict.exec ?? []) collectTargets(code, at, depth + 1, r);
-        if (verdict.paths.some((p) => p.word.dynamic)) break;
-        // Pathspecs that only leave files out stand for everything else.
-        const given = verdict.paths.filter((p) => !pathspecMagic(p.word.text).exclude);
-        if (given.length === 0 && verdict.paths.length > 0) possibly(ANY_FILE);
-        for (const p of given) {
-          const magic = pathspecMagic(p.word.text);
-          const bare = magic.rest === '' ? '.' : magic.rest;
-          const fromTop = magic.top && top;
-          // The tree where it runs named as `.` (or the top, `:/`): any tracked file there.
-          if (bare === '.' && !magic.literal) {
+        for (const q of verdict.asks) {
+          if (q.pathspecs.some((w) => w.dynamic)) continue;
+          let index: number | undefined;
+          if (settled && !q.unasked && r.questions.length < MAX_QUESTIONS) {
+            index = r.questions.length;
+            r.questions.push({
+              cwd: at,
+              against: q.against,
+              pathspecs: q.pathspecs.map((w) => w.text),
+              untracked: q.untracked ?? false,
+              ignored: q.ignored ?? false,
+              ifExists: q.ifExists ?? false,
+              tracked: q.tracked ?? false,
+              mayFail: q.mayFail ?? false,
+              guess: q.guess ?? false,
+              listTree: q.listTree ?? false,
+              ...(q.unlessAncestor !== undefined ? { unlessAncestor: q.unlessAncestor } : {}),
+            });
+          }
+          // Should git not answer, or not be asked: the paths it was given, and for the whole
+          // tree the files of the kinds it touches that exist there. Pathspecs that only leave
+          // files out stand for everything else.
+          const certain = !q.possible;
+          if (q.pathspecs.every((w) => pathspecMagic(w.text).exclude)) {
             add(
               {
-                word: word(fromTop ? TOP : '.'),
+                word: word(top ? TOP : '.'),
                 tree: true,
-                certain: false,
-                how,
-                touches: ANY_FILE,
+                certain: certain && !r.moved,
+                fallback: index,
+                touches: q.touches,
               },
               at,
             );
             continue;
           }
-          const patterns = magic.literal || magic.glob ? [bare] : gitWildcards(bare);
-          for (const pattern of patterns) {
-            const text = fromTop ? `${TOP}/${pattern}` : pattern;
-            add(
-              {
-                word: {
-                  text,
-                  mask: (magic.literal ? 'q' : 'u').repeat(text.length),
-                  dynamic: false,
-                  cut: p.word.cut,
+          for (const w of q.pathspecs) {
+            const magic = pathspecMagic(w.text);
+            // A pathspec that leaves files out writes nothing itself.
+            if (magic.exclude) continue;
+            const bare = magic.rest === '' ? '.' : magic.rest;
+            const fromTop = magic.top && top;
+            const patterns = magic.literal || magic.glob ? [bare] : gitWildcards(bare);
+            for (const p of patterns) {
+              const text = fromTop ? `${TOP}/${p}` : p;
+              add(
+                {
+                  word: {
+                    text,
+                    mask: (magic.literal ? 'q' : 'u').repeat(text.length),
+                    dynamic: false,
+                    cut: w.cut,
+                  },
+                  tree: true,
+                  // The whole tree after a change is a possible write, like a command given no path.
+                  certain: certain && !(r.moved && bare === '.'),
+                  fallback: index,
+                  ifExists: q.ifExists ?? false,
+                  // git's wildcards also match names that start with a dot.
+                  dotfiles: true,
+                  nocase: verdict.nocase || magic.icase,
+                  // The whole tree, and anything `git rm` is given (it only removes tracked
+                  // files): the files of the kinds it touches that are there.
+                  ...(bare === '.' || q.tracked ? { touches: q.touches } : {}),
                 },
-                tree: true,
-                how,
-                ifExists: p.ifExists ?? false,
-                // git's wildcards also match names that start with a dot.
-                dotfiles: true,
-                nocase: verdict.nocase || magic.icase,
-                // `git rm` only removes tracked files.
-                ...(p.tracked ? { touches: TRACKED_FILES } : {}),
-              },
-              at,
-            );
+                at,
+              );
+            }
           }
         }
         break;
@@ -2551,6 +2904,26 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           }
         }
         break;
+    }
+    // What git says about a later command no longer holds once this one ran: a git command that
+    // is not only looking, or a program or script that may run git.
+    if (words[0] !== undefined && !words[0].dynamic && programName(words[0]) === 'git') {
+      if (gitChanges(words)) r.moved = true;
+    } else if (
+      verdict.kind === 'unknown' ||
+      verdict.kind === 'script' ||
+      verdict.kind === 'unread' ||
+      (words[0] !== undefined && (words[0].dynamic || RUNS_ELSEWHERE.has(programName(words[0]))))
+    ) {
+      r.moved = true;
+    } else if (
+      [
+        ...(verdict.kind === 'writes' ? verdict.items.map((x) => x.word) : []),
+        ...cmd.redirects.filter((red) => red.op.startsWith('>')).map((red) => red.target),
+      ].some((w) => /(^|\/)\.git(\/|$)/.test(w.text))
+    ) {
+      // A write inside `.git` itself.
+      r.moved = true;
     }
   }
 }

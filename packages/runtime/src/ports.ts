@@ -269,6 +269,132 @@ export function createGitPort(): GitPort {
         return cut ? { files: [], complete: false } : null;
       }
     },
+    whatGitChanges: async (cwd, query) => {
+      // A revision comes from a command line: it is never let through as an option.
+      if (query.against.some((r) => r.startsWith('-') || r === '' || r.length > 256)) return null;
+      const options = {
+        cwd,
+        timeoutMs: query.timeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+        // The pathspecs are the command's own, read the way git reads them for it.
+        env: { GIT_LITERAL_PATHSPECS: '0' },
+      };
+      /** The tree a revision names, or null when there is none of that name. */
+      const treeOf = async (rev: string): Promise<string | null> => {
+        const verify = (name: string) =>
+          runGit(['rev-parse', '--verify', '--quiet', name], { ...options, okExitCodes: [1, 128] });
+        // The revision itself first: peeled at once, a parent that is not there (`stash@{0}^3`)
+        // can still come out as a tree.
+        if ((await verify(rev)).exitCode !== 0) return null;
+        const res = await verify(`${rev}^{tree}`);
+        return res.exitCode === 0 ? res.stdout.trim() || null : null;
+      };
+      /** The one remote branch of that name (`origin/x` for `x`), as `git checkout x` finds it. */
+      const remoteOf = async (name: string): Promise<string | null> => {
+        const res = await runGit(
+          ['for-each-ref', '--count=1', '--format=%(objectname)', `refs/remotes/*/${name}`],
+          options,
+        );
+        const oid = res.stdout.trim();
+        return oid === '' ? null : treeOf(oid);
+      };
+      try {
+        const root =
+          query.root ??
+          realpathSync((await runGit(['rev-parse', '--show-toplevel'], options)).stdout.trim());
+        let against = query.against;
+        if (query.unlessAncestor) {
+          // Already in its history (a rebase onto an upstream the branch is on): nothing to do.
+          const [a, b] = query.unlessAncestor;
+          if (a.startsWith('-') || b.startsWith('-')) return null;
+          const is = await runGit(['merge-base', '--is-ancestor', a, b], {
+            ...options,
+            okExitCodes: [1, 128],
+          });
+          if (is.exitCode === 0) return Object.assign([], { root });
+        }
+        if (query.mayFail) {
+          // Words that may name no revision: a missing one makes the command write nothing.
+          const trees: string[] = [];
+          for (const rev of against) {
+            // A merge's `HEAD...x` is kept as it is, once both sides are there.
+            const sides = rev.split('...');
+            if (sides.length === 2) {
+              for (const side of sides)
+                if ((await treeOf(side)) === null) return Object.assign([], { root });
+              trees.push(rev);
+              continue;
+            }
+            const tree = (await treeOf(rev)) ?? (query.guess ? await remoteOf(rev) : null);
+            if (tree === null) return Object.assign([], { root });
+            trees.push(tree);
+          }
+          against = trees;
+        }
+        // Paths from the top of the tree, whatever the configuration says about how to show them;
+        // no external diff or text conversion runs.
+        const [diff, untracked] = await Promise.all([
+          // `git rm` removes the tracked files its pathspecs match; the others change what
+          // differs between the working tree and where the files come from.
+          query.tracked
+            ? runGit(
+                ['ls-files', '-z', '--full-name', '--cached', '--', ...query.pathspecs],
+                options,
+              )
+            : query.listTree
+              ? runGit(
+                  [
+                    'ls-tree',
+                    '-r',
+                    '-z',
+                    '--name-only',
+                    '--full-tree',
+                    ...against,
+                    '--',
+                    ...query.pathspecs,
+                  ],
+                  options,
+                )
+              : runGit(
+                  [
+                    'diff',
+                    '--name-only',
+                    '-z',
+                    '--no-renames',
+                    '--no-relative',
+                    '--no-ext-diff',
+                    '--no-textconv',
+                    ...against,
+                    '--',
+                    ...query.pathspecs,
+                  ],
+                  options,
+                ),
+          query.untracked
+            ? runGit(
+                [
+                  'ls-files',
+                  '-z',
+                  '--full-name',
+                  '--others',
+                  // Ignored files too, with `git stash -a`.
+                  ...(query.ignored ? [] : ['--exclude-standard']),
+                  '--',
+                  ...query.pathspecs,
+                ],
+                options,
+              )
+            : Promise.resolve(null),
+        ]);
+        // A nested repository is listed as its folder: what is in it is not git's to change.
+        const files = [diff.stdout, untracked?.stdout ?? '']
+          .flatMap((out) => out.split('\0'))
+          .filter((f) => f !== '' && !f.endsWith('/'));
+        return Object.assign(files, { root });
+      } catch {
+        return null;
+      }
+    },
     currentBranch: (cwd) => safe(() => currentBranch(cwd), null),
     headCommit: (cwd) => safe(() => headCommit(cwd), null),
     changedFiles: (cwd) => safe(async () => (await changedFiles(cwd)).map((f) => f.path), []),
