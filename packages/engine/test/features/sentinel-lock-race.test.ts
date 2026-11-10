@@ -274,24 +274,81 @@ describe('sentinel lock races', () => {
     expect(fs.readdirSync(join(file, '..')).filter((f) => !f.startsWith('lock.seen-'))).toEqual([]);
   });
 
-  it('treats a lock put back after its holder let go of it as free', () => {
+  it('never takes a lock in the middle of a release, whatever its clock says', () => {
+    for (const skew of [0, 3000, -3000, 60 * 60_000]) {
+      const file = lockFile();
+      let d: ReturnType<typeof tryProcessLock> = null;
+      // H lets go. Should a third process D create a lock while H puts something back, it gets
+      // it only if the lock is free.
+      const h = tryProcessLock(file, {
+        link: (existing, to) => {
+          if (existing.includes('.release-') && d === null) d = tryProcessLock(file);
+          fs.linkSync(existing, to);
+        },
+      })!;
+      const hId = fs.readFileSync(file, 'utf8').split('\n')[1] as string;
+      let c: ReturnType<typeof tryProcessLock> = null;
+      hook.fn = (op, path) => {
+        // H noted its release and found the lock its own; it is about to move it. C, another
+        // process of this machine whose clock is off (an NFS server, a clock step), looks now.
+        if (op !== 'rename' || path !== file) return;
+        hook.fn = null;
+        const released = (globalThis as Record<symbol, Set<string>>)[
+          Symbol.for('mindly.sentinel.released')
+        ]!;
+        released.delete(hId);
+        c = tryProcessLock(file, { now: () => Date.now() + skew });
+        released.add(hId);
+      };
+      try {
+        h.release();
+      } finally {
+        hook.fn = null;
+      }
+      expect(c).toBeNull();
+      expect(fs.existsSync(file)).toBe(false);
+      // Nothing left but what C noted of the lock it saw.
+      expect(fs.readdirSync(join(file, '..')).filter((f) => !f.startsWith('lock.seen-'))).toEqual(
+        [],
+      );
+    }
+  });
+
+  it('takes a lock that was let go of while it judged it, in the same call', () => {
     const file = lockFile();
-    // A holder in another process of this machine and namespace let go of its lock while it was
-    // aside, and another process put it back. Its PID lives (here: this process's parent).
-    const id = 'abababababababababababab';
-    const here = { namespace: () => 'pid:[1]', host: () => 'host-1', alive: () => true };
-    fs.writeFileSync(file, [process.ppid, id, '', 'pid:[1]', 'host-1'].join('\n'));
-    expect(tryProcessLock(file, here)).toBeNull();
-    // Its holder noted the release; a moment later it may still be removing it itself.
-    fs.writeFileSync(`${file}.released-${id}`, '');
-    expect(tryProcessLock(file, here)).toBeNull();
-    // A note that stays means it could not: the lock is free.
-    const t = new Date(Date.now() - 5000);
-    fs.utimesSync(`${file}.released-${id}`, t, t);
-    const lock = tryProcessLock(file, here)!;
+    // A holder of this machine and namespace whose process is gone.
+    fs.writeFileSync(
+      file,
+      [999999, 'abababababababababababab', '', 'pid:[1]', 'host-1'].join('\n'),
+    );
+    const here = { namespace: () => 'pid:[1]', host: () => 'host-1', alive: () => false };
+    // Between the first create and the judgement, the lock is taken over and let go of by
+    // someone else; the lock found then is again a dead holder's.
+    let creates = 0;
+    const lock = tryProcessLock(file, {
+      ...here,
+      link: (existing, to) => {
+        if (existing.includes('.new-') && ++creates === 2) {
+          fs.writeFileSync(
+            to,
+            [999998, 'cdcdcdcdcdcdcdcdcdcdcdcd', '', 'pid:[1]', 'host-1'].join('\n'),
+          );
+        }
+        fs.linkSync(existing, to);
+      },
+    });
     expect(lock).not.toBeNull();
+    expect(fs.readFileSync(file, 'utf8').split('\n')[0]).toBe(String(process.pid));
+    lock!.release();
+  });
+
+  it('removes notes of releases left behind when the lock is next taken', () => {
+    const file = lockFile();
+    // A release that never found its lock again (it stayed away for longer than it looked).
+    fs.writeFileSync(`${file}.released-abababababababababababab`, '');
+    const lock = tryProcessLock(file)!;
+    expect(fs.readdirSync(join(file, '..'))).toEqual(['lock']);
     lock.release();
-    expect(fs.readdirSync(join(file, '..'))).toEqual([]);
   });
 
   it('looks for a lock it let go of while it was away, and removes it once back', () => {

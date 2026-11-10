@@ -3,6 +3,7 @@ import {
   closeSync,
   constants as fsConstants,
   copyFileSync,
+  existsSync,
   linkSync,
   openSync,
   readdirSync,
@@ -64,8 +65,6 @@ const HELD_RETRY_MS = 5;
 /** A holder that let go of a lock it found away looks for it again this often, this far apart. */
 const RELEASE_LATER_TRIES = 30;
 const RELEASE_LATER_MS = 1000;
-/** A note of a release older than this belongs to a lock its holder could not remove. */
-const RELEASE_SETTLED_MS = 2000;
 /** Acquisitions let go of, remembered per process. */
 const MAX_RELEASED_IDS = 1000;
 /** A note of what was seen of a lock is not believed past this age, nor when dated in the future. */
@@ -200,25 +199,16 @@ function releasedMark(file: string, id: string | null): string | null {
 }
 
 /**
- * True when the acquisition `id` of the lock at `file` was let go of. With `settledMs`, a note
- * on disk counts only once it is that old: a holder notes its release before it removes its
- * lock, and a lock in the middle of a normal release is not free to take over yet.
+ * True when the acquisition `id` of the lock at `file` was let go of: by this process, or (with
+ * `notes`) by any, as its note next to the lock says. Only a takeover that has the lock aside
+ * reads the notes: a holder notes its release before it removes its lock, so a contender that
+ * read them would take a lock in the middle of a normal release.
  */
-function wasReleased(
-  file: string,
-  id: string | null,
-  settled?: { now: () => number; ms: number },
-): boolean {
+function wasReleased(file: string, id: string | null, notes: boolean): boolean {
   if (id === null) return false;
   if (releasedIds().has(id)) return true;
-  const mark = releasedMark(file, id);
-  if (mark === null) return false;
-  try {
-    const at = statSync(mark).mtimeMs;
-    return settled === undefined || Math.abs(settled.now() - at) > settled.ms;
-  } catch {
-    return false;
-  }
+  const mark = notes ? releasedMark(file, id) : null;
+  return mark !== null && existsSync(mark);
 }
 
 /** The lock ids this process holds now, shared by every copy of this module in the process. */
@@ -379,7 +369,7 @@ function takeOver(
         return true;
       }
       // Its holder let go of it while it was aside: it is free, and dropped instead of put back.
-      if (wasReleased(file, movedId)) {
+      if (wasReleased(file, movedId, true)) {
         if (mark) unlinkQuiet(mark);
         return true;
       }
@@ -475,6 +465,21 @@ function sweepTemp(file: string, now: () => number): void {
       } catch {
         // gone meanwhile, or not ours to remove
       }
+    }
+  } catch {
+    // the lock works without the cleanup
+  }
+}
+
+/** Removes every note of a release next to the lock (bounded). */
+function sweepReleaseNotes(file: string): void {
+  try {
+    const prefix = `${basename(file)}.released-`;
+    let removed = 0;
+    for (const name of readdirSync(dirname(file)).slice(0, SWEEP_MAX_ENTRIES)) {
+      if (!name.startsWith(prefix)) continue;
+      unlinkQuiet(join(dirname(file), name));
+      if (++removed >= SWEEP_MAX_REMOVED) return;
     }
   } catch {
     // the lock works without the cleanup
@@ -619,9 +624,10 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
     if (age > maxAge) return true;
     const h = parseHolder(seen.raw);
     if (h === null) return Math.abs(age) > UNREADABLE_MAX_AGE_MS;
-    // Put back after its holder let go of it, which it could not remove: free, whatever its
-    // PID says.
-    if (wasReleased(file, h.id, { now, ms: RELEASE_SETTLED_MS })) return true;
+    // Let go of by this process (which could not remove it then): free, whatever its PID says.
+    // Notes of other processes are not read here, see `wasReleased`; a lock one of them could
+    // not remove is removed by its own look again, or taken over like any other.
+    if (wasReleased(file, h.id, false)) return true;
     const verdict = byPid(h);
     if (verdict !== 'unknown' || h.id === null) return verdict === 'gone';
     // Its holder touches it every `heartbeatMs` while it lives: abandoned once this observer
@@ -629,7 +635,9 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
     return unchangedFor(seen, h.id) > MISSED_HEARTBEATS * heartbeatMs;
   };
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Create, or judge the lock there and take it over, then create: twice at most, since the
+  // lock may be let go of between the first create and the judgement.
+  for (let attempt = 0; attempt < 3; attempt++) {
     const id = randomBytes(12).toString('hex');
     try {
       held.add(id);
@@ -642,6 +650,9 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
       ].join('\n');
       if (create(file, content, link)) {
         sweepTemp(file, now);
+        // Notes of releases are of no use once the lock is ours: a lock put back now could not
+        // replace it.
+        sweepReleaseNotes(file);
         // What this observer noted about the lock that was here is of no use any more.
         try {
           unlinkQuiet(notePath());
