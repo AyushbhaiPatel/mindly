@@ -179,7 +179,7 @@ export async function installCommand(
   const running = process.argv[1];
   const global = await onPath('mindly', env);
   if (global && running && sameFile(global, running)) return [global];
-  return [stableNode(env), entry];
+  return [stableNode(), entry];
 }
 
 async function projectRootOf(cwd: string): Promise<string> {
