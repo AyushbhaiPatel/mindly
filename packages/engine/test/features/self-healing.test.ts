@@ -7,6 +7,7 @@ import {
   EVIDENCE_SCAN_WORK,
   excerptPresent,
   excerptsPresent,
+  excerptsWork,
   excerptState,
   excerptWork,
   normalizeBlock,
@@ -1057,6 +1058,44 @@ describe('self-healing memory', () => {
     expect(checks.length).toBeGreaterThan(300);
     expect(checks.every((c) => c.state === 'valid')).toBe(true);
     expect(all).toBeLessThan(40 * normalising + 50);
+  });
+
+  it('looks up many excerpts sharing a prefix in a run of it in linear steps', () => {
+    /** The best of three runs: the time of the work, not of compiling it. */
+    const timed = <T>(f: () => T): [T, number] => {
+      let best = Infinity;
+      let r = f();
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now();
+        r = f();
+        best = Math.min(best, performance.now() - t);
+      }
+      return [r, best];
+    };
+    const code = Array.from(
+      { length: 7000 },
+      (_, i) => `  const item${i} = await service.load${i % 97}({ id: ${i}, tag: "t${i % 13}" });`,
+    ).join('\n');
+    const [, normalising] = timed(() => normalizeBlock(code));
+    const run = 'a'.repeat(500_000);
+    // Excerpts that share a prefix and differ in their last unit: one state of the automaton has
+    // as many ways out as there are excerpts, and the text comes back to it at every unit.
+    for (const [prefix, k] of [
+      [40, 500],
+      [40, 2000],
+      [40, 5000],
+      [10, 2000],
+    ] as const) {
+      const excerpts = Array.from(
+        { length: k },
+        (_, i) => `${'a'.repeat(prefix)}${String.fromCharCode(0x4e00 + i)}`,
+      );
+      const [found, ms] = timed(() => excerptsWork(run, excerpts));
+      expect(found.present.some(Boolean)).toBe(false);
+      // Linear: a few steps per unit of the text and of the excerpts, however many share a state.
+      expect(found.steps).toBeLessThan(8 * (run.length + k * (prefix + 1)));
+      expect(ms).toBeLessThan(40 * normalising + 50);
+    }
   });
 
   it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {

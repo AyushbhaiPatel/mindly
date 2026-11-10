@@ -72,6 +72,8 @@ const ANCHOR = 32;
 const HASH_BASE = 0x01000193;
 /** Checks of excerpts against windows of the text, per unit of the text, before an automaton. */
 const MAX_ANCHOR_CHECKS_PER_UNIT = 2;
+/** Children a state of an automaton has looked through; more are looked up in a table. */
+const FEW_CHILDREN = 4;
 /** Characters of excerpts looked for in one pass over a file (see `occurringIn`). */
 const MAX_PATTERNS_PER_PASS = 1_000_000;
 /** Lines that making safe changes, up to which the made-safe file is built line by line. */
@@ -378,7 +380,7 @@ interface NormFile {
    * Looks for the normalised excerpts of all evidence of the file in one pass, so `contains`
    * answers each of them without reading the file again.
    */
-  prepare(normExcerpts: readonly string[]): void;
+  prepare(normExcerpts: readonly string[], work?: SearchWork): void;
   /** Whether `normExcerpt` is in the file. Linear in the file; never limited by an allowance. */
   contains(normExcerpt: string): boolean;
   /**
@@ -478,18 +480,45 @@ function eachPlace(
  * excerpts sharing an anchor, in a text full of it), and for shorter excerpts, an automaton
  * decides instead, which is linear whatever the text holds.
  */
-function occurringIn(text: Uint16Array, patterns: readonly string[]): string[] {
+function occurringIn(
+  text: Uint16Array,
+  patterns: readonly string[],
+  work: SearchWork = { steps: 0 },
+): string[] {
   const long = patterns.filter((p) => p.length >= ANCHOR);
   const short = patterns.filter((p) => p.length < ANCHOR);
-  const found = new Set<string>(short.length > 0 ? automatonFinds(text, short) : []);
+  const found = new Set<string>(short.length > 0 ? inBatches(text, short, work) : []);
   if (long.length > 0) {
-    for (const p of anchoredFinds(text, long) ?? automatonFinds(text, long)) found.add(p);
+    for (const p of anchoredFinds(text, long, work) ?? inBatches(text, long, work)) found.add(p);
   }
   return patterns.filter((p) => found.has(p));
 }
 
+/** `automatonFinds` in batches, so one automaton stays small whatever the number of patterns. */
+function inBatches(text: Uint16Array, patterns: readonly string[], work: SearchWork): string[] {
+  const out: string[] = [];
+  for (let at = 0; at < patterns.length;) {
+    const batch: string[] = [];
+    for (let size = 0; at < patterns.length && size < MAX_PATTERNS_PER_PASS; at++) {
+      batch.push(patterns[at] as string);
+      size += (patterns[at] as string).length;
+    }
+    out.push(...automatonFinds(text, batch, work));
+  }
+  return out;
+}
+
+/** Steps a search took: windows and checks, or transitions of an automaton. For tests. */
+interface SearchWork {
+  steps: number;
+}
+
 /** See `occurringIn`; null when the checks would go past their bound. */
-function anchoredFinds(text: Uint16Array, patterns: readonly string[]): string[] | null {
+function anchoredFinds(
+  text: Uint16Array,
+  patterns: readonly string[],
+  work: SearchWork,
+): string[] | null {
   const n = text.length;
   let longest = ANCHOR;
   for (const p of patterns) longest = Math.max(longest, p.length);
@@ -554,28 +583,103 @@ function anchoredFinds(text: Uint16Array, patterns: readonly string[]): string[]
       }
     }
   }
+  work.steps += n + checks;
   return patterns.filter((_, id) => hit[id] === 1);
 }
 
 /**
- * The automaton for `occurringIn` (Aho-Corasick): linear in the text and in the patterns
- * together, whatever they hold, however many there are. It is kept in typed arrays: a node's
- * children are a list (`child`, then `sibling`), except the root's, which are a table by unit.
+ * Transitions of an automaton, by state and code unit, in one open-addressing table: constant
+ * time whatever the number of transitions out of a state. Holds at most half its capacity.
  */
-function automatonFinds(text: Uint16Array, patterns: readonly string[]): string[] {
+class Transitions {
+  private readonly from: Int32Array;
+  private readonly unit: Uint16Array;
+  private readonly to: Int32Array;
+  private readonly mask: number;
+  private count = 0;
+
+  constructor(capacity: number) {
+    let size = 16;
+    while (size < 2 * capacity) size <<= 1;
+    this.from = new Int32Array(size).fill(-1);
+    this.unit = new Uint16Array(size);
+    this.to = new Int32Array(size);
+    this.mask = size - 1;
+  }
+
+  private slot(state: number, unit: number): number {
+    let i = (Math.imul(state, 0x9e3779b1) ^ Math.imul(unit + 1, 0x85ebca6b)) & this.mask;
+    while (this.from[i] !== -1 && (this.from[i] !== state || this.unit[i] !== unit)) {
+      i = (i + 1) & this.mask;
+    }
+    return i;
+  }
+
+  /** The state after `unit` from `state`; -1 when there is none. */
+  get(state: number, unit: number): number {
+    const i = this.slot(state, unit);
+    return this.from[i] === -1 ? -1 : (this.to[i] as number);
+  }
+
+  /** Records a transition; false (nothing recorded) when the table is half full. */
+  set(state: number, unit: number, to: number): boolean {
+    const i = this.slot(state, unit);
+    if (this.from[i] === -1) {
+      if (2 * (this.count + 1) > this.mask + 1) return false;
+      this.count++;
+      this.from[i] = state;
+      this.unit[i] = unit;
+    }
+    this.to[i] = to;
+    return true;
+  }
+}
+
+/**
+ * The automaton for `occurringIn` (Aho-Corasick): linear in the text and in the patterns
+ * together, whatever they hold, however many there are. Its edges are in one table (constant
+ * time per step, however many edges leave a state); a state's children are also listed
+ * (`child`, then `sibling`) to build the failure links. A step that has to follow failure links
+ * is remembered, so the same step later takes constant time.
+ */
+function automatonFinds(
+  text: Uint16Array,
+  patterns: readonly string[],
+  work: SearchWork = { steps: 0 },
+): string[] {
   let total = 1;
   for (const p of patterns) total += p.length;
   const label = new Uint16Array(total);
   const child = new Int32Array(total).fill(-1);
   const sibling = new Int32Array(total).fill(-1);
+  const children = new Int32Array(total);
   const top = new Int32Array(0x10000).fill(-1);
-  const topKids: number[] = [];
-  const next = (v: number, c: number): number => {
-    if (v === 0) return top[c] as number;
-    for (let w = child[v] as number; w !== -1; w = sibling[w] as number) {
-      if (label[w] === c) return w;
-    }
-    return -1;
+  // A state with a few children has them looked through; one with more, looked up in a table.
+  const hashed = new Transitions(total);
+  const edges = {
+    get(v: number, c: number): number {
+      work.steps++;
+      if (v === 0) return top[c] as number;
+      if ((children[v] as number) > FEW_CHILDREN) return hashed.get(v, c);
+      for (let w = child[v] as number; w !== -1; w = sibling[w] as number) {
+        work.steps++;
+        if (label[w] === c) return w;
+      }
+      return -1;
+    },
+    add(v: number, c: number, w: number): void {
+      label[w] = c;
+      sibling[w] = child[v] as number;
+      child[v] = w;
+      const n = (children[v] as number) + 1;
+      children[v] = n;
+      if (v === 0) top[c] = w;
+      else if (n === FEW_CHILDREN + 1) {
+        for (let k = child[v] as number; k !== -1; k = sibling[k] as number) {
+          hashed.set(v, label[k] as number, k);
+        }
+      } else if (n > FEW_CHILDREN + 1) hashed.set(v, c, w);
+    },
   };
   let nodes = 1;
   const ends = new Int32Array(patterns.length);
@@ -584,17 +688,10 @@ function automatonFinds(text: Uint16Array, patterns: readonly string[]): string[
     let v = 0;
     for (let i = 0; i < p.length; i++) {
       const c = p.charCodeAt(i);
-      let w = next(v, c);
+      let w = edges.get(v, c);
       if (w === -1) {
         w = nodes++;
-        label[w] = c;
-        if (v === 0) {
-          top[c] = w;
-          topKids.push(w);
-        } else {
-          sibling[w] = child[v] as number;
-          child[v] = w;
-        }
+        edges.add(v, c, w);
       }
       v = w;
     }
@@ -602,22 +699,22 @@ function automatonFinds(text: Uint16Array, patterns: readonly string[]): string[
   }
   const isEnd = new Uint8Array(nodes);
   for (let id = 0; id < ends.length; id++) isEnd[ends[id] as number] = 1;
-  // Failure links, and the nearest node down them that ends a pattern, breadth first.
+  // Failure links, and the nearest state down them that ends a pattern, breadth first.
   const fail = new Int32Array(nodes);
   const output = new Int32Array(nodes).fill(-1);
   const queue = new Int32Array(nodes);
   let head = 0;
   let tail = 0;
-  for (const w of topKids) queue[tail++] = w;
+  for (let w = child[0] as number; w !== -1; w = sibling[w] as number) queue[tail++] = w;
   while (head < tail) {
     const u = queue[head++] as number;
     for (let w = child[u] as number; w !== -1; w = sibling[w] as number) {
       const c = label[w] as number;
       let f = fail[u] as number;
-      let g = next(f, c);
+      let g = edges.get(f, c);
       while (g === -1 && f !== 0) {
         f = fail[f] as number;
-        g = next(f, c);
+        g = edges.get(f, c);
       }
       const fw = g === -1 ? 0 : g;
       fail[w] = fw;
@@ -625,15 +722,25 @@ function automatonFinds(text: Uint16Array, patterns: readonly string[]): string[
       queue[tail++] = w;
     }
   }
-  // One pass; every node ending a pattern is marked once, so the marking is linear too.
+  // One pass; every state ending a pattern is marked once, so the marking is linear too.
+  const resolved = new Transitions(Math.min(text.length, 4 * nodes));
   const hit = new Uint8Array(nodes);
   let v = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text[i] as number;
-    let g = next(v, c);
-    while (g === -1 && v !== 0) {
-      v = fail[v] as number;
-      g = next(v, c);
+    let g = edges.get(v, c);
+    if (g === -1 && v !== 0) {
+      g = resolved.get(v, c);
+      if (g === -1) {
+        let f = fail[v] as number;
+        let h = edges.get(f, c);
+        while (h === -1 && f !== 0) {
+          f = fail[f] as number;
+          h = edges.get(f, c);
+        }
+        g = h === -1 ? 0 : h;
+        resolved.set(v, c, g);
+      }
     }
     v = g === -1 ? 0 : g;
     for (let u = isEnd[v] ? v : (output[v] as number); u > 0 && !hit[u]; u = output[u] as number) {
@@ -672,18 +779,11 @@ function normFile(raw: string): NormFile {
       view ??= file.spend(safeViewCost(raw)) ? safeView(raw, normContent) : null;
       return view;
     },
-    prepare(normExcerpts) {
+    prepare(normExcerpts, work) {
       const wanted = [...new Set(normExcerpts.filter((e) => e.length > 0 && !found.has(e)))];
-      // In batches, so the automaton of one pass stays small whatever the number of rows.
-      for (let at = 0; at < wanted.length;) {
-        const batch: string[] = [];
-        for (let size = 0; at < wanted.length && size < MAX_PATTERNS_PER_PASS; at++) {
-          batch.push(wanted[at] as string);
-          size += (wanted[at] as string).length;
-        }
-        for (const e of occurringIn(file.units(normContent), batch)) found.set(e, true);
-        for (const e of batch) if (!found.has(e)) found.set(e, false);
-      }
+      if (wanted.length === 0) return;
+      for (const e of occurringIn(file.units(normContent), wanted, work)) found.set(e, true);
+      for (const e of wanted) if (!found.has(e)) found.set(e, false);
     },
     contains(normExcerpt) {
       let hit = found.get(normExcerpt);
@@ -813,10 +913,22 @@ export function excerptWork(
  * of one file is (see `NormFile.prepare`). For tests.
  */
 export function excerptsPresent(content: string, excerpts: readonly string[]): boolean[] {
+  return excerptsWork(content, excerpts).present;
+}
+
+/**
+ * `excerptsPresent` with the steps the search took: a measure of its cost that does not depend
+ * on how fast the machine is. For tests.
+ */
+export function excerptsWork(
+  content: string,
+  excerpts: readonly string[],
+): { present: boolean[]; steps: number } {
   const file = normFile(content);
   const norms = excerpts.map((e) => normalizeBlock(e));
-  file.prepare(norms);
-  return norms.map((e) => e.length > 0 && file.contains(e));
+  const work: SearchWork = { steps: 0 };
+  file.prepare(norms, work);
+  return { present: norms.map((e) => e.length > 0 && file.contains(e)), steps: work.steps };
 }
 
 /** What a look found, and, for evidence of the earliest form found in place, where. */
