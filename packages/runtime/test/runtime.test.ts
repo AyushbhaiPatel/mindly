@@ -343,22 +343,29 @@ describe('git commands that switch branches or come after other commands', () =>
     }
   });
 
-  it('stands by the paths given once an earlier command may have moved things', async () => {
+  it('stands by the paths given once an earlier command may have changed things', async () => {
     const { dir, mindly, shell, git } = certs();
     try {
       setUp(dir, git);
-      // Nothing differs now, but a fetch, a commit or a reset first changes that.
+      // Nothing differs now, but a fetch or a reset first may change that: the paths named are
+      // written, and what is done to the whole tree is a possible write.
       for (const command of [
         'git fetch && git checkout origin/main -- certs/server.pem',
         'git fetch origin main && git restore --source=origin/main certs',
+      ]) {
+        const r = await shell(command);
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('certs/server.pem');
+      }
+      for (const command of [
         'git fetch origin && git checkout origin/main -- .',
         'git fetch origin && git reset --hard origin/main',
         'git reset && git checkout -- .',
         'git fetch && git switch other',
       ]) {
         const r = await shell(command);
-        expect(r.decision, command).toBe('deny');
-        expect(r.reason, command).toContain('certs/server.pem');
+        expect(r.decision, command).toBeNull();
+        expect(r.context, command).toContain('Certificates are issued by hand');
       }
       // The whole tree stands for the tracked files there: an ignored file is not touched.
       const env = guarded({ 'Env files are edited by hand': ['.env'] });
@@ -382,7 +389,6 @@ describe('git commands that switch branches or come after other commands', () =>
         for (const command of [
           'git stash -a',
           'git stash push -a -- .env',
-          'git fetch && git stash -a',
           'git clean -fdx',
           "git clean -fd -e '!.env'",
         ]) {
@@ -390,6 +396,9 @@ describe('git commands that switch branches or come after other commands', () =>
           expect(r.decision, command).toBe('deny');
           expect(r.reason, command).toContain('.env');
         }
+        const after = await env.shell('git fetch && git stash -a');
+        expect(after.decision).toBeNull();
+        expect(after.context).toContain('Env files are edited by hand');
       } finally {
         env.mindly.close();
       }
@@ -518,44 +527,34 @@ describe('git commands whose files the line does not name', () => {
     }
   });
 
-  it('keeps asking after commands whose effect git can still tell', async () => {
+  it('warns about the whole tree after commands that may change what git says', async () => {
     const { dir, mindly, shell, git } = setUp();
     try {
       git('remote', 'add', 'origin', dir);
+      git('fetch', '-q', 'origin');
       writeFileSync(join(dir, 'src', 'b.ts'), 'local work\n');
+      writeFileSync(join(dir, 'certs', 'new.pem'), 'n\n');
+      // Never a block for what is done to the whole tree, never silence.
       for (const command of [
         'git add -A && git commit -qm wip && git checkout feature',
         'git stash && git checkout feature && git stash pop',
-        'git stash -u && git checkout feature && git stash pop',
         'git fetch && git checkout feature',
         'git commit -qam wip && git checkout -- .',
         'git add -A && git stash',
-      ]) {
-        const r = await shell(command);
-        expect(r.decision, `${command}: ${r.reason}`).toBeNull();
-      }
-      // A file added and then stashed or reset goes with it.
-      writeFileSync(join(dir, 'certs', 'new.pem'), 'n\n');
-      for (const command of ['git add -A && git stash', 'git add certs && git reset --hard']) {
-        expect((await shell(command)).decision, command).toBe('deny');
-      }
-      rmSync(join(dir, 'certs', 'new.pem'));
-      // A remote-tracking ref after a fetch is not answered for.
-      git('fetch', '-q', 'origin');
-      for (const command of [
-        'git fetch && git checkout origin/main -- certs/server.pem',
+        'git add certs && git reset --hard',
         'git remote update && git reset --hard origin/main',
-      ]) {
-        expect((await shell(command)).decision, command).toBe('deny');
-      }
-      // Pathspecs that only leave files out stand for everything else.
-      writeFileSync(join(dir, 'certs', 'server.pem'), 'k-dirty\n');
-      for (const command of [
         "git add src && git checkout -- ':!src'",
         "git reset -q && git stash push -- ':!src'",
       ]) {
-        expect((await shell(command)).decision, command).toBe('deny');
+        const r = await shell(command);
+        expect(r.decision, `${command}: ${r.reason}`).toBeNull();
+        expect(r.context, command).toContain('Certificates are issued by hand');
       }
+      // A path named is still blocked, and the first command is still asked exactly.
+      const named = await shell('git fetch && git checkout origin/main -- certs/server.pem');
+      expect(named.decision).toBe('deny');
+      const first = await shell('git stash -u && git checkout feature && git stash pop');
+      expect(first.reason).toContain('certs/new.pem');
     } finally {
       mindly.close();
     }

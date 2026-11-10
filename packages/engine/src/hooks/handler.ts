@@ -702,8 +702,7 @@ export class HookHandler {
             mayFail: q.mayFail,
             guess: q.guess,
             listTree: q.listTree,
-            stale: q.stale,
-            ...(q.untrackedIn !== undefined ? { untrackedIn: q.untrackedIn } : {}),
+            ...(q.unlessAncestor !== undefined ? { unlessAncestor: q.unlessAncestor } : {}),
             ...(known !== undefined ? { root: known } : {}),
             timeoutMs,
           })

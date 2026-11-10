@@ -55,13 +55,8 @@ export interface GitPort {
       guess?: boolean;
       /** List every file of the one revision instead (what a stash's untracked part holds). */
       listTree?: boolean;
-      /** The untracked files listed are those these pathspecs match, not the question's. */
-      untrackedIn?: string[];
-      /**
-       * Remote-tracking refs may have moved before the command runs: a revision that is one, or
-       * that does not exist yet, cannot be answered for (null).
-       */
-      stale?: boolean;
+      /** Nothing is written when the first revision is already in the second's history. */
+      unlessAncestor?: [string, string];
       root?: string;
       timeoutMs: number;
     },

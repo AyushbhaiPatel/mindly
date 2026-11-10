@@ -303,26 +303,15 @@ export function createGitPort(): GitPort {
           query.root ??
           realpathSync((await runGit(['rev-parse', '--show-toplevel'], options)).stdout.trim());
         let against = query.against;
-        if (query.stale) {
-          // Remote-tracking refs may move before the command runs: a revision that is one, or
-          // one that does not exist yet (a fetch may bring it), is not answered for.
-          for (const rev of against) {
-            for (const part of rev.split(/\.\.\.?/)) {
-              const name = part.replace(/[~^].*$/, '');
-              if (name === '' || name === 'HEAD' || name === '@' || /^@\{-?\d+\}$/.test(name))
-                continue;
-              if (/FETCH_HEAD|^refs\/remotes\//.test(name)) return null;
-              const full = await runGit(
-                ['rev-parse', '--verify', '--quiet', '--symbolic-full-name', name],
-                {
-                  ...options,
-                  okExitCodes: [1, 128],
-                },
-              );
-              if (full.exitCode !== 0 || full.stdout.trim().startsWith('refs/remotes/'))
-                return null;
-            }
-          }
+        if (query.unlessAncestor) {
+          // Already in its history (a rebase onto an upstream the branch is on): nothing to do.
+          const [a, b] = query.unlessAncestor;
+          if (a.startsWith('-') || b.startsWith('-')) return null;
+          const is = await runGit(['merge-base', '--is-ancestor', a, b], {
+            ...options,
+            okExitCodes: [1, 128],
+          });
+          if (is.exitCode === 0) return Object.assign([], { root });
         }
         if (query.mayFail) {
           // Words that may name no revision: a missing one makes the command write nothing.
@@ -391,7 +380,7 @@ export function createGitPort(): GitPort {
                   // Ignored files too, with `git stash -a`.
                   ...(query.ignored ? [] : ['--exclude-standard']),
                   '--',
-                  ...(query.untrackedIn ?? query.pathspecs),
+                  ...query.pathspecs,
                 ],
                 options,
               )

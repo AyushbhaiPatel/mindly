@@ -376,132 +376,80 @@ describe('write targets of a shell command', () => {
     expect(targets('git mv prisma db')).toEqual(['db/[prisma]/**', 'prisma', 'prisma/**']);
   });
 
-  it('does not take what git says for a later command once an earlier one moved things', () => {
-    const asked = (command: string) =>
-      readShellWrites(command, { home: HOME, top: TOP }).questions.filter((q) =>
-        q.pathspecs.some((p) => p.endsWith('secret/key.txt')),
-      ).length;
+  it('asks git only when nothing earlier on the line can have changed its answer', () => {
+    const questions = (command: string) =>
+      readShellWrites(command, { home: HOME, top: TOP }).questions;
     const given = (command: string) =>
       read(command)
         .filter((t) => t.fallback === null && t.certain)
         .map((t) => t.path);
-    // A reset of the index, a commit, a stash or a program that may run git changes what git
-    // would answer.
+    // Anything that changes what git would answer comes first: git is not asked. The paths a
+    // later command names are certain writes.
     for (const cmd of [
       'git reset && git checkout -- secret/key.txt',
-      'git commit -qm wip && git checkout HEAD@{1} -- secret/key.txt',
+      'git add -A && git checkout -- secret/key.txt',
+      'git commit -qm wip && git checkout HEAD~1 -- secret/key.txt',
       'git stash && git checkout stash@{0} -- secret/key.txt',
+      'git fetch && git checkout origin/main -- secret/key.txt',
+      'git remote update && git checkout origin/main -- secret/key.txt',
       'git branch -f main origin/main; git checkout main -- secret/key.txt',
+      'git switch other && git checkout -- secret/key.txt',
+      'git -C . stash drop && git checkout -- secret/key.txt',
       './sync.sh && git checkout -- secret/key.txt',
       'make && git checkout -- secret/key.txt',
       'bash -c "git pull" && git checkout -- secret/key.txt',
-      'echo $(git stash drop) && git checkout stash@{1} -- secret/key.txt',
+      'echo $(git stash drop) && git checkout -- secret/key.txt',
       'git pull && git checkout -- secret/key.txt',
       'cd /elsewhere && cd - && git checkout -- secret/key.txt',
       'GIT_DIR=other.git git checkout -- secret/key.txt',
       'git --git-dir=other.git checkout -- secret/key.txt',
       'git --icase-pathspecs checkout -- secret/key.txt',
     ]) {
-      expect(asked(cmd), cmd).toBe(0);
+      const later = questions(cmd).filter((x) => x.pathspecs.some((p) => p.endsWith('key.txt')));
+      expect(later, cmd).toEqual([]);
       expect(given(cmd), cmd).toEqual(['secret/key.txt']);
     }
-    // The whole tree: the tracked files there.
-    expect(read('git reset -q && git checkout -- .')).toEqual([
-      expect.objectContaining({
-        path: '.',
-        fallback: null,
-        touches: { tracked: true, untracked: false, ignored: false },
-      }),
-    ]);
-    // A fetch moves remote-tracking refs only: git is still asked, and says nothing for one of
-    // them, or for a revision that is not there yet.
+    // What it does to the whole tree (a reset, a switch, a merge, a pop) is a possible write: a
+    // warning when a covered file is there, never a block.
     for (const cmd of [
-      'git fetch && git checkout origin/main -- secret/key.txt',
-      'git remote update && git reset --hard origin/main',
-      'git fetch && git switch other',
+      'git fetch origin && git reset --hard origin/main',
+      'git stash && git checkout feature && git stash pop',
+      'git stash pop stash@{1} && git stash pop',
+      'git stash branch tmp && git stash pop',
+      'git -C src stash drop && git stash pop',
+      'git switch feature && git merge --no-edit certs-change',
+      'git checkout -b fix && git commit -qam fix && git checkout main && git merge fix',
+      'git fetch -q origin && git merge --no-edit origin/feature',
+      'git fetch -q origin && git rebase origin/feature',
+      'git commit -qa --amend --no-edit && git checkout feature',
+      "git reset -q && git stash push -- ':!src'",
     ]) {
-      const questions = readShellWrites(cmd, { home: HOME, top: TOP }).questions;
-      expect(questions.length, cmd).toBeGreaterThan(0);
+      const stand = read(cmd).filter((x) => x.fallback === null && x.path === TOP);
+      expect(stand.length, cmd).toBeGreaterThan(0);
       expect(
-        questions.every((x) => x.stale),
+        stand.every((x) => !x.certain),
         cmd,
       ).toBe(true);
     }
-    expect(readShellWrites('git fetch && git checkout -- x').questions[0]?.stale).toBe(false);
-    // `git add` brings untracked files into what a later reset or stash takes away; a commit
-    // makes a later switch write what differs from the working tree.
-    expect(readShellWrites('git add -A && git stash').questions[0]).toMatchObject({
-      against: ['HEAD'],
-      untracked: true,
-    });
-    expect(
-      readShellWrites('git add -A && git commit -qm wip && git switch feature').questions[0],
-    ).toMatchObject({ against: ['feature'], untracked: true });
-    // A stash taken back after others were put away on the line: one of those, or one of the
-    // stashes there now, a place further down for each taken off before.
-    const against = (cmd: string) =>
-      readShellWrites(cmd, { home: HOME, top: TOP }).questions.map((x) => x.against.join(' '));
-    expect(against('git stash && git checkout feature && git stash pop')).toEqual([
-      'HEAD',
-      '',
-      'HEAD feature',
-      'stash@{0}^1 stash@{0}',
-      'stash@{0}^3',
+    // The first command of such a line is still asked.
+    expect(questions('git stash && git checkout feature && git stash pop')).toEqual([
+      expect.objectContaining({ against: ['HEAD'] }),
     ]);
-    expect(against('git stash drop && git stash pop')).toEqual([
-      'stash@{1}^1 stash@{1}',
-      'stash@{1}^3',
-    ]);
-    expect(against('git stash && git stash pop stash@{1}')).toEqual([
-      'HEAD',
-      'stash@{0}^1 stash@{0}',
-      'stash@{1}^1 stash@{1}',
-      'stash@{0}^3',
-      'stash@{1}^3',
-    ]);
-    // In another repository the list is another one.
-    expect(against('git -C ../other stash && git stash pop')).toEqual([
-      'HEAD',
-      'stash@{0}^1 stash@{0}',
-      'stash@{0}^3',
-    ]);
-    // A commit moves what `HEAD~n` names; a switch moves HEAD itself.
-    expect(against('git commit -qam wip && git reset --hard HEAD~1')).toEqual(['HEAD']);
-    expect(against('git commit -qam wip && git switch -')).toEqual(['@{-1}']);
-    expect(against('git add -A && git commit -qm wip && git merge x')).toEqual(['HEAD...x']);
-    expect(against('git switch feature && git merge x')).toEqual(['HEAD feature', 'feature...x']);
-    // `git add` of some paths takes only their untracked files; `-u` takes none.
-    expect(readShellWrites('git add src && git stash').questions[0]).toMatchObject({
-      untracked: true,
-      untrackedIn: ['src'],
-    });
-    expect(readShellWrites('git add -u && git stash').questions[0]).toMatchObject({
-      untracked: false,
-    });
-    // A fetch into a local branch moves it.
-    expect(against('git fetch -q origin feature:feature && git checkout feature')).toEqual([]);
-    // Looking around first changes nothing, nor does a folder of the same tree.
+    // Looking around first changes nothing, nor does writing a file of the project.
     for (const cmd of [
       'git status && git checkout -- secret/key.txt',
       'git log -1 && git diff && git checkout -- secret/key.txt',
       'git branch && git stash list && git checkout -- secret/key.txt',
+      'git config --get user.name && git checkout -- secret/key.txt',
       'ls && cat a.txt && git checkout -- secret/key.txt',
       `cd ${TOP}/src && git checkout -- ../secret/key.txt`,
       'cd src && git checkout -- ../secret/key.txt',
       'echo x > notes.txt && git checkout -- secret/key.txt',
     ]) {
-      expect(asked(cmd), cmd).toBe(1);
+      expect(questions(cmd), cmd).toHaveLength(1);
     }
-    // A branch switch compares two revisions: only a moved ref changes what git says of it.
-    const switches = (command: string) =>
-      readShellWrites(command, { home: HOME, top: TOP }).questions.filter(
-        (q) => q.against.length === 2,
-      ).length;
-    expect(switches('git add -A && git checkout -- x && git switch other')).toBe(1);
-    expect(switches('git merge other && git switch other')).toBe(0);
-    expect(read('git merge x && git switch other')).toContainEqual(
-      expect.objectContaining({ path: TOP, fallback: null, certain: true }),
-    );
+    // A write inside `.git` itself is a change.
+    expect(questions('echo x > .git/HEAD && git checkout -- secret/key.txt')).toEqual([]);
     // Case is ignored with `--icase-pathspecs`.
     expect(read('git --icase-pathspecs checkout -- SECRET')[0]).toMatchObject({ nocase: true });
     expect(read("git checkout -- ':(icase)SECRET'")[0]).toMatchObject({ nocase: true });
@@ -526,10 +474,25 @@ describe('write targets of a shell command', () => {
     expect(ask('git cherry-pick -x abc123')).toEqual(['abc123^1 abc123']);
     expect(ask('git cherry-pick -m 2 abc123')).toEqual(['abc123^2 abc123']);
     expect(ask('git revert a..b')).toEqual(['a...b']);
-    expect(ask('git rebase main')).toEqual(['HEAD...main']);
-    expect(ask('git rebase')).toEqual(['HEAD...@{upstream}']);
+    expect(ask('git cherry-pick ..b')).toEqual(['HEAD...b']);
+    expect(ask('git cherry-pick a...b')).toEqual(['a...b', 'b...a']);
     expect(ask('git merge -')).toEqual(['HEAD...@{-1}']);
-    expect(ask('git rebase --autostash main')).toEqual(['HEAD', 'HEAD...main']);
+    // A rebase writes what differs between the branch and where it goes, and what its own
+    // commits touch; a branch named is checked out first.
+    expect(ask('git rebase main')).toEqual(['HEAD main', 'main...HEAD']);
+    expect(ask('git rebase')).toEqual(['HEAD @{upstream}', '@{upstream}...HEAD']);
+    expect(ask('git rebase main topic')).toEqual(['HEAD topic', 'topic main', 'main...topic']);
+    expect(ask('git rebase --onto HEAD~2 HEAD~1')).toEqual(['HEAD HEAD~2', 'HEAD~1...HEAD']);
+    expect(ask('git rebase --autostash main')).toEqual(['HEAD', 'HEAD main', 'main...HEAD']);
+    // Already on the upstream, it stays: unless forced, or onto somewhere else.
+    expect(readShellWrites('git rebase main').questions[0]?.unlessAncestor).toEqual([
+      'main',
+      'HEAD',
+    ]);
+    expect(readShellWrites('git rebase -f main').questions[0]?.unlessAncestor).toBeUndefined();
+    expect(
+      readShellWrites('git rebase --onto x main').questions[0]?.unlessAncestor,
+    ).toBeUndefined();
     // What cannot be asked is a possible write of the tracked files: a warning at most.
     for (const cmd of ['git pull', 'git am x.mbox', 'git apply x.patch', 'git merge --abort']) {
       const reading = readShellWrites(cmd, { home: HOME, top: TOP });
@@ -543,8 +506,8 @@ describe('write targets of a shell command', () => {
     expect(read('git clean -fd :/').map((t) => [t.path, t.how])).toEqual([[TOP, 'clean']]);
     expect(read("git clean -fx -- '*.pem'").map((t) => t.path)).toEqual(['*.pem', '*/**/*.pem']);
     // Pathspecs that only leave files out stand for everything else.
-    expect(read("git reset -q && git stash push -- ':!src'")).toEqual([
-      expect.objectContaining({ path: TOP, fallback: null }),
+    expect(read("git stash push -- ':!src'")).toEqual([
+      expect.objectContaining({ path: TOP, fallback: 0 }),
     ]);
   });
 
