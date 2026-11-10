@@ -437,7 +437,68 @@ describe('safe regex subset', () => {
     ['a+(?:[ab]*[ab])x', 'same characters'],
     ['[a-f]?[^g]+x', 'same characters'],
     ['[', 'compile'],
+    ['[^](a+)+x', 'nested'],
+    ['[](a|aa)*x', 'nested'],
+    ['x[^]*\\s*y', 'same characters'],
   ])('rejects %s', (p, why) => expect(checkSafePattern(p)).toMatch(why));
+});
+
+describe('overlap of character classes', () => {
+  const atoms = [
+    'a',
+    'z',
+    '-',
+    ']',
+    '.',
+    '\\d',
+    '\\D',
+    '\\w',
+    '\\W',
+    '\\s',
+    '\\S',
+    '\\n',
+    '\\t',
+    '\\x41',
+    '\\u0430',
+    '\\.',
+    '[a-f]',
+    '[g-z]',
+    '[^g]',
+    '[^\\w]',
+    '[\\s\\d]',
+    '[^\\S]',
+    '[a\\-z]',
+    '[-a]',
+    '[\\b]',
+    '[\\x41-\\x43]',
+    '[\\u0400-\\u04ff]',
+    '[^\\n]',
+    '[^]',
+    '[.]',
+    '[\\]]',
+    '[A-Z_]',
+  ];
+  it('agrees with every code unit for each pair of atoms', () => {
+    const sets = atoms.map((atom) => {
+      const re = new RegExp(`^(?:${atom})$`);
+      const bits = new Uint8Array(0x10000);
+      for (let c = 0; c <= 0xffff; c++) bits[c] = re.test(String.fromCharCode(c)) ? 1 : 0;
+      return bits;
+    });
+    const wrong: string[] = [];
+    atoms.forEach((x, i) =>
+      atoms.forEach((y, j) => {
+        // `x?y+=`: refused exactly when x and y share a character (`=` is in neither... or both,
+        // which does not matter: only x then y is judged).
+        const pattern = `${x}?${y}+=`;
+        const verdict = checkSafePattern(pattern);
+        const shared = sets[i]!.some((bit, c) => bit === 1 && sets[j]![c] === 1);
+        const refused = verdict !== null && verdict.includes('same characters');
+        if (shared !== refused) wrong.push(`${pattern}: shared ${shared}, verdict ${verdict}`);
+      }),
+    );
+    expect(wrong).toEqual([]);
+  });
 });
 
 describe('regex budget', () => {
@@ -490,7 +551,7 @@ describe('regex budget', () => {
     expect(performance.now() - start).toBeLessThan(200);
   });
 
-  it('stops a pattern that runs out of time and does not run it again', async () => {
+  it('skips a pattern that ran out of time only until the file changes', async () => {
     const { mindly, root, write, memory, contracts } = await withDecision();
     write('src/min.js', 'a'.repeat(400 * 1024));
     const spec = { path: 'src/min.js', pattern: '.*a.*x' };
@@ -499,19 +560,77 @@ describe('regex budget', () => {
     expect(performance.now() - start).toBeLessThan(1000);
     expect(c.state).toBe('error');
     expect(c.lastMessage).toBe(
-      'pattern took longer than 100 ms on src/min.js and is no longer run; add a contract with a simpler pattern',
+      'pattern took longer than 100 ms on src/min.js; it runs again when the file changes',
     );
+    // The same content is not checked again.
     start = performance.now();
     expect(contracts.evaluate(mindly.store.contracts.get(c.id), root).message).toBe(c.lastMessage);
     expect(performance.now() - start).toBeLessThan(20);
-    // Another pattern on the same contract (and other contracts) run as usual.
-    const cheap = { ...spec, pattern: 'eval\\(' };
-    const changed = contracts.evaluate({ ...c, spec: cheap }, root);
-    expect(changed.state).toBe('passing');
-    expect(contracts.create(memory.id, 'pattern_absent', cheap, USER).state).toBe('passing');
+    // Changed content is.
+    write('src/min.js', 'const a = 1;\n');
+    expect(contracts.evaluate(mindly.store.contracts.get(c.id), root).state).toBe('passing');
+    write('src/min.js', 'const ax = 1;\n');
+    expect(contracts.evaluate(mindly.store.contracts.get(c.id), root).state).toBe('failing');
     // What is remembered goes with the contract.
     mindly.store.contracts.delete(c.id);
-    expect(mindly.store.contracts.slowPattern(c.id)).toBeNull();
+    expect(mindly.store.contracts.slowRun(c.id)).toBeNull();
+  });
+
+  it('a slow file does not switch a contract off: the next break is still reported', async () => {
+    const { root, mindly, pid, write, memory, contracts } = await withDecision();
+    write('src/fmt.ts', 'export const a = 1;\n');
+    const spec = { path: 'src/fmt.ts', pattern: '\\s+$' };
+    const c = contracts.create(memory.id, 'pattern_absent', spec, USER);
+    expect(c.state).toBe('passing');
+
+    write('src/fmt.ts', ' '.repeat(400_000) + 'x\n');
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/fmt.ts', 'x') }),
+    );
+    expect(mindly.store.contracts.get(c.id).state).toBe('error');
+
+    write('src/fmt.ts', 'export const a = 1;   \n');
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/fmt.ts', '   ') }),
+    );
+    expect(mindly.store.contracts.get(c.id).state).toBe('failing');
+    expect(
+      mindly.store.conflicts.list(pid).filter((x) => x.kind === 'contract_broken'),
+    ).toHaveLength(1);
+  });
+
+  it('judges a stored pattern once, not in every hook', async () => {
+    const { root, mindly, write, memory } = await withDecision();
+    const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFG';
+    const g1 = '(?:' + [...letters].map((ch) => `[${ch}]`).join('|') + ')?';
+    const g2 = '(?:' + [...'0123456789!#%&,;<=>@~`_":'].map((ch) => `[${ch}]`).join('|') + ')?';
+    const pattern = `${g1}${g2}x`;
+    expect(pattern.length).toBeLessThanOrEqual(300);
+    // Judging even this many classes is quick.
+    let start = performance.now();
+    expect(checkSafePattern(pattern)).toBeNull();
+    expect(performance.now() - start).toBeLessThan(50);
+    // Stored the way an earlier process would have, so nothing is kept for it yet.
+    const c = mindly.store.contracts.create({
+      projectId: memory.projectId,
+      memoryId: memory.id,
+      kind: 'pattern_absent',
+      spec: { path: 'src/auth.ts', pattern },
+      approvedHash: null,
+    });
+    const verdicts = () =>
+      mindly.store.db
+        .prepare("SELECT count(*) AS n FROM kv WHERE key LIKE 'contract:pattern-verdict:%'")
+        .get() as { n: number };
+    expect(verdicts().n).toBe(0);
+    write('src/auth.ts', 'y\n');
+    start = performance.now();
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'y') }),
+    );
+    expect(performance.now() - start).toBeLessThan(200);
+    expect(verdicts().n).toBe(1);
+    expect(mindly.store.contracts.get(c.id).state).toBe('passing');
   });
 
   it('explains why an existing contract with a now-rejected pattern cannot run', async () => {

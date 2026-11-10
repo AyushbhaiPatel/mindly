@@ -218,10 +218,13 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   never runs over more than 200 characters at once: a longer line is checked in overlapping
   200-character windows, so all of it is read (a single match longer than about 100 characters
   may be missed there). The whole check runs in a separate context with a 100 ms timeout that
-  stops even a single runaway match, so no pattern holds a hook for longer; a pattern that runs
-  out of time is not run again, and its contract reports an error until it is replaced with a
-  simpler one. A stored contract whose pattern fails these checks is not run either: it reports
-  an error explaining why, and `mindly doctor` lists it.
+  stops even a single runaway match, so no pattern holds a hook for longer. A pattern that runs
+  out of time reports an error and is not run again on that same file content; any change to the
+  file runs it again. Overlaps between character classes are worked out on their code-point
+  ranges, the work of judging one pattern is capped (a pattern past the cap is refused as too
+  complex), and the verdict is kept by pattern hash, so a hook does not judge a stored pattern
+  again. A stored contract whose pattern fails these checks is not run either: it reports an
+  error explaining why, and `mindly doctor` lists it.
 
 ## Data retention and deletion
 

@@ -36,7 +36,7 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
  * most two unbounded quantifiers (a `{n,m}` with m > 16 counts as unbounded) and at most eight
  * quantifiers in total. As a backstop for anything the subset lets through, the match runs in a
  * separate context with a timeout (see `matchLines`), which does stop a running regex; a pattern
- * that runs out of time once is not run again. Without nested quantifiers, the paths a
+ * that runs out of time is not run again on the same file content. Without nested quantifiers, the paths a
  * backtracking matcher can try per
  * start position are bounded by counting them: a sequence multiplies the paths of its parts, an
  * alternation adds the paths of its branches (or counts once when its branches are distinct
@@ -61,6 +61,8 @@ const MATCH_WINDOW_CHARS = 200;
 /** How far consecutive windows of a long line overlap: a match up to about this long is found. */
 const MATCH_WINDOW_OVERLAP = 100;
 const PATTERN_BUDGET_MS = 100;
+/** Where a pattern's verdict is kept; the version changes whenever the rules do. */
+const PATTERN_VERDICT_PREFIX = 'contract:pattern-verdict:2:';
 /** Recent contract results read, once, for a contract whose last pass/fail was never kept. */
 const LEGACY_LOOKBACK = 2000;
 const MAX_UNBOUNDED_QUANTIFIERS = 2;
@@ -94,8 +96,11 @@ export function checkSafePattern(pattern: string): string | null {
 const verdicts = new Map<string, string | null>();
 const VERDICT_CACHE_SIZE = 512;
 
-/** Characters a part of a pattern can match: sources of single-character atoms, or any. */
-type CharSet = readonly string[] | 'any';
+/**
+ * Characters a part of a pattern can match, as sorted, disjoint, inclusive ranges of UTF-16 code
+ * units (a pattern without the `u` flag matches code units).
+ */
+type CharSet = readonly (readonly [number, number])[];
 
 /** One atom of a sequence (a character, a class, a group) with its quantifier. */
 interface Atom {
@@ -134,7 +139,7 @@ function judgePattern(pattern: string): string | null {
     /** The current branch's last atom, until the next one starts (its quantifier may follow). */
     pending: Atom | null;
     /** Last characters of the variable-length atoms since the branch's last mandatory one. */
-    open: CharSet[];
+    open: CharSet;
     branchFirst: CharSet | null;
     branchLast: CharSet | null;
     branchConsumes: boolean;
@@ -161,6 +166,7 @@ function judgePattern(pattern: string): string | null {
     nullable: false,
   });
   let ambiguous = false;
+  const work: JudgeWork = { left: JUDGE_WORK };
   /** Adds the atom that just ended to its branch: what it may start and end with, and overlaps. */
   const settle = (f: Frame): void => {
     const a = f.pending;
@@ -171,17 +177,16 @@ function judgePattern(pattern: string): string | null {
     // A repeated part right after a variable-length one that can take the same characters gives
     // the matcher a choice at every such character: `a?a?a{16}`, `.*\s*`, `\d?\d{2}`,
     // `a+(?:b*a)`.
-    if ((quantified || a.variable) && f.open.some((o) => charsOverlap(o, a.first, ignoreCase))) {
+    if ((quantified || a.variable) && charsOverlap(f.open, a.first, ignoreCase, work)) {
       ambiguous = true;
     }
     if (a.min !== a.max || a.variable) {
-      if (min >= 1) f.open = [a.last];
-      else f.open.push(a.last);
+      f.open = min >= 1 ? a.last : unionChars(f.open, a.last, work);
     } else if (min >= 1) {
       f.open = [];
     }
-    if (f.branchFirst === null) f.branchFirst = min >= 1 ? a.first : 'any';
-    f.branchLast = min >= 1 ? a.last : 'any';
+    if (f.branchFirst === null) f.branchFirst = min >= 1 ? a.first : ANY_CHAR;
+    f.branchLast = min >= 1 ? a.last : ANY_CHAR;
     if (min >= 1) f.branchConsumes = true;
   };
   const endBranch = (f: Frame, end: number): void => {
@@ -191,8 +196,8 @@ function judgePattern(pattern: string): string | null {
     f.atom = 1;
     f.branches.push(pattern.slice(f.branchStart, end));
     f.branchStart = end + 1;
-    f.first = unionChars(f.first, f.branchFirst ?? 'any');
-    f.last = unionChars(f.last, f.branchLast ?? 'any');
+    f.first = unionChars(f.first, f.branchFirst ?? ANY_CHAR, work);
+    f.last = unionChars(f.last, f.branchLast ?? ANY_CHAR, work);
     if (!f.branchConsumes) f.nullable = true;
     f.open = [];
     f.branchFirst = null;
@@ -213,13 +218,10 @@ function judgePattern(pattern: string): string | null {
     settle(f);
     f.pending = { ...next, min: 1, max: 1 };
   };
-  const char = (source: string): Omit<Atom, 'min' | 'max'> => ({
-    first: [source],
-    last: [source],
-    consumes: true,
-    anchor: false,
-    variable: false,
-  });
+  const char = (source: string): Omit<Atom, 'min' | 'max'> => {
+    const chars = atomChars(source);
+    return { first: chars, last: chars, consumes: true, anchor: false, variable: false };
+  };
   const ANCHOR = { first: [], last: [], consumes: false, anchor: true, variable: false };
   while (i < pattern.length) {
     const ch = pattern[i] as string;
@@ -234,11 +236,11 @@ function judgePattern(pattern: string): string | null {
       continue;
     }
     if (ch === '[') {
-      // Skip the character class, honouring escapes.
+      // Skip the character class, honouring escapes. As in JavaScript, a `]` right after `[` or
+      // `[^` closes it (`[]` matches nothing, `[^]` anything); it is not a literal `]`.
       const start = i;
       i++;
       if (pattern[i] === '^') i++;
-      if (pattern[i] === ']') i++;
       while (i < pattern.length && pattern[i] !== ']') i += pattern[i] === '\\' ? 2 : 1;
       atom(1, char(pattern.slice(start, i + 1)));
       i++;
@@ -334,6 +336,9 @@ function judgePattern(pattern: string): string | null {
     return `at most ${MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers are allowed`;
   }
   endBranch(top(), pattern.length);
+  if (work.left <= 0) {
+    return 'pattern is too complex to check; use fewer character classes or alternatives';
+  }
   if (paths(top()) > MAX_PATHS) {
     return 'pattern allows too much backtracking; use fewer optional parts or alternatives';
   }
@@ -343,54 +348,183 @@ function judgePattern(pattern: string): string | null {
   return null;
 }
 
-function unionChars(a: CharSet, b: CharSet): CharSet {
-  if (a === 'any' || b === 'any') return 'any';
-  return [...new Set([...a, ...b])];
+/** What judging one pattern may cost, in range steps; past it the pattern is refused. */
+const JUDGE_WORK = 200_000;
+
+interface JudgeWork {
+  left: number;
 }
 
-/** Whether some character is in both sets. Unsure counts as yes. */
-function charsOverlap(a: CharSet, b: CharSet, ignoreCase: boolean): boolean {
-  if (a === 'any') return b === 'any' || b.length > 0;
-  if (b === 'any') return a.length > 0;
-  return a.some((x) => b.some((y) => atomsOverlap(x, y, ignoreCase)));
+const ANY_CHAR: CharSet = [[0, 0xffff]];
+const DIGIT: CharSet = [[0x30, 0x39]];
+const WORD: CharSet = [
+  [0x30, 0x39],
+  [0x41, 0x5a],
+  [0x5f, 0x5f],
+  [0x61, 0x7a],
+];
+const SPACE: CharSet = [
+  [0x09, 0x0d],
+  [0x20, 0x20],
+  [0xa0, 0xa0],
+  [0x1680, 0x1680],
+  [0x2000, 0x200a],
+  [0x2028, 0x2029],
+  [0x202f, 0x202f],
+  [0x205f, 0x205f],
+  [0x3000, 0x3000],
+  [0xfeff, 0xfeff],
+];
+const LINE_END: CharSet = [
+  [0x0a, 0x0a],
+  [0x0d, 0x0d],
+  [0x2028, 0x2029],
+];
+
+function unionChars(a: CharSet, b: CharSet, work?: JudgeWork): CharSet {
+  if (a.length === 0) return b;
+  if (b.length === 0) return a;
+  const all = [...a, ...b].sort((x, y) => x[0] - y[0]);
+  if (work) work.left -= all.length;
+  const out: [number, number][] = [];
+  for (const [lo, hi] of all) {
+    const prev = out[out.length - 1];
+    if (prev && lo <= prev[1] + 1) prev[1] = Math.max(prev[1], hi);
+    else out.push([lo, hi]);
+  }
+  return out;
 }
 
-const overlaps = new Map<string, boolean>();
+function complementChars(a: CharSet): CharSet {
+  const out: [number, number][] = [];
+  let next = 0;
+  for (const [lo, hi] of a) {
+    if (lo > next) out.push([next, lo - 1]);
+    next = hi + 1;
+  }
+  if (next <= 0xffff) out.push([next, 0xffff]);
+  return out;
+}
+
+/** Whether some character is in both sets, walking both range lists once. */
+function charsOverlap(a: CharSet, b: CharSet, ignoreCase: boolean, work: JudgeWork): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  // Case folding is not modelled: with it, any two non-empty sets may share a character.
+  if (ignoreCase) return true;
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    work.left--;
+    const [alo, ahi] = a[i] as readonly [number, number];
+    const [blo, bhi] = b[j] as readonly [number, number];
+    if (alo <= bhi && blo <= ahi) return true;
+    if (ahi < bhi) i++;
+    else j++;
+  }
+  return false;
+}
 
 /**
- * Whether two single-character atoms (a character, an escape, a class or `.`) can match the same
- * character. A plain character is tried against the other atom; otherwise every UTF-16 code unit
- * is (a pattern without the `u` flag matches code units).
+ * The characters a single-character atom matches: a character, an escape, a class or `.`.
+ * Anything it cannot read counts as every character.
  */
-function atomsOverlap(x: string, y: string, ignoreCase: boolean): boolean {
-  const key = `${ignoreCase ? 'i' : ''}\u0000${x}\u0000${y}`;
-  const known = overlaps.get(key);
-  if (known !== undefined) return known;
-  const result = singleCharsOverlap(x, y, ignoreCase);
-  if (overlaps.size >= VERDICT_CACHE_SIZE) overlaps.clear();
-  overlaps.set(key, result);
-  return result;
+function atomChars(source: string): CharSet {
+  if (source === '.') return complementChars(LINE_END);
+  if (source.startsWith('[')) return classChars(source) ?? ANY_CHAR;
+  if (source.startsWith('\\')) {
+    const set = escapeSet(source[1] ?? '');
+    if (set) return set;
+    const code = escapeCode(source.slice(1), false);
+    return code === null ? ANY_CHAR : [[code, code]];
+  }
+  const code = source.charCodeAt(0);
+  return [[code, code]];
 }
 
-function singleCharsOverlap(x: string, y: string, ignoreCase: boolean): boolean {
-  try {
-    const flags = ignoreCase ? 'i' : '';
-    const rx = new RegExp(`^(?:${x})$`, flags);
-    const ry = new RegExp(`^(?:${y})$`, flags);
-    const plain = (s: string): string | null =>
-      s.length === 1 && s !== '.' ? s : /^\\\W$/.test(s) ? (s[1] as string) : null;
-    const px = plain(x);
-    if (px !== null) return ry.test(px);
-    const py = plain(y);
-    if (py !== null) return rx.test(py);
-    for (let c = 0; c <= 0xffff; c++) {
-      const s = String.fromCharCode(c);
-      if (rx.test(s) && ry.test(s)) return true;
-    }
-    return false;
-  } catch {
-    return true;
+/** `\d`, `\w`, `\s` and their negations. */
+function escapeSet(letter: string): CharSet | null {
+  switch (letter) {
+    case 'd':
+      return DIGIT;
+    case 'D':
+      return complementChars(DIGIT);
+    case 'w':
+      return WORD;
+    case 'W':
+      return complementChars(WORD);
+    case 's':
+      return SPACE;
+    case 'S':
+      return complementChars(SPACE);
+    default:
+      return null;
   }
+}
+
+/** The code unit an escape (without its backslash) stands for, or null if it cannot tell. */
+function escapeCode(body: string, inClass: boolean): number | null {
+  const letter = body[0] ?? '';
+  const simple: Record<string, number> = { n: 10, r: 13, t: 9, v: 11, f: 12, '0': 0 };
+  if (letter in simple && !(letter === '0' && /^0\d/.test(body))) return simple[letter] as number;
+  if (letter === 'b') return inClass ? 8 : null;
+  if (letter === 'x') return /^x[0-9a-fA-F]{2}$/.test(body) ? parseInt(body.slice(1), 16) : null;
+  if (letter === 'u') return /^u[0-9a-fA-F]{4}$/.test(body) ? parseInt(body.slice(1), 16) : null;
+  if (letter === 'c') return /^c[A-Za-z]$/.test(body) ? body.charCodeAt(1) % 32 : null;
+  if (letter === '' || /[0-9A-Za-z]/.test(letter)) return null;
+  return letter.charCodeAt(0);
+}
+
+/** The characters of a class such as `[^a-z_\d]`, or null when it cannot be read. */
+function classChars(source: string): CharSet | null {
+  if (!source.endsWith(']')) return null;
+  let i = 1;
+  const negated = source[i] === '^';
+  if (negated) i++;
+  const end = source.length - 1;
+  // `[]` matches nothing and `[^]` everything.
+  if (i === end) return negated ? ANY_CHAR : [];
+  let set: CharSet = [];
+  /** Reads one item: a code unit, or a set (`\d`); advances `i`. */
+  const item = (): number | CharSet | null => {
+    const ch = source[i] as string;
+    if (ch !== '\\') {
+      i++;
+      return ch.charCodeAt(0);
+    }
+    const letter = source[i + 1] ?? '';
+    const asSet = escapeSet(letter);
+    if (asSet) {
+      i += 2;
+      return asSet;
+    }
+    const length = letter === 'x' ? 4 : letter === 'u' ? 6 : letter === 'c' ? 3 : 2;
+    const code = escapeCode(source.slice(i + 1, i + length), true);
+    i += length;
+    return code;
+  };
+  while (i < end) {
+    const lo = item();
+    if (lo === null) return null;
+    if (typeof lo !== 'number') {
+      set = unionChars(set, lo);
+      continue;
+    }
+    if (source[i] === '-' && i + 1 < end) {
+      i++;
+      const hi = item();
+      if (hi === null) return null;
+      if (typeof hi === 'number') {
+        if (hi < lo) return null;
+        set = unionChars(set, [[lo, hi]]);
+        continue;
+      }
+      // `[a-\d]`: the dash is a plain character.
+      set = unionChars(unionChars(set, [[lo, lo]]), unionChars([[0x2d, 0x2d]], hi));
+      continue;
+    }
+    set = unionChars(set, [[lo, lo]]);
+  }
+  return negated ? complementChars(set) : set;
 }
 
 /**
@@ -537,24 +671,25 @@ export class ContractService {
       case 'pattern_present':
       case 'pattern_absent': {
         const pattern = spec.pattern ?? '';
-        const rejected = checkSafePattern(pattern);
+        const rejected = this.patternVerdict(pattern);
         if (rejected !== null) {
           return {
             state: 'error',
             message: `pattern rejected as too expensive to evaluate safely: ${sanitizeLine(pattern, 120)} (${rejected}); add a contract with a simpler pattern`,
           };
         }
-        // A pattern that once ran out of time is not run again: every edit would pay the budget.
+        // A pattern that ran out of time on this content is not run on it again, or every hook
+        // would pay the whole budget; any change to the file runs it again.
         const tooSlow = {
           state: 'error' as const,
-          message: `pattern took longer than ${PATTERN_BUDGET_MS} ms on ${rel} and is no longer run; add a contract with a simpler pattern`,
+          message: `pattern took longer than ${PATTERN_BUDGET_MS} ms on ${rel}; it runs again when the file changes`,
         };
-        const patternHash = sha256(pattern);
+        const run = sha256(`${pattern}\u0000${content}`);
         const contracts = this.k.store.contracts;
-        if (contracts.slowPattern(contract.id) === patternHash) return tooSlow;
+        if (contracts.slowRun(contract.id) === run) return tooSlow;
         const found = matchLines(pattern, content);
         if (found === 'timeout') {
-          contracts.setSlowPattern(contract.id, patternHash);
+          contracts.setSlowRun(contract.id, run);
           return tooSlow;
         }
         if (found === 'error') return { state: 'error', message: 'pattern could not be evaluated' };
@@ -584,6 +719,19 @@ export class ContractService {
           : { state: 'failing', message: `${rel} no longer exports ${symbol}` };
       }
     }
+  }
+
+  /**
+   * `checkSafePattern` for a stored pattern, judged once and kept by pattern hash, so a hook (a
+   * fresh process each time) does not judge the same pattern again.
+   */
+  private patternVerdict(pattern: string): string | null {
+    const key = `${PATTERN_VERDICT_PREFIX}${sha256(pattern)}`;
+    const kept = this.k.store.kv.get<{ verdict: string | null }>(key);
+    if (kept && (kept.verdict === null || typeof kept.verdict === 'string')) return kept.verdict;
+    const verdict = checkSafePattern(pattern);
+    this.k.store.kv.set(key, { verdict });
+    return verdict;
   }
 
   /**

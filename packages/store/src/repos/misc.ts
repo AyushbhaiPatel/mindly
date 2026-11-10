@@ -384,23 +384,23 @@ export class ContractRepo {
   }
 
   /**
-   * The hash of a pattern that ran out of time on this contract, so it is not run again; null when
-   * none did.
+   * The hash of the pattern and file content a check of this contract last ran out of time on,
+   * so that check is not repeated; null when none did.
    */
-  slowPattern(id: string): string | null {
+  slowRun(id: string): string | null {
     const r = this.db.prepare('SELECT value FROM kv WHERE key = ?').get(slowKey(id)) as
       Row | undefined;
     const v = r ? json<unknown>(r, 'value', null) : null;
     return typeof v === 'string' ? v : null;
   }
 
-  setSlowPattern(id: string, patternHash: string): void {
+  setSlowRun(id: string, runHash: string): void {
     this.db
       .prepare(
         `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)
          ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
-      .run(slowKey(id), toJson(patternHash), this.clock.now());
+      .run(slowKey(id), toJson(runHash), this.clock.now());
   }
 
   /** Drops what is remembered for contracts that no longer exist (deleted with their memory). */
