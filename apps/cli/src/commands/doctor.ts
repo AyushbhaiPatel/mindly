@@ -144,6 +144,78 @@ function skippedStoreItems(why: StoreSkip): DoctorItem[] {
   ];
 }
 
+/** What stopped the database from being read, as far as the advice to give depends on it. */
+export type DatabaseErrorKind = 'busy' | 'permission' | 'damaged' | 'other';
+
+const SQLITE_PERM = 3;
+const SQLITE_BUSY = 5;
+const SQLITE_LOCKED = 6;
+const SQLITE_READONLY = 8;
+const SQLITE_CORRUPT = 11;
+const SQLITE_AUTH = 23;
+const SQLITE_NOTADB = 26;
+
+/**
+ * Tells a busy database from one Mindly may not read and from a damaged file. They need opposite
+ * advice: moving a database away is right for a damaged file and loses everything when the file
+ * was only busy.
+ */
+export function classifyDatabaseError(err: unknown): DatabaseErrorKind {
+  const e = (err ?? {}) as { code?: unknown; errcode?: unknown; message?: unknown };
+  const code = typeof e.code === 'string' ? e.code : '';
+  // node:sqlite reports SQLite's (possibly extended) result code; the primary code is its low byte.
+  const primary = typeof e.errcode === 'number' ? e.errcode & 0xff : -1;
+  const message = typeof e.message === 'string' ? e.message : '';
+  if (primary === SQLITE_BUSY || primary === SQLITE_LOCKED) return 'busy';
+  if (/database (table )?is (locked|busy)/i.test(message)) return 'busy';
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'permission';
+  if (primary === SQLITE_PERM || primary === SQLITE_READONLY || primary === SQLITE_AUTH) {
+    return 'permission';
+  }
+  if (primary === SQLITE_CORRUPT || primary === SQLITE_NOTADB) return 'damaged';
+  if (/malformed|not a database/i.test(message)) return 'damaged';
+  return 'other';
+}
+
+function damagedItem(what: string, dbPath: string): DoctorItem {
+  return item(
+    { name: 'database', status: 'fail', detail: what },
+    'Setup',
+    `The database file cannot be read as a Mindly database: ${what}`,
+    `Check ${dbPath}; if it is damaged, move it away and Mindly starts a new one`,
+  );
+}
+
+/** The `database` check for an error met while reading the database, with advice that fits it. */
+export function databaseErrorItem(err: unknown, dbPath: string): DoctorItem {
+  const what = describeError(err);
+  switch (classifyDatabaseError(err)) {
+    case 'busy':
+      return item(
+        { name: 'database', status: 'fail', detail: what },
+        'Setup',
+        'The database is busy: another Mindly process is holding it',
+        'Close other Mindly processes (mindly daemon stop) and run mindly doctor again',
+      );
+    case 'permission':
+      return item(
+        { name: 'database', status: 'fail', detail: what },
+        'Setup',
+        `Mindly is not allowed to read or write ${dbPath}: ${what}`,
+        `Make ${dbPath} and its folder readable and writable by you (and not on a read-only disk)`,
+      );
+    case 'damaged':
+      return damagedItem(what, dbPath);
+    case 'other':
+      return item(
+        { name: 'database', status: 'fail', detail: what },
+        'Setup',
+        `The database cannot be opened: ${what}`,
+        `Close other Mindly processes (mindly daemon stop) and check ${dbPath}`,
+      );
+  }
+}
+
 /** A version further ahead of this Mindly's than this is damage, not a newer release. */
 const MAX_VERSIONS_AHEAD = 1000;
 
@@ -156,21 +228,7 @@ const MAX_VERSIONS_AHEAD = 1000;
 function databaseCheck(dbPath: string): DatabaseCheck {
   const latest = MIGRATIONS.length;
   const failed = (err: unknown): DatabaseCheck => ({
-    item: item(
-      { name: 'database', status: 'fail', detail: describeError(err) },
-      'Setup',
-      `The database cannot be opened: ${describeError(err)}`,
-      `Close other Mindly processes (mindly daemon stop) and check ${dbPath}`,
-    ),
-    skipped: 'unusable',
-  });
-  const damaged = (what: string): DatabaseCheck => ({
-    item: item(
-      { name: 'database', status: 'fail', detail: what },
-      'Setup',
-      `The database file cannot be read as a Mindly database: ${what}`,
-      `Check ${dbPath}; if it is damaged, move it away and Mindly starts a new one`,
-    ),
+    item: databaseErrorItem(err, dbPath),
     skipped: 'unusable',
   });
   let found: number | null;
@@ -185,11 +243,14 @@ function databaseCheck(dbPath: string): DatabaseCheck {
       found = confirmSchemaVersion(dbPath, { busyTimeoutMs: 2000 });
     }
   } catch (err) {
-    return damaged(describeError(err));
+    return failed(err);
   }
   // No Mindly wrote a version this far ahead: the number is not a version.
   if (found !== null && found > latest + MAX_VERSIONS_AHEAD) {
-    return damaged(`schema version ${found} is not one Mindly writes`);
+    return {
+      item: damagedItem(`schema version ${found} is not one Mindly writes`, dbPath),
+      skipped: 'unusable',
+    };
   }
   if (found !== null && found > latest) {
     return {

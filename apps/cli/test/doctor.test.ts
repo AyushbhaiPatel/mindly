@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { MIGRATIONS } from '@mindly/store';
-import { modeIfThere } from '../src/commands/doctor.js';
+import { classifyDatabaseError, databaseErrorItem, modeIfThere } from '../src/commands/doctor.js';
 import { cli, sandbox, tempDir } from './helpers.js';
 
 function json<T = Record<string, unknown>>(text: string): T {
@@ -340,4 +340,61 @@ describe('doctor', () => {
       }
     }
   }, 60_000);
+
+  it('doctor tells a busy database from a damaged one and from one it may not read', async () => {
+    const sqlite = (errcode: number, message: string): Error =>
+      Object.assign(new Error(message), { code: 'ERR_SQLITE_ERROR', errcode, errstr: message });
+    const fsError = (code: string): Error =>
+      Object.assign(new Error(`${code}: operation not permitted`), { code });
+    expect(classifyDatabaseError(sqlite(5, 'database is locked'))).toBe('busy');
+    expect(classifyDatabaseError(sqlite(6, 'database table is locked'))).toBe('busy');
+    expect(classifyDatabaseError(sqlite(517, 'database is locked'))).toBe('busy');
+    for (const code of ['EACCES', 'EPERM', 'EROFS']) {
+      expect(classifyDatabaseError(fsError(code)), code).toBe('permission');
+    }
+    expect(classifyDatabaseError(sqlite(8, 'attempt to write a readonly database'))).toBe(
+      'permission',
+    );
+    expect(classifyDatabaseError(sqlite(26, 'file is not a database'))).toBe('damaged');
+    expect(classifyDatabaseError(sqlite(11, 'database disk image is malformed'))).toBe('damaged');
+    expect(classifyDatabaseError(sqlite(14, 'unable to open database file'))).toBe('other');
+
+    const advice = (err: Error): string => {
+      const i = databaseErrorItem(err, '/home/me/.mindly/mindly.db');
+      return `${i.text} ${i.fix?.cmd ?? ''} ${i.fix?.why ?? ''}`;
+    };
+    expect(advice(sqlite(5, 'database is locked'))).toContain('mindly daemon stop');
+    expect(advice(sqlite(5, 'database is locked'))).not.toContain('move it away');
+    expect(advice(fsError('EACCES'))).toContain('/home/me/.mindly/mindly.db');
+    expect(advice(fsError('EACCES'))).not.toContain('move it away');
+    expect(advice(sqlite(26, 'file is not a database'))).toContain('move it away');
+
+    // End to end: an older database (rollback journal) that another process holds.
+    const sb = sandbox();
+    expect((await cli(sb, ['init', '--yes'])).code).toBe(0);
+    const path = join(sb.mindlyHome, 'mindly.db');
+    for (const f of [path, `${path}-wal`, `${path}-shm`]) rmSync(f, { force: true });
+    const latest = MIGRATIONS.length;
+    const old = new DatabaseSync(path);
+    try {
+      for (const sql of MIGRATIONS.slice(0, latest - 1)) old.exec(sql);
+      old.exec(`PRAGMA user_version = ${latest - 1}`);
+    } finally {
+      old.close();
+    }
+    chmodSync(path, 0o600);
+    const holder = new DatabaseSync(path);
+    holder.exec('BEGIN EXCLUSIVE');
+    holder.exec('PRAGMA user_version = 1');
+    try {
+      const said = (await cli(sb, ['doctor'])).stdout.replace(/\s+/g, ' ');
+      expect(said).toContain('The database is busy');
+      expect(said).toContain('mindly daemon stop');
+      expect(said).not.toContain('move it away');
+      expect(said).not.toContain('cannot be read as a Mindly database');
+    } finally {
+      holder.exec('ROLLBACK');
+      holder.close();
+    }
+  }, 30_000);
 });
