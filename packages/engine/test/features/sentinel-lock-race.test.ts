@@ -173,6 +173,84 @@ describe('sentinel lock races', () => {
     }
   });
 
+  it('never leaves its lock behind when it lets go while a takeover has it aside', () => {
+    const file = lockFile();
+    const a = tryProcessLock(file)!;
+    // An observer in another namespace saw the lock unchanged for the window; A was only slow,
+    // and touches it while it is judged under the guard, so the takeover will put it back.
+    let mono = 0;
+    const observer = {
+      namespace: () => 'pid:[4026532002]',
+      host: () => 'host-1',
+      monotonic: () => mono,
+    };
+    expect(tryProcessLock(file, observer)).toBeNull();
+    mono += 6 * SENTINEL_LOCK_HEARTBEAT_MS + 1000;
+    let reads = 0;
+    let releasedAside = false;
+    hook.fn = (op, path) => {
+      // The takeover has the lock aside; at that moment A lets go.
+      if (op === 'read' && path.startsWith(`${file}.stale-`) && !releasedAside) {
+        releasedAside = true;
+        hook.fn = null;
+        a.release();
+      }
+    };
+    try {
+      const r = tryProcessLock(file, {
+        ...observer,
+        monotonic: () => {
+          if (++reads === 2) {
+            const t = new Date(Date.now() + 1000);
+            fs.utimesSync(file, t, t);
+          }
+          return mono;
+        },
+      });
+      expect(r).toBeNull();
+    } finally {
+      hook.fn = null;
+    }
+    expect(releasedAside).toBe(true);
+    // Not put back: A let go of it. Nothing of it is left, and the lock is free.
+    expect(fs.readdirSync(join(file, '..')).filter((f) => !f.startsWith('lock.seen-'))).toEqual([]);
+    tryProcessLock(file)!.release();
+  });
+
+  it('treats a lock put back after its holder let go of it as free', () => {
+    const file = lockFile();
+    // A holder in another process of this machine and namespace let go of its lock while it was
+    // aside, and another process put it back. Its PID lives (here: this process's parent).
+    const id = 'abababababababababababab';
+    const here = { namespace: () => 'pid:[1]', host: () => 'host-1', alive: () => true };
+    fs.writeFileSync(file, [process.ppid, id, '', 'pid:[1]', 'host-1'].join('\n'));
+    expect(tryProcessLock(file, here)).toBeNull();
+    fs.writeFileSync(`${file}.released-${id}`, '');
+    const lock = tryProcessLock(file, here)!;
+    expect(lock).not.toBeNull();
+    lock.release();
+    expect(fs.readdirSync(join(file, '..'))).toEqual([]);
+  });
+
+  it('looks for a lock it let go of while it was away, and removes it once back', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const file = lockFile();
+      const a = tryProcessLock(file)!;
+      const mine = fs.readFileSync(file, 'utf8');
+      const id = mine.split('\n')[1] as string;
+      // Away while A lets go (another process has it aside), back a second later.
+      fs.renameSync(file, `${file}.away`);
+      a.release();
+      expect(fs.existsSync(`${file}.released-${id}`)).toBe(true);
+      fs.renameSync(`${file}.away`, file);
+      vi.advanceTimersByTime(1000);
+      expect(fs.readdirSync(join(file, '..'))).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not count a lock that is away for a moment as lost', () => {
     const file = lockFile();
     const lock = tryProcessLock(file)!;
