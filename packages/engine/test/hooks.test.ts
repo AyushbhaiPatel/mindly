@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { Mindly, USER } from '../src/index.js';
+import { SEARCH_LIMITS } from '../src/hooks/search.js';
 import { event, FakeClock, fakeGit, setup, shellTool, writeTool } from './helpers.js';
 
 describe('hook flow', () => {
@@ -302,11 +303,8 @@ describe('hook flow', () => {
     }
     // A rule that names its directory also holds for files a command brings into it.
     for (const command of [
-      'cp -r /tmp/prisma packages/db',
       'cp -R /tmp/migrations packages/db/prisma/',
-      'rsync -a /tmp/db/ packages/db/',
       'tar xf a.tar -C packages/db/prisma/migrations',
-      'unzip -o a.zip -d packages/db',
       'find packages/db -type f -delete',
       'git checkout HEAD~1 packages',
       'git rm -r packages',
@@ -321,8 +319,14 @@ describe('hook flow', () => {
       expect(r.decision, command).toBe('deny');
       expect(r.reason, command).toContain('Applied migrations are never edited');
     }
-    // A directory handed to a program that may walk it is worth a warning.
-    for (const command of ['rimraf packages/db/prisma', 'rimraf packages', 'tar xzf a.tgz']) {
+    // Files of unknown names put around it may or may not land in it: worth a warning.
+    for (const command of [
+      'cp -r /tmp/prisma packages/db',
+      'rsync -a /tmp/db/ packages/db/',
+      'unzip -o a.zip -d packages/db',
+      'tar xzf a.tgz',
+      'mytool packages/db/prisma',
+    ]) {
       const r = await shell(command);
       expect(r.decision, command).toBeNull();
       expect(r.context, command).toContain('Applied migrations are never edited');
@@ -426,17 +430,15 @@ describe('hook flow', () => {
     expect((await shell('rm -f *.log')).decision).toBeNull();
     expect((await shell('rm -f *.env')).decision).toBeNull();
     // A formatter only rewrites the kinds of file it knows: a covered file of another kind is
-    // worth a warning, a change of mode too, and neither is a block.
-    for (const command of [
-      'prettier --write .',
-      'eslint --fix .',
-      'chmod -R 755 .',
-      'black dist',
-    ]) {
+    // none of its business. A change of mode is a warning, not a block.
+    for (const command of ['prettier --write .', 'eslint --fix .', 'black dist']) {
       const r = await shell(command);
       expect(r.decision, command).toBeNull();
-      expect(r.context, command).toContain('Certificates are issued by hand');
+      expect(r.context ?? '', command).not.toContain('Certificates are issued by hand');
     }
+    const mode = await shell('chmod -R 755 .');
+    expect(mode.decision).toBeNull();
+    expect(mode.context).toContain('Certificates are issued by hand');
     for (const command of ['git checkout .', 'git restore .', 'rm -rf *']) {
       expect((await shell(command)).decision, command).toBe('deny');
     }
@@ -459,23 +461,115 @@ describe('hook flow', () => {
     writeFileSync(join(root, 'dist', 'deep', 'a.js'), '');
     const shell = (command: string) =>
       mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
-    // The clock runs out while the first folder is being read.
-    let t = 0;
-    const clock = vi.spyOn(performance, 'now').mockImplementation(() => (t += 10_000));
+    // A search budget too small for the folder: what it found is not the whole answer.
+    const before = { ...SEARCH_LIMITS };
+    SEARCH_LIMITS.entries = 1;
     try {
       const r = await shell('rm -rf dist');
       expect(r.decision).toBeNull();
-      expect(r.context).toContain('could not finish looking through dist/**');
+      expect(r.context).toContain('could not search all of dist');
       expect(r.context).toContain('Certificates are issued by hand');
       // What the command names outright is still blocked, with or without a search.
       writeFileSync(join(root, 'dist', 'server.pem'), '');
       expect((await shell('rm dist/server.pem')).decision).toBe('deny');
+      // A target whose search found a covered file is blocked, whatever another one did.
+      mkdirSync(join(root, 'certs'));
+      writeFileSync(join(root, 'certs', 'a.pem'), '');
+      const both = await shell('rm -rf dist certs');
+      expect(both.decision).toBe('deny');
+      expect(both.reason).toContain('certs/a.pem');
       // A possible write that could not be looked through says nothing.
       expect((await shell('mytool dist')).context ?? '').not.toContain('Certificates');
     } finally {
-      clock.mockRestore();
+      Object.assign(SEARCH_LIMITS, before);
     }
     expect((await shell('rm -rf dist')).decision).toBe('deny');
+  });
+
+  it('searches each target on its own, so a large folder never hides a small one', async () => {
+    const { root, mindly } = setup();
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Certificates are issued by hand',
+      body: 'Ask first.',
+      scopePaths: ['**/*.pem'],
+      source: USER,
+      enforce: true,
+    });
+    // A folder that sorts first and is larger than one search may look at.
+    mkdirSync(join(root, 'build'));
+    for (let i = 0; i < 3000; i++) writeFileSync(join(root, 'build', `f${i}.o`), '');
+    mkdirSync(join(root, 'certs'));
+    writeFileSync(join(root, 'certs', 'server.pem'), '');
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    const before = { ...SEARCH_LIMITS };
+    SEARCH_LIMITS.entries = 1000;
+    try {
+      for (const command of [
+        'rm -rf build certs',
+        'rm -rf certs build',
+        'rm -rf build && rm -rf certs',
+        'rm -rf *',
+        "find . -name '*.pem' -delete",
+        'rm -f */*.pem',
+      ]) {
+        const r = await shell(command);
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('certs/server.pem');
+      }
+      const big = await shell('rm -rf build');
+      expect(big.decision).toBeNull();
+      expect(big.context).toContain('could not search all of build');
+    } finally {
+      Object.assign(SEARCH_LIMITS, before);
+    }
+  });
+
+  it('answers within its time, and says what it did not get to', async () => {
+    const { root, mindly } = setup();
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Certificates are issued by hand',
+      body: 'Ask first.',
+      scopePaths: ['**/*.pem'],
+      source: USER,
+      enforce: true,
+    });
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    // A clock that has always run out: nothing is read, and the agent is told so.
+    let t = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => (t += 10_000));
+    try {
+      const r = await shell('rm -rf certs');
+      expect(r.decision).toBeNull();
+      expect(r.context).toContain('did not read this whole command');
+    } finally {
+      clock.mockRestore();
+    }
+    // Commands built to be slow end well inside the hook's deadline, with a warning.
+    for (const command of [
+      'cd a;'.repeat(40_000) + 'rm certs/a.pem',
+      `rm ${'../'.repeat(60_000)}certs/a.pem`,
+      `rm -rf ${'**/'.repeat(40)}*.pem`,
+      `rm -rf ${'*a'.repeat(60)}*`,
+      `${'echo x; '.repeat(25_000)}rm certs/a.pem`,
+      `rm ${'{a,'.repeat(200)}b${'}'.repeat(200)}`,
+    ]) {
+      const started = performance.now();
+      const r = await shell(command);
+      expect(performance.now() - started, command.slice(0, 40)).toBeLessThan(1200);
+      expect(r.decision, command.slice(0, 40)).toBeNull();
+    }
+    const cds = await shell('cd a;'.repeat(40_000) + 'rm certs/a.pem');
+    expect(cds.context).toContain('did not read this whole command');
   });
 
   it('says so when a command is too long or too large to read to its end', async () => {

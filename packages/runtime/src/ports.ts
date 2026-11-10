@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import type { UserConfig } from '@mindly/core';
+import { isMindlyError, type UserConfig } from '@mindly/core';
 import type { GitPort, LlmPort, NotifierPort } from '@mindly/engine';
 import {
   addWorktree,
@@ -245,6 +245,30 @@ export function createGitPort(): GitPort {
         }
         return trees;
       }, null),
+    listFiles: async (root, query) => {
+      const how = {
+        known: ['--cached', '--others', '--exclude-standard'],
+        ignored: ['--others', '--ignored', '--exclude-standard', '--directory'],
+        changed: ['--modified', '--deleted'],
+        tracked: ['--cached'],
+      }[query.kind];
+      try {
+        const res = await runGit(['ls-files', '-z', ...how, '--', ...query.pathspecs], {
+          cwd: root,
+          timeoutMs: query.timeoutMs,
+          maxBuffer: 4 * 1024 * 1024,
+          // The one place pathspecs are patterns: each carries its own magic prefix.
+          env: { GIT_LITERAL_PATHSPECS: '0' },
+        });
+        return { files: res.stdout.split('\0').filter((f) => f !== ''), complete: true };
+      } catch (err) {
+        // Too slow or too much to list: what is there is not known. Anything else: no git here.
+        const cut =
+          isMindlyError(err, 'timeout') ||
+          (isMindlyError(err) && err.message.includes('size limit'));
+        return cut ? { files: [], complete: false } : null;
+      }
+    },
     currentBranch: (cwd) => safe(() => currentBranch(cwd), null),
     headCommit: (cwd) => safe(() => headCommit(cwd), null),
     changedFiles: (cwd) => safe(async () => (await changedFiles(cwd)).map((f) => f.path), []),

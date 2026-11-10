@@ -15,7 +15,11 @@ vi.mock('node:fs', async (importOriginal) => {
     listed.push(String(args[0]));
     return actual.readdirSync(...args);
   };
-  return { ...actual, readdirSync };
+  const opendirSync = (...args: Parameters<typeof actual.opendirSync>) => {
+    listed.push(String(args[0]));
+    return actual.opendirSync(...args);
+  };
+  return { ...actual, readdirSync, opendirSync };
 });
 
 function project() {

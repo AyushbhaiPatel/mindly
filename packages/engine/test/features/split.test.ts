@@ -486,7 +486,6 @@ describe('split through hook events', () => {
       ['rm -rf src/api', 'src/api/**'],
       ['rm -rf src', 'src/**'],
       ['rm -rf src/api/not-there-yet', 'src/api/not-there-yet/**'],
-      ['cp -r /tmp/api src/', 'src/api/**'],
       ['git checkout HEAD~1 src', 'src/**'],
       // A wildcard stands for the files it expands to.
       ['rm src/api/*.ts', 'src/api/billing.ts'],
@@ -516,8 +515,27 @@ describe('split through hook events', () => {
       'rm -rf packages/*/dist',
       "find . -name '*.js' -delete",
       'for f in src/*.ts; do echo $f; done',
-      'git clean -fd',
+      // A formatter over the whole tree only rewrites the kinds of file it knows.
+      'black .',
+      'gofmt -w .',
     ]) {
+      const r = await shell(command);
+      expect(r.decision ?? null, command).toBeNull();
+      expect(r.context ?? '', command).not.toContain('owned by part');
+      expect(r.context ?? '', command).not.toContain('reaches files owned');
+    }
+    // Files of unknown names put into the tree may land on another part's files: a warning.
+    for (const command of [
+      'tar xzf /tmp/file.tgz',
+      'unzip -q /tmp/a.zip',
+      'cp -R /tmp/tpl/* .',
+      'cp -r /tmp/api src/',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision ?? null, command).toBeNull();
+      expect(r.context ?? '', command).toContain('reaches files owned');
+    }
+    for (const command of [] as string[]) {
       const r = await shell(command);
       expect(r.decision ?? null, command).toBeNull();
       expect(r.context ?? '', command).not.toContain('owned by part');

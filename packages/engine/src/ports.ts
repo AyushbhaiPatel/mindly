@@ -32,6 +32,23 @@ export interface GitPort {
    * path outside the session's tree belongs to the project is known from one call.
    */
   workingTrees?(cwd: string): Promise<string[] | null>;
+  /**
+   * Paths (relative to `root`, a working tree) that git lists for `pathspecs`, without walking
+   * ignored directories. `known`: tracked files and untracked files that are not ignored.
+   * `ignored`: ignored files, and each ignored directory as one entry ending in `/`. `changed`:
+   * tracked files that differ from the index or are gone. `tracked`: tracked files. `complete`
+   * is false when the listing
+   * was cut by the time limit or its size; null when git cannot be asked at all. Optional: with
+   * it, looking for the files a rule covers costs what the rule matches, not the size of the tree.
+   */
+  listFiles?(
+    root: string,
+    query: {
+      kind: 'known' | 'ignored' | 'changed' | 'tracked';
+      pathspecs: string[];
+      timeoutMs: number;
+    },
+  ): Promise<{ files: string[]; complete: boolean } | null>;
   currentBranch(cwd: string): Promise<string | null>;
   headCommit(cwd: string): Promise<string | null>;
   /** Project-relative paths with uncommitted changes (staged, unstaged, untracked). */

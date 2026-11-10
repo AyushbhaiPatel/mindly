@@ -144,6 +144,14 @@ describe('linked worktrees', () => {
       expect((await shell(wt, `touch ${elsewhere.join(' ')} ${dir}/auth.ts`)).decision).toBe(
         'deny',
       );
+      // git decides what a whole-tree command really touches: `git clean` leaves tracked files,
+      // `git checkout .` only brings back what differs from the index.
+      expect((await shell(dir, 'git clean -fdx')).decision).toBeNull();
+      expect((await shell(dir, 'git checkout -- .')).decision).toBeNull();
+      writeFileSync(join(dir, 'auth.ts'), 'export const changed = 1;\n');
+      expect((await shell(dir, 'git checkout -- .')).decision).toBe('deny');
+      expect((await shell(dir, 'git stash push auth.ts')).decision).toBe('deny');
+      expect((await shell(dir, 'git restore --staged auth.ts')).decision).toBeNull();
     } finally {
       mindly.close();
     }

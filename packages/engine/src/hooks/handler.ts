@@ -1,6 +1,6 @@
-import { existsSync, lstatSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, opendirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import {
   EMPTY_HOOK_RESULT,
   globToRegExp,
@@ -33,8 +33,15 @@ import {
   shellMayWrite,
   shellMayWriteFiles,
 } from './shell.js';
-import { isLiteralScope } from './scope.js';
-import { globsReaching, scopeLabel, ScopeSearch, type WrittenScope } from './search.js';
+import { isLiteralScope, patternSegments } from './scope.js';
+import {
+  collapse,
+  globsReaching,
+  isWholeTree,
+  scopeLabel,
+  ScopeSearch,
+  type WrittenScope,
+} from './search.js';
 import type { RuleService } from '../memory/rules.js';
 import type { ProjectContext, ProjectService } from '../projects.js';
 
@@ -57,6 +64,18 @@ const MAX_RECORDED_PATHS = 50;
 const MAX_TREE_LOOKUPS = 16;
 /** Files of one shell command that are checked again (decisions, exports) after it ran. */
 const MAX_SHELL_CHANGED = 20;
+/**
+ * Time the checks before a tool may take: reading the command, placing its paths and searching
+ * for covered files. It is well under the hook's own deadline (`hooks.timeoutMs`, of which it is
+ * at most this share), so the answer is given by Mindly and not cut off by the timer. What is not
+ * read or searched when it runs out becomes a warning.
+ */
+const PRE_TOOL_BUDGET_MS = 900;
+const PRE_TOOL_SHARE = 0.6;
+/** Wildcard segments one written pattern may have; a deeper one counts as its whole directory. */
+const MAX_PATTERN_SEGMENTS = 16;
+/** Entries listed in the sources of one copy to see what it brings. */
+const MAX_SOURCE_ENTRIES = 2000;
 
 /** A path a tool is about to write, as rules and guards see it. */
 interface CheckedPath {
@@ -81,6 +100,8 @@ interface Located extends CheckedPath {
 interface Writes {
   paths: CheckedPath[];
   scopes: WrittenScope[];
+  /** Directories in which files of unknown names are put (an archive unpacked, a copy). */
+  landings: Located[];
   /** Paths that may be in the project but could not be placed (see {@link MAX_TREE_LOOKUPS}). */
   unchecked: number;
 }
@@ -412,27 +433,38 @@ export class HookHandler {
   /**
    * What a shell command writes, read from its text and placed like the paths of an editing
    * tool. `certain` are writes the text shows; `possible` are paths given to a program that may
-   * only read them. A directory written as a whole and a wildcard become a scope: nothing is
-   * listed here, and nothing outside the project is ever read. With `ownTreeOnly` (after the
-   * command ran) only files in the session's working tree are placed, without any lookup.
-   * `limit` says why the command was not read to its end, when it was not.
+   * only read them. A directory written as a whole and a wildcard become a scope: nothing of the
+   * project is listed here. With `ownTreeOnly` (after the command ran) only files in the
+   * session's working tree are placed, without any lookup. `limit` says why the command was not
+   * read to its end, when it was not.
    */
   private async shellWrites(
     project: ProjectContext,
     cwd: string,
     command: string,
     ownTreeOnly = false,
+    timeUp: () => boolean = () => false,
   ): Promise<{ certain: Writes; possible: Writes; limit: string | null }> {
-    const certain: Writes = { paths: [], scopes: [], unchecked: 0 };
-    const possible: Writes = { paths: [], scopes: [], unchecked: 0 };
+    const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0 };
+    const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0 };
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
     // The command is read as text; where it runs, the home directory and the repository root
     // are handed in so `~`, `$HOME` and `$(git rev-parse --show-toplevel)` can be placed.
-    const reading = readShellWrites(command, { home: toPosix(homedir()), top: toPosix(treeRoot) });
+    const reading = readShellWrites(command, {
+      home: toPosix(homedir()),
+      top: toPosix(treeRoot),
+      timeUp,
+    });
+    let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
     const seen = new Set<string>();
     for (const t of reading.targets) {
+      if (timeUp()) {
+        limit ??= 'no time was left to place all it writes';
+        break;
+      }
       const into = t.certain ? certain : possible;
+      const restore = t.how === 'restore';
       const place = async (abs: string): Promise<Located | null> => {
         const found = await this.locate(project, treeRoot, abs, trees);
         if (found === 'unknown') into.unchecked++;
@@ -443,17 +475,27 @@ export class HookHandler {
         seen.add(`${t.certain}:${at.abs}`);
         into.paths.push({ rel: at.rel, abs: at.abs, own: at.own });
       };
-      const scope = (at: Located, rest: string[]): void => {
+      const scope = (at: Located, segments: readonly string[], base = at.abs): void => {
+        // Runs of `**` are one, and a pattern too deep to compare counts as its directory.
+        let rest = collapse(segments);
+        if (rest.length > MAX_PATTERN_SEGMENTS) rest = ['**'];
         const pattern = [...(at.rel === '' ? [] : [at.rel]), ...rest].join('/');
         into.scopes.push({
           // A single segment is written `./x`: this level only, not that name at any depth.
           pattern: pattern.includes('/') || pattern === '**' ? pattern : `./${pattern}`,
-          base: at.abs,
+          base,
           rest,
           root: at.root,
           own: at.own,
           only: t.only,
+          dotfiles: t.dotfiles,
+          nocase: t.nocase,
+          restore,
+          existing: t.how === 'clean',
         });
+      };
+      const landing = (at: Located | null): void => {
+        if (at !== null) into.landings.push(at);
       };
       const path = isAbsolute(t.path) ? t.path : resolve(cwd, placeHome(t.path));
       if (t.glob) {
@@ -474,28 +516,77 @@ export class HookHandler {
         }
         continue;
       }
+      // A word that is a path only when such an entry exists.
+      if (t.ifExists && !exists(path)) continue;
       // A directory above the project, written with everything in it, holds the project too.
-      if (t.tree && t.certain && downTo(toPosix(path), treeRoot, []) !== null) {
+      if (t.tree && t.certain && t.how !== 'land' && downTo(toPosix(path), treeRoot, []) !== null) {
         const root = await place(treeRoot);
         if (root !== null) scope(root, ['**']);
         continue;
       }
-      // A bare word given to an unknown program is a path only when such an entry exists.
-      if (t.ifExists && !exists(path)) continue;
       const directory = isDirectory(path);
-      if (t.entries.length > 0 && directory) {
-        // A copy into a directory: each source lands under its own name, a directory with
-        // everything in it; `.` pours into the directory itself.
-        for (const name of t.entries) {
-          const at = await place(name === '.' ? path : join(path, name));
-          if (at === null) continue;
-          if (name !== '.') file(at);
-          if (t.tree) scope(at, ['**']);
+      if (t.how === 'land') {
+        // An archive unpacked there: files of unknown names are put somewhere inside.
+        landing(await place(path));
+        continue;
+      }
+      if (t.entries.length > 0) {
+        // A copy creates or overwrites what its sources bring; it does not destroy the
+        // destination. Each source is looked at, when it is here to look at, to see what lands.
+        if (!directory) {
+          const at = await place(path);
+          file(at);
+          const source = t.sources[0] ?? null;
+          const from = source === null ? null : resolve(cwd, placeHome(source));
+          // A source that is a directory brings what it holds; one that is not here (made
+          // earlier in the same command, or given by a variable) may be either.
+          if (t.tree && (from === null || isDirectory(from) || !exists(from))) {
+            const brought = from === null ? null : entriesUnder(from, timeUp);
+            if (brought === null) landing(at);
+            else for (const rel of brought) file(await place(join(path, rel)));
+          }
+          continue;
+        }
+        for (const [name, from] of copied(t, cwd, timeUp)) {
+          if (name === null) {
+            landing(await place(path));
+            continue;
+          }
+          const dest = name === '.' ? path : join(path, name);
+          if (from !== null && isFile(from)) {
+            file(await place(dest));
+            continue;
+          }
+          const brought = from !== null && t.tree ? entriesUnder(from, timeUp) : null;
+          if (brought !== null) {
+            for (const rel of brought) file(await place(join(dest, rel)));
+            continue;
+          }
+          // A source that is not here to look at: its own name lands, and what it holds is
+          // not known.
+          if (name !== '.') file(await place(dest));
+          if (t.tree || name === '.') landing(await place(dest));
         }
         continue;
       }
       const at = await place(path);
       if (at === null) continue;
+      if (restore && ownTreeOnly) {
+        // After the command: what it brought back is checked again like any written file.
+        file(at);
+        continue;
+      }
+      if (restore) {
+        // Only what differs from the index is brought back: the path is a question, not a write.
+        if (at.rel !== '')
+          scope(
+            { ...at, rel: toPosix(dirname(at.rel)) === '.' ? '' : toPosix(dirname(at.rel)) },
+            [basename(at.rel)],
+            dirname(at.abs),
+          );
+        scope(at, ['**']);
+        continue;
+      }
       file(at);
       // A whole tree is written when the text says so; a path merely given to a program counts
       // as a tree only when it is a directory.
@@ -504,66 +595,78 @@ export class HookHandler {
     // What the text shows as written is not also reported as a mere possibility.
     const sure = new Set(certain.paths.map((p) => p.abs));
     possible.paths = possible.paths.filter((p) => !sure.has(p.abs));
-    return { certain, possible, limit: reading.limit };
+    return { certain, possible, limit };
+  }
+
+  /** The rules the user marked as enforced that have a scope. */
+  private enforced(projectId: string): Memory[] {
+    return this.k.store.memories
+      .list(projectId, { kinds: ['rule'], trust: ['approved', 'verified'], limit: 300 })
+      .filter((m) => m.enforce && m.source.type === 'user' && m.scope.paths.length > 0);
   }
 
   /**
    * What the rules the user marked as enforced say about a write. `deny` is the first rule that
    * covers a written path, or something a written scope certainly reaches. `warn` are rules that
-   * may apply: they cover a file the command would not rewrite, or the search for covered files
-   * could not finish.
+   * may apply: files of unknown names land where the rule can match, or the search for covered
+   * files could not finish.
    *
    * A scope (a directory or wildcard written as a whole) is decided exactly, not by giving up:
    * a rule that names one path or one directory (`prisma/migrations/**`) is compared as text,
-   * with no listing; a rule with wildcards (a `.pem` file at any depth) applies when a file it covers exists
-   * there, which is searched within a budget. Only when the budget runs out is the answer not
-   * known, and then the command is warned, not blocked: denying on "could not look" would stop
-   * everyday commands (`rm -rf dist`) in every large repository, while the editing tools and
-   * every path a command names outright stay enforced.
+   * with no listing; a rule with wildcards (a `.pem` file at any depth) applies when a file it
+   * covers exists there (see `ScopeSearch`). Each scope has its own answer: a search that could
+   * not finish for one never weakens a match found for another, and it is a warning that names
+   * what could not be searched, not a block, because denying on "could not look" would stop
+   * everyday commands in every large repository.
    */
   private enforcedRules(
-    projectId: string,
-    paths: readonly string[],
-    scopes: readonly WrittenScope[],
+    rules: readonly Memory[],
+    writes: Writes,
     search: ScopeSearch,
   ): { deny: RuleHit | null; warn: RuleHit[] } {
     const warn: RuleHit[] = [];
-    if (paths.length === 0 && scopes.length === 0) return { deny: null, warn };
-    const rules = this.k.store.memories
-      .list(projectId, { kinds: ['rule'], trust: ['approved', 'verified'], limit: 300 })
-      .filter((m) => m.enforce && m.source.type === 'user' && m.scope.paths.length > 0);
+    const paths = writes.paths.map((p) => p.rel);
     for (const rule of rules) {
       const globs = rule.scope.paths;
       const covers = paths.filter((p) => matchesAnyGlob(p, globs));
       const maybe: string[] = [];
-      let unfinished = false;
-      for (const s of scopes) {
+      const unsearched: string[] = [];
+      for (const s of writes.scopes) {
         const reaching = globsReaching(s, globs);
         if (reaching.length === 0) continue;
-        // A whole directory against a rule that names its path or directory: known from the
-        // text, and it also holds for files the command creates or brings back. A wildcard only
-        // stands for what exists, and a formatter only rewrites the kinds of file it knows: for
-        // those, existing files decide.
-        const wholeTree = s.rest.length === 1 && s.rest[0] === '**';
-        if (wholeTree && s.only === null && reaching.some(isLiteralScope)) {
+        if (settledByText(s, reaching)) {
           covers.push(scopeLabel(s));
           continue;
         }
         const found = search.covered(s, reaching);
+        // A formatter only rewrites the kinds of file it knows; the others are not its business.
         const rewritten = found.files.filter((f) => writesKind(s, f));
         if (rewritten.length > 0) covers.push(...rewritten.slice(0, 5));
-        else if (found.files.length > 0) maybe.push(...found.files.slice(0, 5));
-        else if (!found.complete) {
-          unfinished = true;
-          maybe.push(scopeLabel(s));
+        else if (!found.complete) unsearched.push(...found.unsearched);
+      }
+      for (const l of writes.landings) {
+        const label = l.rel === '' ? '.' : l.rel;
+        // Files of unknown names land there. Inside a directory the rule names, any of them is
+        // covered. Around it, or for a rule that matches names at any depth, they may or may not
+        // land on a covered file: worth a warning when such a file is there to be overwritten.
+        if (globs.some((g) => isLiteralScope(g) && landsInside(l.rel, g))) {
+          covers.push(label);
+          continue;
         }
+        const ls = landingScope(l);
+        const reaching = globsReaching(ls, globs);
+        if (reaching.some(isLiteralScope)) maybe.push(label);
+        else if (reaching.length > 0 && search.covered(ls, reaching).files.length > 0)
+          maybe.push(label);
       }
       if (covers.length > 0) {
         // `x` and `x/**` are one thing to the reader.
         const named = covers.filter((c) => !(c.endsWith('/**') && covers.includes(c.slice(0, -3))));
         return { deny: { rule, covers: [...new Set(named)] }, warn };
       }
-      if (maybe.length > 0) warn.push({ rule, covers: maybe, unfinished });
+      if (maybe.length > 0) warn.push({ rule, covers: [...new Set(maybe)] });
+      if (unsearched.length > 0)
+        warn.push({ rule, covers: [...new Set(unsearched)], unfinished: true });
     }
     return { deny: null, warn };
   }
@@ -626,7 +729,16 @@ export class HookHandler {
       const all = [...paths, ...unrecorded];
       const rule: RuleHit | null = built?.deny
         ? { rule: built.deny, covers: coveredBy(built.deny, all) }
-        : this.enforcedRules(pid, unrecorded, [], new ScopeSearch()).deny;
+        : this.enforcedRules(
+            this.enforced(pid),
+            {
+              paths: unrecorded.map((rel) => ({ rel, abs: rel, own: false })),
+              scopes: [],
+              landings: [],
+              unchecked: 0,
+            },
+            new ScopeSearch(null, 0),
+          ).deny;
       if (overlap.overlaps.length > 0 || rule || pending.length > 0) {
         // What Mindly told the agent before this write: the evidence of overlap and rule saves.
         this.appendToolEvent(pid, session, 'tool.before', {
@@ -652,26 +764,60 @@ export class HookHandler {
       // A command that writes a file (sed -i, cat > file, mv, rm) answers to the same rules and
       // guards as an editing tool, for the files its text shows it writes. A path that is only
       // handed to a program Mindly does not know may just be read: that is a warning, not a block.
-      const { certain, possible, limit } = await this.shellWrites(project, evt.cwd, tool.command);
+      // All of it within one budget of time, under the hook's own deadline: what is not read or
+      // searched when it runs out is said in a warning.
+      const budget = Math.min(PRE_TOOL_BUDGET_MS, this.k.config.hooks.timeoutMs * PRE_TOOL_SHARE);
+      const until = performance.now() + budget;
+      const { certain, possible, limit } = await this.shellWrites(
+        project,
+        evt.cwd,
+        tool.command,
+        false,
+        () => performance.now() > until - budget / 2,
+      );
       if (certain.unchecked > 0) return uncheckedDenial(certain.unchecked, false);
       const written = certain.paths.map((p) => p.rel);
       const named = possible.paths.map((p) => p.rel);
-      const patterns = (w: Writes): string[] => w.scopes.map((x) => x.pattern);
-      const search = new ScopeSearch();
+      const lister = this.k.ports.git.listFiles?.bind(this.k.ports.git) ?? null;
+      const search = new ScopeSearch(lister, until);
       const guarded = async (w: Writes, paths: string[]): Promise<WriteGuardResult> => {
-        const first = await this.consultGuards(project, session, paths, patterns(w));
+        const whole = w.scopes.map((x) => x.pattern);
+        const first = await this.consultGuards(project, session, paths, whole);
         if (first.deny === null && first.warnings.length === 0) return first;
-        // A wildcard only stands for what exists: when a guard objects to one, the files it
-        // expands to are what is really asked about. A whole directory stays a pattern.
-        const listed = expandWildcards(w.scopes, search);
+        // A wildcard only stands for what exists, and a formatter only rewrites the kinds of
+        // file it knows: when a guard objects, the files in question are what is really asked
+        // about. A whole directory stays a pattern.
+        const listed = await expandScopes(w.scopes, search);
         if (listed === null) return first;
         return this.consultGuards(project, session, [...paths, ...listed.files], listed.whole);
       };
       const guard = await guarded(certain, written);
+      // What may only be read, and where files of unknown names land (an archive unpacked, a
+      // copy whose sources cannot be seen), is never a block here: a warning at most.
       const soft = await guarded(possible, named);
-      const rules = this.enforcedRules(pid, written, certain.scopes, search);
+      const landed = await this.consultGuards(
+        project,
+        session,
+        [],
+        [...certain.landings, ...possible.landings].map((l) =>
+          l.rel === '' ? '**' : `${l.rel}/**`,
+        ),
+      );
+      soft.warnings.push(...landed.warnings);
+      const enforced = this.enforced(pid);
+      await search.prepare(
+        [
+          ...certain.scopes,
+          ...possible.scopes,
+          ...certain.landings.map(landingScope),
+          ...possible.landings.map(landingScope),
+        ].flatMap((scope) =>
+          enforced.map((m) => ({ scope, globs: globsReaching(scope, m.scope.paths) })),
+        ),
+      );
+      const rules = this.enforcedRules(enforced, certain, search);
       const rule = rules.deny;
-      const softRules = rule ? null : this.enforcedRules(pid, named, possible.scopes, search);
+      const softRules = rule ? null : this.enforcedRules(enforced, possible, search);
       if (mistakes.length > 0 || pending.length > 0 || rule) {
         const recorded = certain.paths.filter((p) => p.own).map((p) => p.rel);
         this.appendToolEvent(pid, session, 'tool.before', {
@@ -696,7 +842,7 @@ export class HookHandler {
       for (const hit of [...rules.warn, ...mayApply].slice(0, 5)) {
         warnings.push(
           hit.unfinished
-            ? `Mindly could not finish looking through ${names(hit)} for files covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
+            ? `Mindly could not search all of ${names(hit)} for files covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
             : `This command names ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change it without asking the user.`,
         );
       }
@@ -865,7 +1011,14 @@ export class HookHandler {
       };
       // Only what is cheap to know again after the command: the files it names outright in this
       // working tree. Directories and wildcards are covered by the paths of the rescan step.
-      const { certain } = await this.shellWrites(project, cwd, command, true);
+      const until = performance.now() + PRE_TOOL_BUDGET_MS / 2;
+      const { certain } = await this.shellWrites(
+        project,
+        cwd,
+        command,
+        true,
+        () => performance.now() > until,
+      );
       for (const p of certain.paths) if (p.own && !isDirectory(p.abs)) add(p.rel, p.abs);
       if (stepPaths.length > 0 && files.size < MAX_SHELL_CHANGED) {
         const names = pathNamer(command);
@@ -1160,23 +1313,25 @@ function exists(path: string): boolean {
   }
 }
 
-/** Files one hook call hands to the write guards in place of the wildcards that name them. */
+/** Files one hook call hands to the write guards in place of the patterns that name them. */
 const MAX_EXPANDED_FILES = 1000;
 
 /**
- * The files the wildcard scopes stand for, and the scopes that stay patterns: whole directories,
- * and wildcards whose files could not all be listed. Null when there is no wildcard to expand.
+ * The files the scopes stand for, and the scopes that stay patterns. A wildcard stands for the
+ * files it expands to, and a formatter over a directory for the files of the kinds it rewrites;
+ * a directory written as a whole, and anything whose files could not all be listed, stays a
+ * pattern. Null when nothing was expanded.
  */
-function expandWildcards(
+async function expandScopes(
   scopes: readonly WrittenScope[],
   search: ScopeSearch,
-): { files: string[]; whole: string[] } | null {
+): Promise<{ files: string[]; whole: string[] } | null> {
   const files: string[] = [];
   const whole: string[] = [];
   let expanded = false;
   for (const s of scopes) {
-    const tree = s.rest.length === 1 && s.rest[0] === '**';
-    const found = tree ? null : search.covered(s, ['**']);
+    const pattern = isWholeTree(s) && s.only === null && !s.restore && s.existing !== true;
+    const found = pattern ? null : await search.listAll(s);
     if (
       found === null ||
       !found.complete ||
@@ -1189,6 +1344,148 @@ function expandWildcards(
     files.push(...found.files.filter((f) => writesKind(s, f)));
   }
   return expanded ? { files, whole } : null;
+}
+
+/**
+ * Whether a rule applies to a scope by the text alone: a directory written as a whole against a
+ * rule that names a path or a directory. It then also holds for files the command creates. A
+ * wildcard only stands for what exists, a formatter only rewrites the kinds of file it knows,
+ * and files brought back from the index only change when they differ: those are searched.
+ */
+function settledByText(scope: WrittenScope, reaching: readonly string[]): boolean {
+  return (
+    isWholeTree(scope) &&
+    scope.only === null &&
+    !scope.restore &&
+    scope.existing !== true &&
+    reaching.some(isLiteralScope)
+  );
+}
+
+/** Where files of unknown names land, as a scope to search for what is there already. */
+function landingScope(l: Located): WrittenScope {
+  return {
+    pattern: l.rel === '' ? '**' : `${l.rel}/**`,
+    base: l.abs,
+    rest: ['**'],
+    root: l.root,
+    own: l.own,
+    only: null,
+    dotfiles: true,
+    nocase: false,
+    restore: false,
+  };
+}
+
+/** Whether a directory (relative; `''` is the root) lies in what a literal rule glob names. */
+function landsInside(dir: string, glob: string): boolean {
+  const segments = patternSegments(glob);
+  const tree = segments[segments.length - 1] === '**' ? segments.slice(0, -1) : segments;
+  const at = dir === '' ? [] : dir.split('/');
+  return tree.length <= at.length && tree.every((s, i) => s === at[i]);
+}
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Files under a directory a copy brings, as paths relative to it. Names only, bounded, and read
+ * entry by entry so a very wide directory stops at the bound. Null when it is not a directory
+ * that can be listed in full: what it brings is then not known.
+ */
+function entriesUnder(dir: string, timeUp: () => boolean): string[] | null {
+  if (!isDirectory(dir)) return null;
+  const out: string[] = [];
+  const queue = [''];
+  let left = MAX_SOURCE_ENTRIES;
+  while (queue.length > 0) {
+    const rel = queue.pop() as string;
+    let handle;
+    try {
+      handle = opendirSync(join(dir, rel), { bufferSize: 128 });
+    } catch {
+      return null;
+    }
+    try {
+      for (;;) {
+        const e = handle.readSync();
+        if (e === null) break;
+        if (--left < 0 || ((left & 127) === 0 && timeUp())) return null;
+        const child = rel === '' ? e.name : `${rel}/${e.name}`;
+        if (e.isDirectory()) {
+          if (e.name !== '.git') queue.push(child);
+        } else out.push(child);
+      }
+    } finally {
+      handle.closeSync();
+    }
+  }
+  return out;
+}
+
+/**
+ * The sources of a copy into a directory: the name each lands under and where it comes from
+ * (null when it is not a local path that is there). A wildcard in the last part of a source is
+ * expanded against its directory; a name of null means names that could not be found out.
+ */
+function copied(
+  t: { entries: string[]; sources: (string | null)[] },
+  cwd: string,
+  timeUp: () => boolean,
+): [name: string | null, from: string | null][] {
+  const out: [string | null, string | null][] = [];
+  t.entries.forEach((name, i) => {
+    const source = t.sources[i] ?? null;
+    const from = source === null ? null : resolve(cwd, placeHome(source));
+    if (name === '*' && from === null) {
+      out.push([null, null]);
+      return;
+    }
+    if (!/[*?]/.test(name)) {
+      out.push([name, from]);
+      return;
+    }
+    // `dir/*`: the entries of `dir` that the pattern matches.
+    const parent = from === null ? null : dirname(from);
+    let match: RegExp | null;
+    try {
+      match = globToRegExp(name);
+    } catch {
+      match = null;
+    }
+    if (parent === null || match === null || /[*?]/.test(parent) || !isDirectory(parent)) {
+      out.push([null, null]);
+      return;
+    }
+    let left = MAX_SOURCE_ENTRIES;
+    let handle;
+    try {
+      handle = opendirSync(parent, { bufferSize: 128 });
+    } catch {
+      out.push([null, null]);
+      return;
+    }
+    try {
+      for (;;) {
+        const e = handle.readSync();
+        if (e === null) break;
+        if (--left < 0 || ((left & 127) === 0 && timeUp())) {
+          out.push([null, null]);
+          break;
+        }
+        // A shell's wildcard does not stand for a leading dot.
+        if (!e.name.startsWith('.') && match.test(e.name)) out.push([e.name, join(parent, e.name)]);
+      }
+    } finally {
+      handle.closeSync();
+    }
+  });
+  return out;
 }
 
 /** Whether what writes the scope rewrites a file of this kind. */
