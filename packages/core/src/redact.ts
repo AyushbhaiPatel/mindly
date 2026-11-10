@@ -6,6 +6,8 @@
  * so hostile content cannot stall a hook with catastrophic regex backtracking.
  */
 
+import { stripInvisible } from './text.js';
+
 export const REDACTED = '[REDACTED]';
 
 /** Hard cap on how much text one call processes. Longer input is truncated first. */
@@ -143,7 +145,11 @@ function compileExtra(source: string): RegExp | null {
 }
 
 export function redact(input: string, options: RedactOptions = {}): RedactionResult {
-  let text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
+  // Characters that render as nothing go first: one inside a secret hides it from every pattern,
+  // and removing it later (as any cleaning for display does) would put the secret back together.
+  let text = stripInvisible(
+    input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input,
+  );
   let count = 0;
   const kinds = new Set<string>();
 

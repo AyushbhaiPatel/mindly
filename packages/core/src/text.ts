@@ -22,22 +22,30 @@ export function truncate(text: string, max: number): string {
 // C0/C1 control characters except TAB and LF.
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
-// Format characters (Unicode Cf: bidi controls, zero-width characters, the soft hyphen, tag
-// characters, interlinear annotation marks, ...) and variation selectors: they render as nothing
-// and can hide text or split a token so the redactor does not see it.
-const INVISIBLE_RE = /[\p{Cf}\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu;
+// Characters that render as nothing (Unicode Cf and Default_Ignorable_Code_Point: bidi controls,
+// zero-width characters, the soft hyphen, tag characters, variation selectors, fillers, ...).
+// They can hide text, or split a token so the redactor does not see it.
+const INVISIBLE_RE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+// What a single token (path, glob, id) must not hold: line breaks and other control characters,
+// and bidi overrides and isolates, which make a name read differently from what it is. Not the
+// other invisible characters: variation selectors and joiners belong to emoji and to ideographic
+// variants, and real file names have them.
+// eslint-disable-next-line no-control-regex
+const UNSAFE_IN_TOKEN_RE = /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/;
+
+/** Removes the characters that render as nothing (see INVISIBLE_RE). */
+export function stripInvisible(text: string): string {
+  return text.replace(INVISIBLE_RE, '');
+}
 // Our own context delimiters; content must never be able to close or forge a block.
 const DELIMITER_RE = /<\s*\/?\s*mindly[-_a-z]*/gi;
 
 /**
  * True when a value meant to be a single token (path, glob, id) contains line breaks, control
- * characters or invisible/bidi characters that could forge structure in rendered context.
+ * characters or bidi overrides/isolates that could forge structure in rendered context.
  */
 export function hasUnsafeChars(value: string): boolean {
-  return (
-    // eslint-disable-next-line no-control-regex
-    /[\u0000-\u001F\u007F-\u009F]/.test(value) || new RegExp(INVISIBLE_RE.source, 'u').test(value)
-  );
+  return UNSAFE_IN_TOKEN_RE.test(value);
 }
 
 /**

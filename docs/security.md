@@ -71,7 +71,11 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   reached no channel is tried again (after 30 s, 2 min, 10 min, 30 min) and dropped after five
   attempts or six hours. Webhook payloads carry an `id` that is the same on every attempt, so a
   receiver can drop the rare repeat (a sender killed after the pager took the request but before
-  it answered). Channel URLs must be `https` (`http` only for localhost) without credentials;
+  it answered); a new occurrence of an alert gets a new id. Two gaps remain, both covered by a
+  running daemon: a page written by work a hook left running past its deadline gets no sender of
+  its own (the hook process exits), and on macOS a hook goes by the sender's process id alone, so
+  a process that took a dead sender's id within 15 s is taken for the sender. Either page waits for
+  the daemon or the next page's sender. Channel URLs must be `https` (`http` only for localhost) without credentials;
   `mindly config set` refuses others, a config file that already holds one keeps working with
   that channel left out (`mindly config get`, `mindly doctor` and the daemon log name it), and
   the rule is checked again when sending. Redirects are not followed.

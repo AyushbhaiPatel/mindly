@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadUserConfig, parseUserConfigUpdate, unusableNotifyChannels } from '../src/config.js';
 import { codename, isUuid, parseCodename, uuidv7 } from '../src/ids.js';
-import { sanitizeForContext, truncate } from '../src/text.js';
+import { REDACTED, redactText } from '../src/redact.js';
+import { sanitizeForContext, sanitizeLine, truncate } from '../src/text.js';
 
 describe('uuidv7', () => {
   it('produces valid, strictly increasing ids', () => {
@@ -184,5 +185,18 @@ describe('config', () => {
     expect(ProjectConfigSchema.safeParse({ checks: [{ name: 'x', argv: ['a\0'] }] }).success).toBe(
       false,
     );
+  });
+});
+
+describe('redaction of text with invisible characters', () => {
+  it('finds a secret whatever invisible character splits it, before any other cleaning', () => {
+    const token = ['ghp', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'].join('_');
+    for (const cp of [0x200b, 0xfe0f, 0x34f, 0x180b, 0x3164, 0xe0041]) {
+      const split = `${token.slice(0, 10)}${String.fromCodePoint(cp)}${token.slice(10)}`;
+      const out = redactText(`use ${split} please`);
+      expect(out).toBe(`use ${REDACTED} please`);
+      // Cleaning after redaction cannot put the secret back together.
+      expect(sanitizeLine(out)).not.toContain(token.slice(10, 20));
+    }
   });
 });
