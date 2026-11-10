@@ -55,6 +55,11 @@ interface Relation {
   windowAlive: boolean | null;
   /** Whether a process of the session's client still runs; null when nothing was recorded. */
   clientRuns: boolean | null;
+  /**
+   * True when the session's client runs and is not one of this server's ancestors, which could
+   * be read: the client of another window.
+   */
+  foreignClient: boolean;
 }
 
 /** A row an MCP server wrote while on a guess, where it is now and what it looked like then. */
@@ -203,8 +208,12 @@ export class SessionResolver {
     const recorded = parseProcessChain(
       this.mindly.store.kv.get<unknown>(hookAncestryKey(session.agentKind, session.externalId)),
     );
+    const is = (r: Omit<Relation, 'foreignClient'>, foreignClient = false): Relation => ({
+      ...r,
+      foreignClient,
+    });
     if (recorded.length === 0) {
-      return { known: false, depth: -1, rank: 2, windowAlive: null, clientRuns: null };
+      return is({ known: false, depth: -1, rank: 2, windowAlive: null, clientRuns: null });
     }
     const mine = this.chain();
     const same = (a: ProcessRef, b: ProcessRef): boolean =>
@@ -221,24 +230,31 @@ export class SessionResolver {
     if (meet === -1) {
       // Another tree: its client is the hook's parent or the process above it.
       const clientRuns = recorded.slice(0, 2).some((h) => this.runs(h));
-      return { known: false, depth: -1, rank: 2, windowAlive: true, clientRuns };
+      // Where this server's ancestors could be read, a client that runs and is not among them is
+      // another window's (the rank stays: a guess may still have to be made).
+      return is(
+        { known: false, depth: -1, rank: 2, windowAlive: true, clientRuns },
+        clientRuns && mine.length > 0,
+      );
     }
-    if (depth === 0) return { known: true, depth, rank: 0, windowAlive: true, clientRuns: true };
+    if (depth === 0) {
+      return is({ known: true, depth, rank: 0, windowAlive: true, clientRuns: true });
+    }
     const below = recorded.slice(0, meet);
     if (below.some((h) => this.runs(h))) {
-      return { known: false, depth, rank: 4, windowAlive: true, clientRuns: true };
+      return is({ known: false, depth, rank: 4, windowAlive: true, clientRuns: true }, true);
     }
     const through =
       depth <= MAX_LAUNCHERS && mine.slice(0, depth).every((m) => isLauncherName(m.name));
     if (!through) {
       return below.length <= 1
-        ? { known: false, depth, rank: 2, windowAlive: null, clientRuns: false }
-        : { known: false, depth, rank: null, windowAlive: false, clientRuns: false };
+        ? is({ known: false, depth, rank: 2, windowAlive: null, clientRuns: false })
+        : is({ known: false, depth, rank: null, windowAlive: false, clientRuns: false });
     }
     const close = below.length <= 1 && !isShellName(mine[depth]?.name);
     // Through launchers to a close meeting point, the client is that point, a running ancestor
     // of this server; otherwise nothing of the hook's side runs any more.
-    return { known: false, depth, rank: close ? 1 : 3, windowAlive: null, clientRuns: close };
+    return is({ known: false, depth, rank: close ? 1 : 3, windowAlive: null, clientRuns: close });
   }
 
   // ----------------------------------------------------------------- project
@@ -492,25 +508,36 @@ export class SessionResolver {
   }
 
   /**
-   * The scope of a call made while the server speaks for a session it only guessed at. The
-   * session it is given carries the server's own current task, not the other window's, and
-   * `guess` records what this call writes, against that session whatever the server does later.
-   */
-  /**
-   * True when the guess `session` is the one window there is: nothing tells it is another
-   * window's (it is not matched through another client that still runs, nor a window that may be
-   * gone), no other live session of this agent kind in this tree has a client that runs or may
-   * run, and no other running server speaks for it. With one window (a server started through a
-   * launcher, or a system where the process table cannot be read) that is the normal case, and
-   * such a guess is treated as the server's own session for everything.
+   * True when the guess `session` is the one window there is, which the server then treats as its
+   * own session for everything. That takes all of:
+   *
+   * - nothing tells that it is another window's: it is a launcher match or nothing is recorded
+   *   (rank 1 or 2), its client is not known to be gone, and its client is not a process that
+   *   runs outside this server's ancestry where that could be read;
+   * - it is the only candidate: no other live session of this agent kind in this tree has a
+   *   client that runs or may run;
+   * - no other running server speaks for it, nor for any other live session of this agent kind
+   *   in this tree (such a server is another window's).
+   *
+   * With one window (a server started through a launcher, or a system where the process table
+   * cannot be read) that is the normal case.
    */
   private async sole(project: ScopedProject, session: Session): Promise<boolean> {
     const r = this.relation(session);
-    if ((r.rank !== 1 && r.rank !== 2) || r.clientRuns === false) return false;
-    const claim = this.claims()[session.id];
-    if (claim && claim.owner !== this.owner) return false;
+    if (r.rank !== 1 && r.rank !== 2) return false;
+    if (r.clientRuns === false || r.foreignClient) return false;
     const others = (await this.hookSessions(project)).filter((s) => s.id !== session.id);
-    return others.every((s) => this.relation(s).clientRuns === false);
+    if (others.some((s) => this.relation(s).clientRuns !== false)) return false;
+    for (const [id, claim] of Object.entries(this.claims())) {
+      if (claim.owner === this.owner) continue;
+      if (id === session.id) return false;
+      const s = this.mindly.store.sessions.find(id);
+      if (!s || s.status === 'ended' || s.projectId !== project.project.id) continue;
+      if (s.agentKind !== this.ctx.agentKind) continue;
+      const root = (s.worktree ? await this.rootOf(s.worktree) : null) ?? project.mainRoot;
+      if (root === project.root) return false;
+    }
+    return true;
   }
 
   /**
@@ -532,6 +559,11 @@ export class SessionResolver {
     return store.sessions.get(session.id);
   }
 
+  /**
+   * The scope of a call made while the server speaks for a session it only guessed at. The
+   * session it is given carries the server's own current task, not the other window's, and
+   * `guess` records what this call writes, against that session whatever the server does later.
+   */
   private guessScope(project: ScopedProject, session: Session): CallScope {
     const store = this.mindly.store;
     // Looked up when used, not now: by the time a slow call notes what it wrote, the server may

@@ -27,19 +27,36 @@ A server works out which session it speaks for and keeps it. In order of prefere
    guess, and the server gives it up for (1) as soon as it can.
 3. A session of its own, with external id `mcp-<pid>-<startTime>`.
 
-A guess that is the only live session of the agent kind in the tree whose client runs (or may run,
-when the process table cannot be read), and that no other running server speaks for, is the one
-window there is: the server treats it as its own session for everything. Any other guess is kept
-at arm's length: the server reads its context as a guest (it picks up no handoff and marks none of
-that window's messages delivered), files handoffs in its own name, and does not claim tasks that
-window owns.
+A guess is the one window there is, and the server treats it as its own session for everything,
+only when all of these hold:
+
+- nothing tells that it is another window's: it is a launcher match or nothing is recorded for it,
+  its client is not known to be gone, and its client is not a running process outside the server's
+  own ancestry (where that ancestry can be read);
+- it is the only live session of the agent kind in the tree whose client runs, or may run when
+  the process table cannot be read;
+- no other running server speaks for it, nor for any other live session of the agent kind in the
+  tree.
+
+Any other guess is kept at arm's length. Every tool declares what it does then, and the server
+routes each call through that one rule:
+
+- `mindly_context` reads the context as a guest: it picks up no handoff and neither shows nor marks
+  delivered any of that window's messages;
+- `mindly_inbox` lists none of that window's messages, and `mindly_ack` acknowledges nothing;
+- `mindly_handoff` files the handoff in the server's own name, describing only the server's own
+  work;
+- `mindly_task_claim` does not claim a task that window owns, and `mindly_tasks` with `mine` lists
+  only the tasks the server took up itself; neither changes that window's current task;
+- intents, tasks and messages the server writes are noted, and go along with it to its own
+  session once that is known.
 
 Each server records its claim, so two servers never share a session; a claim is free again only
 when its process is gone. A server on its own session moves to its client's hook session once it
 knows which that is (the first tool call may come before the first hook) and takes its unfinished
 tasks, active intents, unread messages and handoffs along; it never moves them to a session it only
-guesses at, unless that guess is the one window there is. A session stays live while its server is being used, except a guessed one whose client is
-gone, which the server lets go of. When the client disconnects (stdin closes, the process is
+guesses at, unless that guess is the one window there is. A session stays live while its server
+is being used, except a guessed one whose client is gone, which the server lets go of. When the client disconnects (stdin closes, the process is
 signalled, the client stops reading) the server's own session is ended and its intents are
 closed. `createMcp` returns the server together with that `release` call for other transports.
 
