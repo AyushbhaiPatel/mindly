@@ -21,6 +21,7 @@ import {
 import { renderHandoffs, renderSnapshots } from '../src/views/continuity.js';
 import { renderMemoryList, renderRules } from '../src/views/memory.js';
 import { renderStatus, type StatusData } from '../src/views/status.js';
+import { unmergedLine } from '../src/views/split.js';
 
 /*
  * Snapshot-style tests of the main screens with fixed clocks and ids, no colour. The UTF-8
@@ -683,5 +684,27 @@ describe('human output never shows internals', () => {
     expect(all).not.toMatch(
       /\b(proposed|verified|session_start|intent_overlap|impact|rate_limited|acknowledged|tokens?|claude-code #|manual|pending)\b/,
     );
+  });
+});
+
+describe('split listing', () => {
+  it('names git data in full, cutting a long path in the middle, never its label', () => {
+    const label = ', whose git storage is reached elsewhere and cannot be checked, even committed';
+    const long = `deep/${'x'.repeat(600)}/wt`;
+    const line = unmergedLine({
+      part: 'page',
+      title: 'Billing page',
+      paths: [],
+      held: [
+        `short/wt${label}`,
+        `${long}${label}`,
+        `files in the uninitialised submodule folder ${long}`,
+      ],
+    });
+    expect(line).toContain(`short/wt${label}`);
+    expect(line).toContain(`/wt${label}`);
+    expect(line).toContain('…');
+    expect(line).toContain('files in the uninitialised submodule folder deep/');
+    expect(line.length).toBeLessThan(1400);
   });
 });

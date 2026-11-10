@@ -18,7 +18,7 @@ import {
   type Screen,
   type Step,
 } from '../present/index.js';
-import { clean } from '../util.js';
+import { clean, cleanEntry } from '../util.js';
 
 /** Plain words for a part's state. */
 export function partStateWord(state: SplitPartState): string {
@@ -215,7 +215,12 @@ export function unmergedLine(w: SplitUnmergedWork): string {
   const what: string[] = [];
   if (w.paths.length > 0) what.push(list(w.paths));
   if (w.held?.length) {
-    what.push(`git data abort never deletes, so its worktree stays: ${list(w.held)}`);
+    // Named in full: an entry says why it cannot be checked.
+    const held = w.held.slice(0, 3).map((p) => cleanEntry(p));
+    const more = w.held.length - held.length;
+    what.push(
+      `git data abort never deletes, so its worktree stays: ${held.join(', ')}${more > 0 ? ` and ${more} more` : ''}`,
+    );
   }
   const commits = w.commits ?? [];
   if (commits.length > 0) {
@@ -337,7 +342,8 @@ export function renderAborted(sc: Screen, a: SplitAbortResult): void {
   if (a.keptBranches.length) sc.note(`Branches kept: ${a.keptBranches.join(', ')}`, 2);
   for (const wt of a.keptWorktrees) {
     sc.text(
-      `${sc.mark('warn')} Kept ${clean(wt, 200)}: ${clean(a.keptBecause[wt] ?? 'it has work the abort may not delete', 300)}`,
+      // In full: up to three entries, how many more, and what to do (bounded by the engine).
+      `${sc.mark('warn')} Kept ${clean(wt, 200)}: ${clean(a.keptBecause[wt] ?? 'it has work the abort may not delete', 2000)}`,
       2,
     );
   }

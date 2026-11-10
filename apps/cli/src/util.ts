@@ -68,6 +68,18 @@ export function clean(text: string | null | undefined, max = 200): string {
   return text ? sanitizeLine(text, max) : '';
 }
 
+/**
+ * {@link clean} for an entry whose end says what it is (`<path>, whose git storage …`) or whose
+ * start does (`files in the … folder <path>`): over `max` characters, it is cut in the middle,
+ * so both ends stay readable.
+ */
+export function cleanEntry(text: string | null | undefined, max = 400): string {
+  const line = clean(text, 100_000);
+  if (line.length <= max) return line;
+  const head = Math.floor((max - 1) / 3);
+  return `${line.slice(0, head)}…${line.slice(line.length - (max - 1 - head))}`;
+}
+
 /** Multi-line variant of {@link clean}. */
 export function cleanBlock(text: string | null | undefined, max = 4000): string {
   return text ? sanitizeForContext(text, max) : '';

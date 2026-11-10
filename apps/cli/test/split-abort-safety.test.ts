@@ -759,6 +759,47 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
   });
 
+  /** A committed fixture `tests/resources/<name>/.gitted` with a linked worktree's git dir. */
+  function linkedWorktreeFixture(repo: string, name: string): void {
+    const g = join(repo, `tests/resources/${name}/.gitted`);
+    git(repo, 'init', '-q', '--bare', g);
+    commitThrough(g, 'fixture\n');
+    write(g, `worktrees/${name}-worktree/HEAD`, 'ref: refs/heads/main\n');
+    write(g, `worktrees/${name}-worktree/commondir`, '../..\n');
+    write(g, `worktrees/${name}-worktree/gitdir`, `../../../../${name}-worktree/.gitted\n`);
+  }
+  const fourFixtures = (s: Sandbox): void => {
+    for (const name of ['testrepo', 'submodules', 'worktree-parent', 'merge-resolve']) {
+      linkedWorktreeFixture(s.repo, name);
+    }
+  };
+  const label = (name: string): string =>
+    ELSEWHERE(`tests/resources/${name}/.gitted/worktrees/${name}-worktree`);
+
+  it('shows what holds a part, how many more, and what to do, in full on screen', async () => {
+    const sb = await splitSandbox(fourFixtures);
+    const page = partDir(sb, 'page');
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    expect(r.code).toBe(1);
+    const flat = (r.stdout + r.stderr).replace(/\s+/g, ' ');
+    const kept = flat.slice(flat.indexOf(`Kept ${page}`), flat.indexOf('Not everything'));
+    for (const name of ['merge-resolve', 'submodules', 'testrepo'])
+      expect(kept).toContain(label(name));
+    expect(kept).toContain('and 1 more');
+    expect(kept).toContain('Move it out of the worktree');
+    expect(kept).toContain('mindly split abort --yes --discard');
+  });
+
+  it('lists what holds a part in full before asking', async () => {
+    const sb = await splitSandbox(fourFixtures);
+    const r = await cli(sb, ['split', 'abort'], { answers: ['n'] });
+    expect(r.code).toBe(1);
+    const flat = r.stderr.replace(/\s+/g, ' ');
+    for (const name of ['merge-resolve', 'submodules', 'testrepo'])
+      expect(flat).toContain(label(name));
+    expect(flat).toContain('and 1 more');
+  });
+
   it('keeps a git directory whose common dir is reached through a tracked link', async () => {
     const sb = await splitSandbox((s) => {
       write(s.repo, '.gitignore', '.cache/\n');

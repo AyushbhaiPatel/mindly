@@ -1652,12 +1652,25 @@ const abortPendingKey = (splitId: string): string => `split.abortPending:${split
 
 /** Why a worktree holding git data (`held`) was kept, and what to do about it. */
 function heldMessage(held: readonly string[]): string {
-  // Named in full: an entry may say why it cannot be checked.
-  const named = held
+  const more = held.length > 3 ? ` and ${held.length - 3} more` : '';
+  return `it holds git data that abort never deletes: ${describeHeld(held)}${more}. Move it out of the worktree (or delete it yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything with mindly split abort --yes --discard`;
+}
+
+/**
+ * Up to three git-data entries, each in full up to 400 characters: an entry may say at its end
+ * why it cannot be checked (`<path>, whose git storage …`) or at its start what it is (`files in
+ * the … folder <path>`), so a longer one is cut in the middle, keeping both ends.
+ */
+function describeHeld(held: readonly string[]): string {
+  return held
     .slice(0, 3)
-    .map((p) => (p === '' || p === '.' ? "the worktree's own folder" : sanitizeLine(p, 400)));
-  const more = held.length > named.length ? ` and ${held.length - named.length} more` : '';
-  return `it holds git data that abort never deletes: ${named.join(', ')}${more}. Move it out of the worktree (or delete it yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything with mindly split abort --yes --discard`;
+    .map((p) => {
+      if (p === '' || p === '.') return "the worktree's own folder";
+      const line = sanitizeLine(p, 100_000);
+      if (line.length <= 400) return line;
+      return `${line.slice(0, 133)}…${line.slice(line.length - 266)}`;
+    })
+    .join(', ');
 }
 
 /** Why a worktree was kept when git did not remove it. */
@@ -1803,7 +1816,10 @@ function hashFile(abs: string, h: Hash): void {
 function describeWork(w: SplitUnmergedWork): string {
   const what: string[] = [];
   if (w.paths.length > 0) what.push(`not committed: ${describePaths(w.paths)}`);
-  if (w.held?.length) what.push(`git data abort never deletes: ${describePaths(w.held)}`);
+  if (w.held?.length) {
+    const more = w.held.length > 3 ? ` and ${w.held.length - 3} more` : '';
+    what.push(`git data abort never deletes: ${describeHeld(w.held)}${more}`);
+  }
   const commits = w.commits ?? [];
   if (commits.length > 0) {
     what.push(
