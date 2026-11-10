@@ -489,7 +489,6 @@ describe('write targets of a shell command', () => {
       'git grep --open=rm k2',
       'git grep -Orm k2',
       'git log --some-new-option',
-      'git log --onel',
       'git status --some-new-option',
       'git diff --ext-diff',
       'git config receive.denyCurrentBranch updateInstead',
@@ -553,6 +552,99 @@ describe('write targets of a shell command', () => {
     expect(lands('git read-tree --prefix=vendor/ -u v1')).toEqual(['vendor']);
     expect(read('git read-tree --prefix=vendor/ v1')).toEqual([]);
     expect(lands('git init vendor/repo')).toEqual(['vendor/repo']);
+  });
+
+  it('reads what git is given besides its options: variables, files it reads, code it runs', () => {
+    const whole = (command: string) => read(command).some((x) => !x.certain && x.path === TOP);
+    const lands = (command: string) =>
+      read(command)
+        .filter((x) => x.how === 'land')
+        .map((x) => x.path);
+    // Variables, settings and subcommands that change nothing git does to files.
+    for (const cmd of [
+      'LANG=C git status',
+      'TZ=UTC LC_ALL=C git log -1',
+      'PAGER=cat git log',
+      'NO_COLOR=1 TERM=dumb git diff',
+      'EDITOR=true git commit -qm x',
+      'VISUAL=: git commit -qm x',
+      'export LANG=C && git status',
+      'git -c commit.gpgsign=false commit -qm x',
+      'git log main --not v1',
+      'git log --onel -3',
+      'git diff --compact-summary',
+      'git fetch -o x origin',
+      'git config --global user.name x',
+      'git submodule status',
+      'git submodule',
+    ]) {
+      expect(read(cmd), cmd).toEqual([]);
+    }
+    // Any other variable may point git at other settings or run a program, also given to a
+    // shell that runs git, or exported before it.
+    for (const cmd of [
+      "EDITOR='touch x' git commit",
+      "VISUAL='touch x' git commit",
+      'HOME=fakehome git commit -qm x',
+      'XDG_CONFIG_HOME=xdg git commit -qm x',
+      'PATH=/tmp/bin:$PATH git status',
+      'SSH_ASKPASS=./x git fetch',
+      'PAGER=./show git log',
+      'SOME_SETTING=1 git status',
+      'export HOME=/tmp/elsewhere && git status',
+      "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=hk bash -c 'git commit -qm x'",
+      "env GIT_DIR=../other/.git sh -c 'git log'",
+      "HOME=fakehome sh -c 'cd src && git commit -qm x'",
+      // Settings git reads later, and subcommands with no option table here.
+      'git init -q --template=tpl',
+      'git config --file=.git/config core.hooksPath hk',
+      'git config -f .git/config core.fsmonitor x',
+      'git config --global core.hooksPath hk',
+      'git config -f ~/.gitconfig core.pager x',
+      'git config -f "$GIT_DIR/config" core.editor x',
+      'git submodule update --init',
+      'git difftool',
+      'git some-alias -b x',
+    ]) {
+      expect(whole(cmd), cmd).toBe(true);
+    }
+    // A file of its own is only that file.
+    expect(targets('git config -f tool.ini a.b c')).toEqual(['tool.ini']);
+    expect(whole('git config -f tool.ini a.b c')).toBe(false);
+    expect(whole('git config -f .git/config user.email x@example.invalid')).toBe(false);
+    // Settings given to a shell stay with it.
+    expect(whole("HOME=fakehome sh -c 'true'; git status")).toBe(false);
+    // Files and folders git fills.
+    expect(targets('git read-tree --index-output=certs/idx.pem HEAD')).toEqual(['certs/idx.pem']);
+    expect(lands('git init -q -b main --bare vendor')).toEqual(['vendor']);
+    expect(lands('git init -q --separate-git-dir=vendor y')).toEqual(['y', 'vendor']);
+    expect(lands('git clone -q --separate-git-dir vendor https://example.com/t/x.git')).toEqual([
+      'x',
+      'vendor',
+    ]);
+    expect(lands('git clone -q vendor.bundle')).toEqual(['vendor']);
+    expect(lands('git clone https://example.com/team/tool.git/')).toEqual(['tool']);
+    expect(lands('git clone git@example.com:team/tool.git')).toEqual(['tool']);
+    expect(whole('git clone git@example.com:team/tool.git')).toBe(false);
+    for (const local of ['git clone repo', 'git clone ../repo x', 'git clone file:///srv/r.git']) {
+      expect(whole(local), local).toBe(true);
+    }
+    expect(lands('git submodule add -q ./ vendor/lib')).toEqual(['vendor/lib']);
+    expect(lands('git submodule add -b main https://example.com/team/lib.git')).toEqual(['lib']);
+    // Code git runs is read like any other shell code.
+    for (const cmd of [
+      'git bisect run rm certs/a.pem',
+      "git bisect run 'rm certs/a.pem && make test'",
+      "git difftool -x 'rm certs/a.pem'",
+      "git difftool --extcmd='rm certs/a.pem' HEAD",
+      "git -c alias.wipe='!rm certs/a.pem' wipe",
+      "git submodule foreach 'rm -f certs/a.pem'",
+      "git rebase -x 'rm certs/a.pem' main",
+    ]) {
+      expect(targets(cmd), cmd).toEqual(['certs/a.pem']);
+    }
+    // Several words to `bisect run` are a program and its arguments, read as they are.
+    expect(targets("git bisect run rm 'certs/*.pem'")).toEqual(['certs/*.pem']);
   });
 
   it('reads git commands that change the whole tree as possible writes of what is there', () => {

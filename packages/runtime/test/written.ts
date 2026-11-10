@@ -16,8 +16,17 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { openMindly } from '../src/index.js';
 
+/**
+ * The environment git runs in: the test's own, less what would change what git does (an editor,
+ * a password prompt, settings given through `GIT_CONFIG_*`), so commands behave the same anywhere.
+ */
 export const GIT_ENV = {
-  ...process.env,
+  ...Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([k]) =>
+        !/^(GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_ASKPASS|GIT_CONFIG_.*|EDITOR|VISUAL)$/.test(k),
+    ),
+  ),
   GIT_AUTHOR_NAME: 't',
   GIT_AUTHOR_EMAIL: 't@example.invalid',
   GIT_COMMITTER_NAME: 't',

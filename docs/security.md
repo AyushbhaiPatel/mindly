@@ -45,13 +45,19 @@ memory, which is then injected into every other agent.
   is refused.
 - git commands are read the same way. One counts as only looking, or only moving refs and the
   index, when its subcommand is known to do so and every option and setting it is given keeps it
-  so. Anything else (an alias, an option or `-c` setting not known to be harmless, a `GIT_*`
-  variable set on the line, a push into a repository on this machine, a config write that changes
-  what later commands do) is taken as a possible change of the whole working tree, which gets a
-  warning when a covered file is there. What git runs on its own, from settings already in place,
-  is not seen: hooks in `.git/hooks` or under a `core.hooksPath` set earlier (husky, lint-staged
-  and the like running on commit), filters, diff drivers and `core.fsmonitor` in the repository's
-  config, variables exported before the session, and a remote whose URL is a path on this machine.
+  so. Anything else is taken as a possible change of the whole working tree, which gets a warning
+  when a covered file is there: an alias, a subcommand or option not known here, a `-c` setting
+  not known to be harmless, a variable set for git or exported earlier on the line (also for a
+  shell that runs git) other than locale, time zone, terminal, author and harmless pager or editor
+  ones, a push into a repository on this machine, and a config write that changes what later
+  commands do. The folders git fills (a clone, a new repository or working tree, a submodule) are
+  checked as written as a whole, and the code it runs (`rebase --exec`, `bisect run`,
+  `difftool --extcmd`, `submodule foreach`, a `!` alias) is read like any other command. What
+  git runs on its own, from settings already in place, is not seen: hooks in `.git/hooks` or
+  under a `core.hooksPath` set earlier (husky, lint-staged and the like running on commit),
+  filters, diff drivers and `core.fsmonitor` in the repository's config, variables exported before
+  the session, a remote whose URL is a path on this machine, and the files a clone from elsewhere
+  brings.
 - Rendered memory text is sanitised: control characters stripped, fence/delimiter sequences
   neutralised, length capped.
 
