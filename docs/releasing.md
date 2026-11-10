@@ -69,9 +69,9 @@ node scripts/smoke-release.mjs /tmp/mindly-release/mindly-cli-<version>.tgz
 The smoke test installs the tarball in a fresh temp directory with a temp `HOME` and
 `MINDLY_HOME` (network is needed for the third-party dependencies) and checks `npx mindly
 --version`, `mindly doctor`, `mindly init --project --yes --agents claude-code` in a temp git repo
-(hooks must point at the installed package, with and without `mindly` on `PATH`), that `init`
-run through `npm exec` refuses and writes nothing, that `npm i -g` into a temp prefix followed by
-`mindly init` records the global `mindly` and its hook runs with no registry to reach, a
+(hooks must point at the installed package, with and without `mindly` on `PATH`), `init` run
+through `npm exec` (hooks must name the launcher in `MINDLY_HOME`, run with the npx cache gone and
+no registry, end quietly once the copy is deleted, and work again after another `init`), a
 `SessionStart` hook payload, and `mindly daemon start`, `/api/health`, the dashboard at `/` and
 `mindly daemon stop`. CI runs the build and `npm pack --dry-run` on the latest Node 22, then this
 smoke test on Node 22.16.0, the oldest release in `engines` (`^22.16.0 || >=24.0.0`: the first
