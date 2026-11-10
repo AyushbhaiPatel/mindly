@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { DEFAULT_DENY_PATHS, MindlyError, isDeniedPath, sanitizeLine } from '@mindly/core';
 import { commitTree } from './capture.js';
 import { driverOverrides, gitVersion, runGit, versionAtLeast } from './exec.js';
@@ -68,9 +68,10 @@ export async function addWorktree(
  * belong to the repository at `repoRoot` and must not be its main working tree. A folder that is
  * no longer a worktree is left alone (returns false).
  *
- * With `force` (the default) uncommitted changes go with it. Without it git itself refuses a
- * worktree with modified or untracked files, or with submodules: that throws `conflict` with
- * `details.refused` and git's reason, and nothing is removed. Ignored files go either way.
+ * With `force` (the default) uncommitted changes go with it, and a locked worktree too. Without
+ * it git itself refuses a worktree with modified or untracked files, with submodules, or that is
+ * locked. A refusal throws `conflict` with `details.refused`, git's reason and, for a locked
+ * worktree, `details.locked`; nothing is removed. Ignored files go either way.
  */
 export async function removeWorktree(
   repoRoot: string,
@@ -94,11 +95,11 @@ export async function removeWorktree(
     throw new MindlyError('invalid_input', 'worktree does not belong to this repository');
   }
   const force = options.force !== false;
-  const res = await runGit(['worktree', 'remove', ...(force ? ['--force'] : []), target], {
-    cwd: root,
-    timeoutMs: 60_000,
-    okExitCodes: force ? [] : [128],
-  });
+  // `--force` twice also removes a locked worktree.
+  const res = await runGit(
+    ['worktree', 'remove', ...(force ? ['--force', '--force'] : []), target],
+    { cwd: root, timeoutMs: 60_000, okExitCodes: [128] },
+  );
   if (res.exitCode !== 0) {
     const reason = sanitizeLine(
       res.stderr
@@ -108,8 +109,9 @@ export async function removeWorktree(
         .join('; ') || 'git refused to remove it',
       300,
     );
+    const locked = /\blocked\b/i.test(res.stderr);
     throw new MindlyError('conflict', `git did not remove the worktree: ${reason}`, {
-      details: { path: target, refused: true, reason },
+      details: { path: target, refused: true, reason, locked },
     });
   }
   await runGit(['worktree', 'prune'], { cwd: root, timeoutMs: 30_000 });
@@ -278,31 +280,43 @@ export async function branchOnlyWork(
 }
 
 /**
- * Folders of dependencies and tools: ignored files in them (a CA bundle in a virtualenv, test
- * keys in `node_modules`) are installed, not written by anyone, and are not listed as work.
+ * Folders that hold installed packages: ignored files in them (certifi's `cacert.pem`, test keys
+ * of a package) were installed, not written by anyone, and are never listed as work.
+ */
+export const PACKAGE_DIRS: readonly string[] = ['node_modules', 'site-packages'];
+
+/**
+ * Dependency and tool trees: ignored deny-listed files in them are not listed, except `.env*`
+ * files and key files, which count wherever they are (outside `PACKAGE_DIRS`). `venv`, `.venv`
+ * and `env` are such a tree only when they hold a `pyvenv.cfg`.
  */
 export const DEPENDENCY_DIRS: readonly string[] = [
-  'node_modules',
-  '.venv',
-  'venv',
-  'env',
-  '.tox',
-  'site-packages',
-  'vendor/bundle',
-  '.gradle',
-  'target',
-  'dist',
-  'build',
-  '.next',
-  '.cache',
   '__pycache__',
+  '.tox',
+  '.gradle',
+  'vendor/bundle',
+  'venv',
+  '.venv',
+  'env',
 ];
 
-function inDependencyDir(rel: string): boolean {
-  const dirs = rel.toLowerCase().split('/').slice(0, -1);
-  for (let i = 0; i < dirs.length; i++) {
-    if (DEPENDENCY_DIRS.includes(dirs[i] as string)) return true;
-    if (dirs[i] === 'vendor' && dirs[i + 1] === 'bundle') return true;
+const VENV_DIRS = new Set(['venv', '.venv', 'env']);
+const ALWAYS_COUNTED = /^(\.env.*|.*\.(key|pem|p12|pfx|keystore|kdbx)|id_(rsa|ed25519|ecdsa).*)$/i;
+
+/** Whether an ignored deny-listed file is installed tooling rather than someone's work. */
+function installed(root: string, rel: string): boolean {
+  const parts = rel.split('/');
+  const dirs = parts.slice(0, -1);
+  const lower = dirs.map((d) => d.toLowerCase());
+  if (lower.some((d) => PACKAGE_DIRS.includes(d))) return true;
+  if (ALWAYS_COUNTED.test(parts[parts.length - 1] ?? '')) return false;
+  for (let i = 0; i < lower.length; i++) {
+    const d = lower[i] as string;
+    if (d === '__pycache__' || d === '.tox' || d === '.gradle') return true;
+    if (d === 'vendor' && lower[i + 1] === 'bundle') return true;
+    if (VENV_DIRS.has(d) && existsSync(join(root, ...dirs.slice(0, i + 1), 'pyvenv.cfg'))) {
+      return true;
+    }
   }
   return false;
 }
@@ -310,8 +324,9 @@ function inDependencyDir(rel: string): boolean {
 /**
  * Ignored files of the working tree at `cwd` that are on the secret deny-list or on `extraDeny`
  * (a local `.env`, a key; any letter case): not part of any commit, but lost with the worktree.
- * Repository-relative; their content is never read. Other ignored files, and anything inside a
- * dependency or tool folder (`DEPENDENCY_DIRS`), are not listed.
+ * Repository-relative; their content is never read. Other ignored files, and installed ones
+ * (in `PACKAGE_DIRS`, or in `DEPENDENCY_DIRS` unless they are `.env*` or key files), are not
+ * listed.
  */
 export async function ignoredDeniedFiles(
   cwd: string,
@@ -330,14 +345,14 @@ export async function ignoredDeniedFiles(
       '--exclude-standard',
       '--',
       ...patterns.map((p) => `:(icase,glob)${p}`),
-      ...DEPENDENCY_DIRS.map((d) => `:(exclude,icase,glob)**/${d}/**`),
+      ...PACKAGE_DIRS.map((d) => `:(exclude,icase,glob)**/${d}/**`),
     ],
     // The deny-list is made of globs: let git read these pathspecs as such.
     { cwd: root, timeoutMs: 60_000, env: { GIT_LITERAL_PATHSPECS: '0' } },
   );
   return res.stdout
     .split('\0')
-    .filter((p) => p !== '' && !inDependencyDir(p) && isDeniedPath(p, extraDeny))
+    .filter((p) => p !== '' && isDeniedPath(p, extraDeny) && !installed(root, p))
     .sort();
 }
 

@@ -709,6 +709,9 @@ export class SplitService {
       part.worktree,
       part.branch,
       this.extraDeny(part.projectId),
+      // Ignored files count only when they name secrets: the project's `ignore` list is about
+      // what Mindly reads, and ignored build output is no one's work.
+      this.k.config.redaction.denyPaths,
     );
     const paths = [...new Set(work.paths)].sort();
     const lost = [...new Set([...paths, ...work.ignoredDenied])].sort();
@@ -786,7 +789,26 @@ export class SplitService {
    * (`finished: false`): the split is only waiting for that abort to be run again.
    */
   abortPending(split: Split): boolean {
-    return (this.k.store.kv.get<string[]>(abortPendingKey(split.id)) ?? []).length > 0;
+    const key = abortPendingKey(split.id);
+    let parts = this.k.store.kv.get<string[]>(key);
+    if (parts === null || parts === undefined) {
+      // Recorded only as an event by an earlier version: read it once and keep it here.
+      parts = [];
+      for (const e of this.k.store.events.query(split.projectId, {
+        types: ['split.aborted'],
+        order: 'desc',
+        limit: 1000,
+      })) {
+        if (e.payload['splitId'] !== split.id) continue;
+        if (e.payload['finished'] === false) {
+          const listed = e.payload['unfinished'];
+          parts = Array.isArray(listed) && listed.length > 0 ? listed.map(String) : ['?'];
+        }
+        break;
+      }
+      this.k.store.kv.set(key, parts);
+    }
+    return parts.length > 0;
   }
 
   /** The latest merge check of a split. */
@@ -1259,8 +1281,9 @@ export class SplitService {
       let unfinished = false;
       // Checked again right before the worktree goes: files written and commits made since are
       // not deleted.
+      let now: Awaited<ReturnType<SplitService['worktreeState']>> | null = null;
       if (limited && existsSync(part.worktree)) {
-        const now = await this.worktreeState(git, root, part).catch(() => null);
+        now = await this.worktreeState(git, root, part).catch(() => null);
         if (!now || !was || now.content !== was.content || now.opaque.length > 0) unfinished = true;
       }
       if (limited && !unfinished && !options.keepBranches && was) {
@@ -1271,17 +1294,19 @@ export class SplitService {
       }
       if (unfinished) keptBecause[part.worktree] = 'it got new work while the abort ran';
       else {
-        // git is the last check: unless everything may go, it refuses a worktree with modified
-        // or untracked files or submodules, whatever the listing above missed.
+        // git is the last check: it refuses a worktree with modified or untracked files, with
+        // submodules or that is locked, whatever the listing above missed. It is overruled only
+        // by a discard nobody was asked about, or for exactly the uncommitted work the user was
+        // shown and confirmed, as it still is now.
+        const force =
+          everything || (confirmed !== undefined && confirmedAsIs(confirmed, part, now));
         try {
-          if (await git.removeWorktree(root, part.worktree, { force: everything })) {
+          if (await git.removeWorktree(root, part.worktree, { force })) {
             removedWorktrees.push(part.worktree);
           }
         } catch (err) {
-          if (!(err instanceof MindlyError && err.details?.['refused'] === true)) throw err;
           unfinished = true;
-          const reason = typeof err.details['reason'] === 'string' ? err.details['reason'] : '';
-          keptBecause[part.worktree] = `git did not remove it${reason ? `: ${reason}` : ''}`;
+          keptBecause[part.worktree] = removalRefused(err, part.worktree);
         }
       }
       if (unfinished) {
@@ -1300,12 +1325,16 @@ export class SplitService {
               deletedBranches.push(part.branch);
             }
           } catch (err) {
-            if (!(err instanceof MindlyError && err.code === 'conflict')) throw err;
             keptBranches.push(part.branch);
-            if (err.details?.['moved'] === true) unfinished = true;
+            // Checked out elsewhere: kept on purpose. Moved, or any other failure: not done.
+            const checkedOut =
+              err instanceof MindlyError &&
+              err.code === 'conflict' &&
+              err.details?.['moved'] !== true;
+            if (!checkedOut) unfinished = true;
             this.k.logger.warn('split abort: branch kept', {
               branch: part.branch,
-              error: err.message,
+              error: err instanceof Error ? err.message : String(err),
             });
           }
         }
@@ -1330,8 +1359,7 @@ export class SplitService {
     }
     const finished = unfinishedParts.size === 0;
     // Recorded on its own, so that a rerun can finish whatever happens to the event log.
-    if (finished) this.k.store.kv.delete(abortPendingKey(split.id));
-    else this.k.store.kv.set(abortPendingKey(split.id), [...unfinishedParts]);
+    this.k.store.kv.set(abortPendingKey(split.id), [...unfinishedParts]);
     if (finished) {
       try {
         rmdirSync(split.worktreeRoot);
@@ -1477,6 +1505,38 @@ export class SplitService {
 }
 
 const abortPendingKey = (splitId: string): string => `split.abortPending:${splitId}`;
+
+/**
+ * True when the part's uncommitted work right now is exactly what the user confirmed: the same
+ * fingerprint (paths, content and mode), nothing beyond the list, no folder that cannot be
+ * checked and no submodules, whose own changes the listing does not see.
+ */
+function confirmedAsIs(
+  confirmed: SplitAbortCheck,
+  part: SplitPart,
+  now: { content: string; opaque: string[] } | null,
+): boolean {
+  const shown = confirmed.state[part.key];
+  const listed = confirmed.work.find((w) => w.part === part.key);
+  if (!now || !shown || shown.content !== now.content || now.opaque.length > 0) return false;
+  // Nothing listed for the part: nothing was confirmed, and git needs no overruling.
+  if (!listed || listed.paths.length === 0 || listed.more || (listed.opaque ?? []).length > 0) {
+    return false;
+  }
+  return !existsSync(join(part.worktree, '.gitmodules'));
+}
+
+/** Why a worktree was kept when git did not remove it. */
+function removalRefused(err: unknown, worktree: string): string {
+  if (err instanceof MindlyError && err.details?.['locked'] === true) {
+    return `it is locked; run git worktree unlock ${worktree}, or remove it anyway: mindly split abort --yes --discard`;
+  }
+  if (err instanceof MindlyError && err.details?.['refused'] === true) {
+    const reason = typeof err.details['reason'] === 'string' ? err.details['reason'] : '';
+    return `git did not remove it${reason ? `: ${reason}` : ''}`;
+  }
+  return `git could not remove it: ${sanitizeLine(err instanceof Error ? err.message : String(err), 300)}`;
+}
 
 /** Paths listed in full; more are summarised and cannot be confirmed. */
 const PATHS_SHOWN = 200;

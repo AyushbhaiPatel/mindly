@@ -1287,6 +1287,128 @@ describe('split through hook events', () => {
     expect(svc.abortPending(mindly.store.splits.get(created.split.id))).toBe(false);
   });
 
+  it('overrules git only for the uncommitted work that was confirmed, as it still is', async () => {
+    const run = async (withSubmodules: boolean) => {
+      const { svc, pid, fake } = await setup();
+      const created = await svc.create({
+        projectId: pid,
+        plan: PLAN,
+        slug: 'billing',
+        plannedBy: 'plan-file',
+        connectedAgents: null,
+      });
+      const [api, page] = created.parts as [
+        (typeof created.parts)[number],
+        (typeof created.parts)[number],
+      ];
+      mkdirSync(join(page.worktree, 'src', 'app'), { recursive: true });
+      writeFileSync(join(page.worktree, 'src', 'app', 'wip.ts'), 'wip\n');
+      if (withSubmodules) writeFileSync(join(page.worktree, '.gitmodules'), '');
+      fake.uncommitted.set(page.worktree, ['src/app/wip.ts']);
+      const forced = new Map<string, boolean>();
+      const removeWorktree = fake.port.removeWorktree;
+      fake.port.removeWorktree = async (root, path, options) => {
+        forced.set(path, options?.force !== false);
+        return removeWorktree(root, path, options);
+      };
+      await svc.abort(created.split.id, { confirmed: await svc.abortCheck(created.split.id) });
+      return { api: forced.get(api.worktree), page: forced.get(page.worktree) };
+    };
+    // Confirmed as it is, the listed file goes with force; the clean worktree does not need it.
+    expect(await run(false)).toEqual({ api: false, page: true });
+    // With submodules, whose own changes are not listed, git keeps the last word.
+    expect(await run(true)).toEqual({ api: false, page: false });
+  });
+
+  it("never reads the project's ignored files, and counts ignored ones only when they are secrets", async () => {
+    const { mindly, svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const byId = mindly.projects.byId.bind(mindly.projects);
+    vi.spyOn(mindly.projects, 'byId').mockImplementation((id) => {
+      const ctx = byId(id);
+      return { ...ctx, config: { ...ctx.config, ignore: ['coverage/**', '**/*.log'] } };
+    });
+    const calls: { extraDeny: readonly string[]; secretDeny: readonly string[] }[] = [];
+    const uncommittedWork = fake.port.uncommittedWork;
+    fake.port.uncommittedWork = async (root, wt, branch, extraDeny, secretDeny) => {
+      calls.push({ extraDeny, secretDeny });
+      return uncommittedWork(root, wt, branch, extraDeny, secretDeny);
+    };
+    await svc.abortCheck(created.split.id);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c.extraDeny).toEqual(expect.arrayContaining(['coverage/**', '**/*.log']));
+      expect(c.secretDeny).not.toContain('coverage/**');
+      expect(c.secretDeny).toEqual(mindly.kernel.config.redaction.denyPaths);
+    }
+  });
+
+  it('keeps going past a part git fails on, and records it', async () => {
+    const { svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const [api, page] = created.parts as [
+      (typeof created.parts)[number],
+      (typeof created.parts)[number],
+    ];
+    const removeWorktree = fake.port.removeWorktree;
+    fake.port.removeWorktree = async (root, path, options) => {
+      if (path === api.worktree) throw new MindlyError('internal', 'git worktree failed');
+      if (path === page.worktree) {
+        throw new MindlyError('conflict', 'git did not remove the worktree', {
+          details: { refused: true, locked: true, reason: 'locked' },
+        });
+      }
+      return removeWorktree(root, path, options);
+    };
+    const aborted = await svc.abort(created.split.id);
+    expect(aborted.finished).toBe(false);
+    expect(aborted.keptWorktrees).toEqual([api.worktree, page.worktree]);
+    expect(aborted.keptBecause[api.worktree]).toMatch(
+      /git could not remove it: git worktree failed/,
+    );
+    expect(aborted.keptBecause[page.worktree]).toBe(
+      `it is locked; run git worktree unlock ${page.worktree}, or remove it anyway: mindly split abort --yes --discard`,
+    );
+    fake.port.removeWorktree = removeWorktree;
+    expect((await svc.abort(created.split.id)).finished).toBe(true);
+  });
+
+  it('reads an unfinished abort recorded only as an event, once', async () => {
+    const { mindly, svc, pid } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    mindly.store.events.append({
+      projectId: pid,
+      sessionId: null,
+      type: 'split.aborted',
+      payload: { splitId: created.split.id, finished: false, unfinished: ['page'] },
+    });
+    const split = mindly.store.splits.get(created.split.id);
+    expect(svc.abortPending(split)).toBe(true);
+    expect(mindly.store.kv.get(`split.abortPending:${split.id}`)).toEqual(['page']);
+    mindly.store.db.prepare("DELETE FROM events WHERE type = 'split.aborted'").run();
+    expect(svc.abortPending(split)).toBe(true);
+    expect((await svc.abort(created.split.id)).finished).toBe(true);
+    expect(mindly.store.kv.get(`split.abortPending:${split.id}`)).toEqual([]);
+  });
+
   it('removes everything with a discard that was not asked about', async () => {
     const { svc, pid, fake } = await setup();
     const created = await svc.create({

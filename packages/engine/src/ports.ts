@@ -248,14 +248,16 @@ export interface SplitGitPort {
    * Work in `worktree` that is not on `refs/heads/<branch>`. `paths`: paths whose content differs
    * from the branch tip, deny-listed ones included. `ignoredDenied`: ignored files on the secret
    * deny-list (a local `.env`), which no commit has and removing the worktree deletes. `denied`:
-   * every deny-listed path of both, whose content must never be read. `extraDeny` adds the
-   * user's and the project's deny globs to the built-in list.
+   * every deny-listed path of both, whose content must never be read. `extraDeny` adds globs
+   * that are never read (the user's and the project's) to the built-in list; `secretDeny` adds
+   * those of them that name secrets, the only ignored files counted besides the built-in list.
    */
   uncommittedWork(
     repoRoot: string,
     worktree: string,
     branch: string,
     extraDeny: readonly string[],
+    secretDeny: readonly string[],
   ): Promise<{ paths: string[]; denied: string[]; ignoredDenied: string[] }>;
   /** Paths that differ between `base` and the worktree's current content (committed or not). */
   changedSince(

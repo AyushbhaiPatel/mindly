@@ -299,6 +299,40 @@ describe('worktrees', () => {
     ]);
   });
 
+  it('counts secrets in folders that only look like build output, and skips real dependency trees', async () => {
+    const root = makeRepo({
+      '.gitignore': 'env/\nbuild/\n.venv/\nvenv/\n.tox/\n',
+    });
+    write(root, 'env/.env', 'k\n');
+    write(root, 'deploy/build/signing.key', 'k\n');
+    // A real virtualenv: installed files are skipped, a `.env` or a key in it still counts.
+    write(root, '.venv/pyvenv.cfg', 'home = /usr/bin\n');
+    write(root, '.venv/lib/python3.12/credentials.json', '{}\n');
+    write(root, '.venv/.env', 'k\n');
+    // Not a virtualenv (no pyvenv.cfg): everything counts.
+    write(root, 'venv/credentials.json', '{}\n');
+    write(root, '.tox/py312/credentials.json', '{}\n');
+    expect(await ignoredDeniedFiles(root)).toEqual([
+      '.venv/.env',
+      'deploy/build/signing.key',
+      'env/.env',
+      'venv/credentials.json',
+    ]);
+  });
+
+  it('keeps a locked worktree unless forced', async () => {
+    const root = makeRepo();
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    git(root, 'worktree', 'lock', '--reason', 'agent running', path);
+    await expect(removeWorktree(root, path, { force: false })).rejects.toSatisfy(
+      (e) => isMindlyError(e, 'conflict') && e.details?.['locked'] === true,
+    );
+    expect(existsSync(path)).toBe(true);
+    expect(await removeWorktree(root, path, { force: true })).toBe(true);
+    expect(existsSync(path)).toBe(false);
+  });
+
   it('removes a worktree without force only when git finds nothing to lose', async () => {
     const root = makeRepo({ '.gitignore': 'build/\n' });
     const path = join(tempDir(), 'part');

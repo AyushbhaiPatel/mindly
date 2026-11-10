@@ -176,3 +176,51 @@ describe('split abort does not refuse for what loses nothing', () => {
     expect(r.code).toBe(0);
   });
 });
+
+describe('split abort removes what was confirmed, and copes with what git will not remove', () => {
+  it('a confirmed abort on the terminal removes the untracked work it listed', async () => {
+    const sb = await splitSandbox();
+    const page = partDir(sb, 'page');
+    // The agent wrote a new file and did not commit it (the ordinary state of a part).
+    write(page, 'src/app/billing.ts', 'export const billing = 1;\n');
+    const r = await cli(sb, ['split', 'abort'], { answers: ['y'] });
+    expect(r.stderr).toContain('Part "Billing page": src/app/billing.ts');
+    expect(r.code).toBe(0);
+    expect(existsSync(page)).toBe(false);
+  });
+
+  it('a secret in a folder that only looks like build output is not removed without --discard', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', 'env/\nbuild/\n'));
+    const page = partDir(sb, 'page');
+    write(page, 'env/.env', 'STRIPE_KEY=sk_live_only_copy\n');
+    write(page, 'deploy/build/signing.key', '-----BEGIN PRIVATE KEY-----\nabc\n');
+    const r = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('deploy/build/signing.key, env/.env');
+    expect(existsSync(join(page, 'env/.env'))).toBe(true);
+    expect(existsSync(join(page, 'deploy/build/signing.key'))).toBe(true);
+  });
+
+  it('a locked worktree is kept with a way out, and --yes --discard removes it', async () => {
+    const sb = await splitSandbox();
+    const page = partDir(sb, 'page');
+    git(sb.repo, 'worktree', 'lock', '--reason', 'agent running', page);
+    const r1 = await cli(sb, ['split', 'abort', '--yes', '--json']);
+    expect(r1.code).toBe(1);
+    const a = JSON.parse(r1.stdout) as {
+      finished: boolean;
+      removedWorktrees: string[];
+      keptBecause: Record<string, string>;
+    };
+    expect(a.finished).toBe(false);
+    expect(a.removedWorktrees).toEqual([partDir(sb, 'api')]);
+    expect(a.keptBecause[page]).toBe(
+      `it is locked; run git worktree unlock ${page}, or remove it anyway: mindly split abort --yes --discard`,
+    );
+    expect(existsSync(page)).toBe(true);
+    const r2 = await cli(sb, ['split', 'abort', '--yes', '--discard']);
+    expect(r2.stderr).toBe('');
+    expect(r2.code).toBe(0);
+    expect(existsSync(page)).toBe(false);
+  });
+});

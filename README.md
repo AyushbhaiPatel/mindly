@@ -207,13 +207,15 @@ the worktrees and keep the part branches, so that no commit is lost; `mindly spl
 --discard` deletes it all. When you confirm an abort on the terminal, it removes only the work it
 listed: anything new, a listed file edited since, or a nested repository stops it.
 
-Short of `--yes --discard`, worktrees are removed the way `git worktree remove` does without
-`--force`: git refuses one with modified or untracked files or with submodules, and the abort
-keeps it and says why. Ignored files go with a worktree; the ignored ones on the secret deny-list
-(and on your `redaction.denyPaths` and the project's `ignore`) count as work, except inside
-dependency and tool folders (`node_modules`, `.venv`, `venv`, `env`, `.tox`, `site-packages`,
-`vendor/bundle`, `.gradle`, `target`, `dist`, `build`, `.next`, `.cache`, `__pycache__`). When an
-abort keeps something, run `mindly split abort` again to finish.
+Worktrees are removed the way `git worktree remove` does without `--force`: git refuses one with
+modified or untracked files, with submodules or that is locked, and the abort keeps it and says
+why. Only `--yes --discard`, or a confirmation on the terminal of exactly the files a worktree
+still holds, overrules that. Ignored files go with a worktree. The ignored ones on the secret
+deny-list or your `redaction.denyPaths` count as work, except installed ones: anything in
+`node_modules` or `site-packages`, and, apart from `.env*` and key files, anything in
+`__pycache__`, `.tox`, `.gradle`, `vendor/bundle` or a virtualenv (a `venv`, `.venv` or `env`
+folder holding `pyvenv.cfg`). When an abort keeps something, run `mindly split abort` again to
+finish.
 
 ### Which agent is better at what, in your repo
 
