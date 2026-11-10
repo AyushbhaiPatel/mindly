@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -45,11 +53,16 @@ function fakeSplitGit(root: string) {
   // Ignored files on the deny-list (by worktree), and which paths are deny-listed.
   const ignoredDenied = new Map<string, string[]>();
   const denied = new Set<string>();
+  // Ignored folders holding a nested repository (by worktree).
+  const nestedRepos = new Map<string, string[]>();
   // Commits only a branch has (by branch), as `branchOnlyWork` reports them; the branch tip is
   // the newest of them.
   const onlyOn = new Map<string, { commit: string; subject: string }[]>();
   const tipOf = (b: string): string => onlyOn.get(b)?.[0]?.commit ?? `tip-${b}`;
-  const calls: { mergeBranches: unknown[] } = { mergeBranches: [] };
+  const calls: { mergeBranches: unknown[]; restored: { worktree: string; paths: string[] }[] } = {
+    mergeBranches: [],
+    restored: [],
+  };
   let mergeCheck: SplitMergeCheck | null = null;
   let runChecks: SplitGitPort['runChecks'] = async () => [];
   const port: SplitGitPort = {
@@ -68,6 +81,9 @@ function fakeSplitGit(root: string) {
       rmSync(path, { recursive: true, force: true });
       worktrees.delete(path);
       return true;
+    },
+    restoreFromHead: async (_root, worktree, paths) => {
+      calls.restored.push({ worktree, paths: [...paths] });
     },
     deleteBranch: async (_root, b, expectedTip) => {
       if (expectedTip !== undefined && branches.has(b) && tipOf(b) !== expectedTip) {
@@ -88,6 +104,7 @@ function fakeSplitGit(root: string) {
         paths,
         ignoredDenied: ignored,
         denied: [...paths, ...ignored].filter((p) => denied.has(p)),
+        nestedRepos: nestedRepos.get(wt) ?? [],
       };
     },
     changedSince: async (_root, wt, base) =>
@@ -120,6 +137,7 @@ function fakeSplitGit(root: string) {
     uncommitted,
     ignoredDenied,
     denied,
+    nestedRepos,
     onlyOn,
     calls,
     setRunChecks: (fn: SplitGitPort['runChecks']) => {
@@ -1287,8 +1305,8 @@ describe('split through hook events', () => {
     expect(svc.abortPending(mindly.store.splits.get(created.split.id))).toBe(false);
   });
 
-  it('overrules git only for the uncommitted work that was confirmed, as it still is', async () => {
-    const run = async (withSubmodules: boolean) => {
+  it('deletes exactly the confirmed files, as they still are, and leaves the rest to git', async () => {
+    const run = async (edit?: (page: string) => void) => {
       const { svc, pid, fake } = await setup();
       const created = await svc.create({
         projectId: pid,
@@ -1297,27 +1315,71 @@ describe('split through hook events', () => {
         plannedBy: 'plan-file',
         connectedAgents: null,
       });
-      const [api, page] = created.parts as [
-        (typeof created.parts)[number],
-        (typeof created.parts)[number],
-      ];
+      const page = (created.parts as { worktree: string }[])[1] as { worktree: string };
       mkdirSync(join(page.worktree, 'src', 'app'), { recursive: true });
       writeFileSync(join(page.worktree, 'src', 'app', 'wip.ts'), 'wip\n');
-      if (withSubmodules) writeFileSync(join(page.worktree, '.gitmodules'), '');
-      fake.uncommitted.set(page.worktree, ['src/app/wip.ts']);
-      const forced = new Map<string, boolean>();
+      writeFileSync(join(page.worktree, 'src', 'app', 'old.ts'), 'old\n');
+      fake.uncommitted.set(page.worktree, ['src/app/old.ts', 'src/app/wip.ts']);
+      const forced: boolean[] = [];
       const removeWorktree = fake.port.removeWorktree;
       fake.port.removeWorktree = async (root, path, options) => {
-        forced.set(path, options?.force !== false);
+        forced.push(options?.force !== false);
         return removeWorktree(root, path, options);
       };
-      await svc.abort(created.split.id, { confirmed: await svc.abortCheck(created.split.id) });
-      return { api: forced.get(api.worktree), page: forced.get(page.worktree) };
+      // The page's branch is looked at by the listing, by abort's own check, then once more right
+      // before its files go: an edit made then is caught file by file.
+      let looks = 0;
+      const branchOnlyWork = fake.port.branchOnlyWork;
+      fake.port.branchOnlyWork = async (root, branch, options) => {
+        if (branch.endsWith('/page') && ++looks === 3) edit?.(page.worktree);
+        return branchOnlyWork(root, branch, options);
+      };
+      const confirmed = await svc.abortCheck(created.split.id);
+      const aborted = await svc.abort(created.split.id, { confirmed });
+      return { aborted, forced, restored: fake.calls.restored, page: page.worktree };
     };
-    // Confirmed as it is, the listed file goes with force; the clean worktree does not need it.
-    expect(await run(false)).toEqual({ api: false, page: true });
-    // With submodules, whose own changes are not listed, git keeps the last word.
-    expect(await run(true)).toEqual({ api: false, page: false });
+    // As confirmed: the listed files are deleted and put back to the commit, then git removes the
+    // worktree without being overruled.
+    const ok = await run();
+    expect(ok.aborted.finished).toBe(true);
+    expect(ok.forced).toEqual([false, false]);
+    expect(ok.restored).toEqual([
+      { worktree: ok.page, paths: ['src/app/old.ts', 'src/app/wip.ts'] },
+    ]);
+    // A listed file edited after the confirmation is kept, and so is the worktree.
+    const edited = await run((wt) => writeFileSync(join(wt, 'src', 'app', 'wip.ts'), 'more\n'));
+    expect(edited.aborted.finished).toBe(false);
+    expect(edited.aborted.keptWorktrees).toEqual([edited.page]);
+    expect(edited.aborted.keptBecause[edited.page]).toBe(
+      'a file it listed changed after the abort was confirmed: src/app/wip.ts',
+    );
+    expect(edited.restored).toEqual([]);
+    expect(edited.forced).toEqual([false]);
+    expect(readFileSync(join(edited.page, 'src', 'app', 'wip.ts'), 'utf8')).toBe('more\n');
+  });
+
+  it('counts an ignored folder holding a nested repository as work no confirmation covers', async () => {
+    const { svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const page = (created.parts as { worktree: string }[])[1] as { worktree: string };
+    mkdirSync(join(page.worktree, 'tools', 'dep', '.git'), { recursive: true });
+    fake.nestedRepos.set(page.worktree, ['tools/dep']);
+    const check = await svc.abortCheck(created.split.id);
+    expect(check.work).toEqual([
+      expect.objectContaining({ part: 'page', paths: ['tools/dep'], opaque: ['tools/dep'] }),
+    ]);
+    await expect(svc.abort(created.split.id)).rejects.toMatchObject({ code: 'conflict' });
+    await expect(svc.abort(created.split.id, { confirmed: check })).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(existsSync(join(page.worktree, 'tools', 'dep', '.git'))).toBe(true);
+    expect((await svc.abort(created.split.id, { discardUncommitted: true })).finished).toBe(true);
   });
 
   it("never reads the project's ignored files, and counts ignored ones only when they are secrets", async () => {

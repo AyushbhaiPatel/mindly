@@ -22,7 +22,9 @@ import {
   fileAtRef,
   fileStateAtRef,
   findRepoRoot,
+  flaggedChanges,
   ignoredDeniedFiles,
+  ignoredNestedRepos,
   headCommit,
   hunkHashes,
   isManifestPath,
@@ -34,6 +36,7 @@ import {
   openWarmWorkspace,
   removeWarmWorkspace,
   removeWorktree,
+  restoreFromHead,
   restoreSnapshotToBranch,
   runChecks,
   runGit,
@@ -102,6 +105,7 @@ export function createSplitGitPort(): SplitGitPort {
     addWorktree: async (repoRoot, path, branch, startPoint) =>
       (await addWorktree(repoRoot, path, branch, startPoint)).path,
     removeWorktree: (repoRoot, path, options) => removeWorktree(repoRoot, path, options),
+    restoreFromHead: (_repoRoot, worktree, paths) => restoreFromHead(worktree, paths),
     deleteBranch: (repoRoot, branch, expectedTip) => deleteBranch(repoRoot, branch, expectedTip),
     branchOnlyWork: (repoRoot, branch, options) => branchOnlyWork(repoRoot, branch, options),
     uncommittedWork: async (repoRoot, worktree, branch, extraDeny, secretDeny) => {
@@ -122,15 +126,21 @@ export function createSplitGitPort(): SplitGitPort {
         { cwd: repoRoot, timeoutMs: 30_000 },
       );
       const ignored = await ignoredDeniedFiles(worktree, secretDeny);
+      // Edited files flagged skip-worktree or assume-unchanged: neither the capture nor git's
+      // status sees them.
+      const flagged = await flaggedChanges(worktree, extraDeny);
+      const nested = await ignoredNestedRepos(worktree);
       const paths = new Set([
         ...res.stdout.split('\0').filter((p) => p !== ''),
         // Left out of the capture because they are on the deny-list: still work in the worktree.
         ...captured.skipped,
+        ...flagged.changed,
       ]);
       return {
         paths: [...paths].sort(),
-        denied: [...new Set([...captured.skipped, ...ignored])].sort(),
+        denied: [...new Set([...captured.skipped, ...ignored, ...flagged.denied])].sort(),
         ignoredDenied: ignored.filter((p) => !paths.has(p)),
+        nestedRepos: [...new Set([...nested.repos, ...nested.unchecked])].sort(),
       };
     },
     changedSince: async (repoRoot, worktree, base, extraDeny) => {

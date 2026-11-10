@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  type Dirent,
+  type Stats,
+} from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { DEFAULT_DENY_PATHS, MindlyError, isDeniedPath, sanitizeLine } from '@mindly/core';
 import { commitTree } from './capture.js';
@@ -69,9 +77,10 @@ export async function addWorktree(
  * no longer a worktree is left alone (returns false).
  *
  * With `force` (the default) uncommitted changes go with it, and a locked worktree too. Without
- * it git itself refuses a worktree with modified or untracked files, with submodules, or that is
- * locked. A refusal throws `conflict` with `details.refused`, git's reason and, for a locked
- * worktree, `details.locked`; nothing is removed. Ignored files go either way.
+ * it git itself refuses a worktree with modified or untracked files (files flagged skip-worktree
+ * or assume-unchanged included), with submodules, or that is locked. A refusal throws `conflict`
+ * with `details.refused`, git's reason and, for a locked worktree, `details.locked`; nothing is
+ * removed. Ignored files go either way.
  */
 export async function removeWorktree(
   repoRoot: string,
@@ -95,12 +104,16 @@ export async function removeWorktree(
     throw new MindlyError('invalid_input', 'worktree does not belong to this repository');
   }
   const force = options.force !== false;
+  // git's check reads the status, which skips files flagged skip-worktree or assume-unchanged:
+  // unflag the ones on disk, so that an edit to one is seen like any other.
+  const flagged = !force && existsSync(target) ? await unflagPresent(target) : [];
   // `--force` twice also removes a locked worktree.
   const res = await runGit(
     ['worktree', 'remove', ...(force ? ['--force', '--force'] : []), target],
     { cwd: root, timeoutMs: 60_000, okExitCodes: [128] },
   );
   if (res.exitCode !== 0) {
+    await reflag(target, flagged).catch(() => undefined);
     const reason = sanitizeLine(
       res.stderr
         .split('\n')
@@ -116,6 +129,224 @@ export async function removeWorktree(
   }
   await runGit(['worktree', 'prune'], { cwd: root, timeoutMs: 30_000 });
   return true;
+}
+
+/** An index entry flagged skip-worktree or assume-unchanged. */
+interface FlaggedEntry {
+  path: string;
+  mode: string;
+  object: string;
+  skipWorktree: boolean;
+  assumeUnchanged: boolean;
+}
+
+/**
+ * Index entries of the working tree at `root` flagged skip-worktree or assume-unchanged: git's
+ * status, and so `git worktree remove`, does not look at their files.
+ */
+async function flaggedEntries(root: string): Promise<FlaggedEntry[]> {
+  const res = await runGit(['ls-files', '-v', '-s', '-z'], { cwd: root, timeoutMs: 60_000 });
+  const out: FlaggedEntry[] = [];
+  for (const rec of res.stdout.split('\0')) {
+    const m = /^(\S) ([0-7]{6}) ([0-9a-f]+) \d\t([\s\S]+)$/.exec(rec);
+    if (!m) continue;
+    const tag = m[1] as string;
+    // `S`: skip-worktree; a lower-case tag: assume-unchanged.
+    const skipWorktree = tag.toUpperCase() === 'S';
+    const assumeUnchanged = tag !== tag.toUpperCase();
+    if (!skipWorktree && !assumeUnchanged) continue;
+    out.push({
+      path: m[4] as string,
+      mode: m[2] as string,
+      object: m[3] as string,
+      skipWorktree,
+      assumeUnchanged,
+    });
+  }
+  return out;
+}
+
+/**
+ * The entry at `rel` (repository-relative) under `root`, if there is one: nothing when a folder on
+ * the way is missing, a symbolic link or not a folder (git does not look past those either).
+ */
+function lstatInTree(root: string, rel: string): Stats | null {
+  const parts = rel.split('/');
+  let at = root;
+  try {
+    for (let i = 0; i < parts.length - 1; i++) {
+      at = join(at, parts[i] as string);
+      if (!lstatSync(at).isDirectory()) return null;
+    }
+    return lstatSync(join(at, parts[parts.length - 1] as string));
+  } catch {
+    return null;
+  }
+}
+
+/** Clears both flags of the flagged entries whose file is on disk; returns them. */
+async function unflagPresent(worktree: string): Promise<FlaggedEntry[]> {
+  const present = (await flaggedEntries(worktree)).filter(
+    (e) => lstatInTree(worktree, e.path) !== null,
+  );
+  await setFlags(worktree, present, false);
+  return present;
+}
+
+/** Sets the flags `unflagPresent` cleared again. */
+async function reflag(worktree: string, entries: readonly FlaggedEntry[]): Promise<void> {
+  await setFlags(worktree, entries, true);
+}
+
+/**
+ * Sets (`on`) or clears each entry's own flags. One flag per call: given both, `update-index`
+ * applies only the first.
+ */
+async function setFlags(
+  worktree: string,
+  entries: readonly FlaggedEntry[],
+  on: boolean,
+): Promise<void> {
+  for (const [flag, list] of [
+    [on ? '--skip-worktree' : '--no-skip-worktree', entries.filter((e) => e.skipWorktree)],
+    [on ? '--assume-unchanged' : '--no-assume-unchanged', entries.filter((e) => e.assumeUnchanged)],
+  ] as const) {
+    if (list.length === 0) continue;
+    await runGit(['update-index', flag, '-z', '--stdin'], {
+      cwd: worktree,
+      input: `${list.map((e) => e.path).join('\0')}\0`,
+      timeoutMs: 60_000,
+    });
+  }
+}
+
+/**
+ * Files of the working tree at `cwd` flagged skip-worktree or assume-unchanged (a local config
+ * kept out of commits) whose content differs from the index: uncommitted work that git's status
+ * does not show. Repository-relative. Deny-listed ones (on the built-in list or `extraDeny`) are
+ * never read: they count whenever they are on disk, and are also returned in `denied`.
+ */
+export async function flaggedChanges(
+  cwd: string,
+  extraDeny: readonly string[] = [],
+): Promise<{ changed: string[]; denied: string[] }> {
+  const root = await findRepoRoot(cwd);
+  const changed: string[] = [];
+  const denied: string[] = [];
+  const toHash: FlaggedEntry[] = [];
+  for (const e of await flaggedEntries(root)) {
+    if (e.mode === '160000') continue;
+    const st = lstatInTree(root, e.path);
+    // Not on disk (a sparse checkout): there is nothing to lose.
+    if (!st) continue;
+    if (isDeniedPath(e.path, extraDeny)) {
+      changed.push(e.path);
+      denied.push(e.path);
+    } else if (st.isSymbolicLink()) {
+      const res = await runGit(['hash-object', '--stdin'], {
+        cwd: root,
+        input: readlinkSync(join(root, e.path)),
+        timeoutMs: 30_000,
+      });
+      if (e.mode !== '120000' || res.stdout.trim() !== e.object) changed.push(e.path);
+    } else if (!st.isFile() || e.mode === '120000' || e.path.includes('\n')) {
+      changed.push(e.path);
+    } else toHash.push(e);
+  }
+  if (toHash.length > 0) {
+    const res = await runGit(['hash-object', '--stdin-paths'], {
+      cwd: root,
+      input: `${toHash.map((e) => e.path).join('\n')}\n`,
+      config: await driverOverrides(root),
+      timeoutMs: 120_000,
+    });
+    const hashes = res.stdout.split('\n');
+    toHash.forEach((e, i) => {
+      if (hashes[i]?.trim() !== e.object) changed.push(e.path);
+    });
+  }
+  return { changed: [...new Set(changed)].sort(), denied: denied.sort() };
+}
+
+/**
+ * Puts `paths` of the worktree back to its HEAD in the index, and writes the committed ones that
+ * are missing from disk; a file that is on disk is never overwritten. Used after the files a user
+ * confirmed were deleted, so that git's own check of the worktree only finds what was not listed.
+ */
+export async function restoreFromHead(worktree: string, paths: readonly string[]): Promise<void> {
+  if (paths.length === 0) return;
+  const root = await findRepoRoot(worktree);
+  const common = {
+    cwd: root,
+    input: `${paths.join('\0')}\0`,
+    config: await driverOverrides(root),
+    timeoutMs: 120_000,
+    // A path neither committed nor in the index, or a file in the way: git's check sees to it.
+    okExitCodes: [1],
+  };
+  await runGit(['reset', '-q', 'HEAD', '--pathspec-from-file=-', '--pathspec-file-nul'], common);
+  await runGit(['checkout-index', '-q', '-z', '--stdin'], common);
+}
+
+/** How many entries `ignoredNestedRepos` reads at most before it gives up. */
+export const NESTED_REPO_SEARCH_LIMIT = 200_000;
+
+/**
+ * Nested git repositories in the ignored folders of the working tree at `cwd` (a dependency
+ * cloned into an ignored `vendor/` and patched there): git deletes ignored folders with the
+ * worktree, and their commits and changes with them. `repos`: their folders. `unchecked`:
+ * ignored folders that could not be looked through (unreadable, or more than `limit` entries in
+ * all), which may hold one. Repository-relative. Installed packages (`node_modules`,
+ * `site-packages`) and cache folders (holding a `CACHEDIR.TAG`) are not looked into.
+ */
+export async function ignoredNestedRepos(
+  cwd: string,
+  limit = NESTED_REPO_SEARCH_LIMIT,
+): Promise<{ repos: string[]; unchecked: string[] }> {
+  const root = await findRepoRoot(cwd);
+  const res = await runGit(
+    ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'],
+    { cwd: root, timeoutMs: 60_000 },
+  );
+  const dirs = res.stdout
+    .split('\0')
+    .filter((p) => p.endsWith('/'))
+    .map((p) => p.slice(0, -1))
+    .sort();
+  // A folder listed inside another listed one is looked through with it.
+  const top = dirs.filter((d) => !dirs.some((o) => o !== d && d.startsWith(`${o}/`)));
+  const repos: string[] = [];
+  const unchecked: string[] = [];
+  let budget = limit;
+  for (const dir of top) {
+    const stack = [dir];
+    let complete = true;
+    while (stack.length > 0) {
+      const rel = stack.pop() as string;
+      const name = rel.slice(rel.lastIndexOf('/') + 1).toLowerCase();
+      if (PACKAGE_DIRS.includes(name)) continue;
+      let entries: Dirent[];
+      try {
+        entries = readdirSync(join(root, rel), { withFileTypes: true });
+      } catch {
+        complete = false;
+        break;
+      }
+      budget -= entries.length;
+      if (budget < 0) {
+        complete = false;
+        break;
+      }
+      if (entries.some((e) => e.name === '.git')) {
+        repos.push(rel);
+        continue;
+      }
+      if (entries.some((e) => e.name === 'CACHEDIR.TAG' && e.isFile())) continue;
+      for (const e of entries) if (e.isDirectory()) stack.push(`${rel}/${e.name}`);
+    }
+    if (!complete) unchecked.push(dir);
+  }
+  return { repos: repos.sort(), unchecked };
 }
 
 /**

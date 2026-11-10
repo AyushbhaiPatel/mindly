@@ -224,10 +224,18 @@ export interface SplitGitPort {
   addWorktree(repoRoot: string, path: string, branch: string, startPoint: string): Promise<string>;
   /**
    * Removes a linked worktree. False when it was not a worktree. With `force` (the default) its
-   * uncommitted work goes with it; with `force: false` git refuses (`conflict`, `details.refused`)
-   * a worktree with modified or untracked files or submodules. Ignored files go either way.
+   * uncommitted work goes with it; with `force: false` git refuses (`conflict`, `details.refused`,
+   * and `details.locked` for a locked one) a worktree with modified or untracked files (flagged
+   * skip-worktree or assume-unchanged ones included), with submodules or that is locked. Ignored
+   * files go either way.
    */
   removeWorktree(repoRoot: string, path: string, options?: { force?: boolean }): Promise<boolean>;
+  /**
+   * Puts `paths` of `worktree` back to its HEAD in the index and writes the committed ones that
+   * are missing from disk, never overwriting a file: what is left for git's check after the
+   * files a user confirmed were deleted.
+   */
+  restoreFromHead(repoRoot: string, worktree: string, paths: readonly string[]): Promise<void>;
   /** Deletes a branch; with `expectedTip`, refuses (`conflict`) one that has moved since. */
   deleteBranch(repoRoot: string, branch: string, expectedTip?: string): Promise<boolean>;
   /**
@@ -248,9 +256,12 @@ export interface SplitGitPort {
    * Work in `worktree` that is not on `refs/heads/<branch>`. `paths`: paths whose content differs
    * from the branch tip, deny-listed ones included. `ignoredDenied`: ignored files on the secret
    * deny-list (a local `.env`), which no commit has and removing the worktree deletes. `denied`:
-   * every deny-listed path of both, whose content must never be read. `extraDeny` adds globs
-   * that are never read (the user's and the project's) to the built-in list; `secretDeny` adds
-   * those of them that name secrets, the only ignored files counted besides the built-in list.
+   * every deny-listed path of both, whose content must never be read. `nestedRepos`: ignored
+   * folders that hold a nested repository, or that could not be looked through, which removing
+   * the worktree deletes too. Edited files flagged skip-worktree or assume-unchanged are among
+   * `paths`. `extraDeny` adds globs that are never read (the user's and the project's) to the
+   * built-in list; `secretDeny` adds those of them that name secrets, the only ignored files
+   * counted besides the built-in list.
    */
   uncommittedWork(
     repoRoot: string,
@@ -258,7 +269,12 @@ export interface SplitGitPort {
     branch: string,
     extraDeny: readonly string[],
     secretDeny: readonly string[],
-  ): Promise<{ paths: string[]; denied: string[]; ignoredDenied: string[] }>;
+  ): Promise<{
+    paths: string[];
+    denied: string[];
+    ignoredDenied: string[];
+    nestedRepos: string[];
+  }>;
   /** Paths that differ between `base` and the worktree's current content (committed or not). */
   changedSince(
     repoRoot: string,

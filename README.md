@@ -204,17 +204,20 @@ parts hold work no other branch has: uncommitted files (secrets such as a local 
 listed by name only), or commits only on a part branch. After a squash or rebase merge of the
 merged branch, every part commit is like that. Run `mindly split abort --keep-branches` to remove
 the worktrees and keep the part branches, so that no commit is lost; `mindly split abort --yes
---discard` deletes it all. When you confirm an abort on the terminal, it removes only the work it
-listed: anything new, a listed file edited since, or a nested repository stops it.
+--discard` deletes it all. When you confirm an abort on the terminal, it deletes only the files it
+listed, each only if it still holds what it held when you were asked: anything new, a listed file
+edited since, or a nested repository stops it.
 
-Worktrees are removed the way `git worktree remove` does without `--force`: git refuses one with
-modified or untracked files, with submodules or that is locked, and the abort keeps it and says
-why. Only `--yes --discard`, or a confirmation on the terminal of exactly the files a worktree
-still holds, overrules that. Ignored files go with a worktree. The ignored ones on the secret
+Then worktrees are removed the way `git worktree remove` does without `--force`: git refuses one
+with modified or untracked files (an edited file flagged skip-worktree or assume-unchanged
+included), with submodules or that is locked, and the abort keeps it and says why. Only `--yes
+--discard` overrules that. Ignored files go with a worktree. The ignored ones on the secret
 deny-list or your `redaction.denyPaths` count as work, except installed ones: anything in
 `node_modules` or `site-packages`, and, apart from `.env*` and key files, anything in
 `__pycache__`, `.tox`, `.gradle`, `vendor/bundle` or a virtualenv (a `venv`, `.venv` or `env`
-folder holding `pyvenv.cfg`). When an abort keeps something, run `mindly split abort` again to
+folder holding `pyvenv.cfg`). So does a git repository inside an ignored folder (outside
+`node_modules`, `site-packages` and cache folders holding a `CACHEDIR.TAG`), and an ignored folder
+too large to look through. When an abort keeps something, run `mindly split abort` again to
 finish.
 
 ### Which agent is better at what, in your repo

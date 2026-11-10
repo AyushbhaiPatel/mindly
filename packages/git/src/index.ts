@@ -78,11 +78,15 @@ export {
   branchOnlyWork,
   deleteBranch,
   DEPENDENCY_DIRS,
+  NESTED_REPO_SEARCH_LIMIT,
   PACKAGE_DIRS,
+  flaggedChanges,
   ignoredDeniedFiles,
+  ignoredNestedRepos,
   listFiles,
   mergeIntoNewBranch,
   removeWorktree,
+  restoreFromHead,
 } from './worktrees.js';
 export type {
   BranchOnlyCommit,

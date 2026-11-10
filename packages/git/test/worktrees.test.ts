@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError } from '@mindly/core';
@@ -8,11 +8,14 @@ import {
   branchExists,
   branchOnlyWork,
   deleteBranch,
+  flaggedChanges,
   ignoredDeniedFiles,
+  ignoredNestedRepos,
   listFiles,
   listWorktrees,
   mergeIntoNewBranch,
   removeWorktree,
+  restoreFromHead,
 } from '../src/index.js';
 import { commitAll, git, makeRepo, tempDir, write } from './helpers.js';
 
@@ -349,6 +352,69 @@ describe('worktrees', () => {
     write(path, 'build/out.js', 'ignored\n');
     expect(await removeWorktree(root, path, { force: false })).toBe(true);
     expect(existsSync(path)).toBe(false);
+  });
+
+  it('sees an edit to a file flagged skip-worktree or assume-unchanged, and keeps the flags', async () => {
+    const root = makeRepo({ 'config/local.json': '{}\n', 'b.txt': 'b\n', '.env.local': 'A=\n' });
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    git(path, 'update-index', '--skip-worktree', 'config/local.json', '.env.local');
+    git(path, 'update-index', '--assume-unchanged', 'b.txt');
+    expect(git(path, 'status', '--porcelain')).toBe('');
+    expect(await flaggedChanges(path)).toEqual({ changed: ['.env.local'], denied: ['.env.local'] });
+    write(path, 'config/local.json', '{"db":"postgres://me:pw@host/db"}\n');
+    write(path, 'b.txt', 'edited\n');
+    expect(await flaggedChanges(path)).toEqual({
+      changed: ['.env.local', 'b.txt', 'config/local.json'],
+      denied: ['.env.local'],
+    });
+    // git's own check sees them too (here, the skip-worktree one alone), and a refusal leaves the
+    // flags as they were.
+    write(path, 'b.txt', 'b\n');
+    await expect(removeWorktree(root, path, { force: false })).rejects.toSatisfy(
+      (e) => isMindlyError(e, 'conflict') && e.details?.['refused'] === true,
+    );
+    expect(git(path, 'ls-files', '-v', 'config/local.json', 'b.txt', '.env.local')).toBe(
+      'S .env.local\nh b.txt\nS config/local.json\n',
+    );
+    // Not on disk (a sparse checkout): nothing to lose.
+    rmSync(join(path, 'config/local.json'));
+    expect((await flaggedChanges(path)).changed).not.toContain('config/local.json');
+  });
+
+  it('puts listed paths back to HEAD without overwriting a file on disk', async () => {
+    const root = makeRepo({ 'a.txt': 'a\n', 'b.txt': 'b\n', 'c.txt': 'c\n' });
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    write(path, 'new.txt', 'new\n');
+    git(path, 'add', 'new.txt', '-f');
+    write(path, 'a.txt', 'edited\n');
+    git(path, 'add', 'a.txt');
+    rmSync(join(path, 'a.txt'));
+    rmSync(join(path, 'new.txt'));
+    rmSync(join(path, 'b.txt'));
+    write(path, 'c.txt', 'written since\n');
+    await restoreFromHead(path, ['a.txt', 'b.txt', 'c.txt', 'new.txt', 'gone.txt']);
+    expect(readFileSync(join(path, 'a.txt'), 'utf8')).toBe('a\n');
+    expect(readFileSync(join(path, 'b.txt'), 'utf8')).toBe('b\n');
+    expect(readFileSync(join(path, 'c.txt'), 'utf8')).toBe('written since\n');
+    expect(git(path, 'status', '--porcelain')).toBe(' M c.txt\n');
+  });
+
+  it('finds nested repositories in ignored folders, and says when it could not look', async () => {
+    const root = makeRepo({ '.gitignore': 'tools/\nnode_modules/\ntarget/\nsrc/vendor/\n' });
+    git(root, 'init', '-q', join(root, 'tools/patched-dep'));
+    write(root, 'src/vendor/lib/.git', 'gitdir: /elsewhere\n');
+    // Installed packages and caches are not looked into.
+    git(root, 'init', '-q', join(root, 'node_modules/dep'));
+    write(root, 'target/CACHEDIR.TAG', 'Signature: 8a477f597d28d172789f06886806bc55\n');
+    git(root, 'init', '-q', join(root, 'target/debug/build/x'));
+    write(root, 'tools/notes/a.txt', 'a\n');
+    expect(await ignoredNestedRepos(root)).toEqual({
+      repos: ['src/vendor/lib', 'tools/patched-dep'],
+      unchecked: [],
+    });
+    expect((await ignoredNestedRepos(root, 3)).unchecked.length).toBeGreaterThan(0);
   });
 
   it('lists tracked and untracked files, not ignored ones', async () => {

@@ -6,6 +6,8 @@ import {
   readlinkSync,
   realpathSync,
   rmdirSync,
+  unlinkSync,
+  type Stats,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
@@ -364,8 +366,11 @@ export interface SplitUnmergedWork {
  */
 export interface SplitAbortCheck {
   work: SplitUnmergedWork[];
-  /** By part key: the tip of its branch and a fingerprint of its uncommitted files' content. */
-  state: Record<string, { tip: string | null; content: string }>;
+  /**
+   * By part key: the tip of its branch, a fingerprint of its uncommitted files' content, and one
+   * of each such file (by path): a confirmed abort deletes a listed file only while it matches.
+   */
+  state: Record<string, { tip: string | null; content: string; files: Record<string, string> }>;
 }
 
 export interface SplitMergeResult {
@@ -688,8 +693,9 @@ export class SplitService {
    * tip (what a merge leaves out). `lost`: that and ignored files on the secret deny-list (a local
    * `.env`), which removing the worktree deletes too. `content`: a fingerprint of `lost`, which
    * changes when any of it is edited; deny-listed files are fingerprinted by size, time and mode,
-   * never read. `opaque`: folders (a nested repository) whose content cannot be fingerprinted.
-   * Other ignored files (build output, dependencies) are not work.
+   * never read. `opaque`: folders (a nested repository, an ignored folder holding one) whose
+   * content cannot be fingerprinted. Other ignored files (build output, dependencies) are not
+   * work.
    */
   /** Deny globs beyond the built-in ones: the user's redaction settings and the project's ignore. */
   private extraDeny(projectId: string): string[] {
@@ -700,9 +706,17 @@ export class SplitService {
     git: SplitGitPort,
     root: string,
     part: SplitPart,
-  ): Promise<{ paths: string[]; lost: string[]; content: string; opaque: string[] }> {
+  ): Promise<{
+    paths: string[];
+    lost: string[];
+    denied: ReadonlySet<string>;
+    content: string;
+    files: Record<string, string>;
+    opaque: string[];
+  }> {
     if (!existsSync(part.worktree) || !(await git.branchExists(root, part.branch))) {
-      return { paths: [], lost: [], ...worktreeFingerprint(part.worktree, [], new Set()) };
+      const denied = new Set<string>();
+      return { paths: [], lost: [], denied, ...worktreeFingerprint(part.worktree, [], denied) };
     }
     const work = await git.uncommittedWork(
       root,
@@ -714,8 +728,54 @@ export class SplitService {
       this.k.config.redaction.denyPaths,
     );
     const paths = [...new Set(work.paths)].sort();
-    const lost = [...new Set([...paths, ...work.ignoredDenied])].sort();
-    return { paths, lost, ...worktreeFingerprint(part.worktree, lost, new Set(work.denied)) };
+    const lost = [...new Set([...paths, ...work.ignoredDenied, ...work.nestedRepos])].sort();
+    const denied = new Set(work.denied);
+    return { paths, lost, denied, ...worktreeFingerprint(part.worktree, lost, denied) };
+  }
+
+  /**
+   * Deletes from the part's worktree exactly the files the user was shown and confirmed (`listed`),
+   * each only while it holds what it held then (`shown`), checked again right before it goes.
+   * Committed ones get their content back, in the index and on disk, and new ones leave the
+   * index: what is left is for git's own check, which refuses whatever was not listed. Returns why
+   * it stopped when a listed file changed since or cannot be checked (nothing more is deleted),
+   * or null.
+   */
+  private async discardConfirmed(
+    git: SplitGitPort,
+    root: string,
+    part: SplitPart,
+    listed: readonly string[],
+    shown: Readonly<Record<string, string>>,
+    now: { files: Readonly<Record<string, string>>; denied: ReadonlySet<string> },
+  ): Promise<string | null> {
+    const changed = (rel: string, digest: string): boolean =>
+      digest !== shown[rel] || digest === 'dir' || digest === 'unreadable';
+    // A listed file that is no longer work (committed since) is left to git.
+    const still = listed.filter((rel) => now.files[rel] !== undefined);
+    // All of them first: one that changed keeps every listed file.
+    const first = still.filter((rel) => changed(rel, now.files[rel] as string));
+    if (first.length > 0) {
+      return `a file it listed changed after the abort was confirmed: ${describePaths(first)}`;
+    }
+    for (const rel of still) {
+      const digest = fileDigest(part.worktree, rel, now.denied);
+      if (changed(rel, digest)) {
+        return `a file it listed changed after the abort was confirmed: ${describePaths([rel])}`;
+      }
+      if (digest === 'missing') continue;
+      try {
+        unlinkSync(join(part.worktree, rel));
+      } catch (err) {
+        return `could not delete ${sanitizeLine(rel, 200)}: ${sanitizeLine(err instanceof Error ? err.message : String(err), 200)}`;
+      }
+    }
+    try {
+      await git.restoreFromHead(root, part.worktree, still);
+    } catch (err) {
+      return `git could not put the listed files back to their last commit: ${sanitizeLine(err instanceof Error ? err.message : String(err), 300)}`;
+    }
+    return null;
   }
 
   /**
@@ -770,7 +830,7 @@ export class SplitService {
         more: false,
       };
       if (!options.keepBranches) only = await this.onlyOnBranch(git, root, part, parts);
-      state[part.key] = { tip: only.tip, content: files.content };
+      state[part.key] = { tip: only.tip, content: files.content, files: files.files };
       if (files.lost.length === 0 && only.commits.length === 0) continue;
       work.push({
         part: part.key,
@@ -1293,15 +1353,28 @@ export class SplitService {
         if (tip !== was.tip) unfinished = true;
       }
       if (unfinished) keptBecause[part.worktree] = 'it got new work while the abort ran';
-      else {
+      // Confirmed: the files the user was shown go first, each only as it was then.
+      const shown = confirmed?.work.find((w) => w.part === part.key);
+      if (!unfinished && confirmed && now && shown && shown.paths.length > 0) {
+        const why = await this.discardConfirmed(
+          git,
+          root,
+          part,
+          shown.paths,
+          confirmed.state[part.key]?.files ?? {},
+          now,
+        );
+        if (why) {
+          unfinished = true;
+          keptBecause[part.worktree] = why;
+        }
+      }
+      if (!unfinished) {
         // git is the last check: it refuses a worktree with modified or untracked files, with
-        // submodules or that is locked, whatever the listing above missed. It is overruled only
-        // by a discard nobody was asked about, or for exactly the uncommitted work the user was
-        // shown and confirmed, as it still is now.
-        const force =
-          everything || (confirmed !== undefined && confirmedAsIs(confirmed, part, now));
+        // submodules or that is locked, whatever the listing above missed or appeared since. Only
+        // a discard nobody was asked about overrules it.
         try {
-          if (await git.removeWorktree(root, part.worktree, { force })) {
+          if (await git.removeWorktree(root, part.worktree, { force: everything })) {
             removedWorktrees.push(part.worktree);
           }
         } catch (err) {
@@ -1506,26 +1579,6 @@ export class SplitService {
 
 const abortPendingKey = (splitId: string): string => `split.abortPending:${splitId}`;
 
-/**
- * True when the part's uncommitted work right now is exactly what the user confirmed: the same
- * fingerprint (paths, content and mode), nothing beyond the list, no folder that cannot be
- * checked and no submodules, whose own changes the listing does not see.
- */
-function confirmedAsIs(
-  confirmed: SplitAbortCheck,
-  part: SplitPart,
-  now: { content: string; opaque: string[] } | null,
-): boolean {
-  const shown = confirmed.state[part.key];
-  const listed = confirmed.work.find((w) => w.part === part.key);
-  if (!now || !shown || shown.content !== now.content || now.opaque.length > 0) return false;
-  // Nothing listed for the part: nothing was confirmed, and git needs no overruling.
-  if (!listed || listed.paths.length === 0 || listed.more || (listed.opaque ?? []).length > 0) {
-    return false;
-  }
-  return !existsSync(join(part.worktree, '.gitmodules'));
-}
-
 /** Why a worktree was kept when git did not remove it. */
 function removalRefused(err: unknown, worktree: string): string {
   if (err instanceof MindlyError && err.details?.['locked'] === true) {
@@ -1587,35 +1640,63 @@ function lossRefusal(
 }
 
 /**
- * SHA-256 over the paths and what each holds in the worktree (or that it is gone). Deny-listed
- * paths count by size, modification time and mode: their content is never read. A folder (a
- * nested repository, a submodule) cannot be fingerprinted and is reported in `opaque`.
+ * SHA-256 over the paths and what each holds in the worktree (or that it is gone), and one per
+ * path in `files`. Deny-listed paths count by size, modification time and mode: their content is
+ * never read. A folder (a nested repository, a submodule) cannot be fingerprinted and is reported
+ * in `opaque`.
  */
 function worktreeFingerprint(
   worktree: string,
   paths: readonly string[],
   denied: ReadonlySet<string>,
-): { content: string; opaque: string[] } {
+): { content: string; files: Record<string, string>; opaque: string[] } {
   const h = createHash('sha256');
+  const files: Record<string, string> = {};
   const opaque: string[] = [];
   for (const rel of paths) {
-    h.update(rel).update('\0');
-    const abs = join(worktree, rel);
-    try {
-      const st = lstatSync(abs);
-      if (st.isDirectory()) {
-        opaque.push(rel);
-        h.update('dir');
-      } else if (denied.has(rel)) h.update(`stat:${st.size}:${st.mtimeMs}:${st.mode}`);
-      else if (st.isSymbolicLink()) h.update('link:').update(readlinkSync(abs));
-      else if (st.isFile()) h.update(`file:${st.mode}:`).update(readFileSync(abs));
-      else h.update(`other:${st.mode}`);
-    } catch {
-      h.update('missing');
-    }
-    h.update('\0');
+    const digest = fileDigest(worktree, rel, denied);
+    if (digest === 'dir') opaque.push(rel);
+    files[rel] = digest;
+    h.update(rel).update('\0').update(digest).update('\0');
   }
-  return { content: h.digest('hex'), opaque };
+  return { content: h.digest('hex'), files, opaque };
+}
+
+/**
+ * The entry at `rel` in the worktree, if any: nothing when a folder on the way is missing, a
+ * symbolic link or not a folder, so that nothing outside the worktree is read or deleted.
+ */
+function lstatInWorktree(worktree: string, rel: string): Stats | null {
+  const parts = rel.split('/');
+  let at = worktree;
+  try {
+    for (let i = 0; i < parts.length - 1; i++) {
+      at = join(at, parts[i] as string);
+      if (!lstatSync(at).isDirectory()) return null;
+    }
+    return lstatSync(join(at, parts[parts.length - 1] as string));
+  } catch {
+    return null;
+  }
+}
+
+/** What `rel` holds in the worktree: `missing`, `dir`, or a hash of its content and mode. */
+function fileDigest(worktree: string, rel: string, denied: ReadonlySet<string>): string {
+  const st = lstatInWorktree(worktree, rel);
+  if (!st) return 'missing';
+  if (st.isDirectory()) return 'dir';
+  const h = createHash('sha256');
+  const abs = join(worktree, rel);
+  try {
+    if (denied.has(rel)) h.update(`stat:${st.size}:${st.mtimeMs}:${st.mode}`);
+    else if (st.isSymbolicLink()) h.update('link:').update(readlinkSync(abs));
+    else if (st.isFile()) h.update(`file:${st.mode}:`).update(readFileSync(abs));
+    else h.update(`other:${st.mode}`);
+  } catch {
+    // Never deleted on a confirmation (see `discardConfirmed`).
+    return 'unreadable';
+  }
+  return h.digest('hex');
 }
 
 /** `"API" (not committed: a.ts; 2 commits only on its branch: 1a2b3c4d5e6f Add plans, …)`. */

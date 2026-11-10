@@ -3,10 +3,26 @@
  * and what must not stop it.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type * as GitModule from '@mindly/git';
 import { cli, git, sandbox, tempDir, write, type Sandbox } from './helpers.js';
+
+// Lets a test act while an abort runs: after each look at a part branch's commits, which abort
+// makes last right before it removes the part's files and worktree.
+const hook: { afterBranchLook?: (branch: string) => void } = {};
+vi.mock('@mindly/git', async (importOriginal) => {
+  const real = await importOriginal<typeof GitModule>();
+  return {
+    ...real,
+    branchOnlyWork: async (...args: Parameters<typeof real.branchOnlyWork>) => {
+      const r = await real.branchOnlyWork(...args);
+      hook.afterBranchLook?.(args[1]);
+      return r;
+    },
+  };
+});
 
 const PLAN = {
   goal: 'Add billing: API, webhook handler, page',
@@ -222,5 +238,137 @@ describe('split abort removes what was confirmed, and copes with what git will n
     expect(r2.stderr).toBe('');
     expect(r2.code).toBe(0);
     expect(existsSync(page)).toBe(false);
+  });
+});
+
+describe('split abort leaves the last word to git, confirmed or not', () => {
+  interface Aborted {
+    finished: boolean;
+    keptWorktrees: string[];
+    keptBecause: Record<string, string>;
+  }
+
+  it('a confirmed abort keeps a repository committed into the part (no .gitmodules)', async () => {
+    const sb = await splitSandbox();
+    const page = partDir(sb, 'page');
+    // The agent makes a repository in its part, commits in it and records it on the part branch.
+    const nested = join(page, 'src/app/vendor');
+    write(page, 'src/app/vendor/lib.ts', 'export const lib = 1;\n');
+    git(nested, 'init', '-q', '-b', 'main');
+    git(nested, 'add', '-A');
+    git(nested, 'commit', '-q', '-m', 'nested work');
+    git(page, 'add', 'src/app/vendor');
+    git(page, 'commit', '-q', '-m', 'add vendor');
+    // Uncommitted work in it, which no listing of the part shows, and a file that is listed.
+    write(page, 'src/app/vendor/wip.ts', 'export const wip = 1;\n');
+    write(page, 'src/app/billing.ts', 'export const billing = 1;\n');
+    const r = await cli(sb, ['split', 'abort', '--keep-branches', '--json'], { answers: ['y'] });
+    expect(r.stderr).toContain('src/app/billing.ts');
+    expect(r.code).toBe(1);
+    const a = JSON.parse(r.stdout) as Aborted;
+    expect(a.finished).toBe(false);
+    expect(a.keptWorktrees).toEqual([page]);
+    expect(a.keptBecause[page]).toMatch(/^git did not remove it: .*submodules/);
+    // The confirmed file went; the repository and its work stay.
+    expect(existsSync(join(page, 'src/app/billing.ts'))).toBe(false);
+    expect(existsSync(join(nested, 'wip.ts'))).toBe(true);
+    expect(existsSync(join(nested, '.git'))).toBe(true);
+    expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
+    expect(existsSync(page)).toBe(false);
+  });
+
+  it('a confirmed abort keeps a file written after its last check', async () => {
+    const sb = await splitSandbox();
+    const page = partDir(sb, 'page');
+    write(page, 'src/app/billing.ts', 'export const billing = 1;\n');
+    write(page, 'src/app/page.ts', 'export const page = 2;\n');
+    // The page branch is looked at by the listing, by abort's own check and, last, right before
+    // the part's files go. Then the agent, still running, saves a new file.
+    let looks = 0;
+    hook.afterBranchLook = (branch) => {
+      if (branch === 'mindly/billing/page' && ++looks === 3) {
+        write(page, 'src/app/late.ts', 'export const late = 1;\n');
+      }
+    };
+    let r: Awaited<ReturnType<typeof cli>>;
+    try {
+      r = await cli(sb, ['split', 'abort', '--json'], { answers: ['y'] });
+    } finally {
+      delete hook.afterBranchLook;
+    }
+    expect(looks).toBe(3);
+    expect(r.code).toBe(1);
+    const a = JSON.parse(r.stdout) as Aborted;
+    expect(a.finished).toBe(false);
+    expect(a.keptWorktrees).toEqual([page]);
+    expect(a.keptBecause[page]).toMatch(/^git did not remove it: .*modified or untracked/);
+    expect(readFileSync(join(page, 'src/app/late.ts'), 'utf8')).toBe('export const late = 1;\n');
+    // What was confirmed went: the new file, and the edit (the committed file is back).
+    expect(existsSync(join(page, 'src/app/billing.ts'))).toBe(false);
+    expect(readFileSync(join(page, 'src/app/page.ts'), 'utf8')).toBe('export const page = 1;\n');
+    // The rerun lists the late file, and a confirmation of it finishes the abort.
+    const again = await cli(sb, ['split', 'abort'], { answers: ['y'] });
+    expect(again.stderr).toContain('src/app/late.ts');
+    expect(again.code).toBe(0);
+    expect(existsSync(page)).toBe(false);
+  });
+
+  it('keeps a nested repository in an ignored folder, confirmed or not', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', 'tools/\n'));
+    const page = partDir(sb, 'page');
+    const nested = join(page, 'tools/patched-dep');
+    write(page, 'tools/patched-dep/fix.ts', 'export const fix = 1;\n');
+    git(nested, 'init', '-q', '-b', 'main');
+    git(nested, 'add', '-A');
+    git(nested, 'commit', '-q', '-m', 'local fix, never pushed');
+    const r = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('tools/patched-dep');
+    const confirmed = await cli(sb, ['split', 'abort', '--keep-branches'], { answers: ['y'] });
+    expect(confirmed.code).toBe(1);
+    expect(existsSync(join(nested, '.git'))).toBe(true);
+    expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
+    expect(existsSync(page)).toBe(false);
+  });
+
+  it('counts an edit to a file flagged skip-worktree, and removes it once confirmed', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, 'config/local.json', '{"db":""}\n'));
+    const page = partDir(sb, 'page');
+    // The usual way to keep a local config out of commits.
+    git(page, 'update-index', '--skip-worktree', 'config/local.json');
+    write(page, 'config/local.json', '{"db":"postgres://me:pw@host/db"}\n');
+    const r = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('config/local.json');
+    expect(readFileSync(join(page, 'config/local.json'), 'utf8')).toContain('postgres://');
+    const confirmed = await cli(sb, ['split', 'abort', '--keep-branches'], { answers: ['y'] });
+    expect(confirmed.stderr).toContain('config/local.json');
+    expect(confirmed.code).toBe(0);
+    expect(existsSync(page)).toBe(false);
+  });
+
+  it('git sees an edit to a flagged file made after the last check', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, 'config/local.json', '{"db":""}\n'));
+    const page = partDir(sb, 'page');
+    git(page, 'update-index', '--skip-worktree', 'config/local.json');
+    let looks = 0;
+    hook.afterBranchLook = (branch) => {
+      if (branch === 'mindly/billing/page' && ++looks === 3) {
+        write(page, 'config/local.json', '{"db":"postgres://me:pw@host/db"}\n');
+      }
+    };
+    let r: Awaited<ReturnType<typeof cli>>;
+    try {
+      r = await cli(sb, ['split', 'abort', '--yes', '--json']);
+    } finally {
+      delete hook.afterBranchLook;
+    }
+    expect(looks).toBe(3);
+    expect(r.code).toBe(1);
+    const a = JSON.parse(r.stdout) as Aborted;
+    expect(a.keptWorktrees).toEqual([page]);
+    expect(a.keptBecause[page]).toMatch(/^git did not remove it: .*modified or untracked/);
+    expect(readFileSync(join(page, 'config/local.json'), 'utf8')).toContain('postgres://');
+    expect(git(page, 'ls-files', '-v', 'config/local.json')).toBe('S config/local.json\n');
   });
 });
