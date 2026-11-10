@@ -511,6 +511,7 @@ export async function splitAbort(
     }
     if (o.json) out.json(a);
     else renderAborted(out.screen(), a);
-    return 0;
+    // Something was kept: the abort is not done, and a script should know.
+    return a.finished ? 0 : 1;
   });
 }

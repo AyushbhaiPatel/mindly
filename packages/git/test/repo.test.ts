@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  utimesSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError } from '@mindly/core';
@@ -144,6 +152,16 @@ describe('captureWorktreeCommit', () => {
 
     // Deterministic: same state, same commit.
     expect((await captureWorktreeCommit(root)).commit).toBe(captured.commit);
+  });
+
+  it('does not report a file that was only touched', async () => {
+    const root = makeRepo({ '.env.example': 'KEY=\n', 'a.txt': 'a\n' });
+    const later = new Date(Date.now() + 5000);
+    utimesSync(join(root, '.env.example'), later, later);
+    utimesSync(join(root, 'a.txt'), later, later);
+    const captured = await captureWorktreeCommit(root);
+    expect(captured.skipped).toEqual([]);
+    expect(captured.tree).toBe(git(root, 'rev-parse', 'HEAD^{tree}').trim());
   });
 
   it('never captures denied paths and works in a repo without commits', async () => {

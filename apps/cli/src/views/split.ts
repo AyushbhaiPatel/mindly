@@ -152,7 +152,7 @@ export function renderSplitStatus(sc: Screen, r: SplitStatusReport): void {
   if (r.abortPending) {
     sc.blank();
     sc.text(
-      `${sc.mark('warn')} An abort of this split kept work that appeared while it ran. Run mindly split abort again to finish it.`,
+      `${sc.mark('warn')} An abort of this split did not remove everything. Run mindly split abort again to finish it.`,
     );
   }
   sc.next(nextSteps(r));
@@ -332,15 +332,15 @@ export function renderAborted(sc: Screen, a: SplitAbortResult): void {
     }.`,
   );
   if (a.keptBranches.length) sc.note(`Branches kept: ${a.keptBranches.join(', ')}`, 2);
-  if (a.keptWorktrees.length) {
+  for (const wt of a.keptWorktrees) {
     sc.text(
-      `${sc.mark('warn')} Kept ${count(a.keptWorktrees.length, 'worktree')} that got new work during the abort: ${a.keptWorktrees.join(', ')}`,
+      `${sc.mark('warn')} Kept ${clean(wt, 200)}: ${clean(a.keptBecause[wt] ?? 'it has work the abort may not delete', 300)}`,
       2,
     );
   }
   if (!a.finished) {
     sc.text(
-      `${sc.mark('warn')} New work appeared while the split was being removed; what holds it was kept. Run mindly split abort again to finish.`,
+      `${sc.mark('warn')} Not everything was removed. Deal with what was kept and run mindly split abort again to finish, or remove it with what it holds: mindly split abort --yes --discard`,
       2,
     );
   }

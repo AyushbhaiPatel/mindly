@@ -284,6 +284,39 @@ describe('worktrees', () => {
     ]);
   });
 
+  it('lists ignored deny-listed files in any letter case, and none in dependency folders', async () => {
+    const root = makeRepo({ '.gitignore': 'certs/\n.venv/\nnode_modules/\n*.secret\n' });
+    write(root, 'certs/Prod.KEY', 'k\n');
+    write(root, 'certs/.ENV', 'k\n');
+    write(root, 'local.secret', 'k\n');
+    write(root, '.venv/lib/python3.12/site-packages/certifi/cacert.pem', 'ca\n');
+    write(root, 'node_modules/pkg/test/fixture.pem', 'ca\n');
+    expect(await ignoredDeniedFiles(root)).toEqual(['certs/.ENV', 'certs/Prod.KEY']);
+    expect(await ignoredDeniedFiles(root, ['**/*.secret'])).toEqual([
+      'certs/.ENV',
+      'certs/Prod.KEY',
+      'local.secret',
+    ]);
+  });
+
+  it('removes a worktree without force only when git finds nothing to lose', async () => {
+    const root = makeRepo({ '.gitignore': 'build/\n' });
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    write(path, 'wip.txt', 'not committed\n');
+    await expect(removeWorktree(root, path, { force: false })).rejects.toSatisfy(
+      (e) =>
+        isMindlyError(e, 'conflict') &&
+        e.details?.['refused'] === true &&
+        /modified or untracked files/.test(String(e.details?.['reason'])),
+    );
+    expect(existsSync(join(path, 'wip.txt'))).toBe(true);
+    commitAll(path, 'wip');
+    write(path, 'build/out.js', 'ignored\n');
+    expect(await removeWorktree(root, path, { force: false })).toBe(true);
+    expect(existsSync(path)).toBe(false);
+  });
+
   it('lists tracked and untracked files, not ignored ones', async () => {
     const root = makeRepo({ 'src/a.ts': 'a\n', '.gitignore': 'dist/\n' });
     write(root, 'src/new.ts', 'new\n');

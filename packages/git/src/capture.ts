@@ -127,6 +127,9 @@ export async function captureWorktreeCommit(
     if (!seeded && parent) await runGit(['read-tree', parent], common);
 
     const split = (out: string): string[] => out.split('\0').filter((p) => p !== '');
+    // A file only touched (same content, new time) is not a change: refresh the copy's stat
+    // cache first, or it would be reported (and, if deny-listed, counted as skipped).
+    await runGit(['update-index', '-q', '--refresh'], { ...common, okExitCodes: [1] });
     // Worktree vs index (modified/deleted tracked files) and new untracked files.
     const unstaged = split(
       (await runGit(['diff-files', '--name-only', '-z', '--ignore-submodules=dirty'], common))

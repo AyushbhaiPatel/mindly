@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import { DEFAULT_DENY_PATHS, MindlyError, isDeniedPath } from '@mindly/core';
+import { DEFAULT_DENY_PATHS, MindlyError, isDeniedPath, sanitizeLine } from '@mindly/core';
 import { commitTree } from './capture.js';
 import { driverOverrides, gitVersion, runGit, versionAtLeast } from './exec.js';
 import { MIN_MERGE_TREE_VERSION, parseMergeTreeOutput } from './merge.js';
@@ -64,11 +64,19 @@ export async function addWorktree(
 }
 
 /**
- * Removes the linked worktree at `path` (uncommitted changes included) and prunes its
- * administrative files. The worktree must belong to the repository at `repoRoot` and must not be
- * its main working tree. A folder that is no longer a worktree is left alone (returns false).
+ * Removes the linked worktree at `path` and prunes its administrative files. The worktree must
+ * belong to the repository at `repoRoot` and must not be its main working tree. A folder that is
+ * no longer a worktree is left alone (returns false).
+ *
+ * With `force` (the default) uncommitted changes go with it. Without it git itself refuses a
+ * worktree with modified or untracked files, or with submodules: that throws `conflict` with
+ * `details.refused` and git's reason, and nothing is removed. Ignored files go either way.
  */
-export async function removeWorktree(repoRoot: string, path: string): Promise<boolean> {
+export async function removeWorktree(
+  repoRoot: string,
+  path: string,
+  options: { force?: boolean } = {},
+): Promise<boolean> {
   const root = await findRepoRoot(repoRoot);
   const target = assertAbsoluteOutside(path, root);
   const known = (await listWorktrees(root)).some((w) => {
@@ -85,7 +93,25 @@ export async function removeWorktree(repoRoot: string, path: string): Promise<bo
   if (existsSync(target) && (await gitCommonDir(target)) !== (await gitCommonDir(root))) {
     throw new MindlyError('invalid_input', 'worktree does not belong to this repository');
   }
-  await runGit(['worktree', 'remove', '--force', target], { cwd: root, timeoutMs: 60_000 });
+  const force = options.force !== false;
+  const res = await runGit(['worktree', 'remove', ...(force ? ['--force'] : []), target], {
+    cwd: root,
+    timeoutMs: 60_000,
+    okExitCodes: force ? [] : [128],
+  });
+  if (res.exitCode !== 0) {
+    const reason = sanitizeLine(
+      res.stderr
+        .split('\n')
+        .map((l) => l.replace(/^(fatal|error): /, '').trim())
+        .filter((l) => l !== '' && !l.startsWith('hint:'))
+        .join('; ') || 'git refused to remove it',
+      300,
+    );
+    throw new MindlyError('conflict', `git did not remove the worktree: ${reason}`, {
+      details: { path: target, refused: true, reason },
+    });
+  }
   await runGit(['worktree', 'prune'], { cwd: root, timeoutMs: 30_000 });
   return true;
 }
@@ -252,9 +278,40 @@ export async function branchOnlyWork(
 }
 
 /**
- * Ignored files of the working tree at `cwd` that are on the secret deny-list (a local `.env`, a
- * key): not part of any commit, but lost with the worktree. Repository-relative; their content is
- * never read. Other ignored files (build output, dependencies) are not listed.
+ * Folders of dependencies and tools: ignored files in them (a CA bundle in a virtualenv, test
+ * keys in `node_modules`) are installed, not written by anyone, and are not listed as work.
+ */
+export const DEPENDENCY_DIRS: readonly string[] = [
+  'node_modules',
+  '.venv',
+  'venv',
+  'env',
+  '.tox',
+  'site-packages',
+  'vendor/bundle',
+  '.gradle',
+  'target',
+  'dist',
+  'build',
+  '.next',
+  '.cache',
+  '__pycache__',
+];
+
+function inDependencyDir(rel: string): boolean {
+  const dirs = rel.toLowerCase().split('/').slice(0, -1);
+  for (let i = 0; i < dirs.length; i++) {
+    if (DEPENDENCY_DIRS.includes(dirs[i] as string)) return true;
+    if (dirs[i] === 'vendor' && dirs[i + 1] === 'bundle') return true;
+  }
+  return false;
+}
+
+/**
+ * Ignored files of the working tree at `cwd` that are on the secret deny-list or on `extraDeny`
+ * (a local `.env`, a key; any letter case): not part of any commit, but lost with the worktree.
+ * Repository-relative; their content is never read. Other ignored files, and anything inside a
+ * dependency or tool folder (`DEPENDENCY_DIRS`), are not listed.
  */
 export async function ignoredDeniedFiles(
   cwd: string,
@@ -272,14 +329,15 @@ export async function ignoredDeniedFiles(
       '--ignored',
       '--exclude-standard',
       '--',
-      ...patterns.map((p) => `:(glob)${p}`),
+      ...patterns.map((p) => `:(icase,glob)${p}`),
+      ...DEPENDENCY_DIRS.map((d) => `:(exclude,icase,glob)**/${d}/**`),
     ],
     // The deny-list is made of globs: let git read these pathspecs as such.
     { cwd: root, timeoutMs: 60_000, env: { GIT_LITERAL_PATHSPECS: '0' } },
   );
   return res.stdout
     .split('\0')
-    .filter((p) => p !== '' && isDeniedPath(p, extraDeny))
+    .filter((p) => p !== '' && !inDependencyDir(p) && isDeniedPath(p, extraDeny))
     .sort();
 }
 

@@ -222,8 +222,12 @@ export interface SplitGitPort {
   branchExists(repoRoot: string, branch: string): Promise<boolean>;
   /** Creates branch `branch` at `startPoint` in a new worktree at `path`; refuses existing ones. */
   addWorktree(repoRoot: string, path: string, branch: string, startPoint: string): Promise<string>;
-  /** Removes a linked worktree (and its uncommitted work). False when it was not a worktree. */
-  removeWorktree(repoRoot: string, path: string): Promise<boolean>;
+  /**
+   * Removes a linked worktree. False when it was not a worktree. With `force` (the default) its
+   * uncommitted work goes with it; with `force: false` git refuses (`conflict`, `details.refused`)
+   * a worktree with modified or untracked files or submodules. Ignored files go either way.
+   */
+  removeWorktree(repoRoot: string, path: string, options?: { force?: boolean }): Promise<boolean>;
   /** Deletes a branch; with `expectedTip`, refuses (`conflict`) one that has moved since. */
   deleteBranch(repoRoot: string, branch: string, expectedTip?: string): Promise<boolean>;
   /**
@@ -244,20 +248,28 @@ export interface SplitGitPort {
    * Work in `worktree` that is not on `refs/heads/<branch>`. `paths`: paths whose content differs
    * from the branch tip, deny-listed ones included. `ignoredDenied`: ignored files on the secret
    * deny-list (a local `.env`), which no commit has and removing the worktree deletes. `denied`:
-   * every deny-listed path of both, whose content must never be read.
+   * every deny-listed path of both, whose content must never be read. `extraDeny` adds the
+   * user's and the project's deny globs to the built-in list.
    */
   uncommittedWork(
     repoRoot: string,
     worktree: string,
     branch: string,
+    extraDeny: readonly string[],
   ): Promise<{ paths: string[]; denied: string[]; ignoredDenied: string[] }>;
   /** Paths that differ between `base` and the worktree's current content (committed or not). */
-  changedSince(repoRoot: string, worktree: string, base: string): Promise<string[]>;
+  changedSince(
+    repoRoot: string,
+    worktree: string,
+    base: string,
+    extraDeny: readonly string[],
+  ): Promise<string[]>;
   /** Shadow-merges the sides' worktrees (uncommitted work included) on top of `base`. */
   mergeCheck(
     repoRoot: string,
     base: string,
     sides: readonly SplitMergeSide[],
+    extraDeny: readonly string[],
   ): Promise<SplitMergeCheck>;
   /** Merges `branches` in order onto `base` into the NEW branch `into` with merge commits. */
   mergeBranches(

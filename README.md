@@ -205,9 +205,15 @@ listed by name only), or commits only on a part branch. After a squash or rebase
 merged branch, every part commit is like that. Run `mindly split abort --keep-branches` to remove
 the worktrees and keep the part branches, so that no commit is lost; `mindly split abort --yes
 --discard` deletes it all. When you confirm an abort on the terminal, it removes only the work it
-listed: anything new, a listed file edited since, or a nested repository stops it. Other ignored
-files in a worktree (build output, dependencies) are not counted and go with it. If work appears
-while an abort runs, what holds it is kept; run `mindly split abort` again to finish.
+listed: anything new, a listed file edited since, or a nested repository stops it.
+
+Short of `--yes --discard`, worktrees are removed the way `git worktree remove` does without
+`--force`: git refuses one with modified or untracked files or with submodules, and the abort
+keeps it and says why. Ignored files go with a worktree; the ignored ones on the secret deny-list
+(and on your `redaction.denyPaths` and the project's `ignore`) count as work, except inside
+dependency and tool folders (`node_modules`, `.venv`, `venv`, `env`, `.tox`, `site-packages`,
+`vendor/bundle`, `.gradle`, `target`, `dist`, `build`, `.next`, `.cache`, `__pycache__`). When an
+abort keeps something, run `mindly split abort` again to finish.
 
 ### Which agent is better at what, in your repo
 

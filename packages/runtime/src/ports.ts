@@ -101,11 +101,14 @@ export function createSplitGitPort(): SplitGitPort {
     branchExists: (repoRoot, branch) => branchExists(repoRoot, branch),
     addWorktree: async (repoRoot, path, branch, startPoint) =>
       (await addWorktree(repoRoot, path, branch, startPoint)).path,
-    removeWorktree: (repoRoot, path) => removeWorktree(repoRoot, path),
+    removeWorktree: (repoRoot, path, options) => removeWorktree(repoRoot, path, options),
     deleteBranch: (repoRoot, branch, expectedTip) => deleteBranch(repoRoot, branch, expectedTip),
     branchOnlyWork: (repoRoot, branch, options) => branchOnlyWork(repoRoot, branch, options),
-    uncommittedWork: async (repoRoot, worktree, branch) => {
-      const captured = await captureWorktreeCommit(worktree, { message: 'mindly split status' });
+    uncommittedWork: async (repoRoot, worktree, branch, extraDeny) => {
+      const captured = await captureWorktreeCommit(worktree, {
+        message: 'mindly split status',
+        extraDeny,
+      });
       const res = await runGit(
         [
           'diff',
@@ -118,7 +121,7 @@ export function createSplitGitPort(): SplitGitPort {
         ],
         { cwd: repoRoot, timeoutMs: 30_000 },
       );
-      const ignored = await ignoredDeniedFiles(worktree);
+      const ignored = await ignoredDeniedFiles(worktree, extraDeny);
       const paths = new Set([
         ...res.stdout.split('\0').filter((p) => p !== ''),
         // Left out of the capture because they are on the deny-list: still work in the worktree.
@@ -130,19 +133,23 @@ export function createSplitGitPort(): SplitGitPort {
         ignoredDenied: ignored.filter((p) => !paths.has(p)),
       };
     },
-    changedSince: async (repoRoot, worktree, base) => {
-      const captured = await captureWorktreeCommit(worktree, { message: 'mindly split status' });
+    changedSince: async (repoRoot, worktree, base, extraDeny) => {
+      const captured = await captureWorktreeCommit(worktree, {
+        message: 'mindly split status',
+        extraDeny,
+      });
       const res = await runGit(
         ['diff', '--name-only', '-z', '--no-renames', base, captured.commit, '--'],
         { cwd: repoRoot, timeoutMs: 30_000 },
       );
       return res.stdout.split('\0').filter((p) => p !== '');
     },
-    mergeCheck: async (repoRoot, base, sides) => {
+    mergeCheck: async (repoRoot, base, sides, extraDeny) => {
       const captured: { label: string; commit: string }[] = [];
       for (const side of sides) {
         const c = await captureWorktreeCommit(side.worktree, {
           message: `mindly split capture ${side.label}`,
+          extraDeny,
         });
         captured.push({ label: side.label, commit: c.commit });
       }

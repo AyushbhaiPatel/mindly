@@ -77,6 +77,7 @@ export {
   branchExists,
   branchOnlyWork,
   deleteBranch,
+  DEPENDENCY_DIRS,
   ignoredDeniedFiles,
   listFiles,
   mergeIntoNewBranch,

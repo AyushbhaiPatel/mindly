@@ -1234,6 +1234,59 @@ describe('split through hook events', () => {
     expect(existsSync(page.worktree)).toBe(false);
   });
 
+  it('leaves the last word to git: a worktree it will not remove is kept, and the abort stays pending', async () => {
+    const { mindly, svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const [api, page] = created.parts as [
+      (typeof created.parts)[number],
+      (typeof created.parts)[number],
+    ];
+    for (const p of created.parts) mindly.tasks.update(p.taskId, { status: 'done' }, null);
+    await svc.merge(created.split.id);
+    // Work the listing cannot see (edits inside a submodule): git refuses to remove it.
+    const forced: boolean[] = [];
+    const removeWorktree = fake.port.removeWorktree;
+    fake.port.removeWorktree = async (root, path, options) => {
+      forced.push(options?.force !== false);
+      if (path === page.worktree && options?.force === false) {
+        throw new MindlyError('conflict', 'git did not remove the worktree', {
+          details: {
+            refused: true,
+            reason: 'working trees containing submodules cannot be moved or removed',
+          },
+        });
+      }
+      return removeWorktree(root, path, options);
+    };
+    const aborted = await svc.abort(created.split.id);
+    expect(forced).toEqual([false, false]);
+    expect(aborted.finished).toBe(false);
+    expect(aborted.removedWorktrees).toEqual([api.worktree]);
+    expect(aborted.keptWorktrees).toEqual([page.worktree]);
+    expect(aborted.keptBranches).toEqual([page.branch]);
+    expect(aborted.keptBecause[page.worktree]).toMatch(/submodules/);
+    expect(existsSync(page.worktree)).toBe(true);
+    expect(fake.branches.has(page.branch)).toBe(true);
+    expect(svc.abortPending(mindly.store.splits.get(created.split.id))).toBe(true);
+    // The pending state does not depend on the event log.
+    mindly.store.db.prepare("DELETE FROM events WHERE type = 'split.aborted'").run();
+    expect(svc.abortPending(mindly.store.splits.get(created.split.id))).toBe(true);
+    // Only a discard that was not asked about forces it.
+    forced.length = 0;
+    const done = await svc.abort(created.split.id, { discardUncommitted: true });
+    fake.port.removeWorktree = removeWorktree;
+    expect(forced).toEqual([true, true]);
+    expect(done.finished).toBe(true);
+    expect(existsSync(page.worktree)).toBe(false);
+    expect(svc.abortPending(mindly.store.splits.get(created.split.id))).toBe(false);
+  });
+
   it('removes everything with a discard that was not asked about', async () => {
     const { svc, pid, fake } = await setup();
     const created = await svc.create({

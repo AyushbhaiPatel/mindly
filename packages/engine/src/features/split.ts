@@ -385,6 +385,8 @@ export interface SplitAbortResult {
   removedWorktrees: string[];
   /** Worktrees left in place because they got work the abort was not allowed to delete. */
   keptWorktrees: string[];
+  /** By kept worktree: why it was kept (new work, or git refusing to remove it). */
+  keptBecause: Record<string, string>;
   /**
    * False when something was kept because new work appeared during the abort: the split keeps
    * its state, and `abort` can be run again to finish.
@@ -689,6 +691,11 @@ export class SplitService {
    * never read. `opaque`: folders (a nested repository) whose content cannot be fingerprinted.
    * Other ignored files (build output, dependencies) are not work.
    */
+  /** Deny globs beyond the built-in ones: the user's redaction settings and the project's ignore. */
+  private extraDeny(projectId: string): string[] {
+    return [...this.k.config.redaction.denyPaths, ...this.projects.byId(projectId).config.ignore];
+  }
+
   private async worktreeState(
     git: SplitGitPort,
     root: string,
@@ -697,7 +704,12 @@ export class SplitService {
     if (!existsSync(part.worktree) || !(await git.branchExists(root, part.branch))) {
       return { paths: [], lost: [], ...worktreeFingerprint(part.worktree, [], new Set()) };
     }
-    const work = await git.uncommittedWork(root, part.worktree, part.branch);
+    const work = await git.uncommittedWork(
+      root,
+      part.worktree,
+      part.branch,
+      this.extraDeny(part.projectId),
+    );
     const paths = [...new Set(work.paths)].sort();
     const lost = [...new Set([...paths, ...work.ignoredDenied])].sort();
     return { paths, lost, ...worktreeFingerprint(part.worktree, lost, new Set(work.denied)) };
@@ -774,14 +786,7 @@ export class SplitService {
    * (`finished: false`): the split is only waiting for that abort to be run again.
    */
   abortPending(split: Split): boolean {
-    for (const e of this.k.store.events.query(split.projectId, {
-      types: ['split.aborted'],
-      order: 'desc',
-      limit: 200,
-    })) {
-      if (e.payload['splitId'] === split.id) return e.payload['finished'] === false;
-    }
-    return false;
+    return (this.k.store.kv.get<string[]>(abortPendingKey(split.id)) ?? []).length > 0;
   }
 
   /** The latest merge check of a split. */
@@ -809,7 +814,12 @@ export class SplitService {
       let unmergedCommits: string[] = [];
       if (git && split.status !== 'aborted' && existsSync(part.worktree)) {
         try {
-          filesChanged = await git.changedSince(root, part.worktree, split.baseCommit);
+          filesChanged = await git.changedSince(
+            root,
+            part.worktree,
+            split.baseCommit,
+            this.extraDeny(split.projectId),
+          );
           uncommitted = await this.notOnBranch(git, root, part);
         } catch (err) {
           this.k.logger.warn('split status: could not diff a worktree', {
@@ -924,7 +934,12 @@ export class SplitService {
       const sides = parts
         .filter((p) => existsSync(p.worktree))
         .map((p) => ({ label: p.key, worktree: p.worktree }));
-      const merge = await git.mergeCheck(project.root, split.baseCommit, sides);
+      const merge = await git.mergeCheck(
+        project.root,
+        split.baseCommit,
+        sides,
+        this.extraDeny(split.projectId),
+      );
       if (!merge.supported) {
         return finish('error', {
           ...result,
@@ -1238,6 +1253,7 @@ export class SplitService {
     const deletedBranches: string[] = [];
     const keptBranches: string[] = [];
     const unfinishedParts = new Set<string>();
+    const keptBecause: Record<string, string> = {};
     for (const part of parts) {
       const was = check?.state[part.key];
       let unfinished = false;
@@ -1253,12 +1269,29 @@ export class SplitService {
           .catch(() => undefined);
         if (tip !== was.tip) unfinished = true;
       }
+      if (unfinished) keptBecause[part.worktree] = 'it got new work while the abort ran';
+      else {
+        // git is the last check: unless everything may go, it refuses a worktree with modified
+        // or untracked files or submodules, whatever the listing above missed.
+        try {
+          if (await git.removeWorktree(root, part.worktree, { force: everything })) {
+            removedWorktrees.push(part.worktree);
+          }
+        } catch (err) {
+          if (!(err instanceof MindlyError && err.details?.['refused'] === true)) throw err;
+          unfinished = true;
+          const reason = typeof err.details['reason'] === 'string' ? err.details['reason'] : '';
+          keptBecause[part.worktree] = `git did not remove it${reason ? `: ${reason}` : ''}`;
+        }
+      }
       if (unfinished) {
         keptWorktrees.push(part.worktree);
         keptBranches.push(part.branch);
-        this.k.logger.warn('split abort: worktree kept, it has new work', { part: part.key });
+        this.k.logger.warn('split abort: worktree kept', {
+          part: part.key,
+          why: keptBecause[part.worktree],
+        });
       } else {
-        if (await git.removeWorktree(root, part.worktree)) removedWorktrees.push(part.worktree);
         if (options.keepBranches) keptBranches.push(part.branch);
         else {
           try {
@@ -1296,6 +1329,9 @@ export class SplitService {
       }
     }
     const finished = unfinishedParts.size === 0;
+    // Recorded on its own, so that a rerun can finish whatever happens to the event log.
+    if (finished) this.k.store.kv.delete(abortPendingKey(split.id));
+    else this.k.store.kv.set(abortPendingKey(split.id), [...unfinishedParts]);
     if (finished) {
       try {
         rmdirSync(split.worktreeRoot);
@@ -1340,6 +1376,7 @@ export class SplitService {
       split: updated,
       removedWorktrees,
       keptWorktrees,
+      keptBecause,
       finished,
       deletedBranches,
       keptBranches,
@@ -1439,6 +1476,8 @@ export class SplitService {
   }
 }
 
+const abortPendingKey = (splitId: string): string => `split.abortPending:${splitId}`;
+
 /** Paths listed in full; more are summarised and cannot be confirmed. */
 const PATHS_SHOWN = 200;
 
@@ -1509,7 +1548,7 @@ function worktreeFingerprint(
         h.update('dir');
       } else if (denied.has(rel)) h.update(`stat:${st.size}:${st.mtimeMs}:${st.mode}`);
       else if (st.isSymbolicLink()) h.update('link:').update(readlinkSync(abs));
-      else if (st.isFile()) h.update('file:').update(readFileSync(abs));
+      else if (st.isFile()) h.update(`file:${st.mode}:`).update(readFileSync(abs));
       else h.update(`other:${st.mode}`);
     } catch {
       h.update('missing');
