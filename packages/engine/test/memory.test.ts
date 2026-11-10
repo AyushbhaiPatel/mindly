@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -729,6 +729,70 @@ describe('trust layer', () => {
     expect(mindly.memory.update(fact.id, { status: 'archived' }, agent, null).status).toBe(
       'archived',
     );
+  });
+
+  it('does not keep evidence that no longer holds when the user restates a memory', () => {
+    const { root, mindly, pid } = project();
+    const sweep = () => selfHealingOf(mindly).sweep(pid);
+
+    // The user takes over an agent's stale fact: the agent's evidence goes with its claim.
+    writeFileSync(join(root, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 8080;\n');
+    const base = { projectId: pid, projectRoot: root, kind: 'fact' as const };
+    const fact = mindly.memory.remember({
+      ...base,
+      title: 'server port',
+      body: 'listens on 8080',
+      source: agent,
+      evidence: [{ path: 'src/server.ts', excerpt: 'PORT_NUMBER_FOR_SERVER = 8080' }],
+    });
+    writeFileSync(join(root, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 9090;\n');
+    sweep();
+    expect(mindly.store.memories.get(fact.id).trust).toBe('stale');
+    const taken = mindly.memory.rememberResult({
+      ...base,
+      title: 'server port',
+      body: 'listens on 9090',
+      source: USER,
+      evidence: [{ path: 'src/server.ts', excerpt: 'PORT_NUMBER_FOR_SERVER = 9090' }],
+    });
+    expect(taken.memory).toMatchObject({ trust: 'approved', source: { type: 'user' } });
+    expect(mindly.store.memories.evidenceFor(fact.id).map((e) => e.excerpt)).toEqual([
+      'PORT_NUMBER_FOR_SERVER = 9090',
+    ]);
+    sweep();
+    expect(mindly.store.memories.get(fact.id).trust).toBe('approved');
+
+    // The user restates their own fact after its file was deleted: the dead row is dropped, the
+    // rows that still hold stay.
+    writeFileSync(join(root, 'src', 'old.ts'), 'export const OLD_THING_IN_OLD_FILE = 1;\n');
+    writeFileSync(join(root, 'src', 'new.ts'), 'export const OLD_THING_IN_OLD_FILE = 1;\n');
+    const own = mindly.memory.remember({
+      ...base,
+      title: 'thing',
+      body: 'in old.ts',
+      source: USER,
+      evidence: [
+        { path: 'src/old.ts', excerpt: 'OLD_THING_IN_OLD_FILE = 1' },
+        { path: 'src/auth.ts', excerpt: 'export function login(user: string) {' },
+      ],
+    });
+    unlinkSync(join(root, 'src', 'old.ts'));
+    sweep();
+    expect(mindly.store.memories.get(own.id).trust).toBe('stale');
+    mindly.memory.rememberResult({
+      ...base,
+      title: 'thing',
+      body: 'in new.ts',
+      source: USER,
+      evidence: [{ path: 'src/new.ts', excerpt: 'OLD_THING_IN_OLD_FILE = 1' }],
+    });
+    expect(mindly.store.memories.get(own.id).trust).toBe('approved');
+    expect(mindly.store.memories.evidenceFor(own.id).map((e) => e.ref)).toEqual([
+      'src/auth.ts',
+      'src/new.ts',
+    ]);
+    sweep();
+    expect(mindly.store.memories.get(own.id).trust).toBe('approved');
   });
 
   it('requires a file named as evidence to exist', () => {

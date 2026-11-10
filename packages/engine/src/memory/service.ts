@@ -347,16 +347,21 @@ export class MemoryService {
           reason: input.reason ?? null,
         });
       }
-      if (replaces) {
-        // Evidence of the version that was replaced goes with it.
+      if (takesOver) {
+        // The user or a repository file takes the memory over: the evidence of the claim it
+        // replaces goes with that claim, and only what the new author gives is attached.
         this.k.store.memories.clearEvidence(m.id);
-      } else if (existing && input.source.type !== 'user') {
-        // The agent that proposed it restates its claim as it stands now. Evidence that no longer
-        // holds is not support for it any more: left attached, the next sweep would mark the
-        // restated memory stale again. Evidence that still holds stays, with or without new
-        // evidence given; with none left and none given, the memory is a plain proposal.
+      } else if (existing) {
+        // Its author (the user or the agent kind that proposed it) restates the claim as it
+        // stands now. Evidence that no longer holds is not support for it any more: left
+        // attached, the next sweep would mark the restated memory stale again. Evidence that
+        // still holds stays, with or without new evidence given.
+        const root = this.k.store.projects.get(input.projectId).root;
+        const deny = this.k.config.redaction.denyPaths;
         for (const e of this.k.store.memories.evidenceFor(m.id)) {
-          if (!evidenceHolds(input.projectRoot, e)) this.k.store.memories.deleteEvidence(e.id);
+          if (evidenceState(root, deny, e) === 'invalid') {
+            this.k.store.memories.deleteEvidence(e.id);
+          }
         }
       }
       this.attachEvidence(m.id, input.projectId, evidence);
@@ -692,17 +697,26 @@ export function excerptPresent(
 }
 
 /**
- * Whether an evidence row still holds, judged as the self-healing sweep judges it: the file is
- * there and, for a row with an excerpt, the excerpt is in it (outside Mindly's own section). A
- * file that cannot be read is given the benefit of the doubt.
+ * Whether an evidence row still holds, judged exactly as the self-healing sweep judges it, against
+ * the same project root: `unknown` when the file cannot be looked at (outside the project, behind
+ * a link leaving it, on the deny-list, too large or unreadable), `invalid` when it is gone or no
+ * longer holds the excerpt (outside Mindly's own section), `valid` otherwise. Only `invalid`
+ * evidence may be dropped.
  */
-function evidenceHolds(projectRoot: string, e: MemoryEvidence): boolean {
-  const resolved = tryResolveInsideRoot(projectRoot, e.ref);
-  if (!resolved || !isFile(resolved.abs)) return false;
-  if (e.excerpt === null) return true;
-  const content = readBounded(resolved.abs);
-  if (content === null) return true;
-  return excerptPresent(stripManagedSection(content), e.excerpt, e.contentHash);
+export function evidenceState(
+  projectRoot: string,
+  denyPaths: readonly string[],
+  e: Pick<MemoryEvidence, 'ref' | 'excerpt' | 'contentHash'>,
+): 'valid' | 'invalid' | 'unknown' {
+  const p = tryResolveInsideRoot(projectRoot, e.ref);
+  if (!p || p.rel === '' || isDeniedPath(p.rel, denyPaths)) return 'unknown';
+  if (!isFile(p.abs)) return 'invalid';
+  const content = readBounded(p.abs);
+  if (content === null) return 'unknown';
+  if (e.excerpt === null) return 'valid';
+  return excerptPresent(stripManagedSection(content), e.excerpt, e.contentHash)
+    ? 'valid'
+    : 'invalid';
 }
 
 function isFile(abs: string): boolean {
