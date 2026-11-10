@@ -40,23 +40,31 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 /**
  * The folders package runners install into, by their actual layout rather than a folder name,
  * so a user called `dlx` or a project called `bunx-demo` is not mistaken for one:
  * - npm (npx, npm exec): `<cache>/_npx/<hex hash>/node_modules/`
- * - pnpm dlx 9+: `<cache>/dlx/<base32 hash>/<time>-<pid>/node_modules/`, and older pnpm and
- *   yarn dlx: `<tmp>/dlx-<pid>/…/node_modules/`
+ * - pnpm dlx 9+: `<cache>/dlx/<base32 hash>/<time>-<pid>/node_modules/`
+ * - yarn dlx: `<tmp>/xfs-<hash>/dlx-<pid>/…`; with yarn's default PnP linker the package runs
+ *   from its zip in yarn's cache (`.yarn/berry/cache/<package>.zip/…`)
  * - bunx: `<tmp>/bunx-<uid>-<package>@<version>/node_modules/`, or bun's own install cache
+ * Anything inside a zip archive counts too: plain Node cannot run it.
  */
 const RUNNER_CACHES = [
   /\/_npx\/[0-9a-f]{8,64}\/node_modules\//,
   /\/dlx\/[0-9a-z]{16,64}\/(?:[0-9a-f]+-[0-9a-f]+\/)?node_modules\//,
-  /\/dlx-\d+\/(?:[^/]+\/)*node_modules\//,
+  /\/xfs-[0-9a-z]+\/dlx-\d+\//,
   /\/bunx-\d+-[^/]+@[^/]+\/node_modules\//,
   /\/\.bun\/install\/cache\//,
+  /\/\.yarn\/(?:berry\/)?cache\//,
+  /\.zip\//i,
 ];
+
+/** Older pnpm dlx: `<OS temp dir>/dlx-<pid>/node_modules/`; only under the temp dir. */
+const TEMP_DLX = /^\/dlx-\d+\/(?:[^/]+\/)*node_modules\//;
 
 function real(path: string): string {
   try {
@@ -66,13 +74,37 @@ function real(path: string): string {
   }
 }
 
+const slashes = (p: string): string => p.replace(/\\/g, '/');
+
+function tempRoots(): string[] {
+  const t = tmpdir();
+  return [...new Set([t, real(t), '/tmp', '/private/tmp', '/var/tmp'].map(slashes))];
+}
+
+/** Where in `path` (slashes only) a runner's cache starts, or -1 when it is not in one. */
+function runnerIndex(p: string): number {
+  let from = -1;
+  for (const re of RUNNER_CACHES) {
+    const m = re.exec(p);
+    if (m && (from === -1 || m.index < from)) from = m.index;
+  }
+  const fold = (s: string) => (process.platform === 'win32' ? s.toLowerCase() : s);
+  for (const root of tempRoots()) {
+    if (fold(p).startsWith(`${fold(root)}/`) && TEMP_DLX.test(p.slice(root.length))) {
+      if (from === -1 || root.length < from) from = root.length;
+    }
+  }
+  return from;
+}
+
 /**
- * True when `path` lies in the temporary cache of a package runner (`npx`, `pnpm dlx`,
- * `yarn dlx`, `bunx`) rather than in an installed package.
+ * True when `path`, as given or once links are resolved, lies in the temporary cache of a
+ * package runner (`npx`, `pnpm dlx`, `yarn dlx`, `bunx`) rather than in an installed package.
+ * Both are checked: pnpm with a global virtual store links a dlx folder into its store, so only
+ * the path as given shows the cache.
  */
 export function inRunnerCache(path: string): boolean {
-  const p = real(path).replace(/\\/g, '/');
-  return RUNNER_CACHES.some((re) => re.test(p));
+  return runnerIndex(slashes(resolve(path))) !== -1 || runnerIndex(slashes(real(path))) !== -1;
 }
 
 /** A package tree in a runner's cache: its outermost `node_modules` and the CLI entry inside it. */
@@ -84,23 +116,52 @@ export interface RunnerTree {
 }
 
 /**
- * The package tree `entry` runs from when it is in a runner's cache, else null (installed
- * package, monorepo checkout, or a cache without a `node_modules` tree to copy).
+ * The package tree `entry` runs from when it is in a runner's cache, checked as given and once
+ * links are resolved; null when it is not in one, or the cache has no `node_modules` tree that
+ * can be copied (bun's install cache, a package inside a zip).
  */
 export function runnerTree(entry: string): RunnerTree | null {
-  const file = real(entry);
-  // Backslashes become slashes one for one, so indexes into `p` are indexes into `file`.
-  const p = file.replace(/\\/g, '/');
-  let from = -1;
-  for (const re of RUNNER_CACHES) {
-    const m = re.exec(p);
-    if (m && (from === -1 || m.index < from)) from = m.index;
+  for (const file of [resolve(entry), real(entry)]) {
+    // Backslashes become slashes one for one, so indexes into `p` are indexes into `file`.
+    const p = slashes(file);
+    const from = runnerIndex(p);
+    if (from === -1 || /\.zip\//i.test(p)) continue;
+    const at = p.indexOf('/node_modules/', from);
+    if (at === -1) continue;
+    const root = file.slice(0, at + '/node_modules'.length);
+    return { root, entry: relative(root, file) };
   }
-  if (from === -1) return null;
-  const at = p.indexOf('/node_modules/', from);
-  if (at === -1) return null;
-  const root = file.slice(0, at + '/node_modules'.length);
-  return { root, entry: relative(root, file) };
+  return null;
+}
+
+/**
+ * Why `init` will not connect agents when the CLI runs from `paths` (its entry, and the script
+ * Node was started with), or null when it can: a runner's cache it cannot copy from, or, when
+ * `entryMustExist`, an entry that is not a regular file (a layout no pattern knows).
+ */
+export function launchRefusal(
+  paths: readonly (string | undefined)[],
+  entryMustExist = false,
+): string | null {
+  const advice =
+    'Install it for good, then connect your agents: npm i -g mindly-cli && mindly init';
+  const given = paths.filter((p): p is string => p !== undefined && p !== '');
+  if (given.some(inRunnerCache) && !given.some((p) => runnerTree(p) !== null)) {
+    return `Mindly is running from a package cache it cannot copy itself out of (a zip archive, or bun's install cache), so hooks pointing there would break. ${advice}`;
+  }
+  const entry = paths[0];
+  if (entryMustExist && entry !== undefined) {
+    let file = false;
+    try {
+      file = statSync(entry).isFile();
+    } catch {
+      // missing, or inside something that is not a folder
+    }
+    if (!file) {
+      return `Mindly is running from ${entry}, which is not a file Node can start, so hooks pointing there would not run. ${advice}`;
+    }
+  }
+  return null;
 }
 
 /** The launcher agents run: `node <this> <args>`. */
