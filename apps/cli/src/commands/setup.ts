@@ -268,8 +268,10 @@ interface SetupOptions {
 /** `mindly init`. */
 export async function init(out: Out, o: SetupOptions): Promise<number> {
   if (o.listAgents) return listAgents(out);
-  // Before anything is planned or written, so a dry run says the same.
-  const refusal = runnerCacheRefusal(cliEntry());
+  // Before anything is planned or written, so a dry run says the same. The entry must exist in
+  // the published package; a monorepo checkout may not be built yet (its tests run from source).
+  const layout = resolveLayout(import.meta.url);
+  const refusal = runnerCacheRefusal([layout.cliMain, process.argv[1]], layout.kind === 'release');
   if (refusal !== null) {
     out.warn(refusal);
     return 1;

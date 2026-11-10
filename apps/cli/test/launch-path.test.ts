@@ -1,4 +1,5 @@
 import { chmodSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { installCommand } from '../src/commands/setup.js';
@@ -16,10 +17,15 @@ describe('package runner caches', () => {
       '/home/a/.npm/_npx/826d5fe126bc685d/node_modules/.bin/mindly',
       'C:\\Users\\a\\AppData\\Local\\npm-cache\\_npx\\1f0e9a2b3c4d5e6f\\node_modules\\mindly-cli\\dist\\main.js',
       '/home/a/.cache/pnpm/dlx/hfz5kqp2gqeoeyvztqv4ws2fji/19a1b2c3d4e-1f2a/node_modules/.pnpm/mindly-cli@0.5.0/node_modules/mindly-cli/dist/main.js',
+      join(tmpdir(), 'dlx-12345', 'node_modules', 'mindly-cli', 'dist', 'main.js'),
       '/tmp/dlx-12345/node_modules/mindly-cli/dist/main.js',
       '/tmp/xfs-1a2b3c4d/dlx-4242/node_modules/mindly-cli/dist/main.js',
       '/tmp/bunx-501-mindly-cli@latest/node_modules/mindly-cli/dist/main.js',
       '/home/a/.bun/install/cache/mindly-cli@0.5.0/dist/main.js',
+      // yarn 4 dlx with its default PnP linker runs the package from its zip in yarn's cache.
+      '/home/a/.yarn/berry/cache/mindly-cli-npm-0.5.0-3f2a1b9c8d-10c0.zip/node_modules/mindly-cli/dist/main.js',
+      '/home/a/project/.yarn/cache/mindly-cli-npm-0.5.0-3f2a1b9c8d-10c0.zip/node_modules/mindly-cli/dist/main.js',
+      '/somewhere/archive.ZIP/node_modules/mindly-cli/dist/main.js',
     ]) {
       expect(inRunnerCache(path), path).toBe(true);
     }
@@ -32,38 +38,64 @@ describe('package runner caches', () => {
       '/home/a/src/dlxtools/apps/cli/dist/main.js',
       '/home/dlx/.npm-global/lib/node_modules/mindly-cli/dist/main.js',
       '/home/a/code/dlx-tools/node_modules/mindly-cli/dist/main.js',
+      '/home/a/code/dlx-2024/node_modules/mindly-cli/dist/main.js',
       '/home/a/src/bunx-demo/node_modules/mindly-cli/dist/main.js',
       'C:\\Users\\dlx\\AppData\\Roaming\\npm\\node_modules\\mindly-cli\\dist\\main.js',
       '/home/a/_npx/notes/node_modules/mindly-cli/dist/main.js',
+      '/home/a/zips/node_modules/mindly-cli/dist/main.js',
     ]) {
       expect(inRunnerCache(path), path).toBe(false);
     }
   });
 
-  it('decides on the real path, not a link to it', () => {
+  it('checks the path as given and once links are resolved', () => {
     const base = realpathSync(tempDir('mindly-real-'));
+    // A link from an ordinary folder into a cache.
     const cached = join(base, '_npx', '826d5fe126bc685d', 'node_modules', 'mindly-cli', 'main.js');
     file(cached, '');
     const linkedIn = join(base, 'bin', 'mindly');
     mkdirSync(dirname(linkedIn), { recursive: true });
     symlinkSync(cached, linkedIn);
     expect(inRunnerCache(linkedIn)).toBe(true);
-    const installed = join(base, 'lib', 'node_modules', 'mindly-cli', 'main.js');
-    file(installed, '');
-    const linkedOut = join(base, '_npx', 'aaaaaaaaaaaaaaaa', 'node_modules', 'mindly');
-    mkdirSync(dirname(linkedOut), { recursive: true });
-    symlinkSync(installed, linkedOut);
-    expect(inRunnerCache(linkedOut)).toBe(false);
+    // pnpm with a global virtual store: the dlx folder links into the store's `links`, so only
+    // the path as given shows the cache.
+    const store = join(base, 'store', 'v10', 'links', 'mindly-cli', '0.5.0', 'abc', 'node_modules');
+    file(join(store, 'mindly-cli', 'dist', 'main.js'), '');
+    const dlx = join(base, 'dlx', 'hfz5kqp2gqeoeyvztqv4ws2fji', '19a1b2c3d4e-1f2a', 'node_modules');
+    mkdirSync(dlx, { recursive: true });
+    symlinkSync(join(store, 'mindly-cli'), join(dlx, 'mindly-cli'));
+    const viaDlx = join(dlx, 'mindly-cli', 'dist', 'main.js');
+    expect(inRunnerCache(viaDlx)).toBe(true);
+    expect(inRunnerCache(realpathSync(viaDlx))).toBe(false);
   });
 
   it('refuses to connect agents from one, with the command that installs Mindly for good', () => {
-    const refusal = runnerCacheRefusal(
-      '/home/a/.npm/_npx/826d5fe126bc685d/node_modules/mindly-cli/dist/main.js',
-    );
+    const entry = '/home/a/.npm/_npx/826d5fe126bc685d/node_modules/mindly-cli/dist/main.js';
+    const refusal = runnerCacheRefusal([entry]);
     expect(refusal).toMatch(/temporary package cache/);
     expect(refusal).toContain('npm i -g mindly-cli && mindly init');
     expect(refusal).not.toContain('\n');
-    expect(runnerCacheRefusal('/usr/local/lib/node_modules/mindly-cli/dist/main.js')).toBe(null);
+    // The script Node was started with counts too (pnpm's global virtual store).
+    expect(runnerCacheRefusal(['/usr/local/lib/node_modules/mindly-cli/dist/main.js', entry])).toBe(
+      refusal,
+    );
+    expect(runnerCacheRefusal(['/usr/local/lib/node_modules/mindly-cli/dist/main.js'])).toBe(null);
+  });
+
+  it('refuses an entry that is not a file Node can start, when it must exist', () => {
+    const base = realpathSync(tempDir('mindly-entry-'));
+    const entry = join(base, 'lib', 'node_modules', 'mindly-cli', 'dist', 'main.js');
+    file(entry, '');
+    expect(runnerCacheRefusal([entry], true)).toBe(null);
+    const zip = join(base, 'pkg.bin');
+    file(zip, 'not a folder');
+    for (const missing of [join(base, 'nowhere', 'main.js'), join(zip, 'dist', 'main.js')]) {
+      const refusal = runnerCacheRefusal([missing], true);
+      expect(refusal, missing).toContain('not a file Node can start');
+      expect(refusal).toContain('npm i -g mindly-cli && mindly init');
+      // A monorepo checkout that is not built yet is not refused.
+      expect(runnerCacheRefusal([missing], false)).toBe(null);
+    }
   });
 });
 
