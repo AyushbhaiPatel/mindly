@@ -744,6 +744,44 @@ describe('self-healing memory', () => {
     }
   });
 
+  it('pays for every hash of an earlier excerpt stored cut short, within one allowance', () => {
+    /** The best of three runs: the time of the work, not of compiling it. */
+    const timed = <T>(f: () => T): [T, number] => {
+      let best = Infinity;
+      let r = f();
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now();
+        r = f();
+        best = Math.min(best, performance.now() - t);
+      }
+      return [r, best];
+    };
+    // A 500 KB config of lookalike lines; the excerpt's start is on every one of them.
+    const rows: string[] = [];
+    for (let i = 0, size = 0; size < 500 * 1024; i++) {
+      rows.push(`"password": "pw${String(i).padStart(6, '0')}",`);
+      size += 24;
+    }
+    const file = rows.join('\n');
+    // 2000 characters that redaction made longer: stored cut short, with the bare hash.
+    let excerpt = '';
+    for (let i = 1000; excerpt.length < 2000; i++) excerpt += (excerpt ? '\n' : '') + rows[i];
+    excerpt = excerpt.slice(0, 2000);
+    const stored = sanitizeForContext(redactText(excerpt), 2000);
+    expect(stored.endsWith('…')).toBe(true);
+    const hash = sha256(normalizeBlock(excerpt));
+    for (const content of [file, file.replace('pw001005', 'pw999999')]) {
+      const found = excerptWork(content, stored, hash);
+      // Too many lookalikes to place it within the allowance: not decided, never gone.
+      expect(found.state).not.toBe('absent');
+      expect(found.work).toBeLessThanOrEqual(EARLIER_FORM_WORK);
+      // A few passes over the file (about twice normalising it here), measured on this machine.
+      const [, normalising] = timed(() => normalizeBlock(content));
+      const [, ms] = timed(() => excerptState(content, stored, hash));
+      expect(ms).toBeLessThan(20 * normalising + 5);
+    }
+  });
+
   it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {
     // Nothing but redactions was kept, on 40 lines: only every run of 40 whole lines could place
     // it, and in a 500 KB file that is more hashing than one check may do.

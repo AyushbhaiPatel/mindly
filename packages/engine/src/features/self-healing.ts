@@ -55,6 +55,14 @@ const MAX_EXCERPT_CHARS = 2000;
  * it such evidence is not decided and keeps the validity it had.
  */
 const MAX_LEGACY_WORK = 1_000_000;
+/**
+ * What a step costs, counted in characters of hashing against `MAX_LEGACY_WORK`: a hash beyond
+ * its characters, one running digest (taking a copy, finishing it and one more character), and
+ * one place visited in the file.
+ */
+const HASH_COST = 256;
+const DIGEST_COST = 512;
+const PLACE_COST = 16;
 /** The allowance of `MAX_LEGACY_WORK`, for tests that check the work stays within it. */
 export const EARLIER_FORM_WORK = MAX_LEGACY_WORK;
 
@@ -341,8 +349,9 @@ function normFile(raw: string): NormFile {
     linesWith(n, hash) {
       let byHash = runs.get(n);
       if (!byHash) {
-        if (!file.spend(normContent.length * n)) return null;
         lines ??= normContent.split('\n');
+        const runCount = Math.max(0, lines.length - n + 1);
+        if (!file.spend(normContent.length * n + runCount * HASH_COST)) return null;
         byHash = new Map();
         for (let i = 0; i + n <= lines.length; i++) {
           const h = sha256(n === 1 ? (lines[i] as string) : lines.slice(i, i + n).join('\n'));
@@ -530,7 +539,7 @@ function placeLines(
   const norm = file.content;
   let visited = 0;
   for (let o = view.text.indexOf(key); o !== -1; o = view.text.indexOf(key, o + 1)) {
-    if (++visited > MAX_LEGACY_OCCURRENCES) return null;
+    if (++visited > MAX_LEGACY_OCCURRENCES || !file.spend(PLACE_COST)) return null;
     const first = lineOf(viewStarts, o) - lineInExcerpt;
     const last = first + excerptLines - 1;
     if (first < 0 || last >= viewStarts.length) continue;
@@ -550,7 +559,7 @@ function placeLines(
         if (lines !== null && b - a + 1 !== lines) continue;
         const start = starts[a] as number;
         const end = b + 1 < starts.length ? (starts[b + 1] as number) - 1 : norm.length;
-        if (!file.spend(end - start)) return null;
+        if (!file.spend(end - start + HASH_COST)) return null;
         if (sha256(norm.slice(start, end)) === hash) return { start, end };
       }
     }
@@ -594,7 +603,7 @@ function placeKept(
   const text = view.text;
   const heads: number[] = [];
   for (let h = text.indexOf(head); h !== -1; h = text.indexOf(head, h + 1)) {
-    if (heads.length >= MAX_LEGACY_OCCURRENCES) return null;
+    if (heads.length >= MAX_LEGACY_OCCURRENCES || !file.spend(PLACE_COST)) return null;
     heads.push(h);
   }
   if (heads.length === 0) return null;
@@ -616,22 +625,25 @@ function placeKept(
       if (++tries > MAX_LEGACY_TRIES) return false;
       let end = last + 1;
       if (!cut) {
-        if (!file.spend(end - start)) return false;
+        if (!file.spend(end - start + HASH_COST)) return false;
         if (sha256(norm.slice(start, end)) === contentHash) return { start, end };
         continue;
       }
       // Cut short: the original ends somewhere after this, within an excerpt's length. Hashed one
       // whole character at a time (a pair is never split: half of one is encoded on its own).
       if (isHighSurrogate(norm.charCodeAt(end - 1)) && isLowSurrogate(norm.charCodeAt(end))) end++;
-      if (!file.spend(MAX_EXCERPT_CHARS * 4)) return false;
+      if (!file.spend(end - start + HASH_COST)) return false;
       const h = createHash('sha256').update(norm.slice(start, end));
       for (let e = end; e - start <= MAX_EXCERPT_CHARS;) {
+        // Every digest is paid for: past the allowance, nothing more is tried in this file.
+        if (!file.spend(DIGEST_COST)) return false;
         if (h.copy().digest('hex') === contentHash) return { start, end: e };
         if (e >= norm.length) break;
         const pairNext =
           isHighSurrogate(norm.charCodeAt(e)) && isLowSurrogate(norm.charCodeAt(e + 1));
         // An excerpt was cut to 2000 code units when it was accepted: its original may end with
         // the first half of a pair, encoded on its own.
+        if (pairNext && !file.spend(DIGEST_COST)) return false;
         if (
           pairNext &&
           h
@@ -661,7 +673,7 @@ function placeKept(
   let lo = 0;
   let hi = 0;
   for (let t = text.indexOf(tail, (heads[0] as number) + head.length); t !== -1;) {
-    if (++visited > MAX_LEGACY_OCCURRENCES) return null;
+    if (++visited > MAX_LEGACY_OCCURRENCES || !file.spend(PLACE_COST)) return null;
     const tailEnd = t + tail.length;
     while (hi < heads.length && (heads[hi] as number) + head.length <= t) hi++;
     while (lo < hi && tailEnd - (heads[lo] as number) > MAX_ORIGINAL_CHARS) lo++;
