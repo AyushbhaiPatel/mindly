@@ -22,8 +22,9 @@ export function truncate(text: string, max: number): string {
 // C0/C1 control characters except TAB and LF.
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
-// Bidirectional overrides/isolates and zero-width characters used to hide text.
-const INVISIBLE_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+// Bidirectional overrides/isolates, zero-width and other format characters used to hide text
+// (the soft hyphen and the Mongolian vowel separator render as nothing in most places).
+const INVISIBLE_RE = /[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
 // Our own context delimiters; content must never be able to close or forge a block.
 const DELIMITER_RE = /<\s*\/?\s*mindly[-_a-z]*/gi;
 

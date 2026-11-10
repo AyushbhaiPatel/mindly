@@ -77,6 +77,11 @@ describe('sanitizeForContext', () => {
     expect(out).not.toMatch(/<\s*\/?\s*mindly/i);
     expect(out).toContain('abc');
   });
+  it('removes format characters that can hide or split a token', () => {
+    for (const ch of [0xad, 0x180e, 0x2060, 0x2064, 0xfeff, 0x200b]) {
+      expect(sanitizeForContext(`gh${String.fromCharCode(ch)}p_token`)).toBe('ghp_token');
+    }
+  });
   it('caps length', () => {
     expect(sanitizeForContext('x'.repeat(100), 10)).toHaveLength(10);
     expect(truncate('hello', 3)).toBe('he…');
