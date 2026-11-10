@@ -88,6 +88,13 @@ const SERIF = "Newsreader, 'Newsreader Variable', Georgia, serif";
 const SANS = "'DM Sans', 'DM Sans Variable', system-ui, -apple-system, 'Segoe UI', sans-serif";
 const MONO = "ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
+const CARD_HEIGHT = 630;
+const KIND_ROW_HEIGHT = 36;
+/** Baseline of the footer line, measured from the bottom edge. */
+const FOOTER_FROM_BOTTOM = 48;
+/** Least distance between the baseline of the last kind row and the footer's. */
+const FOOTER_CLEARANCE = 34;
+
 /** Renders the card as a standalone SVG document. */
 export function renderSavesCard(input: SavesCardInput): string {
   const { summary } = input;
@@ -157,7 +164,7 @@ export function renderSavesCard(input: SavesCardInput): string {
       `font-family="${SANS}" font-weight="600" fill="#141413"`,
     );
     t(X + 74, y, 24, esc(SAVE_KIND_LABELS[k]), `font-family="${SANS}" fill="#3d3d3a"`);
-    y += 36;
+    y += KIND_ROW_HEIGHT;
   });
 
   // By agent.
@@ -177,8 +184,12 @@ export function renderSavesCard(input: SavesCardInput): string {
     t(W - X, 320, 18, 'Agents helped', `font-family="${SANS}" fill="#6b6a64" text-anchor="end"`);
   }
 
+  // The card is 1200x630 (the size link previews expect) and grows only when it has to: the
+  // footer sits 48 px above the bottom edge, and the last kind row keeps the same distance from
+  // it that six rows have on the standard card. A seventh row would otherwise be drawn over it.
+  const lastKindRow = y - KIND_ROW_HEIGHT;
+  let H = Math.max(CARD_HEIGHT, lastKindRow + FOOTER_CLEARANCE + FOOTER_FROM_BOTTOM);
   // Details: sentences and files (never without --details), below the counts.
-  let H = 630;
   if (details) {
     let dy = Math.max(y, 404) + 40;
     t(X, dy, 22, 'Details', `font-family="${SERIF}" fill="#141413"`);
@@ -194,12 +205,12 @@ export function renderSavesCard(input: SavesCardInput): string {
       }
       dy += s.paths.length > 0 ? 56 : 34;
     }
-    H = Math.max(630, dy + 70);
+    H = Math.max(H, dy + 70);
   }
 
   t(
     X,
-    H - 48,
+    H - FOOTER_FROM_BOTTOM,
     18,
     'Counted only with evidence: every save links to the recorded events that prove it.',
     `font-family="${SANS}" fill="#6b6a64"`,
