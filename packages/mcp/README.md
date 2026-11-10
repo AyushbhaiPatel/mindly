@@ -41,8 +41,10 @@ only when all of these hold:
 Any other guess is kept at arm's length. Every tool declares what it does then, and the server
 routes each call through that one rule:
 
-- `mindly_context` reads the context as a guest: it picks up no handoff and neither shows nor marks
-  delivered any of that window's messages;
+- `mindly_context` reads the context as a guest: it picks up no handoff, neither shows nor marks
+  delivered any of that window's messages, records nothing against that session (so what that
+  window's own hooks serve is unchanged), and lists as your open tasks only the tasks the server
+  took up itself;
 - `mindly_inbox` lists none of that window's messages, and `mindly_ack` acknowledges nothing;
 - `mindly_handoff` files the handoff in the server's own name, describing only the server's own
   work;

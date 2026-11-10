@@ -1770,6 +1770,59 @@ describe('telling windows of one agent apart', () => {
       expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(tA.id);
     });
 
+    it("leaves what the window's own prompt hook serves unchanged after a guest context", async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      a.mindly.memory.remember({
+        projectId: projectOf(a, sessA),
+        projectRoot: a.root,
+        kind: 'decision',
+        title: 'Login tokens rotate every hour',
+        body: 'The login flow rotates refresh tokens hourly.',
+        source: { type: 'user', sessionId: null, agentKind: null },
+      });
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      const asked = await b.call('mindly_context', { query: 'login tokens rotate' });
+      expect(asked.text).toContain('Login tokens rotate every hour');
+      expect(asked.structured?.['packetId']).toBeNull();
+      expect((await b.call('mindly_context')).text).toContain('Login tokens rotate every hour');
+      // Nothing was recorded against the window's session.
+      expect(a.mindly.store.contextPackets.forSession(sessA, 30)).toEqual([]);
+      expect(
+        a.mindly.store.events.query(projectOf(a, sessA), {
+          sessionId: sessA,
+          types: ['context.served'],
+        }),
+      ).toEqual([]);
+      // The window's own prompt is still served the memory.
+      const r = await a.mindly.hooks.handle(
+        hook(a.root, 'claude-code', 'win-a', 'prompt', { prompt: 'how do login tokens rotate' }),
+      );
+      expect(r.context).toContain('Login tokens rotate every hour');
+    });
+
+    it("lists only the server's own tasks as its open tasks in a guest context", async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      a.mindly.tasks.create({
+        projectId: projectOf(a, sessA),
+        title: 'window A private task',
+        owner: a.mindly.store.sessions.get(sessA),
+      });
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      expect((await b.call('mindly_context')).text).not.toContain('window A private task');
+      await b.call('mindly_task_create', { title: 'B work' });
+      const ctx = (await b.call('mindly_context')).text;
+      expect(ctx).toMatch(/Your open tasks[\s\S]*B work/);
+      expect(ctx).not.toContain('window A private task');
+      // The window itself still sees its own task as its own.
+      const own = await a.call('mindly_context');
+      expect(sid(own)).toBe(sessA);
+      expect(own.text).toMatch(/Your open tasks[\s\S]*window A private task/);
+    });
+
     it('files a handoff in its own name on a guess, so it never picks it up itself', async () => {
       const a = await harness(windowA);
       const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);

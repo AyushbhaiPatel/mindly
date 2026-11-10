@@ -290,19 +290,26 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       input: z.strictObject({ query: z.string().min(1).max(2000).optional() }),
       // Not read-only and not idempotent: a client must not pre-fetch or repeat this call.
       annotations: WRITE,
-      // What is waiting for the session (a handoff, messages) is left for that window.
-      onGuess: (args, scope) => contextOf(args.query, scope, true),
+      // What is waiting for the session (a handoff, messages) is left for that window, nothing
+      // is recorded against it, and only the tasks the server took up itself are its own.
+      onGuess: (args, scope) => contextOf(args.query, scope, scope.guess),
     },
-    (args, scope) => contextOf(args.query, scope, false),
+    (args, scope) => contextOf(args.query, scope, null),
   );
 
-  function contextOf(query: string | undefined, scope: CallScope, guest: boolean): CallToolResult {
+  function contextOf(
+    query: string | undefined,
+    scope: CallScope,
+    guest: GuessScope | null,
+  ): CallToolResult {
     const { project, session } = scope;
     const build = () =>
       query
         ? mindly.context.prompt(project, session, query)
         : mindly.context.sessionStart(project, session);
-    const built = guest ? mindly.context.asGuest(session, build) : build();
+    const built = guest
+      ? mindly.context.asGuest(session, build, { ownsTask: (id) => guest.wrote('task', id) })
+      : build();
     return ok(built.text ?? 'No Mindly context for this project right now.', {
       packetId: built.packet?.id ?? null,
       deliveries: built.deliveries.map((d) => d.id),

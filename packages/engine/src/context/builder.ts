@@ -11,6 +11,7 @@ import {
   type HandoffSplitBrief,
   type Memory,
   type Session,
+  type Task,
 } from '@mindly/core';
 import { LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
 import type { ProjectContext } from '../projects.js';
@@ -32,6 +33,12 @@ interface Candidate {
   delivery?: Delivery;
 }
 
+/** What a guest (see `ContextBuilder.asGuest`) may present as its own. */
+export interface GuestView {
+  /** True for a task the caller took up itself; none when omitted. */
+  ownsTask?: (taskId: string) => boolean;
+}
+
 export interface BuiltContext {
   text: string | null;
   packet: ContextPacket | null;
@@ -49,16 +56,19 @@ export class ContextBuilder {
     private readonly mistakes: MistakeService,
   ) {}
 
-  /** Sessions the context being built is read for as a guest (see `asGuest`). */
-  private readonly guests = new Set<string>();
+  /** Sessions the context being built is read for as a guest (see `asGuest`), with their view. */
+  private readonly guests = new Map<string, GuestView>();
 
   /**
    * Builds context for `session` as a guest: an MCP server that cannot tell whether the session
-   * is its client's or another window's. What belongs to the session is left for it: a handoff
-   * waiting for it is not picked up, and messages to it are not shown or marked delivered.
+   * is its client's or another window's. What belongs to the session is left for it and nothing
+   * is recorded against it: a handoff waiting for it is not picked up, messages to it are not
+   * shown or marked delivered, no packet of what was served is kept (the session's own context
+   * would then leave those memories out), and only the tasks `view` names are listed as the
+   * caller's own.
    */
-  asGuest(session: Session, build: () => BuiltContext): BuiltContext {
-    this.guests.add(session.id);
+  asGuest(session: Session, build: () => BuiltContext, view: GuestView = {}): BuiltContext {
+    this.guests.set(session.id, view);
     try {
       return build();
     } finally {
@@ -177,7 +187,7 @@ export class ContextBuilder {
       });
     }
 
-    for (const t of this.k.store.tasks.ownedBy(session.id)) {
+    for (const t of this.ownTasks(session)) {
       cands.push({
         item: {
           ref: t.id,
@@ -211,7 +221,10 @@ export class ContextBuilder {
     const pid = project.project.id;
     const cands: Candidate[] = [...this.deliveryCandidates(session, 0)];
 
-    const served = this.recentlyServed(session);
+    // A guest has no history of its own with the session: what the session saw is not its own.
+    const served = this.guests.has(session.id)
+      ? new Map<string, number>()
+      : this.recentlyServed(session);
     const hits = this.k.store.memories.search(pid, prompt, {
       trust: ['approved', 'verified', 'proposed'],
       ...(session.branch ? { branch: session.branch } : {}),
@@ -463,6 +476,21 @@ export class ContextBuilder {
     ];
   }
 
+  /**
+   * The session's unfinished tasks, newest first. For a guest, only the ones it took up itself,
+   * wherever they are now: the session's own are another window's as far as it can tell.
+   */
+  private ownTasks(session: Session): Task[] {
+    const guest = this.guests.get(session.id);
+    if (!guest) return this.k.store.tasks.ownedBy(session.id);
+    const owns = guest.ownsTask;
+    if (!owns) return [];
+    return this.k.store.tasks
+      .list(session.projectId, { statuses: ['open', 'in_progress', 'blocked'] })
+      .filter((t) => owns(t.id))
+      .slice(0, 20);
+  }
+
   /** Memory ids already shown to this session recently, with when they were shown. */
   private recentlyServed(session: Session): Map<string, number> {
     const since = this.k.clock.now() - RECENT_SERVE_WINDOW_MS;
@@ -511,6 +539,9 @@ export class ContextBuilder {
     if (!text) {
       return { text: null, packet: null, deliveries: [] };
     }
+    // A guest leaves no trace on the session: a packet kept against it would make the session's
+    // own context leave out what the guest was shown (and bisect read it as what the session saw).
+    if (this.guests.has(session.id)) return { text, packet: null, deliveries: [] };
     this.telepathy.markDelivered(session, deliveries);
     const packet = this.k.store.contextPackets.record({
       projectId: project.project.id,
