@@ -142,30 +142,38 @@ export class SessionResolver {
 
   /**
    * How `session` relates to this server, from the ancestors its first hook recorded. `depth` is
-   * where the two chains meet in the server's own chain (0: the server's parent), -1 when they
-   * do not meet.
+   * where the two chains meet in the server's own chain (0: the server's parent), -1 when they do
+   * not meet or nothing was recorded.
    *
-   * - `known`: the session's hooks were started by this server's own client. That is the case
-   *   when the chains meet at the server's parent, or a little further up with nothing but
-   *   launchers in between on the server's side (`npx`, `pnpm dlx`, a node shim that keeps
-   *   running) and nothing still running below that point on the hook's side. Two windows under
-   *   one terminal, multiplexer or IDE host meet further up, past a process that is not a
-   *   launcher, or with the other window's client still running below the meeting point.
-   * - `windowAlive`: whether the client that made the session still runs: true when something
-   *   below the meeting point on the hook's side runs, false when the client between the hook's
-   *   shell and the meeting point is gone too (a window closed without ending its session), null
-   *   when that cannot be told (nothing was recorded, or only the hook's own short-lived parent
-   *   lies below the meeting point, which has exited whoever the client is).
+   * Only one thing proves that a session is the server's own: its hooks were started by the
+   * server's parent, which is then the client of both (`known`). Everything else is a guess, and
+   * `rank` orders guesses (lower is better; null: not to be guessed at all):
+   *
+   * - 1: the chains meet a little further up, with only launchers (`npx`, a node shim, a shell)
+   *   between the server and the meeting point on its side, and on the hook's side only the
+   *   process that started the hook below it. That is what a server started through a launcher
+   *   sees of its own client. It is also what a crashed window looks like whose client was
+   *   started straight from the same host as a client that happens to be called `node`, which is
+   *   why it stays a guess and gives way as soon as something better turns up.
+   * - 2: nothing tells (no record, chains that do not meet).
+   * - 3: as 1, but meeting at a shell or with more than one process below the meeting point on
+   *   the hook's side: a hook that went through two short-lived processes, or a window that is
+   *   gone. Such a guess is not kept alive by the server.
+   * - 4: another client is still running below the meeting point: most likely another window.
+   * - null: the chains meet beyond a process on the server's side that is not a launcher (its own
+   *   client), and nothing below the meeting point on the hook's side runs any more: a window
+   *   that was closed without ending its session (`windowAlive` false).
    */
   private relation(session: Session): {
     known: boolean;
     depth: number;
+    rank: number | null;
     windowAlive: boolean | null;
   } {
     const recorded = parseProcessChain(
       this.mindly.store.kv.get<unknown>(hookAncestryKey(session.agentKind, session.externalId)),
     );
-    if (recorded.length === 0) return { known: false, depth: -1, windowAlive: null };
+    if (recorded.length === 0) return { known: false, depth: -1, rank: 2, windowAlive: null };
     const mine = this.chain();
     const same = (a: ProcessRef, b: ProcessRef): boolean =>
       a.pid === b.pid && a.start === b.start && a.start !== '';
@@ -178,21 +186,19 @@ export class SessionResolver {
         depth = j;
       }
     }
-    if (meet === -1) return { known: false, depth: -1, windowAlive: true };
+    if (meet === -1) return { known: false, depth: -1, rank: 2, windowAlive: true };
+    if (depth === 0) return { known: true, depth, rank: 0, windowAlive: true };
     const below = recorded.slice(0, meet);
-    const belowRuns = below.some((h) => this.runs(h));
-    const windowAlive = belowRuns ? true : below.length <= 1 ? null : false;
-    // Seeing through launchers needs the meeting point to be a client: the process that started
-    // the hook (itself, or through the hook's own short-lived shell), and not a shell. A client
-    // that happens to be called `node` looks like a launcher by name; without these two checks
-    // a window that crashed earlier in the same shell would meet this server at that shell, past
-    // this server's own client, and pass for its own.
-    const meetsClient =
-      below.length <= 1 && !belowRuns && !isShellName(mine[depth]?.name) && depth <= MAX_LAUNCHERS;
-    const throughLaunchers =
-      meetsClient && mine.slice(0, depth).every((m) => isLauncherName(m.name));
-    const known = depth === 0 || throughLaunchers;
-    return { known, depth, windowAlive: known ? true : windowAlive };
+    if (below.some((h) => this.runs(h))) return { known: false, depth, rank: 4, windowAlive: true };
+    const through =
+      depth <= MAX_LAUNCHERS && mine.slice(0, depth).every((m) => isLauncherName(m.name));
+    if (!through) {
+      return below.length <= 1
+        ? { known: false, depth, rank: 2, windowAlive: null }
+        : { known: false, depth, rank: null, windowAlive: false };
+    }
+    const close = below.length <= 1 && !isShellName(mine[depth]?.name);
+    return { known: false, depth, rank: close ? 1 : 3, windowAlive: null };
   }
 
   // ----------------------------------------------------------------- project
@@ -306,35 +312,53 @@ export class SessionResolver {
     const before = this.bound;
     const all = await this.hookSessions(project);
     const relations = new Map(all.map((s) => [s.id, this.relation(s)]));
-    // The session known to be this client's: the known one that meets the server closest, when
-    // only one does. Several at the same point is one host running several sessions, which
-    // ancestry cannot tell apart.
-    const known = all.filter((s) => relations.get(s.id)?.known);
-    const closest = Math.min(...known.map((s) => relations.get(s.id)?.depth ?? Infinity));
-    const top = known.filter((s) => relations.get(s.id)?.depth === closest);
-    const ours = top.length === 1 ? (top[0] as Session) : null;
-    if (ours && before && ours.id === before.id) {
+    const rel = (s: Session) => relations.get(s.id) as ReturnType<SessionResolver['relation']>;
+    // Known: the session whose hooks the server's parent started, when only one has. Several is
+    // one host running several sessions, which ancestry cannot tell apart: a guess among those.
+    const known = all.filter((s) => rel(s).known);
+    const ours = known.length === 1 ? (known[0] as Session) : null;
+    if (ours && before?.id === ours.id) {
       // The guess was right: its hook record arrived after the server bound to it.
-      this.take(ours.id, false, true);
+      if (!before.sure) this.take(ours.id, false, true);
       return false;
     }
-    const candidates = all.filter((s) => s.id !== before?.id);
-    const sure = ours && ours.id !== before?.id ? [ours] : [];
-    const knowable = this.chain().length > 0;
-    let guessed: Session[] = [];
-    if (!before || (before.own && !knowable)) {
-      const pool = top.length > 1 ? top.filter((s) => s.id !== before?.id) : candidates;
-      guessed = pool.filter((s) => !sure.includes(s) && relations.get(s.id)?.windowAlive !== false);
+    if (ours && this.take(ours.id, false, true)) {
+      if (before?.own) this.handOver(before.id, ours.id);
+      return true;
     }
-    for (const [list, sureOfIt] of [
-      [sure, true],
-      [guessed, false],
-    ] as const) {
-      for (const s of list) {
-        if (!this.take(s.id, false, sureOfIt)) continue;
-        if (before?.own) this.handOver(before.id, s.id);
-        return true;
-      }
+    // A server on a session of its own moves only to a session it knows is its own: a guess may
+    // be another window, and its work would stay there. Unless nothing can be known at all.
+    if (before?.own && this.chain().length > 0) return false;
+
+    // Guesses, best first: by rank, then (for launcher matches) the closest meeting point, then
+    // the most recently active.
+    const key = (s: Session): [number, number] => {
+      const r = rel(s);
+      if (r.known) return [0, 0];
+      const rank = r.rank ?? Infinity;
+      return [rank, rank === 1 || rank === 3 ? r.depth : 0];
+    };
+    const better = (x: [number, number], y: [number, number]): boolean =>
+      x[0] < y[0] || (x[0] === y[0] && x[1] < y[1]);
+    const pool = (known.length > 1 ? known : all).filter(
+      (s) => s.id !== before?.id && rel(s).rank !== null,
+    );
+    const ordered = pool
+      .map((s, i) => ({ s, k: key(s), i }))
+      .sort((x, y) => (better(x.k, y.k) ? -1 : better(y.k, x.k) ? 1 : x.i - y.i));
+    // A server on a guess moves only to a strictly better one; it does not hop between equals.
+    const current =
+      before && !before.own
+        ? (() => {
+            const cur = this.mindly.store.sessions.find(before.id);
+            return cur ? key(cur) : null;
+          })()
+        : null;
+    for (const { s, k } of ordered) {
+      if (current && !better(k, current)) break;
+      if (!this.take(s.id, false, false)) continue;
+      if (before?.own) this.handOver(before.id, s.id);
+      return true;
     }
     return false;
   }
@@ -388,8 +412,12 @@ export class SessionResolver {
     if (!this.bound || this.bound.own || !this.bound.sure) await this.improve(project);
 
     if (this.bound && !this.bound.own) {
-      // The session is alive while its server is being used, whether or not a hook ran lately.
-      store.sessions.touch(this.bound.id);
+      // The session is alive while its server is being used, whether or not a hook ran lately;
+      // except a weak guess, which may be a window that is gone.
+      const session = store.sessions.get(this.bound.id);
+      if (this.bound.sure || (this.relation(session).rank ?? Infinity) < 3) {
+        store.sessions.touch(this.bound.id);
+      }
       return { project, session: store.sessions.get(this.bound.id) };
     }
 

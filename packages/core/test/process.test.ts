@@ -137,6 +137,10 @@ describe('ps output', () => {
     );
     expect(isLauncherName('/Applications/Some App.app/Contents/MacOS/Some App')).toBe(false);
     expect(isShellName('/bin/bash')).toBe(true);
+    // Login shells as macOS `ps` lists them, and the csh family.
+    for (const shell of ['-zsh', '-bash', 'tcsh', 'csh', 'ksh', 'fish', 'dash']) {
+      expect(isShellName(shell)).toBe(true);
+    }
     expect(isShellName('node')).toBe(false);
   });
 });

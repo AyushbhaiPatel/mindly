@@ -187,7 +187,7 @@ export function isLauncherName(name: string | undefined): boolean {
 
 /** True when `name` is a shell (a shell runs commands; it is never an agent client). */
 export function isShellName(name: string | undefined): boolean {
-  return /^(sh|bash|zsh|dash|fish|ksh|cmd|pwsh|powershell)$/.test(programName(name));
+  return /^(sh|bash|zsh|dash|fish|ksh|mksh|csh|tcsh|cmd|pwsh|powershell)$/.test(programName(name));
 }
 
 /**
@@ -200,7 +200,11 @@ function programName(name: string | undefined): string {
   const trimmed = name.trim();
   const file = /[\\/]/.test(trimmed) ? (trimmed.split(/[\\/]/).pop() ?? '') : trimmed;
   const first = file.split(/\s+/)[0] ?? '';
-  return first.toLowerCase().replace(/\.(exe|cmd)$/, '');
+  // A login shell is listed with a leading dash ("-zsh").
+  return first
+    .toLowerCase()
+    .replace(/^-/, '')
+    .replace(/\.(exe|cmd)$/, '');
 }
 
 /** Parses a stored chain; anything malformed yields an empty one. */

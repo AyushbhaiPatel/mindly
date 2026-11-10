@@ -1014,9 +1014,10 @@ describe('telling windows of one agent apart', () => {
         a,
       );
       expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      // Right, but only guesses: a launcher match is never taken as proof.
       const claims = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
-      expect(claims[sessA]?.sure).toBe(true);
-      expect(claims[sessB]?.sure).toBe(true);
+      expect(claims[sessA]?.sure).toBe(false);
+      expect(claims[sessB]?.sure).toBe(false);
     } finally {
       for (const pid of live) if (pid !== 10 && pid !== 100 && pid !== 200) running.delete(pid);
     }
@@ -1040,8 +1041,14 @@ describe('telling windows of one agent apart', () => {
         ],
       });
       const stale = await hookSession(a, 'win-b', [ref(251), ref(250), ref(50), TERMINAL]);
-      const first = sid(await a.call('mindly_status'));
-      expect(first).not.toBe(stale);
+      const seen = a.mindly.store.sessions.get(stale).lastSeenAt;
+      await a.call('mindly_status');
+      // At most a weak guess: never known, and not kept alive by this server.
+      const before = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
+      expect(before[stale]?.sure).not.toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await a.call('mindly_status');
+      expect(a.mindly.store.sessions.get(stale).lastSeenAt).toBe(seen);
       // Hooks started straight from the client (no shell in between) do not change that.
       const direct = await hookSession(a, 'win-c', [ref(300), ref(50), TERMINAL]);
       const claims = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
@@ -1052,6 +1059,60 @@ describe('telling windows of one agent apart', () => {
       expect(sid(await a.call('mindly_status'))).toBe(own);
     } finally {
       for (const pid of live) running.delete(pid);
+    }
+  });
+
+  for (const host of ['bash', '-zsh', 'tcsh', 'tmux: server', 'Some IDE Host']) {
+    it(`never binds for good to a crashed sibling started by the same host (${host})`, async () => {
+      // Host 60 started window B's client (250, gone) straight away, and window A's client
+      // (100, a plain `node` process) now: its own hooks are not recorded yet.
+      const live = [60, 1400];
+      for (const pid of live) running.add(pid);
+      try {
+        const a = await harness({
+          ...world,
+          pid: 1400,
+          startTime: 1,
+          ancestors: [
+            { ...ref(100), name: 'node' },
+            { ...ref(60), name: host },
+            { ...TERMINAL, name: 'Terminal' },
+          ],
+        });
+        const stale = await hookSession(a, 'win-b', [ref(250), ref(60), TERMINAL]);
+        await a.call('mindly_status');
+        const claims = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
+        expect(claims[stale]?.sure).not.toBe(true);
+        // Window A's own record arrives: the server moves to it, and knows it.
+        const own = await hookSession(a, 'win-a', [ref(101), ref(100), ref(60), TERMINAL]);
+        expect(sid(await a.call('mindly_status'))).toBe(own);
+        const after = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
+        expect(after[own]?.sure).toBe(true);
+      } finally {
+        for (const pid of live) running.delete(pid);
+      }
+    });
+  }
+
+  it('binds through a launcher to a session whose hook went through two short-lived processes', async () => {
+    // The client (100) runs hooks through a shell that does not exec (102, then 103), and
+    // starts its server through a launcher that keeps running (130).
+    for (const pid of [130, 1500]) running.add(pid);
+    try {
+      const a = await harness({
+        ...world,
+        pid: 1500,
+        startTime: 1,
+        ancestors: [{ ...ref(130), name: 'npx' }, ref(100), TERMINAL],
+      });
+      const own = await hookSession(a, 'win-a', [ref(103), ref(102), ref(100), TERMINAL]);
+      expect(sid(await a.call('mindly_status'))).toBe(own);
+      // Another window that is still open is a worse guess than that one.
+      const other = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await a.call('mindly_status'))).toBe(own);
+      expect(other).not.toBe(own);
+    } finally {
+      for (const pid of [130, 1500]) running.delete(pid);
     }
   });
 

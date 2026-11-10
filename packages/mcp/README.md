@@ -18,7 +18,9 @@ A server works out which session it speaks for and keeps it. In order of prefere
    This tells apart two windows of one agent in one checkout, each a client process of its own.
    It cannot tell apart sessions that one process runs together (an app or IDE host with several
    threads and a server per thread): when more than one live session matches, the server guesses
-   among those as in (2).
+   among those as in (2). A server started through a launcher that keeps running (`npx`, a node
+   shim) has the launcher as its parent: it prefers the session whose hooks its client started,
+   but only as a guess.
 2. Where that says nothing (a client without hooks, a system where the process table cannot be
    read): the most recently active live session of the agent kind in the working tree of `cwd`
    that no other running server speaks for, leaving out sessions whose client is gone. This is a
