@@ -376,7 +376,8 @@ const cases: {
     name: 'NAME+= before a git command that names the file',
     prep: LOCAL_PEM,
     command: 'X+=1 git checkout v1 -- certs/server.pem',
-    want: ['deny'],
+    // An assignment to an upper-case variable makes the line one not read fully.
+    want: ['warn'],
   },
   // A value read as the destination of a push into a working tree.
   {
@@ -809,7 +810,6 @@ const quiet: { name: string; prep?: string; command: string }[] = [
   { name: 'config of a file of its own', command: 'git config -f tool.ini core.hooksPath x' },
   { name: 'submodule status', command: 'git submodule status' },
   { name: 'status after a shell variable', command: 'msg=fix; git status' },
-  { name: 'tests, then a commit', command: 'npm test >/dev/null 2>&1 && git commit -qm x' },
   { name: 'status in a folder', prep: 'mkdir -p sub', command: 'cd sub && git status' },
   { name: 'a test of the diff', command: 'if git diff --quiet; then echo ok; fi' },
 ];
@@ -929,6 +929,104 @@ const notReadFully: {
   { name: 'a substitution in a default value', command: `echo "\${x:-'$(${CO})'}"` },
 ];
 
+/** A TypeScript compiler, when the repository has one installed. */
+const TSC = `${process.cwd()}/node_modules/.bin/tsc`;
+
+// Lines whose programs, options or assignments the reader does not model completely.
+notReadFully.push(
+  // An assignment with a quoted value is still an assignment, before the program.
+  {
+    name: 'an empty quoted assignment before bash -c',
+    command: "A='' bash -c 'x=certs/server.pem; rm $x'",
+  },
+  {
+    name: 'an empty quoted assignment before sh -c',
+    command: `A="" sh -c 'rm "$0"' certs/server.pem`,
+  },
+  {
+    name: 'an empty quoted assignment before eval',
+    command: "A='' eval 'x=certs/server.pem; rm $x'",
+  },
+  // A rule scoped to a folder, on a line not read fully: the folder is there.
+  {
+    name: 'bash -c removing a folder a rule names',
+    scopes: ['certs'],
+    command: "bash -c 'rm -r certs'",
+  },
+  // Launchers and assignments the reader does not model.
+  { name: 'npx -c', command: "npx -c 'rm certs/server.pem'", runs: has('npx') },
+  {
+    name: 'npx --call under timeout',
+    command: "timeout 5 npx --call 'rm certs/server.pem'",
+    runs: has('npx'),
+  },
+  { name: 'env --spl', command: "env --spl 'rm certs/server.pem'", runs: ENV_SPLIT },
+  { name: 'HOME set, then ~', command: 'HOME=certs; rm ~/server.pem' },
+  { name: 'HOME set, then cd', command: 'HOME=certs; cd; rm server.pem' },
+  // Filters and programs that write, besides what they read.
+  {
+    name: 'a pipe into uniq with an output file',
+    command: 'cat src/a.ts | uniq - certs/server.pem',
+  },
+  { name: 'uniq with an output file', command: 'uniq src/a.ts certs/server.pem' },
+  { name: 'a pipe into sort -mo', command: 'cat src/a.ts | sort -mo certs/server.pem' },
+  { name: 'sort -uo', command: 'sort -uo certs/server.pem src/a.ts' },
+  { name: 'sort --outp=', command: 'sort --outp=certs/server.pem src/a.ts' },
+  { name: 'rg --pre rm', command: 'rg --pre rm k certs', runs: has('rg') },
+  { name: 'awk print to a file', command: `awk '{print > "certs/server.pem"}' src/a.ts` },
+  { name: 'awk system', command: `awk 'BEGIN{system("rm certs/server.pem")}'` },
+  { name: 'sed w', command: "sed -n 'w certs/server.pem' src/a.ts" },
+  { name: 'ruby -i', command: `ruby -i -pe 'sub(/k/,"z")' certs/server.pem`, runs: has('ruby') },
+  {
+    name: 'tsc --outFile',
+    command: `${TSC} src/a.ts --outFile certs/server.pem`,
+    runs: works(`test -x ${TSC}`),
+  },
+  // Interpreters given code that builds the paths it writes.
+  {
+    name: 'python -c over listdir',
+    command: `python3 -c 'import os; [os.remove(os.path.join("certs", f)) for f in os.listdir("certs")]'`,
+    runs: has('python3'),
+  },
+  {
+    name: 'node -e over readdirSync',
+    command: `node -e 'const fs=require("fs"); for (const f of fs.readdirSync("certs")) fs.unlinkSync("certs/"+f)'`,
+  },
+  // A wildcard naming a folder made earlier on the line.
+  { name: 'cp into k*/ made on the line', command: 'mkdir keys && cp certs/server.pem k*/' },
+  {
+    name: 'cp into v*/ made on the line',
+    scopes: VENDOR,
+    command: 'mkdir vendor && cp src/a.ts v*/',
+  },
+);
+
+describe('a shell line that holds a patch is read as a shell line', () => {
+  it('a Bash line holding an apply_patch envelope', async () => {
+    const { buildTool } = await import('../../adapters/src/shared/tools.js');
+    const g = setUp(PEM);
+    try {
+      const command =
+        "rm certs/server.pem; echo '*** Begin Patch\n*** Add File: notes.txt\n+x\n*** End Patch' >/dev/null";
+      expect(runInCopy(g.dir, command, covered).written).toEqual(['certs/server.pem']);
+      const r = await g.mindly.hooks.handle({
+        agentKind: 'claude-code',
+        event: 'pre_tool',
+        externalSessionId: 'p',
+        cwd: g.dir,
+        transcriptPath: null,
+        startSource: null,
+        prompt: null,
+        lastMessage: null,
+        tool: buildTool({ name: 'Bash', input: { command } }),
+      });
+      expect(verdictOf(r)).toBe('deny');
+    } finally {
+      g.mindly.close();
+    }
+  });
+});
+
 describe('lines not read fully that write a covered file are warned about', () => {
   for (const c of notReadFully) {
     it(c.name, async () => {
@@ -947,6 +1045,8 @@ describe('lines not read fully that write a covered file are warned about', () =
 });
 
 const notBlocked: { name: string; prep?: string; command: string }[] = [
+  // A package manager is not modelled completely: the line warns, never blocks.
+  { name: 'tests, then a commit', command: 'npm test >/dev/null 2>&1 && git commit -qm x' },
   // Text that is not run, with a subscript and a substitution in it.
   {
     name: 'a to-do line holding a substitution, written to a file',

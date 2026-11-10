@@ -62,6 +62,16 @@ describe('codex parse', () => {
     expect(ev?.tool?.edits[0]).toMatchObject({ path: 'a.txt', addedText: 'hi' });
   });
 
+  it('reads a shell line that only holds a patch as a shell line', () => {
+    for (const command of [
+      "rm certs/server.pem; echo '*** Begin Patch\n*** Add File: n.txt\n+x\n*** End Patch' >/dev/null",
+      "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\nEOF\nrm x",
+    ]) {
+      const ev = a.parse('PreToolUse', { ...f('PreToolUse.Bash'), tool_input: { command } });
+      expect(ev?.tool, command).toMatchObject({ shell: true, writes: false, edits: [], command });
+    }
+  });
+
   it('parses Bash and failed PostToolUse', () => {
     expect(a.parse('PreToolUse', f('PreToolUse.Bash'))?.tool).toMatchObject({
       shell: true,
