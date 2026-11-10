@@ -545,8 +545,12 @@ export class SentinelService {
       return result('checked', { step: latest.seq, runId: run.id, checks: reports, setupFailed });
     } catch (err) {
       const runId = run?.id ?? null;
-      if (err instanceof BisectAborted || signal.aborted) {
-        const lost = lockLost();
+      const stopped = err instanceof BisectAborted || signal.aborted;
+      // Whatever failed, nothing is saved unless the lock is still ours: it may have been taken
+      // over since the last look, before a heartbeat noticed, and the new holder's state is not
+      // ours to overwrite.
+      const lost = lockLost() || (!stopped && !lock.held());
+      if (stopped || lost) {
         if (lost) this.k.logger.warn('sentinel: lock lost, pass stopped', { projectId });
         if (run) {
           this.finishRunQuietly(run, 'cancelled', {

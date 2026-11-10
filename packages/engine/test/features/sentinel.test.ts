@@ -952,6 +952,39 @@ describe('sentinel pass', () => {
     ]);
   });
 
+  it('does not save over the new holder when it fails after losing its lock', async () => {
+    const w = await world(breaksAt(3));
+    const svc = sentinelOf(w.mindly);
+    w.addSteps(1, 2);
+    await w.pass();
+    const lockFile = join(dirname(svc.warmPath(w.pid, w.root)), 'lock');
+    const theirs = ['424242', 'feedfeedfeedfeedfeedfeed', '', 'pid:[4026532001]', 'h'].join('\n');
+    w.addSteps(3, 4);
+    // The check fails at the new step and a bisect is about to start. Meanwhile (before any
+    // heartbeat) a daemon in another container took the lock over and saved its own state,
+    // and then something here fails.
+    const countSince = w.mindly.store.runs.countSince.bind(w.mindly.store.runs);
+    let theirState: ReturnType<typeof w.mindly.store.sentinel.get> = null;
+    w.mindly.store.runs.countSince = () => {
+      writeFileSync(lockFile, theirs);
+      theirState = w.mindly.store.sentinel.save(w.pid, w.root, {
+        checkedSeq: 4,
+        checkedAt: 1,
+        setupCommit: null,
+        checks: {},
+        skips: 0,
+        skippedSeq: null,
+        retryAt: null,
+      });
+      throw new Error('database is locked');
+    };
+    const r = await w.pass();
+    w.mindly.store.runs.countSince = countSince;
+    expect(r).toMatchObject({ status: 'cancelled', reason: 'lock_lost' });
+    expect(w.mindly.store.sentinel.get(w.pid, w.root)).toEqual(theirState);
+    expect(readFileSync(lockFile, 'utf8')).toBe(theirs);
+  });
+
   it("refuses to run when Mindly's home is inside the repository", async () => {
     const w = await world(() => 'pass');
     const svc = new SentinelService(
