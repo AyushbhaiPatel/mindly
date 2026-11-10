@@ -10,6 +10,7 @@ import {
   RATE_LIMIT_HANDOFF_MAX_AGE_MS,
   readTranscriptTail,
   recentAgentTexts,
+  turnEntries,
   type Mindly,
 } from '../../src/index.js';
 import { event, writeTool } from '../helpers.js';
@@ -226,10 +227,10 @@ describe('rate-limit failover', () => {
       'claude.rate_limit_error',
     );
     expect(detectRateLimit('claude-code', ['5-hour limit reached'])).toBe('claude.five_hour_limit');
-    expect(detectRateLimit('codex', ['stream error: rate limit reached, retry in 30s'])).toBe(
-      'codex.rate_limit',
-    );
-    expect(detectRateLimit('cursor', ['HTTP 429 Too Many Requests'])).toBe(
+    expect(
+      detectRateLimit('codex', ['stream error: rate limit reached, retry in 30s'], 'client'),
+    ).toBe('codex.rate_limit');
+    expect(detectRateLimit('cursor', ['HTTP 429 Too Many Requests'], 'client')).toBe(
       'generic.too_many_requests',
     );
     expect(detectRateLimit('codex', ['You\u2019ve hit your usage limit'])).toBe(
@@ -260,85 +261,158 @@ describe('rate-limit failover', () => {
     }
   });
 
-  it('still recognises the notices agents print', () => {
-    const notices: [string, string, string][] = [
-      [
-        'claude-code',
-        'Claude usage limit reached. Your limit will reset at 3pm.',
-        'claude.usage_limit_reached',
-      ],
-      ['claude-code', 'Your limit will reset at 3pm (Europe/Berlin).', 'claude.limit_will_reset'],
-      ['claude-code', '\u23bf  5-hour limit reached \u2219 resets 5pm', 'claude.five_hour_limit'],
-      [
-        'claude-code',
-        'You\u2019ve hit your session limit \u00b7 resets 3pm',
-        'claude.limit_reached',
-      ],
-      ['claude-code', 'Weekly limit reached \u2219 resets Mon 9am', 'claude.limit_reached'],
-      ['claude-code', 'Session limit reached \u2219 resets 5pm', 'claude.limit_reached'],
-      ['claude-code', "You've reached your usage limit", 'generic.usage_limit'],
-      [
-        'claude-code',
-        'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}',
-        'claude.rate_limit_error',
-      ],
-      ['claude-code', 'Working on it.\n\nAPI Error: 429 Too Many Requests', 'claude.http_429'],
-      [
-        'codex',
-        "You've hit your usage limit. Upgrade to Pro or try again later.",
-        'codex.usage_limit',
-      ],
-      ['codex', 'stream error: rate limit reached, retry in 30s', 'codex.rate_limit'],
-      ['codex', 'Rate limited. Please try again in 20s.', 'codex.rate_limit'],
-      ['gemini', 'Resource has been exhausted (e.g. check quota).', 'gemini.resource_exhausted'],
-      ['gemini', '[API Error: got status: RESOURCE_EXHAUSTED]', 'gemini.resource_exhausted_status'],
-      ['gemini', 'You have exhausted your daily quota on this model.', 'gemini.quota_exhausted'],
-      ['cursor', "You've hit your usage limit", 'generic.usage_limit'],
-      ['cursor', 'Error: Rate limit exceeded. Try again in 5 minutes.', 'generic.rate_limit'],
-      ['cursor', 'Quota exceeded. Check your plan and billing details.', 'generic.quota_exceeded'],
-      ['cursor', 'HTTP 429 Too Many Requests', 'generic.too_many_requests'],
-    ];
-    for (const [kind, text, id] of notices) {
+  // Wordings that name the account's own limit.
+  const ACCOUNT_NOTICES: [string, string, string][] = [
+    [
+      'claude-code',
+      'Claude usage limit reached. Your limit will reset at 3pm.',
+      'claude.usage_limit_reached',
+    ],
+    ['claude-code', 'Claude AI usage limit reached|1712345678', 'claude.usage_limit_reached'],
+    ['claude-code', 'Your limit will reset at 3pm (Europe/Berlin).', 'claude.limit_will_reset'],
+    ['claude-code', '⎿  5-hour limit reached ∙ resets 5pm', 'claude.five_hour_limit'],
+    ['claude-code', 'You’ve hit your session limit · resets 3pm', 'claude.limit_reached'],
+    ['claude-code', 'Weekly limit reached ∙ resets Mon 9am', 'claude.limit_reached'],
+    ['claude-code', 'Session limit reached ∙ resets 5pm', 'claude.limit_reached'],
+    ['claude-code', 'Opus weekly limit reached ∙ resets Oct 9, 5pm', 'claude.limit_reached'],
+    ['claude-code', 'You’ve hit your limit · resets 10pm (Asia/Tokyo)', 'claude.limit_reached'],
+    ['claude-code', "You've hit your limit ∙ resets 4am", 'claude.limit_reached'],
+    ['claude-code', "You've reached your usage limit", 'generic.usage_limit'],
+    ['claude-code', '[12:03:11] Usage limit reached', 'claude.usage_limit_reached'],
+    ['claude-code', '2026-01-01T12:00:00Z Usage limit reached.', 'claude.usage_limit_reached'],
+    ['claude-code', '[2026-01-01 12:00:00] [error] Weekly limit reached', 'claude.limit_reached'],
+    [
+      'codex',
+      "You've hit your usage limit. Upgrade to Pro or try again in 3 hours.",
+      'codex.usage_limit',
+    ],
+    ['codex', '⚠ You’ve hit your usage limit. Try again at 3pm', 'codex.usage_limit'],
+    [
+      'codex',
+      'You exceeded your current quota, please check your plan and billing details.',
+      'generic.quota_used_up',
+    ],
+    ['gemini', 'You have exhausted your daily quota on this model.', 'gemini.quota_exhausted'],
+    [
+      'gemini',
+      'You have exhausted your capacity on this model. Your quota will reset after 2h.',
+      'gemini.quota_exhausted',
+    ],
+    ['cursor', "You've hit your usage limit", 'generic.usage_limit'],
+    ['cursor', '✗ Usage limit reached', 'generic.usage_limit'],
+  ];
+
+  // What any rate-limited API says: a limit only when the client itself reports it.
+  const API_NOTICES: [string, string, string][] = [
+    ['claude-code', 'API Error: 429 Too Many Requests', 'claude.http_429'],
+    ['codex', 'stream error: rate limit reached, retry in 30s', 'codex.rate_limit'],
+    ['codex', '■ stream error: rate limit reached', 'codex.rate_limit'],
+    ['codex', 'Rate limited. Please try again in 20s.', 'codex.rate_limit'],
+    [
+      'codex',
+      'Rate limit reached for gpt-5 in organization org-abc on tokens per min. Please try again in 2s.',
+      'codex.rate_limit',
+    ],
+    ['codex', 'exceeded retry limit, last status: 429 Too Many Requests', 'codex.retry_limit'],
+    ['gemini', 'Resource has been exhausted (e.g. check quota).', 'gemini.resource_exhausted'],
+    [
+      'gemini',
+      `[API Error: {"error":{"code":429,"message":"${'Quota exceeded for quota metric x. '.repeat(8)}","status":"RESOURCE_EXHAUSTED"}}]`,
+      'gemini.resource_exhausted_status',
+    ],
+    ['cursor', 'Error: Rate limit exceeded. Try again in 5 minutes.', 'generic.rate_limit'],
+    ['cursor', 'ERROR  rate limit exceeded', 'generic.rate_limit'],
+    ['cursor', 'Rate limit exceeded.', 'generic.rate_limit'],
+    ['cursor', 'Rate limited.', 'generic.rate_limit'],
+    ['cursor', 'Quota exceeded.', 'generic.quota_exceeded'],
+    ['cursor', '│ 🚫 Fatal: quota exceeded', 'generic.quota_exceeded'],
+    ['cursor', 'HTTP 429 Too Many Requests', 'generic.too_many_requests'],
+    ['cursor', '429 Too Many Requests', 'generic.too_many_requests'],
+    ['cursor', 'Request failed: 429 Too Many Requests', 'generic.too_many_requests'],
+    ['cursor', 'Warning: usage limit reached, resets at 5pm', 'generic.usage_limit'],
+    ['cursor', 'WARN rate limited; backing off for 2s', 'generic.rate_limit'],
+    ['cursor', 'Failed: rate limit exceeded', 'generic.rate_limit'],
+  ];
+
+  const LONG_ANSWER = [
+    'I moved the session store behind an interface and switched login over to it.',
+    'The old cookie path is still there for the two callers that have not been migrated,',
+    'and the tests for both paths pass. What is left is the logout flow and the admin',
+    'impersonation path, which reads the cookie directly in three places. I started on the',
+    'first of those and left a note in the file about the order to do the rest in, because',
+    'the second one depends on a helper that the first one introduces. Nothing is half',
+    'applied: every file I touched is in a state that builds and passes its own tests.',
+  ].join('\n');
+
+  it('recognises an account limit from the client and as the last line the assistant wrote', () => {
+    expect(LONG_ANSWER.length).toBeGreaterThan(500);
+    for (const [kind, text, id] of ACCOUNT_NOTICES) {
+      expect([text, detectRateLimit(kind, [text], 'client')]).toEqual([text, id]);
       expect([text, detectRateLimit(kind, [text])]).toEqual([text, id]);
+      // At the end of a message of any length.
+      expect([text, detectRateLimit(kind, [`${LONG_ANSWER}\n\n${text}`])]).toEqual([text, id]);
+      expect([
+        text,
+        detectRateLimit(kind, [`Working.\nStep one.\nStep two.\nStep three.\n${text}\n\n`]),
+      ]).toEqual([text, id]);
+      // Not when the message goes on after it.
+      expect([text, detectRateLimit(kind, [`${text}\n\n${LONG_ANSWER}`])]).toEqual([text, null]);
     }
   });
 
-  it('recognises a notice behind a status glyph, a timestamp or a failure label', () => {
-    const notices: [string, string, string][] = [
-      ['codex', '⚠ You’ve hit your usage limit. Try again at 3pm', 'codex.usage_limit'],
-      ['codex', '■ stream error: rate limit reached', 'codex.rate_limit'],
-      ['claude-code', '[12:03:11] Usage limit reached', 'claude.usage_limit_reached'],
-      ['claude-code', '2026-01-01T12:00:00Z Usage limit reached.', 'claude.usage_limit_reached'],
-      ['claude-code', '[2026-01-01 12:00:00] [error] Weekly limit reached', 'claude.limit_reached'],
-      [
-        'claude-code',
-        'API Error: Request rejected (429) · rate_limit_error',
-        'claude.rate_limit_error',
-      ],
-      ['cursor', 'Request failed: 429 Too Many Requests', 'generic.too_many_requests'],
-      ['cursor', '✗ Usage limit reached', 'generic.usage_limit'],
-      ['cursor', 'ERROR  rate limit exceeded', 'generic.rate_limit'],
-      ['cursor', '│ 🚫 Fatal: quota exceeded', 'generic.quota_exceeded'],
-      [
-        'gemini',
-        '✕ [API Error: got status: RESOURCE_EXHAUSTED]',
-        'gemini.resource_exhausted_status',
-      ],
-    ];
-    for (const [kind, text, id] of notices) {
-      // As the whole of a short message the assistant ended on, and as the client's error report.
-      expect([text, detectRateLimit(kind, [text])]).toEqual([text, id]);
+  it('takes API vocabulary for a limit only when the client reports it', () => {
+    for (const [kind, text, id] of API_NOTICES) {
       expect([text, detectRateLimit(kind, [text], 'client')]).toEqual([text, id]);
+      expect([text, detectRateLimit(kind, [`${LONG_ANSWER}\n\n${text}`])]).toEqual([text, null]);
+      // The one line a client writes in place of an answer is the client's report.
+      const own = /^\W*\[?API Error/.test(text) ? id : null;
+      expect([text, detectRateLimit(kind, [text])]).toEqual([text, own]);
     }
-    // Log vocabulary is a label only when the client itself reports the error.
-    const logLines: [string, string][] = [
-      ['Warning: usage limit reached, resets at 5pm', 'generic.usage_limit'],
-      ['WARN rate limited; backing off for 2s', 'generic.rate_limit'],
-      ['Failed: rate limit exceeded', 'generic.rate_limit'],
+    expect(
+      detectRateLimit('claude-code', ['API Error: Request rejected (429) · rate_limit_error']),
+    ).toBe('claude.rate_limit_error');
+    expect(
+      detectRateLimit('claude-code', [
+        'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}',
+      ]),
+    ).toBe('claude.rate_limit_error');
+    expect(detectRateLimit('gemini', ['✕ [API Error: got status: RESOURCE_EXHAUSTED]'])).toBe(
+      'gemini.resource_exhausted_status',
+    );
+  });
+
+  it('does not take a short ordinary last message for a limit', () => {
+    const ordinary = [
+      'Rate limit exceeded.',
+      '429 Too Many Requests',
+      'Quota exceeded.',
+      'Error: rate limit exceeded',
+      'Rate limited.',
+      'Done. The API returns:\n\nToo many requests',
+      'Working on it.\n\nAPI Error: 429 Too Many Requests',
+      'Too many requests.',
+      'HTTP 429',
     ];
-    for (const [text, id] of logLines) {
-      expect([text, detectRateLimit('cursor', [text], 'client')]).toEqual([text, id]);
-      expect([text, detectRateLimit('cursor', [text])]).toEqual([text, null]);
+    for (const kind of ['claude-code', 'codex', 'gemini', 'cursor']) {
+      for (const text of ordinary) {
+        expect([kind, text, detectRateLimit(kind, [text])]).toEqual([kind, text, null]);
+      }
+    }
+  });
+
+  it('does not take a retry for a limit', () => {
+    const retries = [
+      'Rate limited, retrying in 30s.',
+      '429 Too Many Requests; retrying 1/5 in 205ms',
+      'stream error: rate limit reached; retry 2/5',
+      'Usage limit reached, retrying shortly',
+      'API Error: 429 Too Many Requests (attempt 3 of 10)',
+    ];
+    for (const kind of ['claude-code', 'codex', 'cursor']) {
+      for (const text of retries) {
+        expect([text, detectRateLimit(kind, [text], 'client')]).toEqual([text, null]);
+        expect([text, detectRateLimit(kind, [text])]).toEqual([text, null]);
+      }
     }
   });
 
@@ -622,6 +696,188 @@ describe('rate-limit failover', () => {
     expect(sent).toHaveLength(0);
   });
 
+  function toolUse(ts: number): object {
+    return {
+      type: 'assistant',
+      timestamp: new Date(ts).toISOString(),
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', name: 'Bash', input: { command: 'pnpm test' } }],
+      },
+    };
+  }
+
+  function toolResult(ts: number): object {
+    return {
+      type: 'user',
+      timestamp: new Date(ts).toISOString(),
+      message: { role: 'user', content: [{ type: 'tool_result', content: '42 passed' }] },
+    };
+  }
+
+  it('does not hand off for a notice the agent got past in the same turn', async () => {
+    const hiccups = (ts: number): [string, object][] => [
+      ['assistant', assistant('You’ve hit your usage limit. Try again at 3pm.', ts)],
+      ['assistant retry', assistant('Rate limited, retrying in 30s.', ts)],
+      [
+        'codex stream error',
+        {
+          type: 'event_msg',
+          timestamp: new Date(ts).toISOString(),
+          payload: {
+            type: 'stream_error',
+            message: '429 Too Many Requests; retrying 1/5 in 205ms',
+          },
+        },
+      ],
+      [
+        'codex error',
+        {
+          type: 'event_msg',
+          timestamp: new Date(ts).toISOString(),
+          payload: { type: 'error', message: 'stream error: rate limit reached' },
+        },
+      ],
+      [
+        'system api error',
+        {
+          type: 'system',
+          subtype: 'api_error',
+          level: 'error',
+          timestamp: new Date(ts).toISOString(),
+          content: 'API Error: 429 Too Many Requests',
+        },
+      ],
+    ];
+    for (const [name, hiccup] of hiccups(0).map(([n], i) => [n, i] as const)) {
+      const { root, clock, mindly, sent } = setupFailover();
+      await claudeTurn(mindly, root, () => clock.advance(1000));
+      const entry = hiccups(clock.t)[hiccup]![1];
+      const transcript = join(root, 'carried-on.jsonl');
+      writeFileSync(
+        transcript,
+        jsonl([
+          entry,
+          toolUse(clock.t + 1),
+          toolResult(clock.t + 2),
+          assistant(LONG_ANSWER, clock.t + 3),
+        ]),
+      );
+      await mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'stop', {
+          transcriptPath: transcript,
+          lastMessage: LONG_ANSWER,
+        }),
+      );
+      const pid = mindly.store.projects.list()[0]!.id;
+      expect([name, mindly.store.handoffs.list(pid).length]).toEqual([name, 0]);
+      expect([name, sent.length]).toEqual([name, 0]);
+
+      // The same entry as the last thing in the turn is the limit (a retry never is).
+      const again = setupFailover();
+      await claudeTurn(again.mindly, again.root, () => again.clock.advance(1000));
+      const ended = join(again.root, 'ended.jsonl');
+      const last = hiccups(again.clock.t + 2)[hiccup]![1];
+      writeFileSync(
+        ended,
+        jsonl([
+          toolUse(again.clock.t),
+          toolResult(again.clock.t + 1),
+          last,
+          { type: 'system', subtype: 'turn_duration' },
+        ]),
+      );
+      await again.mindly.hooks.handle(
+        event(again.root, 'claude-code', 'cc', 'stop', { transcriptPath: ended }),
+      );
+      const apid = again.mindly.store.projects.list()[0]!.id;
+      expect([name, again.mindly.store.handoffs.list(apid).length]).toEqual([
+        name,
+        name.includes('retry') || name === 'codex stream error' ? 0 : 1,
+      ]);
+    }
+  });
+
+  it('takes an entry without a timestamp as part of the turn it follows', () => {
+    const since = 1_750_000_000_000;
+    const notice = {
+      type: 'assistant',
+      message: { role: 'assistant', content: 'Usage limit reached.' },
+    };
+    const turn = turnEntries(
+      parseTranscriptTail(
+        jsonl([
+          assistant('Usage limit reached.', since - 60_000),
+          {
+            type: 'user',
+            timestamp: new Date(since).toISOString(),
+            message: { role: 'user', content: 'go' },
+          },
+          toolUse(since + 1),
+          toolResult(since + 2),
+          { type: 'system', subtype: 'turn_duration' },
+          notice,
+          { type: 'assistant', message: { role: 'assistant', content: '   ' } },
+        ]),
+      ),
+      since,
+    );
+    expect(turn.map((e) => (e.tool ? 'tool' : e.text))).toEqual([
+      'tool',
+      'tool',
+      'Usage limit reached.',
+    ]);
+    // Without any timestamps the turn starts after the last prompt, not after a tool result.
+    const plain = turnEntries(
+      parseTranscriptTail(
+        jsonl([
+          { role: 'assistant', content: 'old answer' },
+          { role: 'user', content: 'go' },
+          { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash' }] },
+          { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] },
+          { role: 'assistant', content: 'new answer' },
+        ]),
+      ),
+      since,
+    );
+    expect(plain.map((e) => (e.tool ? 'tool' : e.text))).toEqual(['tool', 'tool', 'new answer']);
+  });
+
+  it('reads Gemini-style entries and leaves subagent entries out', () => {
+    const at = new Date(1_750_000_000_000).toISOString();
+    const entries = parseTranscriptTail(
+      jsonl([
+        {
+          type: 'gemini',
+          timestamp: at,
+          content: 'Looking at the tests.',
+          toolCalls: [{ name: 'run_shell_command' }],
+        },
+        {
+          type: 'gemini',
+          timestamp: at,
+          content: 'You have exhausted your daily quota on this model.',
+        },
+        {
+          type: 'assistant',
+          timestamp: at,
+          isSidechain: true,
+          message: { role: 'assistant', content: [{ type: 'text', text: 'Usage limit reached.' }] },
+        },
+        { ...toolUse(1_750_000_000_000), isSidechain: true },
+      ]),
+    );
+    expect(entries.map((e) => [e.agent, e.tool])).toEqual([
+      [true, true],
+      [true, false],
+      [false, false],
+      [false, false],
+    ]);
+    const turn = turnEntries(entries, 0);
+    expect(turn).toHaveLength(2);
+    expect(detectRateLimit('gemini', [turn[1]!.text])).toBe('gemini.quota_exhausted');
+  });
+
   async function hitLimit(mindly: Mindly, root: string): Promise<void> {
     await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'stop', { lastMessage: 'Claude usage limit reached.' }),
@@ -800,6 +1056,84 @@ describe('rate-limit failover', () => {
     await mindly.hooks.handle(
       event(root, 'claude-code', 'cc', 'stop', { transcriptPath: transcript }),
     );
+    expect(mindly.store.handoffs.get(h!.id).status).toBe('pending');
+  });
+
+  it('keeps the handoff when a turn that did work ends in an error of any wording', async () => {
+    const endings = (ts: number): [string, object, string | undefined][] => [
+      [
+        'unknown wording from the client',
+        {
+          type: 'system',
+          subtype: 'api_error',
+          level: 'error',
+          timestamp: new Date(ts).toISOString(),
+          content: 'No more credits on this workspace until 10pm (Asia/Tokyo)',
+        },
+        undefined,
+      ],
+      [
+        'client notice without a timestamp',
+        {
+          type: 'assistant',
+          isApiErrorMessage: true,
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'You’ve hit your limit · resets 10pm (Asia/Tokyo)' }],
+          },
+        },
+        undefined,
+      ],
+      [
+        'known notice without a timestamp',
+        { type: 'assistant', message: { role: 'assistant', content: 'Usage limit reached.' } },
+        undefined,
+      ],
+      ['cut off after a tool call', toolResult(ts), undefined],
+    ];
+    for (let i = 0; i < endings(0).length; i++) {
+      const { root, clock, mindly } = setupFailover();
+      await claudeTurn(mindly, root, () => clock.advance(1000));
+      const pid = mindly.store.projects.list()[0]!.id;
+      await hitLimit(mindly, root);
+      const [h] = mindly.store.handoffs.list(pid);
+      clock.advance(3_600_000);
+      await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'continue' }));
+      clock.advance(1000);
+      const [name, ending] = endings(clock.t + 2)[i]!;
+      const transcript = join(root, 'ended-in-error.jsonl');
+      writeFileSync(transcript, jsonl([toolUse(clock.t), toolResult(clock.t + 1), ending]));
+      await mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'stop', { transcriptPath: transcript }),
+      );
+      expect([name, mindly.store.handoffs.get(h!.id).status]).toEqual([name, 'pending']);
+      expect(mindly.store.handoffs.list(pid)).toHaveLength(1);
+    }
+  });
+
+  it('keeps the handoff when a long last message ends in the notice and there is no transcript', async () => {
+    const { root, clock, mindly } = setupFailover();
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    clock.advance(1000);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'migrate auth' }));
+    clock.advance(1000);
+    const notice = "You've hit your usage limit. Upgrade to Pro or try again in 3 hours.";
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'stop', { lastMessage: `${LONG_ANSWER}\n\n${notice}` }),
+    );
+    const pid = mindly.store.projects.list()[0]!.id;
+    const [h] = mindly.store.handoffs.list(pid);
+    expect(h?.reason).toBe('rate_limit');
+
+    clock.advance(60_000);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'continue' }));
+    clock.advance(1000);
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'stop', {
+        lastMessage: `${LONG_ANSWER}\n\nStep one.\nStep two.\nStep three.\nStep four.\n${notice}`,
+      }),
+    );
+    expect(mindly.store.handoffs.list(pid).map((x) => x.status)).toEqual(['pending']);
     expect(mindly.store.handoffs.get(h!.id).status).toBe('pending');
   });
 
