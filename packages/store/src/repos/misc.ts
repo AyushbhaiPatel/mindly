@@ -334,8 +334,9 @@ export class ContractRepo {
   /**
    * Stores a result and keeps the contract's last passing/failing one (see `lastConclusive`), in
    * one transaction. A passing or failing result is remembered as it is. Before any other result
-   * replaces a passing or failing state that was never remembered (a contract last run before
-   * this was kept), that state is remembered first, so it is not lost with the row's `state`.
+   * replaces a passing or failing state, that state is remembered: it is the newest conclusive
+   * result whatever was remembered before (nothing, for a contract last run before this was kept;
+   * something older, when a process of a previous version wrote the state alone).
    * Throws `not_found`, writing nothing, for a contract that no longer exists.
    */
   recordResult(id: string, state: ContractState, message: string | null): Contract {
@@ -348,7 +349,7 @@ export class ContractRepo {
             `INSERT INTO kv (key, value, updated_at)
                SELECT ?, json_quote(state), ? FROM contracts
                WHERE id = ? AND state IN ('passing', 'failing')
-             ON CONFLICT (key) DO NOTHING`,
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
           )
           .run(conclusiveKey(id), now, id);
       }

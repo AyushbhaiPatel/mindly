@@ -266,6 +266,27 @@ describe('executable memory', () => {
     ).toHaveLength(1);
   });
 
+  it.each(['none', 'failing'] as const)(
+    'trusts a passing state over an older remembered "%s"',
+    async (stale) => {
+      const { root, mindly, pid, cc, write, memory, contracts } = await withDecision();
+      const spec = { path: 'src/auth.ts', pattern: 'role:' };
+      const c = contracts.create(memory.id, 'pattern_present', spec, USER);
+      // The state as a process of a previous version leaves it: updated on its own.
+      mindly.store.contracts.setLastConclusive(c.id, stale);
+      mindly.store.db.prepare("UPDATE contracts SET state = 'passing' WHERE id = ?").run(c.id);
+
+      write('src/auth.ts', `// ${'x'.repeat(600 * 1024)}\n`);
+      expect(contracts.run(mindly.store.contracts.get(c.id), root, cc).state).toBe('error');
+      expect(mindly.store.contracts.lastConclusive(c.id)).toBe('passing');
+      write('src/auth.ts', 'export const nothing = 1;\n');
+      expect(contracts.run(mindly.store.contracts.get(c.id), root, cc).state).toBe('failing');
+      expect(
+        mindly.store.conflicts.list(pid).filter((x) => x.kind === 'contract_broken'),
+      ).toHaveLength(1);
+    },
+  );
+
   it('remembers nothing for a contract that is gone when its result arrives', async () => {
     const { mindly, memory, contracts } = await withDecision();
     const c = contracts.create(memory.id, 'file_exists', { path: 'src/auth.ts' }, USER);
