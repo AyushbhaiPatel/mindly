@@ -1,17 +1,14 @@
-import { statSync } from 'node:fs';
 import { type MemoryEvidence, type Session } from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
-import { stripManagedSection } from '../memory/managed-section.js';
-import { excerptPresent, readBounded, type MemoryService } from '../memory/service.js';
-import type { Mindly } from '../mindly.js';
 import {
-  attachService,
-  guarded,
-  liveSessions,
-  MAX_FILES_PER_EVENT,
-  safeProjectPath,
-} from './shared.js';
+  judgeEvidence,
+  readEvidenceFile,
+  type EvidenceFile,
+  type MemoryService,
+} from '../memory/service.js';
+import type { Mindly } from '../mindly.js';
+import { attachService, guarded, liveSessions, MAX_FILES_PER_EVENT } from './shared.js';
 
 const MAX_SWEEP_EVIDENCE = 2000;
 
@@ -91,48 +88,31 @@ export class SelfHealingService {
     return result;
   }
 
-  private fileReader(projectRoot: string): (rel: string) => FileState {
-    const cache = new Map<string, FileState>();
+  /** Reads each file once; judged by the same functions a restatement uses. */
+  private fileReader(projectRoot: string): (rel: string) => EvidenceFile {
+    const cache = new Map<string, EvidenceFile>();
     return (rel) => {
       const hit = cache.get(rel);
       if (hit) return hit;
-      const state = this.readFile(projectRoot, rel);
+      const state = readEvidenceFile(projectRoot, this.k.config.redaction.denyPaths, rel);
       cache.set(rel, state);
       return state;
     };
   }
 
-  private readFile(projectRoot: string, rel: string): FileState {
-    const p = safeProjectPath(this.k, projectRoot, rel);
-    if (!p) return { kind: 'unreadable' };
-    let isFile: boolean;
-    try {
-      isFile = statSync(p.abs).isFile();
-    } catch {
-      return { kind: 'missing' };
-    }
-    if (!isFile) return { kind: 'missing' };
-    const content = readBounded(p.abs);
-    // Rules Mindly wrote into an instruction file are not evidence for those same rules.
-    return content === null
-      ? { kind: 'unreadable' }
-      : { kind: 'present', content: stripManagedSection(content) };
-  }
-
   private check(
     projectId: string,
     e: MemoryEvidence,
-    read: (rel: string) => FileState,
+    read: (rel: string) => EvidenceFile,
     actor: Session | null,
   ): EvidenceCheck {
     const base = { evidenceId: e.id, memoryId: e.memoryId, path: e.ref };
     const file = read(e.ref);
-    if (file.kind === 'unreadable') {
+    const state = judgeEvidence(file, e);
+    if (state === 'unknown') {
       return { ...base, state: 'unknown', markedStale: false, restored: false };
     }
-    const valid =
-      file.kind === 'present' &&
-      (e.excerpt === null || excerptPresent(file.content, e.excerpt, e.contentHash));
+    const valid = state === 'valid';
     this.k.store.memories.markEvidence(e.id, valid);
     if (valid) {
       return { ...base, state: 'valid', markedStale: false, restored: !e.valid };
@@ -163,9 +143,6 @@ export class SelfHealingService {
     return { ...base, state: 'invalid', markedStale, restored: false };
   }
 }
-
-type FileState =
-  { kind: 'present'; content: string } | { kind: 'missing' } | { kind: 'unreadable' };
 
 /** Feature module: re-verifies memory evidence on `files.changed`. */
 export const selfHealingModule = (mindly: Mindly): void => {

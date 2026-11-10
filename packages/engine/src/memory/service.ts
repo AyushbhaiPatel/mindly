@@ -416,14 +416,16 @@ export class MemoryService {
    *   evidence goes with the claim it backed. Left attached, it could later make the new
    *   author's memory go stale.
    * - Otherwise (its own author restating it, or the user taking over a rule imported from an
-   *   instruction file) a row is dropped only when it is certainly gone, or, on a takeover, when
-   *   the new author gives evidence for the same file. Rows that hold stay: an imported rule's
-   *   row is the record of the file it came from, which keeps rules sync from writing it there
-   *   again and marks the rule stale when its line is removed.
+   *   instruction file) a row is dropped when it no longer holds, or, on a takeover, when the new
+   *   author gives evidence for the same file. Rows that hold stay: an imported rule's row is the
+   *   record of the file it came from, which keeps rules sync from writing it there again and
+   *   marks the rule stale when its line is removed.
    *
-   * Certainly gone means invalid both in the restater's checkout and at the project root, judged
-   * as the sweep judges it. A row that holds on another branch is left for the sweep, which can
-   * mark it invalid and valid again; deleting it could not be undone.
+   * Whether a row holds is judged at the project root only, by {@link judgeEvidence}, exactly as
+   * the self-healing sweep judges it, even when the restatement comes from a linked worktree where
+   * the row still holds. A memory is about the project as the sweep sees it: a row kept because
+   * it holds on another branch would make the next sweep mark the memory just restated stale
+   * again, and that sweep never restores trust. Do not add the restater's checkout here.
    */
   private reviseEvidence(
     existing: Memory,
@@ -439,10 +441,10 @@ export class MemoryService {
     const replaced = new Set(takesOver ? incoming.map((e) => e.rel) : []);
     const root = this.k.store.projects.get(input.projectId).root;
     const deny = this.k.config.redaction.denyPaths;
-    const roots = [...new Set([input.projectRoot, root])];
     for (const e of repo.evidenceFor(existing.id)) {
-      const gone = roots.every((r) => evidenceState(r, deny, e) === 'invalid');
-      if (gone || replaced.has(e.ref)) repo.deleteEvidence(e.id);
+      if (replaced.has(e.ref) || evidenceState(root, deny, e) === 'invalid') {
+        repo.deleteEvidence(e.id);
+      }
     }
   }
 
@@ -718,26 +720,51 @@ export function excerptPresent(
 }
 
 /**
- * Whether an evidence row still holds, judged exactly as the self-healing sweep judges it, against
- * the same project root: `unknown` when the file cannot be looked at (outside the project, behind
- * a link leaving it, on the deny-list, too large or unreadable), `invalid` when it is gone or no
- * longer holds the excerpt (outside Mindly's own section), `valid` otherwise. Only `invalid`
- * evidence may be dropped.
+ * A file evidence points at, as read for judging it: its text without Mindly's own section (rules
+ * Mindly wrote into an instruction file are not evidence for those same rules), gone, or
+ * `unreadable` when it cannot be looked at (outside the project, behind a link leaving it, on the
+ * deny-list, too large or unreadable).
  */
+export type EvidenceFile =
+  { kind: 'present'; content: string } | { kind: 'missing' } | { kind: 'unreadable' };
+
+/** Reads the file at `rel` under `projectRoot` for {@link judgeEvidence}. */
+export function readEvidenceFile(
+  projectRoot: string,
+  denyPaths: readonly string[],
+  rel: string,
+): EvidenceFile {
+  const p = tryResolveInsideRoot(projectRoot, rel);
+  if (!p || p.rel === '' || isDeniedPath(p.rel, denyPaths)) return { kind: 'unreadable' };
+  if (!isFile(p.abs)) return { kind: 'missing' };
+  const content = readBounded(p.abs);
+  return content === null
+    ? { kind: 'unreadable' }
+    : { kind: 'present', content: stripManagedSection(content) };
+}
+
+/**
+ * Whether an evidence row holds in `file`: `unknown` when the file cannot be looked at, `invalid`
+ * when it is gone or no longer holds the excerpt, `valid` otherwise. The one judgement behind both
+ * the self-healing sweep and a restatement, so the two can never disagree about a row.
+ */
+export function judgeEvidence(
+  file: EvidenceFile,
+  e: Pick<MemoryEvidence, 'excerpt' | 'contentHash'>,
+): 'valid' | 'invalid' | 'unknown' {
+  if (file.kind === 'unreadable') return 'unknown';
+  if (file.kind === 'missing') return 'invalid';
+  if (e.excerpt === null) return 'valid';
+  return excerptPresent(file.content, e.excerpt, e.contentHash) ? 'valid' : 'invalid';
+}
+
+/** {@link judgeEvidence} of one row, its file read under `projectRoot`. */
 export function evidenceState(
   projectRoot: string,
   denyPaths: readonly string[],
   e: Pick<MemoryEvidence, 'ref' | 'excerpt' | 'contentHash'>,
 ): 'valid' | 'invalid' | 'unknown' {
-  const p = tryResolveInsideRoot(projectRoot, e.ref);
-  if (!p || p.rel === '' || isDeniedPath(p.rel, denyPaths)) return 'unknown';
-  if (!isFile(p.abs)) return 'invalid';
-  const content = readBounded(p.abs);
-  if (content === null) return 'unknown';
-  if (e.excerpt === null) return 'valid';
-  return excerptPresent(stripManagedSection(content), e.excerpt, e.contentHash)
-    ? 'valid'
-    : 'invalid';
+  return judgeEvidence(readEvidenceFile(projectRoot, denyPaths, e.ref), e);
 }
 
 function isFile(abs: string): boolean {

@@ -732,27 +732,36 @@ describe('trust layer', () => {
     );
   });
 
-  it('drops evidence on a restatement only when it is gone from the restater checkout too', () => {
+  it('judges evidence at the project root on a restatement from a linked worktree', () => {
+    // A restatement judges evidence where the sweep does, at the project root, even when the
+    // restater's worktree still holds the line. Keeping such a row because it holds on another
+    // branch would let the next sweep mark the memory just restated stale again, and the sweep
+    // never restores trust. Do not change this to look at the restater's checkout.
     const { root, mindly, pid } = project();
-    // A linked worktree on another branch, where the line is still as it was.
-    const wt = mkdtempSync(join(tmpdir(), 'syn-wt-'));
-    mkdirSync(join(wt, 'src'));
-    writeFileSync(join(wt, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 8080;\n');
-    writeFileSync(join(root, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 9090;\n');
-    const base = { projectId: pid, kind: 'fact' as const, title: 'server port', source: agent };
+    const sweep = () => selfHealingOf(mindly).sweep(pid);
+    writeFileSync(join(root, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 8080;\n');
+    const base = { projectId: pid, kind: 'fact' as const, title: 'server port', source: USER };
     const fact = mindly.memory.remember({
       ...base,
-      projectRoot: wt,
+      projectRoot: root,
       body: 'listens on 8080',
       evidence: [{ path: 'src/server.ts', excerpt: 'PORT_NUMBER_FOR_SERVER = 8080' }],
     });
-    // Restated in the worktree without new evidence: the row holds there, so it stays.
-    mindly.memory.remember({ ...base, projectRoot: wt, body: 'listens on 8080 here' });
-    expect(mindly.store.memories.evidenceFor(fact.id)).toHaveLength(1);
-    // Gone in the worktree as well: now it is certainly gone and is dropped.
-    writeFileSync(join(wt, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 7070;\n');
-    mindly.memory.remember({ ...base, projectRoot: wt, body: 'listens on 7070 here' });
+    // The main checkout moves on; the sweep marks the user's fact stale.
+    writeFileSync(join(root, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 9090;\n');
+    sweep();
+    expect(mindly.store.memories.get(fact.id).trust).toBe('stale');
+
+    // The user restates it from a linked worktree where the line is still as it was.
+    const wt = mkdtempSync(join(tmpdir(), 'syn-wt-'));
+    mkdirSync(join(wt, 'src'));
+    writeFileSync(join(wt, 'src', 'server.ts'), 'export const PORT_NUMBER_FOR_SERVER = 8080;\n');
+    const again = mindly.memory.remember({ ...base, projectRoot: wt, body: 'listens on 8080' });
+    expect(again.trust).toBe('approved');
     expect(mindly.store.memories.evidenceFor(fact.id)).toEqual([]);
+    // The next sweep agrees with what the restatement kept.
+    sweep();
+    expect(mindly.store.memories.get(fact.id).trust).toBe('approved');
   });
 
   it('keeps evidence of other files when the user takes over, and replaces it for the same file', () => {
