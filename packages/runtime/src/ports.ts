@@ -279,10 +279,42 @@ export function createGitPort(): GitPort {
         // The pathspecs are the command's own, read the way git reads them for it.
         env: { GIT_LITERAL_PATHSPECS: '0' },
       };
+      /** The tree a revision names, or null when there is none of that name. */
+      const treeOf = async (rev: string): Promise<string | null> => {
+        const res = await runGit(['rev-parse', '--verify', '--quiet', `${rev}^{tree}`], {
+          ...options,
+          okExitCodes: [1, 128],
+        });
+        return res.exitCode === 0 ? res.stdout.trim() || null : null;
+      };
+      /** The one remote branch of that name (`origin/x` for `x`), as `git checkout x` finds it. */
+      const remoteOf = async (name: string): Promise<string | null> => {
+        const res = await runGit(
+          ['for-each-ref', '--count=1', '--format=%(objectname)', `refs/remotes/*/${name}`],
+          options,
+        );
+        const oid = res.stdout.trim();
+        return oid === '' ? null : treeOf(oid);
+      };
       try {
-        const [top, diff, untracked] = await Promise.all([
-          runGit(['rev-parse', '--show-toplevel'], options),
-          // `git rm` removes the tracked files the pathspecs match; the others change what
+        const root =
+          query.root ??
+          realpathSync((await runGit(['rev-parse', '--show-toplevel'], options)).stdout.trim());
+        let against = query.against;
+        if (query.mayFail) {
+          // Words that may name no revision: a missing one makes the command write nothing.
+          const trees: string[] = [];
+          for (const rev of against) {
+            const tree = (await treeOf(rev)) ?? (query.guess ? await remoteOf(rev) : null);
+            if (tree === null) return Object.assign([], { root });
+            trees.push(tree);
+          }
+          against = trees;
+        }
+        // Paths from the top of the tree, whatever the configuration says about how to show them;
+        // no external diff or text conversion runs.
+        const [diff, untracked] = await Promise.all([
+          // `git rm` removes the tracked files its pathspecs match; the others change what
           // differs between the working tree and where the files come from.
           query.tracked
             ? runGit(
@@ -295,7 +327,10 @@ export function createGitPort(): GitPort {
                   '--name-only',
                   '-z',
                   '--no-renames',
-                  ...query.against,
+                  '--no-relative',
+                  '--no-ext-diff',
+                  '--no-textconv',
+                  ...against,
                   '--',
                   ...query.pathspecs,
                 ],
@@ -308,7 +343,8 @@ export function createGitPort(): GitPort {
                   '-z',
                   '--full-name',
                   '--others',
-                  '--exclude-standard',
+                  // Ignored files too, with `git stash -a`.
+                  ...(query.ignored ? [] : ['--exclude-standard']),
                   '--',
                   ...query.pathspecs,
                 ],
@@ -316,10 +352,11 @@ export function createGitPort(): GitPort {
               )
             : Promise.resolve(null),
         ]);
+        // A nested repository is listed as its folder: what is in it is not git's to change.
         const files = [diff.stdout, untracked?.stdout ?? '']
           .flatMap((out) => out.split('\0'))
-          .filter((f) => f !== '');
-        return Object.assign(files, { root: realpathSync(top.stdout.trim()) });
+          .filter((f) => f !== '' && !f.endsWith('/'));
+        return Object.assign(files, { root });
       } catch {
         return null;
       }

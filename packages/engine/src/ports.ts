@@ -35,9 +35,12 @@ export interface GitPort {
   /**
    * The files a git command that brings files back would change, run from `cwd`: the paths (from
    * `root`, the top of the working tree) that `git diff` reports between the working tree and
-   * `against` (the index when empty, else one revision), for `pathspecs` exactly as a command
-   * gave them (none: the whole tree). With `untracked`, the untracked files they match too.
-   * Null when git cannot say (no repository, an unknown revision, no answer in time).
+   * `against` (the index when empty, else one revision; two revisions are compared with each
+   * other), for `pathspecs` exactly as a command gave them (none: the whole tree). With
+   * `untracked`, the untracked files they match too, and with `ignored` the ignored ones. Null
+   * when git cannot say (no repository, an unknown revision, no answer in time); with `mayFail`,
+   * a revision that does not exist means nothing is written (an empty list), and with `guess` a
+   * remote branch of that name stands in for it first. `root`, when known, saves asking for it.
    */
   whatGitChanges?(
     cwd: string,
@@ -45,8 +48,12 @@ export interface GitPort {
       against: string[];
       pathspecs: string[];
       untracked: boolean;
+      ignored?: boolean;
       /** List the tracked files the pathspecs match instead (`git rm`). */
       tracked?: boolean;
+      mayFail?: boolean;
+      guess?: boolean;
+      root?: string;
       timeoutMs: number;
     },
   ): Promise<(string[] & { root: string }) | null>;

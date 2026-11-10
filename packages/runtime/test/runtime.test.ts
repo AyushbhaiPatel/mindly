@@ -260,6 +260,177 @@ describe('git commands that bring files back', () => {
   });
 });
 
+describe('git commands that switch branches or come after other commands', () => {
+  const certs = () =>
+    guarded({
+      'Certificates are issued by hand': ['**/*.pem'],
+      'Env files are edited by hand': ['.env'],
+    });
+  const setUp = (dir: string, git: (...args: string[]) => Buffer) => {
+    writeFileSync(join(dir, '.gitignore'), '.env\n');
+    writeFileSync(join(dir, '.env'), 'E=1\n');
+    mkdirSync(join(dir, 'certs'));
+    writeFileSync(join(dir, 'certs', 'server.pem'), 'k1\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'certs');
+    git('branch', 'same');
+    git('checkout', '-q', '-b', 'other');
+    writeFileSync(join(dir, 'certs', 'server.pem'), 'k-other\n');
+    git('commit', '-q', '-am', 'other');
+    git('checkout', '-q', 'main');
+  };
+
+  it('writes what differs between HEAD and the branch it switches to', async () => {
+    const { dir, mindly, shell, git } = certs();
+    try {
+      setUp(dir, git);
+      for (const command of [
+        'git checkout other',
+        'git switch other',
+        'git checkout -b tmp other',
+        'git switch -c tmp other',
+        'git checkout -f -B tmp other',
+        'git checkout --detach other',
+      ]) {
+        const r = await shell(command);
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('certs/server.pem');
+      }
+      // Nothing differs, or no branch of that name: nothing is written.
+      for (const command of [
+        'git checkout same',
+        'git switch same',
+        'git checkout -b tmp',
+        'git checkout -f -b tmp',
+        'git checkout no-such-branch',
+        'git checkout certs',
+        'git checkout -- certs',
+      ]) {
+        expect((await shell(command)).decision, command).toBeNull();
+      }
+      // A branch that only a remote has is made from it.
+      const other = git('rev-parse', 'other').toString().trim();
+      git('update-ref', 'refs/remotes/origin/feature', other);
+      expect((await shell('git checkout feature')).decision).toBe('deny');
+      expect((await shell('git switch feature')).decision).toBe('deny');
+      // Forced, every local change goes too.
+      writeFileSync(join(dir, 'certs', 'server.pem'), 'k2\n');
+      for (const command of [
+        'git checkout -f -b tmp',
+        'git checkout -fb tmp',
+        'git switch -f same',
+        'git checkout -f same',
+        // Words that are paths when such a file exists, whatever comes first.
+        'git checkout certs/server.pem .gitignore',
+        'git checkout .gitignore certs/server.pem',
+        "git checkout '*.pem'",
+        "git checkout ':(glob)**/*.pem'",
+        "git checkout ':/certs'",
+      ]) {
+        const r = await shell(command);
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('certs/server.pem');
+      }
+      // Paths come from the top whatever the configuration says.
+      git('config', 'diff.relative', 'true');
+      for (const command of ['git checkout -- .', 'git reset --hard', 'git stash']) {
+        const r = await shell(command, join(dir, 'certs'));
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('certs/server.pem');
+      }
+    } finally {
+      mindly.close();
+    }
+  });
+
+  it('stands by the paths given once an earlier command may have moved things', async () => {
+    const { dir, mindly, shell, git } = certs();
+    try {
+      setUp(dir, git);
+      // Nothing differs now, but a fetch, a commit or a reset first changes that.
+      for (const command of [
+        'git fetch && git checkout origin/main -- certs/server.pem',
+        'git fetch origin main && git restore --source=origin/main certs',
+        'git fetch origin && git checkout origin/main -- .',
+        'git fetch origin && git reset --hard origin/main',
+        'git reset && git checkout -- .',
+        'git fetch && git switch other',
+      ]) {
+        const r = await shell(command);
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('certs/server.pem');
+      }
+      // The whole tree stands for the tracked files there: an ignored file is not touched.
+      const env = guarded({ 'Env files are edited by hand': ['.env'] });
+      try {
+        writeFileSync(join(env.dir, '.gitignore'), '.env\n');
+        writeFileSync(join(env.dir, '.env'), 'E=1\n');
+        env.git('add', '-A');
+        env.git('commit', '-q', '-m', 'ignore');
+        for (const command of [
+          'git fetch && git reset --hard',
+          'git fetch && git checkout -- .',
+          'git fetch && git stash',
+          'git fetch && git stash -u',
+          'git fetch && git clean -fd',
+          'git clean -f .env',
+        ]) {
+          expect((await env.shell(command)).decision, command).toBeNull();
+        }
+        // Ignored files go with `git stash -a` and `git clean -x`, or once an exclude pattern
+        // takes them back from what is ignored.
+        for (const command of [
+          'git stash -a',
+          'git stash push -a -- .env',
+          'git fetch && git stash -a',
+          'git clean -fdx',
+          "git clean -fd -e '!.env'",
+        ]) {
+          const r = await env.shell(command);
+          expect(r.decision, command).toBe('deny');
+          expect(r.reason, command).toContain('.env');
+        }
+      } finally {
+        env.mindly.close();
+      }
+    } finally {
+      mindly.close();
+    }
+  });
+
+  it('finds repositories nested deep in an untracked folder', async () => {
+    const { dir, mindly, shell } = certs();
+    try {
+      for (const inner of ['tools/inner', 'tools/a/b/inner']) {
+        mkdirSync(join(dir, inner), { recursive: true });
+        execFileSync('git', ['init', '-q'], { cwd: join(dir, inner) });
+        writeFileSync(join(dir, inner, 'key.pem'), 'k\n');
+      }
+      for (const command of ['rm -rf tools', 'rm -rf tools/a', 'rm -rf tools/inner']) {
+        const r = await shell(command);
+        expect(r.decision, command).toBe('deny');
+        expect(r.reason, command).toContain('key.pem');
+      }
+      // git names them: a large untracked folder without one is not walked, nor held up.
+      mkdirSync(join(dir, 'scratch', 'many'), { recursive: true });
+      for (let i = 0; i < 5000; i++) writeFileSync(join(dir, 'scratch', 'many', `f${i}`), '');
+      const large = await shell('rm -rf scratch');
+      expect(large.decision).toBeNull();
+      expect(large.context ?? '').not.toContain('could not search');
+      expect((await shell('rm -rf *')).decision).toBe('deny');
+      // A folder named with characters a pattern would read is matched by its name.
+      for (const name of ['src/{a,b}', 'src/x*y', 'src/app/[id]']) {
+        mkdirSync(join(dir, name), { recursive: true });
+        writeFileSync(join(dir, name, 'key.pem'), 'k\n');
+        const r = await shell(`rm -rf '${name}'`);
+        expect(r.decision, name).toBe('deny');
+      }
+    } finally {
+      mindly.close();
+    }
+  });
+});
+
 describe('linked worktrees', () => {
   it('lists every working tree of a repository in one call', async () => {
     const dir = repo();

@@ -21,6 +21,7 @@ import { existsSync, opendirSync, readFileSync, type Dir } from 'node:fs';
 import { join, relative } from 'node:path';
 import { globToRegExp, toPosix } from '@mindly/core';
 import { isLiteralScope, literalPrefix, patternSegments, patternsMayOverlap } from './scope.js';
+import type { FileKinds } from './shell.js';
 
 /**
  * A whole directory or a wildcard pattern a shell command writes (`rm -r dir`, `rm dir/*.ts`),
@@ -46,13 +47,16 @@ export interface WrittenScope {
   /** Letter case is ignored (`find -iname`). */
   nocase: boolean;
   /**
-   * Only files that exist are touched (`git clean`): nothing the command creates. Decided by
-   * what is there, even against a rule that names its directory. `withIgnored` says whether
-   * ignored files are touched too (`git clean -x`).
+   * Only files that exist there and are of these kinds are touched, nothing the command creates:
+   * `git clean` (untracked files, ignored ones with `-x`), and what a git command that puts
+   * back tracked files stands for when git cannot say. Decided by what is there, even against a
+   * rule that names its directory.
    */
-  existing?: boolean;
-  withIgnored?: boolean;
+  existing?: FileKinds;
 }
+
+/** Every kind of file: a scope that is not limited to some. */
+const ANY_FILE: FileKinds = { tracked: true, untracked: true, ignored: true };
 
 /** What git can list for a search; see `GitPort.listFiles`. */
 export type FileLister = (
@@ -175,11 +179,18 @@ function ruleMatcher(globs: readonly string[], nocase: boolean): (rel: string) =
   };
 }
 
-/** A rule glob as git pathspecs (`:(top,glob)…`), or null when it cannot be given to git. */
-function pathspecs(glob: string, nocase: boolean): string[] | null {
+/**
+ * A rule glob as git pathspecs (`:(top,glob)…`), or null when it cannot be given to git. When the
+ * glob starts with `base` (the directory being written), that part is a name, not a pattern:
+ * a folder called `[id]` or `{a,b}` is matched as it is written.
+ */
+function pathspecs(glob: string, nocase: boolean, base = ''): string[] | null {
   const magic = nocase ? ':(top,glob,icase)' : ':(top,glob)';
+  const literal = base !== '' && (glob === base || glob.startsWith(`${base}/`));
+  const head = literal ? `${gitLiteral(base)}/` : '';
+  const rest = literal ? glob.slice(base.length + 1) || '**' : glob;
   // Alternatives become one pattern each; git has no `{a,b}`.
-  let forms = [collapse(patternSegments(glob)).join('/')];
+  let forms = [collapse(literal ? rest.split('/') : patternSegments(rest)).join('/')];
   for (let round = 0; round < 4; round++) {
     const next: string[] = [];
     let expanded = false;
@@ -200,21 +211,31 @@ function pathspecs(glob: string, nocase: boolean): string[] | null {
   }
   if (forms.some((f) => f.includes('{') || f.length > 1024 || f.includes('\0'))) return null;
   // `[` is literal in a rule glob and a class in git's.
-  return forms.map((f) => `${magic}${f.replace(/[[\]\\]/g, '\\$&')}`);
+  return forms.map((f) => `${magic}${head}${f.replace(/[[\]\\]/g, '\\$&')}`);
 }
 
 interface TreeFacts {
   /** Files git knows (tracked or untracked, not ignored) that match what was asked. */
-  files: string[];
+  files: string[] | null;
   /** Ignored files that match what was asked. */
-  ignored: string[];
+  ignored: string[] | null;
   /** Ignored directories, each one entry, without what is inside. */
   ignoredDirs: string[];
   /** Nested repositories and submodules: git lists nothing inside them. */
   nestedDirs: string[];
-  /** Tracked files among `files`, when a scope that only touches untracked files asked. */
-  tracked: Set<string> | null;
-  complete: boolean;
+  /** Tracked files that match what was asked, when a scope limited to some kinds asked. */
+  tracked: string[] | null;
+  trackedSet: Set<string> | null;
+}
+
+interface Plan {
+  specs: Set<string>;
+  bases: Set<string>;
+  ok: boolean;
+  /** Which listings the scopes need. */
+  known: boolean;
+  ignored: boolean;
+  tracked: boolean;
 }
 
 /** What a search found for one scope. */
@@ -234,6 +255,11 @@ export interface Covered {
 export class ScopeSearch {
   private readonly facts = new Map<string, TreeFacts | null>();
   private readonly walked = new Map<string, { files: string[]; complete: boolean }>();
+  /** What git said, by name, of the covered files a walk found. */
+  private readonly checked = new Map<
+    string,
+    { named: Set<string>; known: Set<string>; tracked: Set<string> }
+  >();
   private walksLeft = SEARCH_LIMITS.walks;
 
   /**
@@ -255,28 +281,38 @@ export class ScopeSearch {
    * and the rule globs that can reach it.
    */
   async prepare(asks: readonly { scope: WrittenScope; globs: readonly string[] }[]): Promise<void> {
-    const byRoot = new Map<
-      string,
-      { specs: Set<string>; bases: Set<string>; ok: boolean; untracked: boolean }
-    >();
+    const byRoot = new Map<string, Plan>();
     for (const { scope, globs } of asks) {
       if (globs.length === 0 || this.facts.has(scope.root)) continue;
       let plan = byRoot.get(scope.root);
-      if (!plan)
-        byRoot.set(
-          scope.root,
-          (plan = { specs: new Set(), bases: new Set(), ok: true, untracked: false }),
-        );
-      if (scope.existing === true) plan.untracked = true;
+      if (!plan) {
+        plan = {
+          specs: new Set(),
+          bases: new Set(),
+          ok: true,
+          known: false,
+          ignored: false,
+          tracked: false,
+        };
+        byRoot.set(scope.root, plan);
+      }
+      const kinds = scope.existing ?? ANY_FILE;
+      if (kinds.untracked) plan.known = true;
+      if (kinds.ignored) plan.ignored = true;
+      if (kinds.tracked !== kinds.untracked) plan.tracked = true;
       const base = toPosix(relative(scope.root, scope.base));
       plan.bases.add(base === '' ? ':(top)' : `:(top,literal)${base}`);
+      // Folders only: listing untracked files, git names each repository nested anywhere under
+      // the directory as one entry, and nothing else matches.
+      if (kinds.untracked)
+        plan.specs.add(`:(top,glob)${base === '' ? '' : `${gitLiteral(base)}/`}**/`);
       for (const g of globs) {
         // A rule that names its directory, asked about a pattern inside it: everything the
         // pattern matches is covered, so the pattern is what git is asked for. Otherwise the
         // rule's pattern, limited to the directory being written.
         const inside = isLiteralScope(g) && isWithin(base, g);
         const asked = inside ? scope.pattern : limitTo(base, g);
-        const specs = pathspecs(asked, scope.nocase);
+        const specs = pathspecs(asked, scope.nocase, base);
         if (specs === null) plan.ok = false;
         else for (const s of specs) plan.specs.add(s);
       }
@@ -286,6 +322,78 @@ export class ScopeSearch {
         this.facts.set(root, await this.ask(root, plan));
       }),
     );
+    // A scope limited to some kinds of file whose listings did not come in time is walked, and
+    // git is asked about the few covered files found there, by name: which are tracked, and which
+    // are not ignored. A walk alone cannot tell.
+    const found = new Map<string, Set<string>>();
+    for (const { scope, globs } of asks) {
+      if (globs.length === 0 || scope.existing === undefined) continue;
+      if (this.pool(scope) !== null) continue;
+      const walked = this.walkScope(scope, globs, scopeMatcher(scope), ruleMatcher(globs, false));
+      let named = found.get(scope.root);
+      if (!named) found.set(scope.root, (named = new Set()));
+      for (const f of walked.files) named.add(f);
+    }
+    await Promise.all(
+      [...found].map(async ([root, named]) => {
+        if (named.size === 0 || named.size > SEARCH_LIMITS.pathspecs) return;
+        const timeoutMs = Math.floor(Math.min(SEARCH_LIMITS.gitMs, this.timeLeft() / 2));
+        if (timeoutMs < 20) return;
+        const pathspecs = [...named].map((f) => `:(top,literal)${f}`);
+        const [known, tracked] = await Promise.all([
+          this.list(root, { kind: 'known', pathspecs, timeoutMs }),
+          this.list(root, { kind: 'tracked', pathspecs, timeoutMs }),
+        ]);
+        if (!known?.complete || !tracked?.complete) return;
+        this.checked.set(root, {
+          named,
+          known: new Set(known.files),
+          tracked: new Set(tracked.files),
+        });
+      }),
+    );
+  }
+
+  /**
+   * The kind of a covered file as far as git said: from the listings that came in time (each
+   * holds every covered file of its kind), or from what it said of the file by name. `untracked`
+   * stands for not tracked and not ignored; `not-tracked` for one of those two. Null: unknown.
+   */
+  private kindOf(
+    f: string,
+    facts: TreeFacts | null,
+    checked: { named: Set<string>; known: Set<string>; tracked: Set<string> } | undefined,
+  ): 'tracked' | 'untracked' | 'ignored' | 'not-tracked' | null {
+    if (checked?.named.has(f)) {
+      if (checked.tracked.has(f)) return 'tracked';
+      return checked.known.has(f) ? 'untracked' : 'ignored';
+    }
+    if (facts === null) return null;
+    if (facts.trackedSet?.has(f)) return 'tracked';
+    if (facts.ignored?.includes(f)) return 'ignored';
+    if (facts.files?.includes(f)) return facts.trackedSet === null ? null : 'untracked';
+    if (facts.trackedSet === null) return null;
+    // Not tracked: untracked or ignored, which the listing that did not come would have said.
+    if (facts.files !== null) return 'ignored';
+    if (facts.ignored !== null) return 'untracked';
+    return 'not-tracked';
+  }
+
+  /** The files of the kinds a scope touches, from git's listings; null when they are not in. */
+  private pool(scope: WrittenScope): string[] | null {
+    const facts = this.facts.get(scope.root) ?? null;
+    if (facts === null) return null;
+    const kinds = scope.existing ?? ANY_FILE;
+    const { files, tracked, trackedSet } = facts;
+    let pool: string[] | null;
+    if (kinds.tracked && kinds.untracked) pool = files;
+    else if (kinds.tracked) pool = tracked;
+    else if (kinds.untracked)
+      pool = files === null || trackedSet === null ? null : files.filter((f) => !trackedSet.has(f));
+    else pool = [];
+    if (pool !== null && kinds.ignored)
+      pool = facts.ignored === null ? null : [...pool, ...facts.ignored];
+    return pool;
   }
 
   /** One listing from git, given up on (as cut short) when git does not answer in time. */
@@ -306,39 +414,44 @@ export class ScopeSearch {
     }
   }
 
-  private async ask(
-    root: string,
-    plan: { specs: Set<string>; bases: Set<string>; ok: boolean; untracked: boolean },
-  ): Promise<TreeFacts | null> {
+  private async ask(root: string, plan: Plan): Promise<TreeFacts | null> {
     if (this.lister === null || !plan.ok || plan.specs.size > SEARCH_LIMITS.pathspecs) return null;
     const timeoutMs = Math.floor(Math.min(SEARCH_LIMITS.gitMs, this.timeLeft() / 2));
     if (timeoutMs < 20) return null;
     const specs = [...plan.specs];
     const bases = [...plan.bases];
+    const none = Promise.resolve(null);
     const [known, ignored, tracked, dirs] = await Promise.all([
-      this.list(root, { kind: 'known', pathspecs: specs, timeoutMs }),
-      this.list(root, { kind: 'ignored', pathspecs: specs, timeoutMs }),
-      plan.untracked
-        ? this.list(root, { kind: 'tracked', pathspecs: specs, timeoutMs })
-        : Promise.resolve(null),
-      this.list(root, { kind: 'dirs', pathspecs: bases, timeoutMs }),
+      plan.known ? this.list(root, { kind: 'known', pathspecs: specs, timeoutMs }) : none,
+      plan.ignored ? this.list(root, { kind: 'ignored', pathspecs: specs, timeoutMs }) : none,
+      plan.tracked ? this.list(root, { kind: 'tracked', pathspecs: specs, timeoutMs }) : none,
+      plan.known ? this.list(root, { kind: 'dirs', pathspecs: bases, timeoutMs }) : none,
     ]);
-    // No git here, or no answer in time: the caller walks instead.
-    if (known === null || ignored === null || dirs === null) return null;
-    if (!known.complete || !ignored.complete || !dirs.complete) return null;
-    // An untracked directory with a `.git` of its own is a nested repository; registered
-    // submodules are named in `.gitmodules`.
-    const nested = dirs.files
-      .filter((d) => d.endsWith('/') && existsSync(join(root, d, '.git')))
-      .map((d) => d.slice(0, -1));
+    // A listing that is needed and did not come (no git here, no answer in time) is left out:
+    // what needs it is walked instead.
+    const got = (
+      list: { files: string[]; complete: boolean } | null,
+    ): { files: string[]; complete: boolean } | null => (list?.complete ? list : null);
+    const k = got(known);
+    const i = got(ignored);
+    const t = got(tracked);
+    const d = got(dirs);
+    if (k === null && i === null && t === null) return null;
+    // An untracked directory with a `.git` of its own is a nested repository, and so is each
+    // folder git lists as one entry among untracked files, however deep; registered submodules
+    // are named in `.gitmodules`.
+    const nested = (d?.files ?? [])
+      .filter((x) => x.endsWith('/') && existsSync(join(root, x, '.git')))
+      .map((x) => x.slice(0, -1));
+    for (const f of k?.files ?? []) if (f.endsWith('/')) nested.push(f.slice(0, -1));
     nested.push(...submodules(root));
     return {
-      files: known.files.filter((f) => !f.endsWith('/')),
-      ignored: ignored.files.filter((f) => !f.endsWith('/')),
-      ignoredDirs: ignored.files.filter((f) => f.endsWith('/')).map((f) => f.slice(0, -1)),
+      files: k === null || d === null ? null : k.files.filter((f) => !f.endsWith('/')),
+      ignored: i === null ? null : i.files.filter((f) => !f.endsWith('/')),
+      ignoredDirs: (i?.files ?? []).filter((f) => f.endsWith('/')).map((f) => f.slice(0, -1)),
       nestedDirs: [...new Set(nested)],
-      tracked: tracked?.complete ? new Set(tracked.files) : null,
-      complete: true,
+      tracked: t?.files ?? null,
+      trackedSet: t === null ? null : new Set(t.files),
     };
   }
 
@@ -350,26 +463,57 @@ export class ScopeSearch {
     const inScope = scopeMatcher(scope);
     // The rule keeps its own letter case, whatever the command's pattern ignores.
     const byRule = ruleMatcher(globs, false);
+    const kinds = scope.existing ?? ANY_FILE;
     const facts = this.facts.get(scope.root) ?? null;
-    if (facts === null) return this.walkScope(scope, globs, inScope, byRule);
-    // `git clean` leaves tracked files alone, and ignored ones without -x.
-    const clean = scope.existing === true;
-    const kept = clean ? facts.tracked : null;
-    const withIgnored = !clean || scope.withIgnored === true;
-    const files = [...facts.files, ...(withIgnored ? facts.ignored : [])].filter(
-      (f) => inScope(f) && byRule(f) && !kept?.has(f),
-    );
+    // The files of the kinds the command touches, from git's listings.
+    const pool = this.pool(scope);
+    if (facts === null || pool === null) {
+      // Without git's listings the scope is walked. Where there is no git, every covered file
+      // found counts. Where git did not answer in time, what it said of the files found, by
+      // name, tells their kind; one it said nothing of could be of a kind the command leaves
+      // alone (an ignored `.env` for `git clean`), so it is not searched to the end.
+      const walked = this.walkScope(scope, globs, inScope, byRule);
+      if (scope.existing === undefined || this.lister === null) return walked;
+      if (kinds.tracked && kinds.untracked && kinds.ignored) return walked;
+      const checked = this.checked.get(scope.root);
+      const files: string[] = [];
+      let unknown = false;
+      for (const f of walked.files) {
+        const kind = this.kindOf(f, facts, checked);
+        // Not tracked is enough to know when both other kinds are touched.
+        const touched =
+          kind === null
+            ? null
+            : kind === 'tracked'
+              ? kinds.tracked
+              : kind === 'untracked'
+                ? kinds.untracked
+                : kind === 'ignored'
+                  ? kinds.ignored
+                  : kinds.untracked && kinds.ignored
+                    ? true
+                    : null;
+        if (touched === null) unknown = true;
+        else if (touched) files.push(f);
+      }
+      const unsearched = unknown ? [scopeLabel(scope), ...walked.unsearched] : walked.unsearched;
+      return { files, complete: unsearched.length === 0, unsearched };
+    }
+    const files = pool.filter((f) => inScope(f) && byRule(f));
     const unsearched: string[] = [];
-    let complete = !(clean && kept === null);
-    if (!complete) unsearched.push(scopeLabel(scope));
+    let complete = true;
     const deps = UNLISTED_DIRS.filter((d) => globs.some((g) => g.includes(d)));
-    const walkInto = [...(withIgnored ? facts.ignoredDirs : []), ...facts.nestedDirs];
+    const reaches = (dir: string): boolean =>
+      patternsMayOverlap(scope.pattern, `${dir}/**`, { nocase: scope.nocase }) &&
+      globs.some((g) => patternsMayOverlap(g, `${dir}/**`)) &&
+      !dir.split('/').some((s) => UNLISTED_DIRS.includes(s) && !deps.includes(s));
+    const walkInto = [
+      ...(kinds.ignored ? facts.ignoredDirs : []),
+      ...(kinds.untracked ? facts.nestedDirs : []),
+    ];
     for (const dir of walkInto) {
       // Only a directory the scope reaches into, and a rule could cover a file of.
-      const reach = { nocase: scope.nocase };
-      if (!patternsMayOverlap(scope.pattern, `${dir}/**`, reach)) continue;
-      if (!globs.some((g) => patternsMayOverlap(g, `${dir}/**`))) continue;
-      if (dir.split('/').some((s) => UNLISTED_DIRS.includes(s) && !deps.includes(s))) continue;
+      if (!reaches(dir)) continue;
       const found = this.walk(scope.root, join(scope.root, dir), deps, byRule, globs.join('\0'));
       for (const f of found.files) if (inScope(f)) files.push(f);
       if (!found.complete) {
@@ -386,22 +530,31 @@ export class ScopeSearch {
    */
   async listAll(scope: WrittenScope): Promise<Covered> {
     const inScope = scopeMatcher(scope);
-    const specs = pathspecs(scope.pattern, scope.nocase);
+    const base = toPosix(relative(scope.root, scope.base));
+    const specs = pathspecs(scope.pattern, scope.nocase, base);
     const timeoutMs = Math.floor(Math.min(SEARCH_LIMITS.gitMs, this.timeLeft() / 2));
+    const kinds = scope.existing ?? ANY_FILE;
     if (this.lister !== null && specs !== null && timeoutMs >= 20) {
       const query = { pathspecs: specs, timeoutMs };
       const [known, tracked] = await Promise.all([
-        this.list(scope.root, { kind: 'known', ...query }),
-        scope.existing === true
+        kinds.untracked ? this.list(scope.root, { kind: 'known', ...query }) : null,
+        kinds.tracked !== kinds.untracked
           ? this.list(scope.root, { kind: 'tracked', ...query })
-          : Promise.resolve(null),
+          : null,
       ]);
-      if (known !== null && known.complete) {
-        // `git clean` leaves tracked files alone.
-        const kept = tracked?.complete ? new Set(tracked.files) : null;
-        const files = known.files.filter((f) => inScope(f) && !kept?.has(f));
-        const complete = known.complete && (scope.existing !== true || kept !== null);
-        return { files, complete, unsearched: complete ? [] : [scopeLabel(scope)] };
+      const kept = tracked?.complete ? new Set(tracked.files) : null;
+      // Tracked files only (what `git reset --hard` puts back), or untracked ones only
+      // (`git clean`, which leaves tracked files alone), or both.
+      const pool = !kinds.untracked
+        ? tracked?.complete
+          ? tracked.files
+          : null
+        : known?.complete && (kinds.tracked || kept !== null)
+          ? known.files.filter((f) => kinds.tracked || !kept?.has(f))
+          : null;
+      if (pool !== null) {
+        const files = pool.filter((f) => !f.endsWith('/') && inScope(f));
+        return { files, complete: true, unsearched: [] };
       }
     }
     return this.walkScope(scope, ['**'], inScope, () => true);
@@ -566,6 +719,11 @@ export function limitTo(base: string, glob: string): string {
     if (after[0] === '**') return [base, ...after].join('/');
   }
   return `${base}/**`;
+}
+
+/** A name as text for a `:(glob)` pathspec: its wildcards are escaped. */
+function gitLiteral(name: string): string {
+  return name.replace(/[[\]*?\\]/g, '\\$&');
 }
 
 /** Paths of the submodules registered in `.gitmodules` (no git call: the file is read). */

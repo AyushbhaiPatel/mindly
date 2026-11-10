@@ -726,6 +726,52 @@ describe('hook flow', () => {
     expect(huge.decision).toBe('deny');
   });
 
+  it('names what git says a command changes from the top of the tree, at any count', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-')));
+    const listed = Array.from({ length: 100_000 }, (_, i) => `src/lib/d${i % 500}/f${i}.ts`);
+    const roots: (string | undefined)[] = [];
+    let answer = listed;
+    const mindly = Mindly.open({
+      inMemory: true,
+      clock: new FakeClock(),
+      ports: {
+        git: {
+          ...fakeGit,
+          findRepoRoot: async (cwd) => (cwd === root || cwd.startsWith(`${root}/`) ? root : null),
+          whatGitChanges: async (_cwd, query) => {
+            roots.push(query.root);
+            return Object.assign([...answer], { root });
+          },
+        },
+      },
+    });
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Certificates are issued by hand',
+      body: 'Ask first.',
+      scopePaths: ['**/*.pem'],
+      source: USER,
+      enforce: true,
+    });
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    // A hundred thousand files are named without looking each one up.
+    let started = performance.now();
+    expect((await shell('git rm -r -q src')).decision).toBeNull();
+    expect(performance.now() - started).toBeLessThan(3000);
+    answer = [...listed, 'certs/server.pem'];
+    started = performance.now();
+    const r = await shell('git rm -r -q src');
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(r.decision).toBe('deny');
+    expect(r.reason).toContain('certs/server.pem');
+    // The top of the tree is known already: git is not asked for it again.
+    expect(roots).toEqual([root, root]);
+  });
+
   it('finds other working trees once and refuses what it cannot place', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-')));
     const other = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-wt-')));

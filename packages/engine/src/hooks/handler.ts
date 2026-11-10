@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import {
   EMPTY_HOOK_RESULT,
+  deniedPathTest,
   globToRegExp,
   isDeniedPath,
   matchesAnyGlob,
@@ -30,6 +31,7 @@ import {
   normalizeCommandLine,
   pathNamer,
   readShellWrites,
+  type FileKinds,
   type GitQuestion,
   shellMayWrite,
   shellMayWriteFiles,
@@ -73,6 +75,13 @@ const MAX_SHELL_CHANGED = 20;
  */
 const PRE_TOOL_BUDGET_MS = 900;
 const PRE_TOOL_SHARE = 0.6;
+/**
+ * Time one git question about a shell command gets: at least the first, at most the second, and
+ * otherwise what is left of the budget once the third is kept for searching what is written.
+ */
+const GIT_QUESTION_MS = 400;
+const GIT_QUESTION_MAX_MS = 700;
+const SEARCH_RESERVE_MS = 250;
 /** Wildcard segments one written pattern may have; a deeper one counts as its whole directory. */
 const MAX_PATTERN_SEGMENTS = 16;
 /** Entries listed in the sources of one copy to see what it brings. */
@@ -445,10 +454,12 @@ export class HookHandler {
     command: string,
     ownTreeOnly = false,
     timeUp: () => boolean = () => false,
+    timeLeft: () => number = () => Infinity,
   ): Promise<{ certain: Writes; possible: Writes; limit: string | null }> {
     const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0 };
     const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0 };
-    const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
+    const repoRoot = await this.k.ports.git.findRepoRoot(cwd);
+    const treeRoot = repoRoot ?? project.root;
     // The command is read as text; where it runs, the home directory and the repository root
     // are handed in so `~`, `$HOME` and `$(git rev-parse --show-toplevel)` can be placed.
     const reading = readShellWrites(command, {
@@ -463,27 +474,34 @@ export class HookHandler {
     // git says which files they change. Those it could not answer for fall back to the paths
     // they were given. After the command ran there is nothing left to ask: the paths are used.
     const unanswered = new Set<number>();
+    // The top of the repository each folder git ran in belongs to, as git said it.
+    const tops = new Map<string, string>();
+    if (repoRoot !== null) tops.set(resolve(cwd), repoRoot);
+    const denied = deniedPathTest(this.k.config.redaction.denyPaths);
     for (const [i, q] of reading.questions.entries()) {
-      const files = ownTreeOnly ? null : await this.askGit(cwd, q, timeUp);
-      if (files === null) {
+      const answer = ownTreeOnly ? null : await this.askGit(cwd, q, timeUp, timeLeft, tops);
+      if (answer === null) {
         unanswered.add(i);
         continue;
       }
-      for (const abs of files) {
-        // git names the entry itself: a symbolic link is replaced or removed, not what it points
-        // to, so only the folder it sits in is resolved.
-        const dir = await this.locate(project, treeRoot, dirname(abs), trees);
-        if (dir === null || dir === 'unknown') {
-          if (dir === 'unknown') certain.unchecked++;
-          continue;
-        }
-        const rel = dir.rel === '' ? basename(abs) : `${dir.rel}/${basename(abs)}`;
-        const at = join(dir.abs, basename(abs));
-        const deny = this.k.config.redaction.denyPaths;
-        if (!seen.has(`true:${at}`)) {
-          seen.add(`true:${at}`);
-          certain.paths.push({ rel, abs: at, own: dir.own && !isDeniedPath(rel, deny) });
-        }
+      if (answer.files.length === 0) continue;
+      // git names files relative to the top of its working tree, never through a symbolic link
+      // to a folder (it does not follow them), and a link itself is replaced or removed, not what
+      // it points to: only the top is placed, and each file is named from there.
+      const top = await this.locate(project, treeRoot, answer.root, trees);
+      if (top === null) continue;
+      if (top === 'unknown') {
+        certain.unchecked++;
+        continue;
+      }
+      for (const f of answer.files) {
+        const rel = top.rel === '' ? f : `${top.rel}/${f}`;
+        // git's names are already plain: `a/b`, never `./a` or `a//b`.
+        const at = `${top.abs}/${f}`;
+        const key = `true:${at}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        certain.paths.push({ rel, abs: at, own: top.own && !denied(rel) });
       }
     }
     let late = false;
@@ -500,6 +518,12 @@ export class HookHandler {
       }
       const into = t.certain ? certain : possible;
       const fallback = t.fallback !== null;
+      // Only files that exist there, of the kinds git touches (`git clean`, and what a command
+      // that puts back tracked files stands for when git cannot say).
+      const existing: FileKinds | null =
+        t.how === 'clean' || t.how === 'clean-ignored'
+          ? { tracked: false, untracked: true, ignored: t.how === 'clean-ignored' }
+          : t.touches;
       const place = async (abs: string): Promise<Located | null> => {
         const found = await this.locate(project, treeRoot, abs, late ? null : trees);
         if (found === 'unknown') into.unchecked++;
@@ -525,8 +549,7 @@ export class HookHandler {
           only: t.only,
           dotfiles: t.dotfiles,
           nocase: t.nocase,
-          existing: t.how === 'clean' || t.how === 'clean-ignored',
-          withIgnored: t.how === 'clean-ignored',
+          ...(existing !== null ? { existing } : {}),
         });
       };
       const landing = (at: Located | null): void => {
@@ -611,9 +634,8 @@ export class HookHandler {
         file(at);
         continue;
       }
-      if ((t.how === 'clean' || t.how === 'clean-ignored') && !ownTreeOnly) {
-        // `git clean` only removes files git does not track: the path and what is under it are
-        // decided by what is there, never by the name alone.
+      if (existing !== null && !ownTreeOnly) {
+        // The path and what is under it are decided by what is there, never by the name alone.
         if (at.rel !== '') {
           const parent = toPosix(dirname(at.rel));
           scope({ ...at, rel: parent === '.' ? '' : parent }, [basename(at.rel)], dirname(at.abs));
@@ -633,27 +655,38 @@ export class HookHandler {
   }
 
   /**
-   * The files a git command that brings files back would change, as absolute paths: what
-   * `git diff` reports between the working tree and what the files come from, for the pathspecs
-   * exactly as given (so git's own wildcards and magic apply), and the untracked files it would
-   * remove. Null when git cannot say in time; the caller then falls back to the paths given.
+   * The files a git command that brings files back would change, relative to the top of the
+   * working tree git runs in: what `git diff` reports between the working tree and what the files
+   * come from, for the pathspecs exactly as given (so git's own wildcards and magic apply), and
+   * the untracked files it would remove. Null when git cannot say in time; the caller then falls
+   * back to the paths given. `tops` keeps the top of each folder asked about, so it is asked once.
    */
   private async askGit(
     cwd: string,
     q: GitQuestion,
     timeUp: () => boolean,
-  ): Promise<string[] | null> {
+    timeLeft: () => number,
+    tops: Map<string, string>,
+  ): Promise<{ root: string; files: string[] } | null> {
     const git = this.k.ports.git;
     if (!git.whatGitChanges || timeUp()) return null;
     const at = resolve(cwd, q.cwd);
     if (!isDirectory(at)) return null;
-    // One word after `git checkout` is a path only when such a file exists; else a branch.
-    if (q.ifExists && !q.pathspecs.every((p) => exists(resolve(at, p)))) return [];
-    const timeoutMs = 400;
+    // A word that is a path only when such a file exists: else this reading writes nothing.
+    const first = q.pathspecs[0];
+    if (q.ifExists && first !== undefined && !exists(resolve(at, first))) {
+      return { root: tops.get(at) ?? at, files: [] };
+    }
+    // git compares every file of the tree: on a large one that takes longer than a listing. It
+    // gets what the hook can spare, keeping enough to search what is written afterwards.
+    const timeoutMs = Math.floor(
+      Math.max(GIT_QUESTION_MS, Math.min(GIT_QUESTION_MAX_MS, timeLeft() - SEARCH_RESERVE_MS)),
+    );
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((done) => {
       timer = setTimeout(() => done(null), timeoutMs + 50);
     });
+    const known = tops.get(at);
     try {
       const answer = await Promise.race([
         git
@@ -661,13 +694,19 @@ export class HookHandler {
             against: q.against,
             pathspecs: q.pathspecs,
             untracked: q.untracked,
+            ignored: q.ignored,
             tracked: q.tracked,
+            mayFail: q.mayFail,
+            guess: q.guess,
+            ...(known !== undefined ? { root: known } : {}),
             timeoutMs,
           })
           .catch(() => null),
         late,
       ]);
-      return answer === null ? null : answer.map((f) => join(answer.root, f));
+      if (answer === null) return null;
+      tops.set(at, answer.root);
+      return { root: answer.root, files: [...answer] };
     } finally {
       clearTimeout(timer);
     }
@@ -849,6 +888,7 @@ export class HookHandler {
         tool.command,
         false,
         () => performance.now() > until - budget / 2,
+        () => until - performance.now(),
       );
       if (certain.unchecked > 0) return uncheckedDenial(certain.unchecked, false);
       const written = certain.paths.map((p) => p.rel);
@@ -1405,7 +1445,7 @@ async function expandScopes(
   const whole: string[] = [];
   let expanded = false;
   for (const s of scopes) {
-    const pattern = isWholeTree(s) && s.only === null && s.existing !== true;
+    const pattern = isWholeTree(s) && s.only === null && s.existing === undefined;
     const found = pattern ? null : await search.listAll(s);
     if (
       found === null ||
@@ -1431,7 +1471,7 @@ function settledByText(scope: WrittenScope, reaching: readonly string[]): boolea
   return (
     isWholeTree(scope) &&
     scope.only === null &&
-    scope.existing !== true &&
+    scope.existing === undefined &&
     reaching.some(isLiteralScope)
   );
 }
