@@ -103,6 +103,38 @@ describe('rules confirmed by the model', () => {
     expect(rules[0]?.scope.paths).toEqual(['packages/**']);
   });
 
+  it('never changes the scope of a rule the user approved, and only narrows a proposal', async () => {
+    let globs = ['src/a/**'];
+    const model = fakeModel(async () => ({
+      isRule: true,
+      rule: 'Use pnpm',
+      scopeGlobs: globs,
+      confidence: 0.5,
+    }));
+    const p = open(model.port);
+    const [first] = await say(p, 'No, use pnpm instead of npm.');
+    expect(first?.scope.paths).toEqual(['src/a/**']);
+
+    // Wider than the proposal: not applied.
+    globs = ['src/**'];
+    const [wider] = await say(p, 'No, use pnpm instead of npm.');
+    expect(wider?.scope.paths).toEqual(['src/a/**']);
+
+    // Inside it: applied.
+    globs = ['src/a/b/**'];
+    const [narrower] = await say(p, 'No, use pnpm instead of npm.');
+    expect(narrower?.scope.paths).toEqual(['src/a/b/**']);
+
+    // Once the user approved it, the model's scope is ignored, wider or narrower.
+    p.mindly.memory.approve(first!.id);
+    for (const g of [['**'], ['nothing-matches/**'], ['src/a/b/c/**']]) {
+      globs = g;
+      const [after] = await say(p, 'No, use pnpm instead of npm.');
+      expect(after?.trust).toBe('approved');
+      expect(after?.scope.paths).toEqual(['src/a/b/**']);
+    }
+  });
+
   it('drops a sentence the model says is not a rule', async () => {
     const model = fakeModel(async () => ({
       isRule: false,

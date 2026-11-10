@@ -105,6 +105,24 @@ export function detectRules(prompt: string): DetectedRule[] {
   return out;
 }
 
+/**
+ * True when everything `glob` can match is already inside `scope`: an empty scope is the whole
+ * project; otherwise `glob` must equal one of its patterns or sit below a `<folder>/**` one.
+ * Anything else counts as possibly wider.
+ */
+export function scopeCovers(scope: readonly string[], glob: string): boolean {
+  if (scope.length === 0) return true;
+  const g = glob.replace(/^\.\//, '');
+  if (g.split('/').includes('..')) return false;
+  return scope.some((s) => {
+    const o = s.replace(/^\.\//, '');
+    if (o === g || o === '**') return true;
+    if (!o.endsWith('/**')) return false;
+    const base = o.slice(0, -2);
+    return !/[*?{[]/.test(base) && g.startsWith(base) && g.length > base.length;
+  });
+}
+
 /** Turns "no, use pnpm instead of npm." into a clean rule title. */
 export function ruleTitle(text: string): string {
   const t = text
@@ -144,7 +162,9 @@ export class RuleService {
       // never raises its trust: weaker phrasing stays proposed until the user approves it.
       if (verdict && !verdict.isRule) continue;
       const strength = d.strength;
-      const scopeGlobs = verdict ? verdict.scopeGlobs.slice(0, 5) : [];
+      const scopeGlobs = verdict
+        ? this.modelScope(input.projectId, ruleTitle(d.text), verdict.scopeGlobs.slice(0, 5))
+        : [];
       let rule: Memory;
       try {
         rule = this.memory.remember({
@@ -197,6 +217,7 @@ export class RuleService {
       Math.floor(this.k.config.hooks.timeoutMs * MODEL_BUDGET_SHARE),
     );
     const controller = new AbortController();
+    const deadline = Date.now() + budget;
     const timer = setTimeout(() => controller.abort(), budget);
     timer.unref?.();
     const extraPatterns = this.k.config.redaction.extraPatterns;
@@ -207,6 +228,7 @@ export class RuleService {
             ? llm
                 .classifyCorrection(redactText(d.text, { extraPatterns }), {
                   signal: controller.signal,
+                  deadline,
                   redactPatterns: extraPatterns,
                   onFailure: (reason) => this.logModelFailure(reason),
                 })
@@ -219,6 +241,26 @@ export class RuleService {
       // Whatever is still in flight is not waited for.
       controller.abort();
     }
+  }
+
+  /**
+   * The scope a model suggested, as far as it may be used. A new rule takes it. A rule that
+   * already exists keeps its scope (an empty list leaves it unchanged), unless it is still only
+   * proposed and the suggestion stays inside it: the model may narrow a proposal, never widen
+   * one, and never touches a rule the user decided on.
+   */
+  private modelScope(projectId: string, title: string, suggested: readonly string[]): string[] {
+    if (suggested.length === 0) return [];
+    const existing = this.memory.findSameTitle(projectId, 'rule', title, null);
+    if (!existing) return [...suggested];
+    const decided =
+      existing.trust !== 'proposed' ||
+      existing.enforce ||
+      existing.pinned ||
+      existing.status !== 'active';
+    if (decided) return [];
+    const current = existing.scope.paths;
+    return suggested.every((g) => scopeCovers(current, g)) ? [...suggested] : [];
   }
 
   private logModelFailure(reason: string): void {
