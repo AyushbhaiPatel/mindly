@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
-  existsSync,
+  constants as fsConstants,
+  copyFileSync,
   linkSync,
   openSync,
   readdirSync,
@@ -319,15 +320,7 @@ function takeOver(
     try {
       const moved = seenAt(aside);
       if (sameLock(moved, current) && moved.mtimeMs === current.mtimeMs) return true;
-      try {
-        link(aside, file);
-      } catch (err) {
-        // EEXIST: a newer lock exists already, and it wins. Anything else: no hard links here,
-        // so the lock is moved back instead, unless a newer one took its place.
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' && !existsSync(file)) {
-          renameSync(aside, file);
-        }
-      }
+      putBack(aside, file, link);
       return false;
     } finally {
       unlinkQuiet(aside);
@@ -336,6 +329,26 @@ function takeOver(
     return false;
   } finally {
     unlinkQuiet(guard);
+  }
+}
+
+/**
+ * Puts a lock that was moved aside back in place, unless a new lock was created there
+ * meanwhile: that one wins, and the holder of the one moved aside finds out at its next
+ * heartbeat. Never over an existing lock, also where there are no hard links: the copy back
+ * is created exclusively, not renamed over the path.
+ */
+function putBack(aside: string, file: string, link: Link): void {
+  try {
+    link(aside, file);
+    return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return;
+  }
+  try {
+    copyFileSync(aside, file, fsConstants.COPYFILE_EXCL);
+  } catch {
+    // a newer lock exists, or none can be made here
   }
 }
 
@@ -382,7 +395,7 @@ function create(file: string, content: string, link: Link): boolean {
 function sweepTemp(file: string, now: () => number): void {
   try {
     const dir = dirname(file);
-    const prefixes = [`${basename(file)}.new-`, `${basename(file)}.stale-`];
+    const prefixes = ['new-', 'stale-', 'release-'].map((p) => `${basename(file)}.${p}`);
     const seen = `${basename(file)}.seen-`;
     let removed = 0;
     for (const name of readdirSync(dir).slice(0, SWEEP_MAX_ENTRIES)) {
@@ -614,8 +627,21 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
             released = true;
             clearInterval(beat);
             held.delete(id);
-            // Only our own lock is removed (it may have been taken over).
-            if (!lost && look() === 'mine') unlinkQuiet(file);
+            if (lost) return;
+            // Only our own lock is removed (it may have been taken over). It is moved to a name
+            // of this call before it is looked at: removing the path after a look could remove
+            // a lock that replaced ours in between.
+            const aside = `${file}.release-${process.pid}-${randomBytes(6).toString('hex')}`;
+            try {
+              renameSync(file, aside);
+            } catch {
+              return;
+            }
+            try {
+              if (parseHolder(readRaw(aside))?.id !== id) putBack(aside, file, link);
+            } finally {
+              unlinkQuiet(aside);
+            }
           },
           held: () => {
             if (released || lost) return false;
