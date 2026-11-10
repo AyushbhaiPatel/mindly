@@ -19,6 +19,12 @@ export interface Notification {
   priority?: NotifyPriority;
   /** Notifications with the same key are sent at most once per dedupe window (10 minutes). */
   dedupeKey?: string;
+  /**
+   * Stays the same on every attempt to deliver this notification (`[A-Za-z0-9_-]`, at most 64
+   * characters). Sent to webhooks as `id`, so a receiver can drop a repeat. One is made up when
+   * missing or malformed.
+   */
+  id?: string;
 }
 
 /** Outcome of one channel for one notification. */
@@ -61,6 +67,8 @@ export type ExecFileLike = (
 
 /** A payload that has already been redacted, flattened and truncated. */
 export interface SafePayload {
+  /** See `Notification.id`. */
+  id: string;
   trigger: NotifyTrigger;
   title: string;
   body: string;

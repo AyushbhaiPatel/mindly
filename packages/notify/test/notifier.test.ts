@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { REDACTED, type UserConfig } from '@mindly/core';
 import {
   DEDUPE_WINDOW_MS,
-  MAX_FAILED_PER_WINDOW,
   MAX_PER_WINDOW,
   OSASCRIPT_SOURCE,
   RATE_WINDOW_MS,
@@ -113,7 +112,14 @@ describe('payload minimisation', () => {
       project: 'demo',
       ts: new Date(clock.now()).toISOString(),
     });
-    expect(Object.keys(payload).sort()).toEqual(['body', 'project', 'title', 'trigger', 'ts']);
+    expect(Object.keys(payload).sort()).toEqual([
+      'body',
+      'id',
+      'project',
+      'title',
+      'trigger',
+      'ts',
+    ]);
   });
 });
 
@@ -366,29 +372,37 @@ describe('a send that reached no channel', () => {
     expect((await pager.send(page))[0]).toMatchObject({ status: 'skipped', reason: 'deduped' });
   });
 
-  it('does not use up the hourly budget, and has a small budget of its own', async () => {
+  it('never holds a new notification back because earlier ones failed', async () => {
     const { fetchImpl, calls, state } = flakyFetch();
     const clock = manualClock();
     const pager = createNotifier(config([webhook()]), { fetchImpl, clock });
 
-    for (let i = 0; i < MAX_FAILED_PER_WINDOW; i++) {
-      expect((await pager.send({ ...page, dedupeKey: `k${i}` }))[0]!.status).toBe('failed');
+    // An outage: three alerts, each tried again a few times over twelve minutes.
+    for (let minute = 0; minute < 12; minute++) {
+      for (let k = 0; k < 3; k++) {
+        expect((await pager.send({ ...page, dedupeKey: `k${k}` }))[0]!.status).toBe('failed');
+      }
+      clock.advance(60_000);
     }
-    // A dead endpoint is left alone for the rest of the hour.
-    const held = await pager.send({ ...page, dedupeKey: 'next' });
-    expect(held[0]).toMatchObject({ status: 'skipped', reason: 'rate_limited' });
-    expect(isSettled(held)).toBe(false);
-    expect(calls).toHaveLength(MAX_FAILED_PER_WINDOW);
+    expect(calls).toHaveLength(36);
 
-    // An hour on, with the endpoint back, the full budget of delivered notifications is there.
-    clock.advance(RATE_WINDOW_MS + 1);
+    // The pager is back; a fresh alert three minutes later goes out, and so do the old ones.
     state.down = false;
-    for (let i = 0; i < MAX_PER_WINDOW; i++) {
+    clock.advance(3 * 60_000);
+    expect((await pager.send({ ...page, dedupeKey: 'fresh' }))[0]!.status).toBe('sent');
+    for (let k = 0; k < 3; k++) {
+      expect((await pager.send({ ...page, dedupeKey: `k${k}` }))[0]!.status).toBe('sent');
+    }
+
+    // The hourly cap counts deliveries only.
+    for (let i = 0; i < MAX_PER_WINDOW - 4; i++) {
       expect((await pager.send({ ...page, dedupeKey: `ok${i}` }))[0]!.status).toBe('sent');
     }
     expect((await pager.send({ ...page, dedupeKey: 'over' }))[0]).toMatchObject({
       reason: 'rate_limited',
     });
+    clock.advance(RATE_WINDOW_MS + 1);
+    expect((await pager.send({ ...page, dedupeKey: 'later' }))[0]!.status).toBe('sent');
   });
 
   it('counts as delivered when one of two channels took it', async () => {
@@ -526,5 +540,20 @@ describe('what is sent', () => {
     const sent = String(calls[0]!.init.body);
     expect(sent).not.toMatch(/ACME-\d/);
     expect(JSON.parse(sent)).toMatchObject({ project: `proj-${REDACTED}` });
+  });
+});
+
+describe('notification id', () => {
+  it('is sent to webhooks, kept when valid and made up otherwise', async () => {
+    const { fetchImpl, calls } = okFetch();
+    const pager = createNotifier(config([webhook()]), { fetchImpl });
+    await pager.send({ ...blocked, id: '01900000-aaaa-7bbb-8ccc-0123456789ab' });
+    await pager.send({ ...blocked, id: 'not valid!' });
+    await pager.send(blocked);
+    const ids = calls.map((c) => (JSON.parse(String(c.init.body)) as { id: string }).id);
+    expect(ids[0]).toBe('01900000-aaaa-7bbb-8ccc-0123456789ab');
+    expect(ids[1]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[2]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[1]).not.toBe(ids[2]);
   });
 });

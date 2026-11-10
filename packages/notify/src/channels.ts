@@ -128,7 +128,10 @@ export async function sendNtfy(
   return { status: 'sent' };
 }
 
-/** Generic webhook: `POST` JSON `{ trigger, title, body, project, ts }`. */
+/**
+ * Generic webhook: `POST` JSON `{ id, trigger, title, body, project, ts }`. `id` is the same on
+ * every attempt to deliver one notification, so a receiver can drop a repeat.
+ */
 export async function sendWebhook(
   p: SafePayload,
   channel: { url: string },
@@ -139,6 +142,7 @@ export async function sendWebhook(
   await post(fetchImpl, url.href, 'webhook', {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
+      id: p.id,
       trigger: p.trigger,
       title: p.title,
       body: p.body,

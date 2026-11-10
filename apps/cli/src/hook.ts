@@ -13,7 +13,7 @@ import {
   type NormalizedHookEvent,
 } from '@mindly/core';
 import { getAdapter } from '@mindly/adapters';
-import { notifyOutbox, type Mindly } from '@mindly/engine';
+import type { Mindly } from '@mindly/engine';
 import { openMindly, type RuntimeOptions } from '@mindly/runtime';
 import { readStdin, StdinTooLarge, type CliIo } from './io.js';
 
@@ -23,20 +23,9 @@ export const MAX_HOOK_STDIN_BYTES = 2 * 1024 * 1024;
 /** Injection points for tests. */
 export interface HookDeps {
   open: (options: RuntimeOptions) => Pick<Mindly, 'hooks' | 'close'>;
-  /**
-   * Runs after the agent has its answer, with the time that is left: sends what waits in the
-   * pager outbox. Optional so a test double of `open` needs none.
-   */
-  afterAnswer?: (mindly: Pick<Mindly, 'hooks' | 'close'>, budgetMs: number) => Promise<void>;
 }
 
-/** Longest a hook process stays around to send a waiting notification. */
-export const HOOK_PAGER_BUDGET_MS = 1200;
-
-const defaultDeps: HookDeps = {
-  open: openMindly,
-  afterAnswer: (mindly, budgetMs) => notifyOutbox(mindly as Mindly).drain(budgetMs),
-};
+const defaultDeps: HookDeps = { open: openMindly };
 
 export { readStdin };
 
@@ -133,29 +122,16 @@ export async function runHook(
     work.catch(() => undefined);
     return fail('deadline exceeded', { timeoutMs });
   }
+  closeQuietly(opened.mindly);
 
   let rendered: { stdout: string; exitCode: number };
   try {
     rendered = adapter.render(event, outcome);
   } catch (err) {
-    closeQuietly(opened.mindly);
     return fail('render failed', { error: describeError(err) });
   }
   logger.debug('hook handled', { agent, event: nativeEvent, ms: Date.now() - started });
   if (rendered.stdout !== '') io.stdout.write(rendered.stdout);
-
-  // The agent has its answer. A notification raised by this hook (or left by an earlier one)
-  // is sent now, within what is left of the hook's own deadline; what does not get out in time
-  // stays in the outbox for the daemon or the next hook.
-  const left = Math.min(HOOK_PAGER_BUDGET_MS, timeoutMs - (Date.now() - started) - 50);
-  if (deps.afterAnswer && opened.mindly && left >= 100) {
-    try {
-      await deps.afterAnswer(opened.mindly, left);
-    } catch (err) {
-      logger.warn('pager outbox skipped', { error: describeError(err) });
-    }
-  }
-  closeQuietly(opened.mindly);
   return rendered.exitCode;
 }
 

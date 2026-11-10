@@ -45,7 +45,9 @@ to `createNotifier`: each failing channel is reported to it once, without the UR
   `>` in it are sent as entities. Windows is reported as `unsupported`.
 - `ntfy`: `POST <url>/<topic>`, plain-text body, `Title`/`Priority`/`Tags` headers. A query string
   on the URL is kept (`?auth=...` carries an ntfy access token).
-- `webhook`: `POST` JSON `{ trigger, title, body, project, ts }`.
+- `webhook`: `POST` JSON `{ id, trigger, title, body, project, ts }`. `id` is
+  `Notification.id` when given (the outbox gives the same one on every attempt), so a receiver
+  can drop a repeat. ntfy sets its own message id, so its messages carry none of ours.
 
 ## Security notes
 
@@ -60,8 +62,9 @@ to `createNotifier`: each failing channel is reported to it once, without the UR
   the URL, which may contain a secret path.
 - **Rate limits** (in memory): the same `dedupeKey` at most once per 10 minutes, at most 30
   notifications per hour overall. Both count notifications that reached a channel: one that
-  failed everywhere keeps its key and can be sent again. Failures have a budget of their own (10
-  per hour), so an endpoint that is down is not hammered.
+  failed everywhere keeps its key and can be sent again, and failures never hold a new
+  notification back. How often a failed one is tried again is up to the caller (Mindly's
+  outbox backs off).
 - **Order of cleaning**: control and invisible characters are removed before redaction, so a
   token cannot hide behind a zero-width character.
 - Processes are started with `execFile` and an argument array only, never a shell.

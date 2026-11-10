@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { redactText, sanitizeLine, MindlyError, truncate } from '@mindly/core';
 import type { Notification, SafePayload } from './types.js';
 
@@ -28,6 +29,7 @@ export function toSafePayload(n: Notification, extraPatterns: readonly string[] 
   const project =
     n.projectName === undefined ? null : safeLine(n.projectName, MAX_PROJECT_CHARS, extraPatterns);
   return {
+    id: n.id !== undefined && /^[A-Za-z0-9_-]{1,64}$/.test(n.id) ? n.id : randomUUID(),
     trigger: n.trigger,
     title,
     body: safeLine(n.body, MAX_BODY_CHARS, extraPatterns),

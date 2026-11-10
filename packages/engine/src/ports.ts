@@ -280,6 +280,8 @@ export interface PagerNotification {
   projectName?: string;
   priority?: 'low' | 'default' | 'high';
   dedupeKey?: string;
+  /** The same on every attempt to deliver this notification; webhooks receive it as `id`. */
+  id?: string;
 }
 
 /** What one channel did with a notification. */
