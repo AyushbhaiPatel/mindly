@@ -38,10 +38,11 @@ memory, which is then injected into every other agent.
 - An `enforce` rule is applied to every path a tool call reports, and to the files a shell
   command's text shows it writes. Files on the deny-list can be protected this way too: their
   names are matched against the rule, but they are still never read and nothing about them is
-  stored. Reading a command is best effort, not a sandbox: a program can write a file its command
-  line never names, a path held in a variable or passed through a pipe is not followed, and a
-  command too long to read to its end (200,000 characters, 500 write targets) is answered with a
-  warning that the rest was not checked. A patch with more files than are reported in one call
+  stored. Reading a command is not a sandbox: a program can write a file its command line never
+  names. A line whose paths depend on what runs (a variable, a pipe into anything but a filter,
+  a `cd` that may fail) is not read fully and is warned about, as described below, and a command
+  too long to read to its end (200,000 characters, 500 write targets) is answered with a warning
+  that the rest was not checked. A patch with more files than are reported in one call
   is refused.
 - git commands are read the same way. One counts as only looking, or only moving refs and the
   index, when its subcommand is known to do so and every option and setting it is given keeps it
@@ -65,10 +66,13 @@ memory, which is then injected into every other agent.
   `:`, `pwd`, `exit`, and `test` and `[` without `-v` or `-R`. Each of the file tools is read
   with the options it is known to take; any other option, or a long option abbreviated, makes the
   line one not read fully (`cp -b`, `cp --parents`, `cp -T`, `mv -T`, `rm --rec`, `touch -r`,
-  `rmdir -p`), as does `ln` with a single operand. A copy, move or link into a folder `mkdir`
-  made earlier on the line lands inside it; into anything else made earlier on the line, whether
-  it is a folder is not known, and the line is not read fully. The rest of a line read fully is: words of plain characters (`*` and `?` included, unless they may
-  match what an earlier command of the line makes), single-quoted text, double-quoted text
+  `rmdir -p`), as does `ln` with a single operand. A `cd` to a folder that is not there makes a
+  line not read fully, unless `mkdir` made it earlier in the same `&&` chain. A copy, move or
+  link into a folder `mkdir` made earlier on the line lands inside it, and its own name is
+  written too; into anything else made earlier on the line, whether it is a folder is not known,
+  and the line is not read fully. The rest of a line read fully is: words of plain characters
+  (`*` and `?` included, unless they may match what an earlier command of the line makes),
+  single-quoted text, double-quoted text
   without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a plain
   path (`>`, `>>`, `2>`, `&>`), `2>&1`, `</dev/null`; a pipe into `head`, `tail`, `grep`, `wc` or
   `cat`; assignments by the shell's rules (a name and `=` outside quotes, whatever the quoting of

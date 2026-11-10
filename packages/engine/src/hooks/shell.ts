@@ -524,6 +524,8 @@ interface SimpleCommand {
   piped: boolean;
   /** Joined to the command before it by `||`: it runs only when that one failed. */
   otherwise: boolean;
+  /** Joined to the command before it by `&&`: it runs only when that one succeeded. */
+  chained?: boolean;
   /**
    * Runs in a shell of its own (part of a pipeline, or sent to the background with `&`): a `cd`
    * in it changes nothing for the commands after it.
@@ -671,7 +673,8 @@ function parse(
   const src = cut ? input.slice(0, MAX_COMMAND_CHARS) : input;
   let steps = 0;
   const commands: SimpleCommand[] = [];
-  const blank = (piped = false, otherwise = false): SimpleCommand => ({
+  const blank = (piped = false, otherwise = false, chained = false): SimpleCommand => ({
+    chained,
     words: [],
     redirects: [],
     nested: [],
@@ -734,7 +737,7 @@ function parse(
     }
     current.words.push(...expandBraces(w));
   };
-  const endCommand = (piped = false, otherwise = false): void => {
+  const endCommand = (piped = false, otherwise = false, chained = false): void => {
     endWord();
     pendingRedirect = null;
     const c = current;
@@ -746,7 +749,7 @@ function parse(
       c.arithmetic.length > 0
     )
       commands.push(c);
-    current = blank(piped, otherwise);
+    current = blank(piped, otherwise, chained);
   };
   /** Index just past the `)` that closes a `$(` opened before `from`; quotes are honoured. */
   const closeParen = (from: number): number => {
@@ -1010,7 +1013,7 @@ function parse(
       const pipe = c === '|' && src[i + 1] !== '|';
       endWord();
       if (pipe || (c === '&' && src[i + 1] !== '&')) current.apart = true;
-      endCommand(pipe, c === '|' && src[i + 1] === '|');
+      endCommand(pipe, c === '|' && src[i + 1] === '|', c === '&' && src[i + 1] === '&');
       i++;
       while (i < src.length && (src[i] === '|' || src[i] === '&' || src[i] === ';')) i++;
       continue;
@@ -3647,6 +3650,11 @@ export interface ShellReadOptions {
    */
   linked?: (path: string) => boolean;
   /**
+   * Whether a path (relative to where the command starts, or absolute) is a folder on disk. With
+   * `understoodOnly`, a `cd` to one that is not there makes the line one not read fully.
+   */
+  isDir?: (path: string) => boolean;
+  /**
    * Read only a line Mindly reads fully; any other stands for a possible write of the whole
    * working tree, never a certain one.
    */
@@ -3898,6 +3906,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     linksMade: false,
     made: [],
     madeDirs: new Set(),
+    isDir: options.isDir ?? null,
     unmatched: false,
   };
   collectTargets(command, '', 0, reading);
@@ -4478,6 +4487,8 @@ interface Reading {
   made: string[];
   /** Folders earlier commands of the line make (`mkdir`), as placed. */
   madeDirs: Set<string>;
+  /** Whether a path, placed as targets are, is a folder on disk; null when not asked. */
+  isDir: ((path: string) => boolean) | null;
   /** A wildcard may match what an earlier command of the line makes. */
   unmatched: boolean;
 }
@@ -4831,6 +4842,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
 
   // How many targets earlier commands of this reading wrote.
   let made = r.out.size;
+  // Folders `mkdir` made earlier in the current `&&` chain: certainly there for what follows.
+  const chain = new Set<string>();
   /**
    * A copy, move or link into a path an earlier command of the line made: into a folder `mkdir`
    * made, what it brings lands inside (`dest/name`); into anything else made there, whether it is
@@ -4847,6 +4860,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         continue;
       }
       if (r.madeDirs.has(dest)) {
+        // `mkdir` may have failed, or not run: the destination itself is written too.
+        out.push(item);
         for (const e of item.entries ?? []) {
           if (e.name === '*') {
             r.unmatched = true;
@@ -4884,6 +4899,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       before = null;
       continue;
     }
+    if (!cmd.chained) chain.clear();
     // A command line can hold more commands than there is time or reason to read.
     r.commands++;
     if (r.commands > r.maxCommands) {
@@ -5028,6 +5044,11 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           // Through a symbolic link, `..` and the paths git is given lead elsewhere than the text
           // says: where later commands run is not known.
           if (to !== null && next !== null && throughLink(to, dir)) next = null;
+          // A folder that is not there, and not made earlier in the same `&&` chain: the `cd`
+          // may fail, and the commands after it run where the shell was.
+          if (next !== null && r.isDir !== null && !chain.has(next) && !r.isDir(next)) {
+            r.unmatched = true;
+          }
           if (verdict.how === 'pushd' && stack.length < 256) stack.push(dir);
           previous = dir;
           dir = next;
@@ -5140,6 +5161,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         const at = item.word.dynamic ? null : place(item.word.text, tilde(item.word), here);
         for (let p = at; p !== null && p !== '' && p !== '.' && p !== '/'; p = posix.dirname(p)) {
           if (r.madeDirs.size < MAX_TARGETS) r.madeDirs.add(p);
+          if (chain.size < MAX_TARGETS) chain.add(p);
           if (!hasOption(words, 'p', ['--parents'])) break;
         }
       }

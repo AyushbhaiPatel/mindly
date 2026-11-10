@@ -494,6 +494,7 @@ export class HookHandler {
       timeUp,
       linked,
       understoodOnly,
+      isDir: (path) => isDirectory(resolve(cwd, placeHome(path))),
     });
     let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
@@ -779,7 +780,7 @@ export class HookHandler {
     rules: readonly Memory[],
     writes: Writes,
     search: ScopeSearch,
-    /** For a line not read fully: a folder a rule names, there under this root, is reached. */
+    /** For possible writes: a folder a rule names, there under this root, is reached. */
     root: string | null = null,
   ): { deny: RuleHit | null; warn: RuleHit[] } {
     const warn: RuleHit[] = [];
@@ -1025,10 +1026,10 @@ export class HookHandler {
       );
       const rules = this.enforcedRules(enforced, certain, search);
       const rule = rules.deny;
-      // A line not read fully also warns when a folder a rule names is there, whatever it holds.
-      const softRules = rule
-        ? null
-        : this.enforcedRules(enforced, possible, search, understood ? null : project.root);
+      // What may change the whole tree (a line not read fully, a git command that brings files
+      // back) also warns when a folder a rule names is there, whatever it holds. What a command
+      // certainly writes is decided by the covered files that exist.
+      const softRules = rule ? null : this.enforcedRules(enforced, possible, search, project.root);
       if (mistakes.length > 0 || pending.length > 0 || rule) {
         const recorded = certain.paths.filter((p) => p.own).map((p) => p.rel);
         this.appendToolEvent(pid, session, 'tool.before', {

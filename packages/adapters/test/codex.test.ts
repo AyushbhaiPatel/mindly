@@ -68,6 +68,9 @@ describe('codex parse', () => {
       "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: n.txt\n+hi\n*** End Patch\nEOF\nrm x",
       // An unquoted delimiter: bash expands the here-document.
       'apply_patch <<EOF\n*** Begin Patch\n*** Add File: n.txt\n+$(rm x)\n*** End Patch\nEOF',
+      // A here-document that ends early, quoted or not, tab-indented under `<<-`.
+      "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: n.txt\n+a\nEOF\nrm x\n*** End Patch\nEOF",
+      "apply_patch <<-'EOF'\n*** Begin Patch\n*** Add File: n.txt\n+a\n\tEOF\nrm x\n*** End Patch\nEOF",
       // A bare patch given to the shell: bash runs each line.
       '*** Begin Patch\n*** Update File: n.txt\n@@\n rm x\n-a\n+b\n*** End Patch',
     ]) {
