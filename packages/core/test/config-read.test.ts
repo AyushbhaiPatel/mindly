@@ -3,7 +3,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { loadProjectConfig, readRegularFileBounded } from '../src/config.js';
+import { loadProjectConfig, readRegularFileBounded, UserConfigSchema } from '../src/config.js';
+
+describe('llm settings', () => {
+  it('reads an empty or blank model name as the default model', () => {
+    for (const model of ['', '   ']) {
+      const cfg = UserConfigSchema.parse({ llm: { provider: 'openai', model } });
+      expect(cfg.llm.model).toBeUndefined();
+    }
+    expect(UserConfigSchema.parse({ llm: { model: ' gpt-4.1-mini ' } }).llm.model).toBe(
+      'gpt-4.1-mini',
+    );
+  });
+});
 
 describe('bounded config reads', () => {
   it.skipIf(process.platform === 'win32')(
