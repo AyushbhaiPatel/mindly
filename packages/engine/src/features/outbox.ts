@@ -334,7 +334,11 @@ export class NotifyOutbox {
           if (!this.hasDue()) return total;
           if (Date.now() >= started + SENDER_MAX_LIFE_MS + 60_000) return total;
         }
-      } catch {
+      } catch (err) {
+        // The outbox is kept; the daemon or the next sender takes over.
+        this.k.logger.warn('pager sender stopped', {
+          error: err instanceof Error ? err.message : String(err),
+        });
         return total;
       }
       await new Promise((resolve) => setTimeout(resolve, slice));

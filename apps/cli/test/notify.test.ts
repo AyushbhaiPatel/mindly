@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -206,6 +206,9 @@ describe('a notification raised in a hook', () => {
   const outboxSize = (sb: Sandbox): number => {
     const db = new DatabaseSync(join(sb.mindlyHome, 'mindly.db'), { readOnly: true });
     try {
+      // Mindly processes are writing meanwhile: wait for them like Mindly's own connections do,
+      // instead of failing on the first lock.
+      db.exec('PRAGMA busy_timeout = 5000');
       const row = db
         .prepare("SELECT count(*) AS n FROM kv WHERE key LIKE 'notify.outbox:%'")
         .get() as { n: number };
@@ -213,6 +216,14 @@ describe('a notification raised in a hook', () => {
     } finally {
       db.close();
     }
+  };
+  /** What the hooks and the sender logged about a locked database (they fail open, so log it). */
+  const lockErrors = (sb: Sandbox): string[] => {
+    const dir = join(sb.mindlyHome, 'logs');
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir)
+      .flatMap((f) => readFileSync(join(dir, f), 'utf8').split('\n'))
+      .filter((l) => /database is locked|SQLITE_BUSY/i.test(l));
   };
   const until = async (ok: () => boolean, ms: number): Promise<boolean> => {
     const deadline = Date.now() + ms;
@@ -252,6 +263,8 @@ describe('a notification raised in a hook', () => {
       expect(hook.bodies).toHaveLength(2);
       const ids = hook.bodies.map((b) => (JSON.parse(b) as { id: string }).id);
       expect(new Set(ids).size).toBe(2);
+      // No Mindly process ran into a lock: hooks, the sender and the CLI share the database.
+      expect(lockErrors(sb)).toEqual([]);
     } finally {
       await hook.close();
     }
@@ -291,6 +304,7 @@ describe('a notification raised in a hook', () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 1000));
       expect(hook.bodies).toHaveLength(1);
+      expect(lockErrors(sb)).toEqual([]);
     } finally {
       await hook.close();
     }
