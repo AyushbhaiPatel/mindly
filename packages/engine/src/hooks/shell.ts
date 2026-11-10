@@ -283,6 +283,9 @@ const LAUNCHERS: Readonly<
   exec: { values: ['-a'] },
   chronic: {},
   setsid: {},
+  busybox: {},
+  toybox: {},
+  shx: {},
   then: {},
   do: {},
   else: {},
@@ -292,6 +295,45 @@ const LAUNCHERS: Readonly<
   until: {},
   '!': {},
 };
+
+/**
+ * Programs that build, deploy or talk to another machine. What they are given is a folder to
+ * work in, a target or a command for somewhere else, not a file they write in its place.
+ */
+const RUNS_ELSEWHERE = new Set([
+  'make',
+  'gmake',
+  'cmake',
+  'ninja',
+  'bazel',
+  'docker',
+  'docker-compose',
+  'podman',
+  'kubectl',
+  'helm',
+  'turbo',
+  'nx',
+  'lerna',
+  'ssh',
+  'mosh',
+  'gh',
+  'glab',
+]);
+
+/** Options of the package managers whose value is the next word. */
+const PACKAGE_MANAGER_VALUES = [
+  '--filter',
+  '-F',
+  '-C',
+  '--dir',
+  '--cwd',
+  '--prefix',
+  '--workspace',
+  '-w',
+];
+
+/** Programs `classify` knows as writers, by the names a package manager may run them under. */
+const KNOWN_WRITERS = new Set(['rimraf', 'del', 'del-cli', 'trash', 'trash-put', 'rm', 'cp', 'mv']);
 
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
 const SCRIPT_RUNNERS = new Set(['python', 'python3', 'node', 'ruby', 'perl', 'php', 'deno', 'bun']);
@@ -406,6 +448,14 @@ const MAX_TARGETS = 500;
 const MAX_DEPTH = 4;
 /** Words without a dot or slash kept per command as "a path, if such a file exists". */
 const MAX_BARE_WORDS = 12;
+/** Simple commands read from one command line, nested ones included. */
+const MAX_COMMANDS = 20_000;
+/** Longest path, and longest working directory, that is followed. */
+const MAX_PATH_CHARS = 4096;
+/** Sources of one copy that are kept by name. */
+const MAX_ENTRIES = 64;
+/** Words one brace expansion (`{a,b}`, `{1..9}`) may turn into. */
+const MAX_BRACE_WORDS = 64;
 
 const word = (text: string, quoted = false): Word => ({
   text,
@@ -413,9 +463,68 @@ const word = (text: string, quoted = false): Word => ({
   dynamic: false,
 });
 
-function parse(input: string): { commands: SimpleCommand[]; cut: boolean } {
-  const cut = input.length > MAX_COMMAND_CHARS;
+/**
+ * The words a brace expansion stands for: `a{b,c}d` is `abd acd`, `f{1..3}` is `f1 f2 f3`. Only
+ * braces written outside quotes expand. A word that would become too many stays as written.
+ */
+function expandBraces(w: Word, depth = 0): Word[] {
+  if (depth > 8 || !w.text.includes('{')) return [w];
+  for (let i = 0; i < w.text.length; i++) {
+    if (w.text[i] !== '{' || w.mask[i] !== 'u') continue;
+    let level = 0;
+    let end = -1;
+    const commas: number[] = [];
+    for (let j = i; j < w.text.length; j++) {
+      if (w.mask[j] !== 'u') continue;
+      const ch = w.text[j];
+      if (ch === '{') level++;
+      else if (ch === '}' && --level === 0) {
+        end = j;
+        break;
+      } else if (ch === ',' && level === 1) commas.push(j);
+    }
+    if (end === -1) return [w];
+    let alternatives: Word[];
+    if (commas.length > 0) {
+      const cuts = [i, ...commas, end];
+      alternatives = cuts.slice(0, -1).map((at, k) => sliceWord(w, at + 1, cuts[k + 1]));
+    } else {
+      const seq = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])$/.exec(w.text.slice(i + 1, end));
+      if (!seq) continue;
+      const [from, to] = [seq[1] as string, seq[2] as string];
+      const numeric = /\d$/.test(from) && /\d$/.test(to);
+      if (!numeric && (/\d$/.test(from) || /\d$/.test(to))) continue;
+      const lo = numeric ? Number(from) : from.charCodeAt(0);
+      const hi = numeric ? Number(to) : to.charCodeAt(0);
+      if (Math.abs(hi - lo) >= MAX_BRACE_WORDS) return [w];
+      alternatives = [];
+      for (let v = lo; ; v += hi >= lo ? 1 : -1) {
+        alternatives.push(word(numeric ? String(v) : String.fromCharCode(v)));
+        if (v === hi) break;
+      }
+    }
+    const out: Word[] = [];
+    for (const alt of alternatives) {
+      const joined: Word = {
+        text: w.text.slice(0, i) + alt.text + w.text.slice(end + 1),
+        mask: w.mask.slice(0, i) + alt.mask + w.mask.slice(end + 1),
+        dynamic: w.dynamic,
+      };
+      out.push(...expandBraces(joined, depth + 1));
+      if (out.length > MAX_BRACE_WORDS) return [w];
+    }
+    return out;
+  }
+  return [w];
+}
+
+function parse(
+  input: string,
+  timeUp: () => boolean = () => false,
+): { commands: SimpleCommand[]; cut: false | 'length' | 'time' } {
+  let cut: false | 'length' | 'time' = input.length > MAX_COMMAND_CHARS ? 'length' : false;
   const src = cut ? input.slice(0, MAX_COMMAND_CHARS) : input;
+  let steps = 0;
   const commands: SimpleCommand[] = [];
   const blank = (piped = false, otherwise = false): SimpleCommand => ({
     words: [],
@@ -467,7 +576,7 @@ function parse(input: string): { commands: SimpleCommand[]; cut: boolean } {
       pendingRedirect = null;
       return;
     }
-    current.words.push(w);
+    current.words.push(...expandBraces(w));
   };
   const endCommand = (piped = false, otherwise = false): void => {
     endWord();
@@ -532,6 +641,12 @@ function parse(input: string): { commands: SimpleCommand[]; cut: boolean } {
       return j + 1;
     }
     const m = /^\$(?:\{(\w+)\}|(\w+))/.exec(src.slice(i, i + 80));
+    if (!m && next === '{') {
+      // `${f%.ts}`, `${x:-y}`: a value that cannot be read from the text.
+      const end = src.indexOf('}', i + 2);
+      cur().dynamic = true;
+      return end === -1 ? src.length : end + 1;
+    }
     if (!m) {
       put('$', quoted);
       return i + 1;
@@ -551,6 +666,11 @@ function parse(input: string): { commands: SimpleCommand[]; cut: boolean } {
 
   let i = 0;
   while (i < src.length) {
+    if (++steps % 4096 === 0 && timeUp()) {
+      // What is left is not read; the caller says so.
+      cut = 'time';
+      break;
+    }
     const c = src[i] as string;
     if (c === '\n') {
       endCommand();
@@ -833,32 +953,47 @@ function optionValue(words: readonly Word[], names: readonly string[]): Word | n
   return null;
 }
 
+/** One thing a command writes, as its text gives it. */
+interface Item {
+  word: Word;
+  /** When the path is a directory, everything under it is written too. */
+  tree?: boolean;
+  /** False when the program may as well leave the path alone. Default true. */
+  certain?: boolean;
+  /** Only files with these extensions are rewritten. */
+  only?: string[];
+  ifExists?: boolean;
+  how?: ShellTarget['how'];
+  /** What lands inside the path when it is a directory, and where each comes from. */
+  entries?: { name: string; from: Word | null }[];
+  /** The path is a pattern the program expands itself, whatever the quoting. */
+  pattern?: boolean;
+  dotfiles?: boolean;
+  nocase?: boolean;
+}
+
 /** What a simple command is, for the question "does it write the files it names?". */
 type Verdict =
   | { kind: 'reads' }
-  | {
-      kind: 'writes';
-      /** Files the command writes. */
-      files?: Word[];
-      /** Paths written with everything under them when they are directories. */
-      trees?: Word[];
-      /** As `files` / `trees`, when the program may as well leave them alone. */
-      maybeFiles?: Word[];
-      maybeTrees?: Word[];
-      /** A copy: `names` land inside `dir` when it is a directory, else `dir` itself is written. */
-      into?: { dir: Word; names: string[]; recursive: boolean };
-      /** Only files with these extensions are rewritten. */
-      only?: string[];
-    }
+  | { kind: 'writes'; items: Item[] }
   | { kind: 'unknown'; args: Word[]; bare: boolean }
   | { kind: 'cd'; how: 'cd' | 'pushd' | 'popd'; dir: Word | null }
   | { kind: 'inline'; code: string }
   | { kind: 'script'; code: string };
 
 const READS: Verdict = { kind: 'reads' };
+const writes = (...items: Item[]): Verdict => ({ kind: 'writes', items });
+const files = (words: readonly Word[], extra: Omit<Item, 'word'> = {}): Item[] =>
+  words.map((word) => ({ word, ...extra }));
+const trees = (words: readonly Word[], extra: Omit<Item, 'word'> = {}): Item[] =>
+  words.map((word) => ({ word, tree: true, ...extra }));
 
 const looksLikePath = (text: string): boolean =>
-  /[./]/.test(text) && !text.includes('://') && !/^[\d.]+$/.test(text) && !/^[^/]+:/.test(text);
+  /[./]/.test(text) &&
+  !/\s/.test(text) &&
+  !text.includes('://') &&
+  !/^[\d.]+$/.test(text) &&
+  !/^[^/]+:/.test(text);
 
 /** A `host:path` argument of scp or rsync: not a local file. */
 const isRemote = (w: Word): boolean => /^[^/]+:/.test(w.text);
@@ -875,42 +1010,41 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
   if (program === 'pushd') return { kind: 'cd', how: 'pushd', dir: args[0] ?? null };
   if (program === 'popd') return { kind: 'cd', how: 'popd', dir: null };
   if (READ_ONLY_PROGRAMS.has(program) || SHELL_WORDS.has(program)) return READS;
-  if (CHECKING_PROGRAMS.has(program)) return READS;
+  if (CHECKING_PROGRAMS.has(program) || RUNS_ELSEWHERE.has(program)) return READS;
 
   const fixer = Object.hasOwn(FIXERS, program) ? FIXERS[program] : undefined;
   if (fixer !== undefined) {
     if (!fixer.fixes(words)) return READS;
     const given = args.filter((w, i) => !(i === 0 && FIXER_SUBCOMMANDS.has(w.text)));
-    const files: Word[] = [];
-    const maybeFiles: Word[] = [];
-    const trees: Word[] = [];
+    const items: Item[] = [];
     for (const w of given) {
       const ext = /[^/.]\.([A-Za-z0-9]+)$/.exec(w.text)?.[1];
       // A named file is rewritten when the tool knows its kind; anything else it is given is a
       // directory or a pattern the tool expands itself.
       if (ext === undefined || /[*?{]/.test(w.text)) {
-        trees.push({ ...w, mask: 'u'.repeat(w.text.length) });
-      } else if (fixer.files.includes(ext.toLowerCase())) files.push(w);
-      else maybeFiles.push(w);
+        items.push({ word: w, tree: true, only: fixer.files, pattern: true, dotfiles: true });
+      } else if (fixer.files.includes(ext.toLowerCase())) items.push({ word: w });
+      else items.push({ word: w, certain: false });
     }
-    return { kind: 'writes', files, maybeFiles, trees, only: fixer.files };
+    return writes(...items);
   }
 
   switch (program) {
-    case 'sed': {
+    case 'sed':
+    case 'gsed': {
       if (!hasFlag(words, /^(-[a-zA-Z]*i.*|--in-place(=.*)?)$/)) return READS;
       // Without -e/-f the first plain argument is the script, not a file.
       const scripted = hasFlag(words, /^(-[a-zA-Z]*[ef]|--expression(=.*)?|--file(=.*)?)$/);
       // BSD sed takes the backup suffix as a separate, often empty, argument.
       const given = args[0]?.text === '' ? args.slice(1) : args;
-      return { kind: 'writes', files: scripted ? given : given.slice(1) };
+      return writes(...files(scripted ? given : given.slice(1)));
     }
     case 'sort': {
       const out =
         optionValue(words, ['-o', '--output']) ??
         words.slice(1).find((w) => /^-o./.test(w.text) && !w.text.startsWith('--'));
       if (!out) return READS;
-      return { kind: 'writes', files: [out.text.startsWith('-o') ? sliceWord(out, 2) : out] };
+      return writes({ word: out.text.startsWith('-o') ? sliceWord(out, 2) : out });
     }
     case 'awk':
     case 'gawk':
@@ -919,8 +1053,14 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
       return readFind(words);
     case 'rm': {
       const recursive = hasOption(words, 'rR', ['--recursive']);
-      return recursive ? { kind: 'writes', trees: args } : { kind: 'writes', files: args };
+      return writes(...(recursive ? trees(args) : files(args)));
     }
+    case 'rimraf':
+    case 'trash':
+    case 'trash-put':
+    case 'del':
+    case 'del-cli':
+      return writes(...trees(args));
     case 'unlink':
     case 'shred':
     case 'rmdir':
@@ -935,18 +1075,20 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
       // Compressors replace the file they are given, unless they write to standard output.
       if (/zip|^xz$|^bz/.test(program) && hasOption(words, 'ctl', ['--stdout', '--test', '--list']))
         return READS;
-      return { kind: 'writes', files: args };
+      return writes(...files(args));
     case 'truncate':
-      return { kind: 'writes', files: argsWithout(words, ['-s', '--size', '-r', '--reference']) };
+      return writes(...files(argsWithout(words, ['-s', '--size', '-r', '--reference'])));
     case 'chmod':
     case 'chown':
     case 'chgrp': {
       // A change of mode or owner leaves the content alone: worth a warning, not a block. The
       // first plain argument is the mode or owner.
       const targets = args.slice(1);
-      return hasOption(words, 'R', ['--recursive'])
-        ? { kind: 'writes', maybeTrees: targets }
-        : { kind: 'writes', maybeFiles: targets };
+      return writes(
+        ...(hasOption(words, 'R', ['--recursive'])
+          ? trees(targets, { certain: false })
+          : files(targets, { certain: false })),
+      );
     }
     case 'mv':
     case 'cp':
@@ -957,24 +1099,58 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
       return readCopy(program, words);
     case 'dd': {
       const out = words.find((w) => w.text.startsWith('of='));
-      return out ? { kind: 'writes', files: [sliceWord(out, 3)] } : READS;
+      return out ? writes({ word: sliceWord(out, 3) }) : READS;
     }
     case 'tar':
     case 'bsdtar':
     case 'gtar':
       return readTar(words);
     case 'unzip': {
-      if (hasOption(words, 'ltpZ', [])) return READS;
-      const into = optionValue(words, ['-d']);
-      return into ? { kind: 'writes', trees: [into] } : { kind: 'writes', maybeTrees: [word('.')] };
+      // Listing, testing or printing writes nothing (`-dcerts` is a directory, not options).
+      if (
+        hasOption(
+          words.filter((w) => !w.text.startsWith('-d')),
+          'ltpZ',
+          [],
+        )
+      )
+        return READS;
+      // `-d dir` or `-ddir`; without it the archive unpacks where the command runs.
+      const attached = words.slice(1).find((w) => /^-d./.test(w.text));
+      const into = optionValue(words, ['-d']) ?? (attached ? sliceWord(attached, 2) : word('.'));
+      return writes({ word: into, how: 'land' });
     }
     case 'zip':
-      return args[0] ? { kind: 'writes', files: [args[0]] } : READS;
+      return args[0] ? writes({ word: args[0] }) : READS;
+    case 'curl': {
+      // `-o file`, also at the end of a cluster of short options (`-sSLo file`).
+      const out = words.filter((w, i) => /^(-[a-zA-Z]*o|--output)$/.test(words[i - 1]?.text ?? ''));
+      const joined = words
+        .filter((w) => w.text.startsWith('--output='))
+        .map((w) => sliceWord(w, '--output='.length));
+      return writes(...files([...out, ...joined]));
+    }
+    case 'wget': {
+      const cluster = words.findIndex((w) => /^-[a-zA-Z]*O$/.test(w.text));
+      const out =
+        optionValue(words, ['-O', '--output-document']) ??
+        (cluster === -1 ? null : (words[cluster + 1] ?? null));
+      const dir = optionValue(words, ['-P', '--directory-prefix']);
+      return writes(
+        ...(out && out.text !== '-' ? files([out]) : []),
+        ...(dir ? [{ word: dir, how: 'land' as const }] : []),
+      );
+    }
+    case 'openssl':
+    case 'ssh-keygen': {
+      const out = words.filter((w, i) => /^(-out|-keyout|-f)$/.test(words[i - 1]?.text ?? ''));
+      return writes(...files(out.filter((_, i) => program === 'openssl' || i === 0)));
+    }
     case 'perl':
       // `-pi`, `-i.bak`, `-0pi -e`: an in-place edit. `-Mstrict` or `-ne` are not.
       if (hasFlag(words, /^-[lnpaswtTuU0-9]*i(?:[lnpae]*|[.~_].*)$/)) {
         const scripted = hasFlag(words, /^-[lnpaswtTuUi0-9]*e$/);
-        return { kind: 'writes', files: scripted ? args.slice(1) : args };
+        return writes(...files(scripted ? args.slice(1) : args));
       }
       break;
     case 'git':
@@ -984,8 +1160,8 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
       return args[0] && args.length > 1 ? { kind: 'inline', code: args[0].text } : READS;
     case 'alias': {
       const code = args
-        .map((w) => w.text.slice(w.text.indexOf('=') + 1))
-        .filter((t, i) => (args[i] as Word).text.includes('='));
+        .filter((w) => w.text.includes('='))
+        .map((w) => w.text.slice(w.text.indexOf('=') + 1));
       return code.length > 0 ? { kind: 'inline', code: code.join('\n') } : READS;
     }
     case 'eval':
@@ -1005,23 +1181,29 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
     case 'bun': {
       // `bun -e code` is an interpreter run, not a package script.
       if (program === 'bun' && hasFlag(words, /^(-e|--eval|-p|--print)$/)) break;
-      const rest = words.slice(1).filter((w) => !isFlag(w));
+      // A package manager runs scripts and tools: what it writes is theirs to say, not what it
+      // is given. A folder it is pointed at (`--filter ./packages/api`, `-C dir`) is not written.
+      const none: Verdict = { kind: 'unknown', args: [], bare: false };
+      const rest = argsWithout(words, PACKAGE_MANAGER_VALUES);
       const head = rest[0];
       if (head === undefined) return READS;
       if (head.text === 'run' || head.text === 'run-script') {
-        return CHECKING_SCRIPT.test(rest[1]?.text ?? '') ? READS : { ...unknown, bare: false };
+        return CHECKING_SCRIPT.test(rest[1]?.text ?? '') ? READS : none;
       }
       if (CHECKING_SCRIPT.test(head.text)) return READS;
       // `pnpm exec vitest`, `yarn dlx prettier`, `pnpm vitest`: what runs is a later word.
       const explicit = head.text === 'exec' || head.text === 'dlx' || head.text === 'x';
       const runs = explicit ? rest[1] : head;
-      if (runs === undefined || depth >= MAX_DEPTH) return { ...unknown, bare: false };
+      if (runs === undefined || depth >= MAX_DEPTH) return none;
       const name = programName(runs);
       // Without `exec`, a word that is no known program is a script or a subcommand of the
-      // package manager (`pnpm install`): it writes what it wants, not what it is given.
+      // package manager (`pnpm install`).
       const known =
-        CHECKING_PROGRAMS.has(name) || READ_ONLY_PROGRAMS.has(name) || Object.hasOwn(FIXERS, name);
-      if (!explicit && !known) return { ...unknown, bare: false };
+        CHECKING_PROGRAMS.has(name) ||
+        READ_ONLY_PROGRAMS.has(name) ||
+        KNOWN_WRITERS.has(name) ||
+        Object.hasOwn(FIXERS, name);
+      if (!explicit && !known) return none;
       return classify(words.slice(words.indexOf(runs)), stdin, depth + 1);
     }
     default:
@@ -1033,7 +1215,7 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
     const code = at === -1 ? undefined : words[at + 1];
     if (code) return { kind: 'inline', code: code.text };
     // No script file: the commands come from a here-document, here-string or pipe.
-    if (stdin !== null && args.filter((w) => w.text !== '-').length === 0)
+    if (stdin !== null && args.filter((w) => w.text !== '-' && w.text !== '-s').length === 0)
       return { kind: 'inline', code: stdin };
     return { kind: 'unknown', args: withoutScript(words), bare: false };
   }
@@ -1043,7 +1225,7 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
       const module = words[2]?.text ?? '';
       const known = CHECKING_PROGRAMS.has(module) || Object.hasOwn(FIXERS, module);
       if (known && depth < MAX_DEPTH) return classify(words.slice(2), stdin, depth + 1);
-      return { ...unknown, bare: false };
+      return { kind: 'unknown', args: [], bare: false };
     }
     const at = words.findIndex(
       (w, i) =>
@@ -1066,7 +1248,11 @@ function withoutScript(words: readonly Word[]): Word[] {
   return words.slice(1).filter((_, i) => i + 1 !== at);
 }
 
-/** `find`: its start directories are written when an action deletes or rewrites what it finds. */
+/**
+ * `find`: what an action deletes or rewrites is what its tests let through. One or more `-name`
+ * tests narrow it to those names under the start directories; `-type d -empty -delete` only
+ * removes empty directories; any other shape counts as the start directories with all they hold.
+ */
 function readFind(words: readonly Word[]): Verdict {
   const starts: Word[] = [];
   let at = 1;
@@ -1077,37 +1263,69 @@ function readFind(words: readonly Word[]): Verdict {
     starts.push(w);
   }
   const where = starts.length > 0 ? starts : [word('.')];
-  const files: Word[] = [];
+  const out: Word[] = [];
+  const names: { pattern: Word; nocase: boolean }[] = [];
   let certain = false;
   let possible = false;
+  let deletes = false;
+  let other = false;
+  let complex = false;
+  let narrows = false;
+  let alternatives = false;
   for (let i = at; i < words.length; i++) {
     const w = words[i] as Word;
-    if (w.text === '-delete') certain = true;
-    else if (/^-(exec|execdir|ok|okdir)$/.test(w.text)) {
-      const run = words[i + 1];
-      if (run && !run.dynamic && DESTRUCTIVE.has(programName(run))) certain = true;
-      else if (run && !READ_ONLY_PROGRAMS.has(programName(run))) possible = true;
-    } else if (/^-(fprint0?|fprintf|fls)$/.test(w.text) && words[i + 1]) {
-      files.push(words[i + 1] as Word);
+    const next = words[i + 1];
+    if (w.text === '-delete') {
+      certain = true;
+      deletes = true;
+    } else if (/^-(exec|execdir|ok|okdir)$/.test(w.text)) {
+      if (next && !next.dynamic && DESTRUCTIVE.has(programName(next))) certain = true;
+      else if (next && !READ_ONLY_PROGRAMS.has(programName(next))) possible = true;
+      other = true;
+    } else if (/^-(fprint0?|fprintf|fls)$/.test(w.text) && next) {
+      out.push(next);
+    } else if (/^-i?name$/.test(w.text) && next) {
+      if (next.dynamic) complex = true;
+      else names.push({ pattern: next, nocase: w.text === '-iname' });
+      i++;
+    } else if (/^(-not|!)$/.test(w.text)) {
+      // A negation can let through what no name test names.
+      complex = true;
+    } else if (/^(-i?path|-i?wholename|-i?regex)$/.test(w.text)) {
+      // Together with the name tests these only narrow what is found; as an alternative to them
+      // (`-o`), they can let through anything.
+      narrows = true;
+      i++;
+    } else if (w.text === '-o' || w.text === '-or') {
+      alternatives = true;
     }
   }
-  if (!certain && !possible && files.length === 0) return READS;
-  // With one `-name` test, only what the name matches under the start directories is touched.
-  const names = words.filter((w, i) => /^-i?name$/.test(words[i - 1]?.text ?? ''));
-  const alternatives = words.some((w) => /^(-o|-or|-not|!)$/.test(w.text));
-  const hit =
-    names.length === 1 && !alternatives && !(names[0] as Word).dynamic
-      ? where.map((start) => {
-          const w = joinWords(start, word(`**/${(names[0] as Word).text}`));
-          // The test is a pattern even when the shell was told to leave it alone.
-          return { ...w, mask: 'u'.repeat(w.text.length) };
-        })
-      : where;
-  return {
-    kind: 'writes',
-    files,
-    ...(certain ? { trees: hit } : possible ? { maybeTrees: hit } : {}),
-  };
+  if (narrows && alternatives) complex = true;
+  if (!certain && !possible) return out.length > 0 ? writes(...files(out)) : READS;
+  // Only empty directories can go: no file is touched.
+  const onlyEmptyDirs =
+    deletes &&
+    !other &&
+    words.some((w) => w.text === '-empty') &&
+    words.some((w, i) => w.text === '-type' && words[i + 1]?.text === 'd');
+  if (onlyEmptyDirs) return out.length > 0 ? writes(...files(out)) : READS;
+  const sure = certain ? {} : { certain: false };
+  if (names.length === 0 || complex) return writes(...files(out), ...trees(where, sure));
+  const items: Item[] = [];
+  for (const start of where) {
+    for (const { pattern, nocase } of names) {
+      // The name is matched at any depth below the start, dotfiles included.
+      items.push({
+        word: joinWords(start, joinWords(word('**'), pattern)),
+        tree: true,
+        pattern: true,
+        dotfiles: true,
+        nocase,
+        ...sure,
+      });
+    }
+  }
+  return writes(...files(out), ...items);
 }
 
 /** Options of the copying programs whose value is the next word. */
@@ -1145,50 +1363,79 @@ const COPY_VALUES: Readonly<Record<string, string[]>> = {
   ],
 };
 
-/** cp, mv, ln, install, rsync, scp: the destination is written, and what lands inside it. */
+/**
+ * cp, mv, ln, install, rsync, scp: what lands in the destination. A copy into a directory creates
+ * or overwrites entries named after the sources; it does not destroy the directory. Each source
+ * is kept with its name, so whoever places the paths can see what it brings.
+ */
 function readCopy(program: string, words: readonly Word[]): Verdict {
   const given = argsWithout(words, COPY_VALUES[program] ?? []);
   const target = optionValue(words, ['-t', '--target-directory']);
   if (program === 'install' && hasOption(words, 'd', ['--directory'])) {
-    return { kind: 'writes', files: given };
+    return writes(...files(given));
   }
   const sources = target ? given : given.slice(0, -1);
   const dest = target ?? given[given.length - 1];
   if (dest === undefined) return READS;
-  const moved = program === 'mv' ? sources.filter((s) => !isRemote(s)) : [];
+  const local = sources.filter((s) => !isRemote(s));
+  // What is moved away is gone from where it was.
+  const gone =
+    program === 'mv' || (program === 'rsync' && hasFlag(words, /^--remove-source-files$/))
+      ? trees(local)
+      : [];
   // A copy to another machine writes nothing here.
-  if ((program === 'scp' || program === 'rsync') && isRemote(dest)) return READS;
+  if ((program === 'scp' || program === 'rsync') && isRemote(dest)) return writes(...gone);
   const recursive =
     program === 'mv' ||
     (program === 'cp' && hasOption(words, 'rRa', ['--recursive', '--archive'])) ||
     (program === 'scp' && hasOption(words, 'r', [])) ||
     program === 'rsync';
-  // What each source becomes inside the destination. `dir/.` and rsync's `dir/` pour their
-  // content into it, and `--delete` empties what is not in the source.
+  // `dir/.` and rsync's `dir/` pour their content into the destination.
   const pours = (s: Word): boolean =>
     posix.basename(s.text) === '.' || (program === 'rsync' && s.text.endsWith('/'));
-  const names = hasFlag(words, /^--del(ete.*)?$/)
-    ? ['.']
-    : sources.filter((s) => !s.dynamic).map((s) => (pours(s) ? '.' : posix.basename(s.text)));
-  return { kind: 'writes', trees: moved, into: { dir: dest, names, recursive } };
+  const entries = sources.map((s) => ({
+    name: s.dynamic ? '*' : pours(s) ? '.' : posix.basename(s.text),
+    from: s.dynamic || isRemote(s) ? null : s,
+  }));
+  const item: Item = { word: dest, tree: recursive, entries };
+  // `--delete` removes from the destination what the source does not hold: the tree goes.
+  if (hasFlag(words, /^--del(ete.*)?$/)) return writes(...gone, ...trees([dest]));
+  return writes(...gone, item);
 }
 
-/** tar: extraction writes the tree it unpacks into; creation writes the archive. */
+/**
+ * tar: extraction lands files in the directory it unpacks into; creation writes the archive. The
+ * old form (`tar xzfC a.tgz dir`) takes the values of `f` and `C` from the next words, in order.
+ */
 function readTar(words: readonly Word[]): Verdict {
-  const mode = words[1]?.text ?? '';
-  const letters = mode.startsWith('--') ? '' : mode.replace(/^-/, '');
-  const has = (letter: string, long: string): boolean =>
-    letters.includes(letter) ||
-    hasFlag(words, new RegExp(`^(--${long}|-[a-zA-Z]*${letter}[a-zA-Z]*)$`));
-  const archive =
-    optionValue(words, ['-f', '--file']) ?? (letters.includes('f') ? words[2] : undefined);
-  if (has('x', 'extract') || hasFlag(words, /^--get$/)) {
-    const into = optionValue(words, ['-C', '--directory']);
-    // Unpacking over the current directory may or may not land on a file that matters.
-    return into ? { kind: 'writes', trees: [into] } : { kind: 'writes', maybeTrees: [word('.')] };
+  let letters = '';
+  let archive: Word | null = optionValue(words, ['--file']);
+  let into: Word | null = optionValue(words, ['--directory']);
+  const takes = (cluster: string, from: number): number => {
+    let at = from;
+    for (const ch of cluster) {
+      if (ch === 'f') archive = words[at++] ?? archive;
+      else if (ch === 'C') into = words[at++] ?? into;
+      else if (ch === 'b') at++;
+    }
+    return at;
+  };
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i] as Word;
+    if (i === 1 && /^[a-zA-Z]+$/.test(w.text)) {
+      letters += w.text;
+      i = takes(w.text, i + 1) - 1;
+    } else if (/^-[a-zA-Z]+$/.test(w.text)) {
+      letters += w.text.slice(1);
+      i = takes(w.text.slice(1), i + 1) - 1;
+    }
   }
-  if (has('c', 'create') || has('r', 'append') || has('u', 'update')) {
-    return archive && archive.text !== '-' ? { kind: 'writes', files: [archive] } : READS;
+  const has = (letter: string, long: RegExp): boolean =>
+    letters.includes(letter) || hasFlag(words, long);
+  if (has('x', /^--(extract|get)$/)) return writes({ word: into ?? word('.'), how: 'land' });
+  if (has('c', /^--create$/) || has('r', /^--append$/) || has('u', /^--update$/)) {
+    const file = archive as Word | null;
+    return file && file.text !== '-' ? writes({ word: file }) : READS;
   }
   return READS;
 }
@@ -1209,52 +1456,68 @@ function readGit(words: readonly Word[]): Verdict {
     dir ? list.map((w) => joinWords(dir, w)) : [...list];
   const dashes = rest.findIndex((w) => w.text === '--');
   const afterDashes = dashes === -1 ? [] : rest.slice(dashes + 1);
+  // Bringing files back from the index only changes those that differ from it.
+  const restore = { how: 'restore' as const };
   switch (sub) {
     case 'restore': {
       // `--staged` alone only moves the index; the file on disk stays.
       const staged = hasOption(command, 'S', ['--staged']);
       if (staged && !hasOption(command, 'W', ['--worktree'])) return READS;
-      return { kind: 'writes', trees: under(argsWithout(command, ['-s', '--source'])) };
+      const from = hasOption(command, 's', ['--source']);
+      return writes(...trees(under(argsWithout(command, ['-s', '--source'])), from ? {} : restore));
     }
     case 'rm':
       if (hasFlag(command, /^--cached$/)) return READS;
-      return { kind: 'writes', trees: under(argsWithout(command, ['--pathspec-from-file'])) };
+      return writes(...trees(under(argsWithout(command, ['--pathspec-from-file']))));
     case 'mv': {
       const given = argsWithout(command, []);
       const dest = given[given.length - 1];
       if (dest === undefined) return READS;
       const sources = given.slice(0, -1);
       const [to] = under([dest]) as [Word];
-      return {
-        kind: 'writes',
-        trees: under(sources),
-        into: { dir: to, names: sources.map((s) => posix.basename(s.text)), recursive: true },
-      };
+      const entries = under(sources).map((s) => ({ name: posix.basename(s.text), from: s }));
+      return writes(...trees(under(sources)), { word: to, tree: true, entries });
     }
-    case 'clean':
+    case 'clean': {
       if (hasOption(command, 'n', ['--dry-run'])) return READS;
-      return { kind: 'writes', trees: under(argsWithout(command, ['-e', '--exclude'])) };
+      // Without a path it cleans where it runs.
+      const given = argsWithout(command, ['-e', '--exclude']);
+      return writes(...trees(under(given.length > 0 ? given : [word('.')]), { how: 'clean' }));
+    }
     case 'checkout': {
       // Creating a branch names no file.
       if (hasFlag(command, /^(-b|-B|--orphan)$/)) return READS;
-      if (dashes !== -1) return { kind: 'writes', trees: under(afterDashes) };
       const given = argsWithout(command, ['--conflict', '--pathspec-from-file']);
+      if (dashes !== -1) {
+        // A revision before `--` brings the files from there, whatever their state.
+        const revision = rest.slice(1, dashes).some((w) => !isFlag(w));
+        return writes(...trees(under(afterDashes), revision ? {} : restore));
+      }
+      // These only make sense with paths.
+      if (hasFlag(command, /^(--ours|--theirs|-p|--patch|--merge|-m)$/)) {
+        return writes(...trees(under(given), restore));
+      }
       // A revision followed by more words: the rest are paths.
-      if (given.length >= 2) return { kind: 'writes', trees: under(given.slice(1)) };
+      if (given.length >= 2) return writes(...trees(under(given.slice(1))));
       const only = given[0];
       if (only === undefined) return READS;
-      // One word is a branch or a path. `.`, `./x` and `x/` can only be paths; another word
-      // that looks like one may be either.
-      if (/^\.\.?(\/|$)|\/$/.test(only.text)) return { kind: 'writes', trees: under([only]) };
-      return looksLikePath(only.text) ? { kind: 'writes', maybeTrees: under([only]) } : READS;
+      // One word is a branch or a path. `.`, `./x` and `x/` can only be paths; any other word
+      // is a path when such a file exists, which the caller checks.
+      const path = /^\.\.?(\/|$)|\/$/.test(only.text);
+      return writes(...trees(under([only]), { ...restore, ifExists: !path }));
     }
-    case 'stash':
-      return dashes === -1 ? READS : { kind: 'writes', trees: under(afterDashes) };
+    case 'stash': {
+      // `git stash push [--] paths` puts their changes away: the files go back to the index.
+      const args = argsWithout([word('git'), ...rest.slice(2)], ['-m', '--message']);
+      if (rest[1]?.text !== 'push' && dashes === -1) return READS;
+      const paths = dashes === -1 ? args : afterDashes;
+      return paths.length > 0 ? writes(...trees(under(paths), restore)) : READS;
+    }
     case 'reset':
       // With paths it only moves the index; `--hard` rewrites files it does not name.
       return READS;
     default:
-      // pull, merge, reset, apply, …: they change files the command line does not name.
+      // pull, merge, apply, …: they change files the command line does not name.
       return {
         kind: 'unknown',
         args: under(rest.slice(1).filter((w) => !isFlag(w) && looksLikePath(w.text))),
@@ -1274,14 +1537,31 @@ export interface ShellTarget {
   path: string;
   /** The path is a wildcard pattern. */
   glob: boolean;
+  /**
+   * The wildcards also match names that start with a dot. A shell's `*` and `?` do not; a
+   * pattern a program expands itself (`find -name`, a formatter's glob) does.
+   */
+  dotfiles: boolean;
+  /** The pattern is compared without regard to letter case (`find -iname`). */
+  nocase: boolean;
   /** When the path is a directory, everything under it is written too (`rm -r`, `git checkout`). */
   tree: boolean;
   /**
-   * When the path is a directory, the entries the command writes inside it (`cp a.ts dir` writes
-   * `dir/a.ts`; `.` stands for the directory's own content); when it is not, the path itself is
-   * written. With `tree`, each entry is written with everything under it.
+   * How the path is written. `write`: created, rewritten or removed. `restore`: brought back from
+   * the git index, which only changes files that differ from it. `land`: files of unknown names
+   * are put somewhere inside it (an archive unpacked there). `clean`: the files there that git
+   * does not track are removed (`git clean`), so only files that exist are touched.
+   */
+  how: 'write' | 'restore' | 'land' | 'clean';
+  /**
+   * For a copy: when the path is a directory, the names that land inside it (`cp a.ts dir`
+   * writes `dir/a.ts`; `.` stands for the content of the source itself, `*` for names that are
+   * not known); when it is not a directory, the path itself is written. With `tree`, a source
+   * that is a directory lands with everything under it.
    */
   entries: string[];
+  /** For each of `entries`, the source it comes from, placed like `path`; null when unknown. */
+  sources: (string | null)[];
   /**
    * The text shows the write (a redirection, `rm`, `sed -i`, …). False when the path is only an
    * argument of a program Mindly does not know, which may as well just read it.
@@ -1290,8 +1570,8 @@ export interface ShellTarget {
   /** Only files with these extensions are written (a formatter given a directory); null: all. */
   only: string[] | null;
   /**
-   * A bare word (no dot or slash) given to a program Mindly does not know: a path only when a
-   * file or directory of that name exists, which the caller checks.
+   * The word is a path only when a file or directory of that name exists, which the caller
+   * checks: a bare word given to an unknown program, or the one word after `git checkout`.
    */
   ifExists: boolean;
 }
@@ -1301,7 +1581,8 @@ export interface ShellReading {
   targets: ShellTarget[];
   /**
    * Set when a limit cut the reading short (a very long command, too many targets, nesting too
-   * deep): what was not read may write files, so the targets are not the whole answer.
+   * deep, a path too long, no time left): what was not read may write files, so the targets are
+   * not the whole answer.
    */
   limit: string | null;
 }
@@ -1316,19 +1597,179 @@ export interface ShellReadOptions {
   home?: string;
   /** Root of the working tree, for `$(git rev-parse --show-toplevel)`. */
   top?: string;
+  /**
+   * Asked now and then while reading: true when there is no time left. The reading stops there
+   * and says so in `limit`.
+   */
+  timeUp?: () => boolean;
 }
 
-/** Inline code that changes files: a write mode, or a call that writes, moves or removes. */
-const INLINE_WRITE =
-  /['"][wax]\+?b?['"]|['"]rm['"]|write|append|unlink|delete|remove|rename|os\.replace|truncate|rmSync|rmtree|mkdir|copy|move|touch|put_contents/i;
+// ---------------------------------------------------------------------------------------------
+// Inline code (`python -c`, `node -e`, a here-document fed to an interpreter). A quoted path is a
+// write target when it is an argument of a call that writes; a path that is only read is nothing;
+// any other quoted path is a possible write.
+// ---------------------------------------------------------------------------------------------
 
-/** Inline code that runs a shell command. */
-const INLINE_SHELL = /system|exec|spawn|popen|subprocess|shell|`/i;
+/** Calls whose first argument is a path they create, rewrite or remove. */
+const CODE_WRITES_FIRST = new Set([
+  'writeFile',
+  'writeFileSync',
+  'appendFile',
+  'appendFileSync',
+  'writeTextFile',
+  'writeTextFileSync',
+  'outputFile',
+  'outputFileSync',
+  'createWriteStream',
+  'truncate',
+  'truncateSync',
+  'mkdir',
+  'mkdirSync',
+  'mkdirs',
+  'makedirs',
+  'touch',
+  'file_put_contents',
+  'unlink',
+  'unlinkSync',
+  'rm',
+  'rmSync',
+  'rmdir',
+  'rmdirSync',
+  'rmtree',
+  'rm_rf',
+  'rm_r',
+  'rm_f',
+  'remove',
+  'removeSync',
+  'removedirs',
+  'emptyDir',
+  'emptyDirSync',
+  'delete',
+]);
+/** Of those, the ones that take a directory with all it holds. */
+const CODE_REMOVES_TREE =
+  /^(rm|rmSync|rmtree|rm_rf|rm_r|remove|removeSync|removedirs|emptyDir|emptyDirSync)$/;
+/** Calls that move their first argument onto their second. */
+const CODE_MOVES = /^(rename|renameSync|move|moveSync|mv)$/;
+/** Calls that write their second argument and only read their first. */
+const CODE_WRITES_SECOND =
+  /^(copy|copy2|copyfile|copyFile|copyFileSync|copySync|copytree|cp|cpSync|cp_r|symlink|symlinkSync|link|linkSync)$/;
+/** Calls that only read the path they are given, or print the text they are given. */
+const CODE_READS =
+  /^(readFile|readFileSync|read_text|read_bytes|readlines|readTextFile|readTextFileSync|exists|existsSync|stat|statSync|lstat|isfile|isdir|access|accessSync|createReadStream|require|load|loads|loadtxt|file_get_contents|file|readdir|readdirSync|listdir|glob|write|print|println|puts|log|error|warn|info|debug|echo|printf|join|format)$/;
+/** Calls that hand a command line to a shell or run a program. */
+const CODE_RUNS =
+  /^(system|popen|Popen|exec|execSync|execFile|execFileSync|spawn|spawnSync|run|call|check_call|check_output|getoutput|shell_exec|passthru)$/;
+/** Methods of a path object that change the file it stands for. */
+const PATH_METHOD_WRITES = /^(write_text|write_bytes|unlink|touch|rmdir|mkdir|rename|replace)$/;
+
+interface CodeFinding {
+  /** Paths the code writes, and paths it merely names. */
+  paths: { text: string; certain: boolean; tree: boolean }[];
+  /** Command lines the code runs. */
+  commands: string[];
+}
+
+function readCode(source: string): CodeFinding {
+  const code = source.slice(0, MAX_COMMAND_CHARS);
+  const out: CodeFinding = { paths: [], commands: [] };
+  // Every quoted string, with where it sits.
+  const strings: { start: number; end: number; text: string }[] = [];
+  for (const m of code.matchAll(/(['"`])((?:(?!\1)[^\\\n]){0,512})\1/g)) {
+    strings.push({ start: m.index, end: m.index + m[0].length, text: m[2] as string });
+    if (strings.length >= 2000) break;
+  }
+  /** The call a string is an argument of, and which argument. */
+  const roles: ({ chain: string; name: string; at: 1 | 2 } | null)[] = [];
+  for (let k = 0; k < strings.length; k++) {
+    const s = strings[k] as (typeof strings)[number];
+    const before = code.slice(Math.max(0, s.start - 120), s.start);
+    // `name(…)`, `name([…])`, or a call without parentheses (`unlink "a"` in Perl and Ruby).
+    const call =
+      /([A-Za-z_][\w.:]*)\s*\(\s*(\[\s*)?$/.exec(before) ??
+      /([A-Za-z_][\w.:]*)[ \t]+$/.exec(before);
+    const prev = k > 0 ? (strings[k - 1] as (typeof strings)[number]) : null;
+    const prevRole = k > 0 ? (roles[k - 1] ?? null) : null;
+    if (call) {
+      const chain = call[1] as string;
+      roles.push({ chain, name: chain.slice(chain.search(/[^.:]*$/)), at: 1 });
+    } else if (prev && prevRole && /^\s*,\s*$/.test(code.slice(prev.end, s.start))) {
+      roles.push({ ...prevRole, at: 2 });
+    } else roles.push(null);
+  }
+  const add = (text: string, certain: boolean, tree = false): void => {
+    // Perl and shell spell the mode in front of the name (`">a.ts"`).
+    const name = text.replace(/^\+?[<>|]+/, '');
+    if (name === '' || /\s/.test(name)) return;
+    out.paths.push({ text: name, certain, tree });
+  };
+  for (let k = 0; k < strings.length; k++) {
+    const s = strings[k] as (typeof strings)[number];
+    const role = roles[k] ?? null;
+    const after = code.slice(s.end, s.end + 60);
+    // `Path('a').write_text(…)`: the method decides.
+    const method = /^\s*\)\s*\.\s*(\w+)/.exec(after)?.[1];
+    if (role && /(^|[.:])(Path|PurePath|PosixPath|Pathname)$/.test(role.chain) && role.at === 1) {
+      if (method && PATH_METHOD_WRITES.test(method)) add(s.text, true);
+      else if (method === undefined || method === 'open') {
+        if (looksLikePath(s.text)) add(s.text, false);
+      }
+      continue;
+    }
+    if (role === null) {
+      // Not an argument of any call: a mode in front of the name is a write, the rest is named.
+      if (/^\+?>/.test(s.text)) add(s.text, true);
+      else if (looksLikePath(s.text)) add(s.text, false);
+      continue;
+    }
+    const { name, chain, at } = role;
+    if (CODE_RUNS.test(name)) {
+      // A command line, or the words of one in a list (`run(['rm', 'a.ts'])`).
+      if (at === 1) {
+        const words = [s.text];
+        for (let j = k + 1; j < strings.length && roles[j]?.at === 2; j++) {
+          if (roles[j]?.chain !== chain) break;
+          words.push((strings[j] as (typeof strings)[number]).text);
+        }
+        const list = /\[\s*$/.test(code.slice(Math.max(0, s.start - 8), s.start));
+        out.commands.push(list ? words.join(' ') : s.text);
+      }
+      continue;
+    }
+    if (name === 'open' || name === 'fopen') {
+      // The mode is the second argument; without one the file is only read.
+      const mode = roles[k + 1]?.at === 2 ? (strings[k + 1] as (typeof strings)[number]).text : '';
+      if (at === 1 && /^[rwaxbt+]+$/.test(mode) && /[wax+]/.test(mode)) add(s.text, true);
+      else if (at === 1 && /^\+?>/.test(s.text)) add(s.text, true);
+      continue;
+    }
+    if (at === 1 && (name === 'write' || name === 'write_file') && /^(File|IO|fs)\./.test(chain)) {
+      add(s.text, true);
+      continue;
+    }
+    if (CODE_MOVES.test(name) || /(^|\.)os\.replace$/.test(chain)) {
+      add(s.text, true, true);
+      continue;
+    }
+    if (CODE_WRITES_SECOND.test(name)) {
+      if (at === 2) add(s.text, true, true);
+      continue;
+    }
+    if (CODE_WRITES_FIRST.has(name)) {
+      if (at === 1) add(s.text, true, CODE_REMOVES_TREE.test(name));
+      continue;
+    }
+    if (CODE_READS.test(name)) continue;
+    if (/^\+?>/.test(s.text)) add(s.text, true);
+    else if (looksLikePath(s.text)) add(s.text, false);
+  }
+  return out;
+}
 
 /**
  * The files a shell command names as write targets, read from its text: redirections, the
  * arguments of programs that write what they are given (`rm`, `mv`, `cp`, `sed -i`, `tee`, …),
- * arguments of programs Mindly does not know, and paths quoted inside inline scripts. Programs
+ * arguments of programs Mindly does not know, and paths written by inline scripts. Programs
  * known to only read or check (`cat`, `grep`, `sed -n`, test runners, linters without a fixing
  * flag) contribute nothing but their redirections. `cd`, `pushd` and `popd` are followed. A
  * target is `certain` when the text shows the write, and not when the path is merely given to an
@@ -1344,6 +1785,8 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     limit: null,
     home: options.home ?? null,
     top: options.top ?? null,
+    timeUp: options.timeUp ?? (() => false),
+    commands: 0,
   };
   collectTargets(command, '', 0, reading);
   return { targets: [...reading.out.values()], limit: reading.limit };
@@ -1359,12 +1802,16 @@ interface Reading {
   limit: string | null;
   home: string | null;
   top: string | null;
+  timeUp: () => boolean;
+  /** Simple commands read so far, over every nested reading. */
+  commands: number;
 }
 
 /**
- * The text of a word as a path pattern: unquoted `*`, `?` and `{a,b}` stay wildcards, an unquoted
- * `[…]` class becomes `?` (one character). `literal` is the same word with the class kept as
- * written, which is what the shell uses when nothing matches.
+ * The text of a word as a path pattern: unquoted `*` and `?` stay wildcards, an unquoted `[…]`
+ * class becomes `?` (one character), and braces the expansion left alone stay alternatives.
+ * `classes` says the word also has a reading with the class kept as written, which is what the
+ * shell uses when nothing matches.
  */
 function wordPattern(w: Word): { pattern: string; glob: boolean; classes: boolean } {
   let pattern = '';
@@ -1375,7 +1822,12 @@ function wordPattern(w: Word): { pattern: string; glob: boolean; classes: boolea
     const bare = w.mask[i] === 'u';
     if (bare && ch === '[') {
       const end = w.text.indexOf(']', i + 2);
-      if (end !== -1 && w.mask[end] === 'u' && !w.text.slice(i, end).includes('/')) {
+      if (
+        end !== -1 &&
+        end - i <= 64 &&
+        w.mask[end] === 'u' &&
+        !w.text.slice(i, end).includes('/')
+      ) {
         pattern += '?';
         glob = true;
         classes = true;
@@ -1384,7 +1836,8 @@ function wordPattern(w: Word): { pattern: string; glob: boolean; classes: boolea
       }
     }
     if (bare && (ch === '*' || ch === '?')) glob = true;
-    if (bare && ch === '{' && /^\{[^{}]*,[^{}]*\}/.test(w.text.slice(i))) glob = true;
+    if (bare && ch === '{' && /^\{[^{}]{0,256},[^{}]{0,256}\}/.test(w.text.slice(i, i + 520)))
+      glob = true;
     pattern += ch;
   }
   return { pattern, glob, classes };
@@ -1395,8 +1848,10 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     r.limit ??= 'commands nested too deep';
     return;
   }
-  const parsed = parse(command);
-  if (parsed.cut) r.limit ??= `only the first ${MAX_COMMAND_CHARS} characters were read`;
+  const parsed = parse(command, r.timeUp);
+  if (parsed.cut === 'length') {
+    r.limit ??= `only the first ${MAX_COMMAND_CHARS} characters were read`;
+  } else if (parsed.cut === 'time') r.limit ??= 'no time was left to read all of it';
   // The directory later commands run in, relative to where the command started; null when a
   // `cd` went somewhere that cannot be read from the text.
   let dir: string | null = startDir;
@@ -1412,6 +1867,10 @@ function collectTargets(command: string, startDir: string | null, depth: number,
    * or under a home directory (`~…`). Marks and `~` are placed. Null when it cannot be known.
    */
   const place = (text: string, tilde: boolean, from: string | null): string | null => {
+    if (text.length > MAX_PATH_CHARS) {
+      r.limit ??= `a path longer than ${MAX_PATH_CHARS} characters was not read`;
+      return null;
+    }
     let fixed: string | null = null;
     if (text.startsWith(HERE) || text.startsWith(BACK)) {
       const at = text.startsWith(HERE) ? from : previous;
@@ -1438,6 +1897,10 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     }
     const out = fixed ?? (from === null ? null : posix.join(from, text));
     if (out === null || MARKS.test(out)) return null;
+    if (out.length > MAX_PATH_CHARS) {
+      r.limit ??= `a path longer than ${MAX_PATH_CHARS} characters was not read`;
+      return null;
+    }
     // A path under a home directory that could not be placed keeps its `~`.
     const path = posix.normalize(out);
     return path.length > 1 ? path.replace(/\/+$/, '') : path;
@@ -1445,14 +1908,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   /** Whether a word starts with a `~` the shell expands (written outside quotes). */
   const tilde = (w: Word): boolean => w.text.startsWith('~') && w.mask.startsWith('u');
 
-  interface How {
-    tree?: boolean;
-    certain?: boolean;
-    entries?: string[];
-    only?: string[] | null;
-    ifExists?: boolean;
-  }
-  const add = (w: Word, how: How, from: string | null = dir): void => {
+  const add = (item: Item, from: string | null = dir): void => {
+    const w = item.pattern ? { ...item.word, mask: 'u'.repeat(item.word.text.length) } : item.word;
     if (w.dynamic || w.text === '' || w.text === '-') return;
     const { pattern, glob, classes } = wordPattern(w);
     // A `[…]` class the shell cannot match stays in the name as written: both readings count.
@@ -1462,15 +1919,20 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           { text: w.text, glob: false },
         ]
       : [{ text: pattern, glob }];
+    const certain = item.certain ?? true;
+    const only = item.only ?? null;
+    const how = item.how ?? 'write';
+    const entries = (item.entries ?? []).map((e) => ({
+      name: e.name,
+      source: e.from === null || e.from.dynamic ? null : place(e.from.text, tilde(e.from), from),
+    }));
     for (const form of forms) {
       const path = place(form.text, tilde(w), from);
       if (path === null || /^\/(dev|proc)\//.test(path)) continue;
-      const key = `${path}\0${form.glob ? 'g' : ''}${how.ifExists ? 'e' : ''}`;
+      const key = `${path}\0${form.glob ? 'g' : ''}${item.ifExists ? 'e' : ''}${how}`;
       const known = r.out.get(key);
-      const certain = how.certain ?? true;
-      const only = how.only ?? null;
       if (known) {
-        known.tree ||= how.tree ?? false;
+        known.tree ||= item.tree ?? false;
         // The kinds of file written are those of the surest mention; equally sure ones add up.
         if (certain && !known.certain) known.only = only;
         else if (certain === known.certain) {
@@ -1478,7 +1940,12 @@ function collectTargets(command: string, startDir: string | null, depth: number,
             known.only === null || only === null ? null : [...new Set([...known.only, ...only])];
         }
         known.certain ||= certain;
-        for (const e of how.entries ?? []) if (!known.entries.includes(e)) known.entries.push(e);
+        known.dotfiles ||= item.dotfiles ?? false;
+        for (const e of entries) {
+          if (known.entries.length >= MAX_ENTRIES) break;
+          known.entries.push(e.name);
+          known.sources.push(e.source);
+        }
         continue;
       }
       if (r.out.size >= MAX_TARGETS) {
@@ -1488,11 +1955,15 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       r.out.set(key, {
         path,
         glob: form.glob,
-        tree: how.tree ?? false,
-        entries: [...(how.entries ?? [])],
+        dotfiles: item.dotfiles ?? false,
+        nocase: item.nocase ?? false,
+        tree: item.tree ?? false,
+        how,
+        entries: entries.slice(0, MAX_ENTRIES).map((e) => e.name),
+        sources: entries.slice(0, MAX_ENTRIES).map((e) => e.source),
         certain,
         only,
-        ifExists: how.ifExists ?? false,
+        ifExists: item.ifExists ?? false,
       });
     }
   };
@@ -1518,6 +1989,16 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       before = null;
       continue;
     }
+    // A command line can hold more commands than there is time or reason to read.
+    r.commands++;
+    if (r.commands > MAX_COMMANDS) {
+      r.limit ??= `more than ${MAX_COMMANDS} commands`;
+      return;
+    }
+    if (r.commands % 64 === 0 && r.timeUp()) {
+      r.limit ??= 'no time was left to read all of it';
+      return;
+    }
     // Substitutions run where they are written, before the command that holds them.
     const at = cmd.otherwise && wasCd ? beforeCd : dir;
     wasCd = false;
@@ -1528,19 +2009,26 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     }
     const { words, chdir } = programWords(cmd.words);
     const here = chdir ? enter(chdir, at) : at;
-    for (const red of cmd.redirects) if (red.op.startsWith('>')) add(red.target, {}, here);
+    for (const red of cmd.redirects) if (red.op.startsWith('>')) add({ word: red.target }, here);
     // What the program reads on standard input, when the text shows it: its own here-document,
-    // or what an `echo` / `cat <<EOF` before the pipe prints.
+    // or what an `echo` / `printf` / `cat <<EOF` before the pipe prints.
     let stdin = cmd.stdin;
     if (stdin === null && cmd.piped && before !== null) {
       const feeder = programWords(before.words).words;
       const name = feeder[0] && !feeder[0].dynamic ? programName(feeder[0]) : '';
       if (name === 'echo' || name === 'printf') {
-        stdin = feeder
-          .slice(1)
-          .filter((w) => !(name === 'echo' && /^-[neE]+$/.test(w.text)))
+        const flags = feeder.slice(1).filter((w) => name === 'echo' && /^-[neE]+$/.test(w.text));
+        const text = feeder
+          .slice(1 + flags.length)
           .map((w) => w.text)
           .join(' ');
+        // printf, and echo -e, turn `\n` into the line ends that separate commands.
+        const escapes = name === 'printf' || flags.some((w) => w.text.includes('e'));
+        stdin = escapes
+          ? text.replace(/\\([ntr\\])/g, (_, c: string) =>
+              c === 'n' ? '\n' : c === 't' ? '\t' : c === 'r' ? '\r' : '\\',
+            )
+          : text;
       } else if (name === 'cat' && feeder.length === 1) stdin = before.stdin;
     }
     before = cmd;
@@ -1569,61 +2057,43 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           } else next = r.home;
         } else if (to.text === '-' && !to.dynamic) next = previous;
         else next = enter(to, dir);
-        if (verdict.how === 'pushd') stack.push(dir);
+        if (verdict.how === 'pushd' && stack.length < 256) stack.push(dir);
         previous = dir;
         dir = next;
         break;
       }
-      case 'writes': {
-        const only = verdict.only ?? null;
-        for (const w of verdict.files ?? []) add(w, { only }, here);
-        for (const w of verdict.trees ?? []) add(w, { tree: true, only }, here);
-        for (const w of verdict.maybeFiles ?? []) add(w, { certain: false }, here);
-        for (const w of verdict.maybeTrees ?? []) add(w, { tree: true, certain: false }, here);
-        if (verdict.into) {
-          const { dir: dest, names, recursive } = verdict.into;
-          add(dest, { tree: recursive, entries: names }, here);
-        }
+      case 'writes':
+        for (const item of verdict.items) add(item, here);
         break;
-      }
       case 'inline':
         collectTargets(verdict.code, here, depth + 1, r);
         break;
       case 'script': {
-        // Paths quoted inside inline code (`python -c "open('a/b.ts','w')"`); the write is
-        // evident when the code also opens for writing or calls something that changes files.
-        const code = verdict.code.slice(0, MAX_COMMAND_CHARS);
-        const writes = INLINE_WRITE.test(code);
-        const runs = INLINE_SHELL.test(code);
-        for (const m of code.matchAll(/(['"`])((?:(?!\1)[^\\\n]){1,512})\1/g)) {
-          const text = m[2] as string;
-          if (/\s/.test(text)) {
-            // A quoted command line handed to the system (`os.system('rm a.ts')`).
-            if (runs) collectTargets(text, here, depth + 1, r);
-            continue;
-          }
-          // Perl and shell spell the mode in front of the name (`">a.ts"`).
-          const name = text.replace(/^[<>+|]+/, '');
-          if (looksLikePath(name)) {
-            add(word(name, true), { certain: writes || /^\+?>/.test(text) }, here);
-          }
+        const found = readCode(verdict.code);
+        for (const p of found.paths) {
+          // A bare name is a path only when a file of that name exists.
+          const item: Item = { word: word(p.text, true), certain: p.certain, tree: p.tree };
+          if (looksLikePath(p.text)) add(item, here);
+          else if (p.certain && /^[\w@+.-]+$/.test(p.text)) add({ ...item, ifExists: true }, here);
         }
+        for (const line of found.commands) collectTargets(line, here, depth + 1, r);
         break;
       }
       case 'unknown':
         // A program Mindly does not know may write what it is given, or only read it. A
-        // directory it is given may be walked, so it counts with everything under it.
+        // directory it is given may be walked, so it counts with everything under it. Text with
+        // spaces in it is a message or a command for somewhere else, not a path.
         for (const w of verdict.args) {
           if (w.dynamic) continue;
           if (isFlag(w)) {
             const eq = w.text.indexOf('=');
             if (eq !== -1 && looksLikePath(w.text.slice(eq + 1)))
-              add(sliceWord(w, eq + 1), { tree: true, certain: false }, here);
+              add({ word: sliceWord(w, eq + 1), tree: true, certain: false }, here);
           } else if (looksLikePath(w.text)) {
-            add(w, { tree: true, certain: false }, here);
+            add({ word: w, tree: true, certain: false }, here);
           } else if (verdict.bare && bare < MAX_BARE_WORDS && /^[\w@+-]+$/.test(w.text)) {
             bare++;
-            add(w, { tree: true, certain: false, ifExists: true }, here);
+            add({ word: w, tree: true, certain: false, ifExists: true }, here);
           }
         }
         break;

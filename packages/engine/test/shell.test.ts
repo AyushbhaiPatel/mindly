@@ -65,8 +65,13 @@ describe('write targets of a shell command', () => {
   const HOME = '/home/dev';
   const TOP = '/work/app';
   const read = (command: string) => shellWriteTargets(command, { home: HOME, top: TOP });
-  /** Targets the text shows as written: `path`, with `/**` for a whole tree and `*` wildcards kept. */
+  /**
+   * Targets the text shows as written: `path`, with `/**` for a whole tree and `*` wildcards
+   * kept; `(land)` where files of unknown names are put, `(restore)` / `(clean)` for paths git
+   * brings back from the index or cleans.
+   */
   const show = (t: ShellTarget): string[] => {
+    if (t.how !== 'write') return [`${t.path} (${t.how})`];
     const whole = t.tree ? [`${t.path}/**`] : [];
     if (t.entries.length === 0) return [t.path, ...whole];
     // A copy: each entry lands inside the directory.
@@ -142,7 +147,11 @@ describe('write targets of a shell command', () => {
       'find prisma -type f | wc -l',
       'sort names.txt',
     ]) {
-      expect(read(cmd), cmd).toEqual([]);
+      // A bare word is a path only when a file of that name exists, which the caller checks.
+      expect(
+        read(cmd).filter((t) => !t.ifExists),
+        cmd,
+      ).toEqual([]);
     }
   });
 
@@ -224,23 +233,42 @@ describe('write targets of a shell command', () => {
 
   it('knows which git subcommands rewrite the files they are given', () => {
     const tree = (p: string) => [p, `${p}/**`];
-    expect(targets('git checkout -- src/auth.ts')).toEqual(tree('src/auth.ts'));
-    expect(targets('git checkout .')).toEqual(tree('.'));
+    // From the index, only what differs from it changes: the caller asks git which those are.
+    expect(targets('git checkout -- src/auth.ts')).toEqual(['src/auth.ts (restore)']);
+    expect(targets('git checkout .')).toEqual(['. (restore)']);
+    expect(targets('git checkout --ours certs/a.pem')).toEqual(['certs/a.pem (restore)']);
+    expect(targets('git checkout -p certs')).toEqual(['certs (restore)']);
+    expect(targets('git restore src/')).toEqual(['src (restore)']);
+    expect(targets('git stash push certs/a.pem')).toEqual(['certs/a.pem (restore)']);
+    expect(targets('git stash push -m wip -- certs')).toEqual(['certs (restore)']);
+    // One word is a path when such a file exists, else a branch.
+    expect(read('git checkout certs')).toEqual([
+      expect.objectContaining({ path: 'certs', how: 'restore', ifExists: true }),
+    ]);
+    expect(read('git checkout fix/.env-loading')[0]).toMatchObject({ ifExists: true });
+    // From a revision, the files are what that revision holds, whatever their state now.
     expect(targets('git checkout HEAD~1 prisma')).toEqual(tree('prisma'));
     expect(targets('git checkout stash@{0} -- prisma/a.sql')).toEqual(tree('prisma/a.sql'));
-    expect(targets('git restore src/')).toEqual(tree('src'));
     expect(targets('git restore --source=HEAD~1 prisma')).toEqual(tree('prisma'));
     expect(targets('git restore -s HEAD~1 --staged --worktree prisma')).toEqual(tree('prisma'));
     expect(targets('git rm -r prisma')).toEqual(tree('prisma'));
     expect(targets('git -c a=b rm -r prisma/migrations')).toEqual(tree('prisma/migrations'));
-    expect(targets('git clean -fdx prisma')).toEqual(tree('prisma'));
-    expect(targets('git clean -fdx')).toEqual([]);
+    // Without a path it cleans where it runs; it only touches files that exist.
+    expect(targets('git clean -fdx')).toEqual(['. (clean)']);
+    expect(targets('git clean -fdx prisma')).toEqual(['prisma (clean)']);
     expect(targets('git mv prisma db')).toEqual(['db/[prisma]/**', 'prisma', 'prisma/**']);
-    expect(targets('git -C packages/web restore src/a.ts')).toEqual(tree('packages/web/src/a.ts'));
-    expect(targets('git stash push -- prisma/a.sql')).toEqual(tree('prisma/a.sql'));
-    // One word after `checkout` is a branch or a path: only a possible write.
-    expect(targets('git checkout prisma/a.sql')).toEqual([]);
-    expect(possible('git checkout prisma/a.sql')).toEqual(tree('prisma/a.sql'));
+    expect(targets('git -C packages/web restore src/a.ts')).toEqual([
+      'packages/web/src/a.ts (restore)',
+    ]);
+    // One word after `checkout` that exists is a path brought back from the index.
+    expect(read('git checkout prisma/a.sql')).toEqual([
+      expect.objectContaining({
+        path: 'prisma/a.sql',
+        how: 'restore',
+        certain: true,
+        ifExists: true,
+      }),
+    ]);
   });
 
   it('reports where copies land', () => {
@@ -258,7 +286,16 @@ describe('write targets of a shell command', () => {
     expect(targets('cp -a /tmp/prisma/. prisma/')).toEqual(['prisma/**']);
     expect(targets('rsync -a /tmp/prisma/ prisma/')).toEqual(['prisma/**']);
     expect(targets('rsync -a /tmp/prisma prisma/')).toEqual(['prisma/[prisma]/**']);
-    expect(targets('rsync -a --delete --exclude node_modules /tmp/repo/ ./')).toEqual(['./**']);
+    expect(targets('rsync -a --delete --exclude node_modules /tmp/repo/ ./')).toEqual([
+      '.',
+      './**',
+    ]);
+    // What is moved away is gone from where it was.
+    expect(targets('rsync -a --remove-source-files certs/ /tmp/c/')).toEqual([
+      '/tmp/c/**',
+      'certs',
+      'certs/**',
+    ]);
     expect(targets('rsync -a -e "ssh -p 22" host:/srv/app/ app/')).toEqual(['app/**']);
   });
 
@@ -272,6 +309,26 @@ describe('write targets of a shell command', () => {
     expect(targets('find -delete')).toEqual(['.', './**']);
     // One `-name` test narrows what is touched to what the name matches.
     expect(targets("find . -name '*.js' -delete")).toEqual(['**/*.js', '**/*.js/**']);
+    // Several names, or a path test that only narrows them, keep it to those names; `-iname`
+    // ignores case; a negation can let anything through.
+    expect(targets("find . -name '*.log' -delete -o -name '*.tmp' -delete")).toEqual([
+      '**/*.log',
+      '**/*.log/**',
+      '**/*.tmp',
+      '**/*.tmp/**',
+    ]);
+    expect(read("find . -iname '*.PEM' -delete")[0]).toMatchObject({ nocase: true });
+    expect(targets("find . -name '*.js' -path './dist/*' -delete")).toEqual([
+      '**/*.js',
+      '**/*.js/**',
+    ]);
+    expect(targets("find . -not -name '*.js' -delete")).toEqual(['.', './**']);
+    expect(targets('find . -name node_modules -type d -prune -exec rm -rf {} +')).toEqual([
+      '**/node_modules',
+      '**/node_modules/**',
+    ]);
+    // Only empty directories can go: nothing is written.
+    expect(read('find . -type d -empty -delete')).toEqual([]);
     expect(targets('find src -name "*.tmp" -exec rm {} \\;')).toEqual([
       'src/**/*.tmp',
       'src/**/*.tmp/**',
@@ -279,19 +336,20 @@ describe('write targets of a shell command', () => {
     // A program it runs that Mindly does not know may change what it finds.
     expect(possible('find prisma -exec mytool {} \\;')).toEqual(['prisma', 'prisma/**']);
     expect(targets('find . -name "*.ts" -fprint list.txt')).toEqual(['list.txt']);
-    expect(targets('tar xf a.tar -C prisma/migrations')).toEqual([
-      'prisma/migrations',
-      'prisma/migrations/**',
+    // Unpacking puts files of unknown names into a directory: the current one by default.
+    expect(targets('tar xf a.tar -C prisma/migrations')).toEqual(['prisma/migrations (land)']);
+    expect(targets('tar -xzf a.tgz --directory=vendor')).toEqual(['vendor (land)']);
+    expect(targets('tar xzfC a.tgz certs')).toEqual(['certs (land)']);
+    expect(targets('unzip -o a.zip -d prisma/migrations')).toEqual(['prisma/migrations (land)']);
+    expect(targets('unzip a.zip -dcerts')).toEqual(['certs (land)']);
+    expect(targets('tar xzf a.tgz')).toEqual(['. (land)']);
+    expect(targets('tar xzf a.tgz -C .')).toEqual(['. (land)']);
+    expect(targets('unzip a.zip')).toEqual(['. (land)']);
+    expect(targets('unzip a.zip -d .')).toEqual(['. (land)']);
+    // Creating an archive writes the archive, whatever comes before its name.
+    expect(targets('tar --exclude=node_modules -czf certs/server.pem .')).toEqual([
+      'certs/server.pem',
     ]);
-    expect(targets('tar -xzf a.tgz --directory=vendor')).toEqual(['vendor', 'vendor/**']);
-    expect(targets('unzip -o a.zip -d prisma/migrations')).toEqual([
-      'prisma/migrations',
-      'prisma/migrations/**',
-    ]);
-    // Unpacking over the current directory may or may not land on a file that matters.
-    expect(targets('tar xzf a.tgz')).toEqual([]);
-    expect(possible('tar xzf a.tgz')).toEqual(['.', './**']);
-    expect(possible('unzip a.zip')).toEqual(['.', './**']);
   });
 
   it('follows cd, pushd and popd, each in the shell it runs in', () => {
@@ -375,16 +433,40 @@ describe('write targets of a shell command', () => {
       {
         path: 'src/generated/*.ts',
         glob: true,
+        dotfiles: false,
+        nocase: false,
         tree: false,
+        how: 'write',
         certain: true,
         entries: [],
+        sources: [],
         only: null,
         ifExists: false,
       },
     ]);
+    // A shell's wildcard does not stand for a leading dot; a pattern a program expands does.
+    expect(read('rm -f *.example')[0]).toMatchObject({ glob: true, dotfiles: false });
+    expect(read("find . -name '*.example' -delete")[0]).toMatchObject({ dotfiles: true });
+    // Braces become the words they stand for, before anything else.
+    expect(targets('touch .env.{local,production}')).toEqual(['.env.local', '.env.production']);
+    expect(targets('mkdir -p prisma/migrations/{002_a,003_b}')).toEqual([
+      'prisma/migrations/002_a',
+      'prisma/migrations/003_b',
+    ]);
+    expect(targets('rm -rf {a..c}erts')).toEqual([
+      'aerts',
+      'aerts/**',
+      'berts',
+      'berts/**',
+      'certs',
+      'certs/**',
+    ]);
+    expect(targets('rm f{1..3}.log')).toEqual(['f1.log', 'f2.log', 'f3.log']);
+    expect(targets("rm '{a,b}.ts'")).toEqual(['{a,b}.ts']);
+    expect(read('rm f{1..100000}.log')[0]).toMatchObject({ path: 'f{1..100000}.log' });
     expect(read('rm -rf dist/*')[0]).toMatchObject({ path: 'dist/*', glob: true, tree: true });
     expect(read('rm -f *.log')[0]).toMatchObject({ path: '*.log', glob: true, tree: false });
-    expect(read('rm src/{a,b}.ts')[0]).toMatchObject({ glob: true });
+    expect(read('rm src/*.{ts,tsx}')[0]).toMatchObject({ path: 'src/*.ts', glob: true });
     expect(read("rm 'src/*.ts'")[0]).toMatchObject({ path: 'src/*.ts', glob: false });
     // A class stands for one character, and for itself when nothing matches.
     expect(read('rm certs/server.p[e]m').map((t) => [t.path, t.glob])).toEqual([
@@ -417,13 +499,47 @@ describe('write targets of a shell command', () => {
     ]);
     expect(targets('ruby -e "File.delete(\'a/b.rb\')"')).toEqual(['a/b.rb']);
     expect(targets('php -r "unlink(\'a/b.php\');"')).toEqual(['a/b.php']);
-    expect(targets('deno eval "Deno.removeSync(\'a/b.ts\')"')).toEqual(['a/b.ts']);
-    expect(targets("bun -e \"require('fs').rmSync('a/b.ts')\"")).toEqual(['a/b.ts']);
+    expect(targets('deno eval "Deno.removeSync(\'a/b.ts\')"')).toEqual(['a/b.ts', 'a/b.ts/**']);
+    expect(targets("bun -e \"require('fs').rmSync('a/b.ts')\"")).toEqual(['a/b.ts', 'a/b.ts/**']);
     expect(targets(`perl -e 'open(F,">a/b.txt")'`)).toEqual(['a/b.txt']);
+    // A quoted name without a dot or slash is a path only when such a file exists.
+    expect(read(`python3 -c "import shutil; shutil.rmtree('certs')"`)).toEqual([
+      expect.objectContaining({ path: 'certs', tree: true, certain: true, ifExists: true }),
+    ]);
     expect(targets(`python3 -c "import os; os.system('rm a/b.ts')"`)).toEqual(['a/b.ts']);
     // Code that only reads names the file without writing it.
     expect(targets(`python -c "print(open('a/b.ts').read())"`)).toEqual([]);
-    expect(possible(`python -c "print(open('a/b.ts').read())"`)).toEqual(['a/b.ts']);
+    expect(possible(`python -c "print(open('a/b.ts').read())"`)).toEqual([]);
+    // Printing is not writing a file; a copy writes its destination, not its source.
+    for (const code of [
+      `node -e "process.stdout.write(require('fs').readFileSync('.env.example','utf8'))"`,
+      `python3 -c "import sys; sys.stdout.write(open('.env.example').read())"`,
+      `node -e "console.log(require('fs').readFileSync('certs/a.pem','utf8'))"`,
+    ]) {
+      expect(read(code), code).toEqual([]);
+    }
+    expect(targets(`python3 -c "import shutil; shutil.copy('.env.example','/tmp/x')"`)).toEqual([
+      '/tmp/x',
+      '/tmp/x/**',
+    ]);
+    expect(
+      targets(
+        `node -e "require('dotenv').config({path:'.env'}); require('fs').writeFileSync('/tmp/keys.json', '')"`,
+      ),
+    ).toEqual(['/tmp/keys.json']);
+    expect(targets(`python3 -c "open('a.txt','a').write('x')"`)).toEqual(['a.txt']);
+    expect(targets(`node -e "require('fs').renameSync('a/b.ts','a/c.ts')"`)).toEqual([
+      'a/b.ts',
+      'a/b.ts/**',
+      'a/c.ts',
+      'a/c.ts/**',
+    ]);
+    expect(
+      targets(`python3 -c "from pathlib import Path; Path('a/b.ts').write_text('x')"`),
+    ).toEqual(['a/b.ts']);
+    expect(targets(`python3 -c "import subprocess; subprocess.run(['rm','a/b.ts'])"`)).toEqual([
+      'a/b.ts',
+    ]);
   });
 
   it('reads substitutions where they are written, quotes and all', () => {
@@ -473,19 +589,43 @@ describe('write targets of a shell command', () => {
     ]);
     expect(possible('mytool --out=dist/a.js').slice(0, 1)).toEqual(['dist/a.js']);
     expect(possible('curl https://example.com/a.json')).toEqual([]);
-    expect(read('rimraf prisma/migrations')[0]).toMatchObject({ tree: true, certain: false });
+    // Known removers are certain writes, also when a package manager runs them.
+    for (const cmd of [
+      'rimraf prisma/migrations',
+      'npx rimraf prisma/migrations',
+      'busybox rm -rf prisma/migrations',
+    ]) {
+      expect(targets(cmd), cmd).toEqual(['prisma/migrations', 'prisma/migrations/**']);
+    }
     // A bare word is a path only if such a file exists, which the caller checks.
-    expect(read('rimraf prisma')).toEqual([
-      {
-        path: 'prisma',
-        glob: false,
-        tree: true,
-        certain: false,
-        entries: [],
-        only: null,
-        ifExists: true,
-      },
+    expect(read('mytool prisma')).toEqual([
+      expect.objectContaining({ path: 'prisma', tree: true, certain: false, ifExists: true }),
     ]);
+    // Text with spaces is a message or a command for somewhere else, not a local path.
+    expect(read('ssh host "rm -rf /var/app/.env.bak"')).toEqual([]);
+    expect(read("docker exec app sh -c 'rm -rf /srv/.env'")).toEqual([]);
+    expect(read('mytool "fix the .env loading"')).toEqual([]);
+    // A folder handed to a build or package tool is where it works, not what it writes.
+    for (const cmd of [
+      'pnpm --filter ./packages/api build',
+      'pnpm -C packages/api build',
+      'yarn --cwd packages/api build',
+      'npm --prefix packages/api run build',
+      'make -C packages/api',
+      'docker build packages/api',
+      'turbo run build --filter=./packages/api',
+    ]) {
+      expect(read(cmd), cmd).toEqual([]);
+    }
+    // Known writers name what they write.
+    expect(targets('curl -o certs/server.pem https://x/y')).toEqual(['certs/server.pem']);
+    expect(targets('curl -sSLo certs/server.pem https://x/y')).toEqual(['certs/server.pem']);
+    expect(targets('wget -qO certs/server.pem https://x/y')).toEqual(['certs/server.pem']);
+    expect(targets(`perl -e 'unlink "certs/server.pem"'`)).toEqual(['certs/server.pem']);
+    expect(targets('curl https://x/y --output=certs/a.pem')).toEqual(['certs/a.pem']);
+    expect(targets('wget -O certs/server.pem https://x/y')).toEqual(['certs/server.pem']);
+    expect(targets('openssl genrsa -out certs/server.pem 2048')).toEqual(['certs/server.pem']);
+    expect(targets("gsed -i 's/a/b/' certs/server.pem")).toEqual(['certs/server.pem']);
     expect(read('docker compose up -d').every((t) => t.ifExists)).toBe(true);
     // Package managers run scripts: what they are given is not what they write.
     expect(read('pnpm install')).toEqual([]);
