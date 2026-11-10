@@ -58,6 +58,9 @@ export const SENTINEL_LOCK_HEARTBEAT_MS = 10_000;
 const MISSED_HEARTBEATS = 6;
 /** Beats in a row at which a holder may fail to read its lock before it gives the lock up. */
 const UNREADABLE_BEATS = 6;
+/** `held()` looks again this often, this far apart, at a lock it cannot read. */
+const HELD_RETRIES = 5;
+const HELD_RETRY_MS = 5;
 /** A note of what was seen of a lock is not believed past this age, nor when dated in the future. */
 const OBSERVATION_MAX_AGE_MS = 24 * 60 * 60_000;
 /**
@@ -274,6 +277,11 @@ function readObservation(path: string): Observation | null {
 
 /** Milliseconds on a clock that never steps, shared by the processes of one boot. */
 const monotonicMs = (): number => Number(process.hrtime.bigint() / 1_000_000n);
+
+/** Blocks for `ms` (a few milliseconds at most). */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 function unlinkQuiet(file: string): void {
   try {
@@ -628,9 +636,12 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
             clearInterval(beat);
             held.delete(id);
             if (lost) return;
-            // Only our own lock is removed (it may have been taken over). It is moved to a name
-            // of this call before it is looked at: removing the path after a look could remove
-            // a lock that replaced ours in between.
+            // Only our own lock is removed: one that names another holder (ours was taken over
+            // and the heartbeat did not notice yet) is left exactly as it is.
+            if (look() !== 'mine') return;
+            // Moved to a name of this call and looked at again there, so a lock that replaced
+            // ours between the look and the move is never removed. That needs a takeover in
+            // those microseconds: the lock moved aside is put back, never over a newer one.
             const aside = `${file}.release-${process.pid}-${randomBytes(6).toString('hex')}`;
             try {
               renameSync(file, aside);
@@ -645,7 +656,13 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
           },
           held: () => {
             if (released || lost) return false;
-            const state = look();
+            // A lock briefly away (another process moving it aside to look at it, then back)
+            // is not lost: looked at again for a moment before the answer is no.
+            let state = look();
+            for (let i = 0; state === 'unreadable' && i < HELD_RETRIES; i++) {
+              pause(HELD_RETRY_MS);
+              state = look();
+            }
             if (state === 'other') lose();
             return state === 'mine';
           },

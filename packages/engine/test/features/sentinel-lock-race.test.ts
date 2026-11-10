@@ -23,6 +23,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return {
     ...real,
     copyFileSync: wrap('copy', real.copyFileSync),
+    readFileSync: wrap('read', real.readFileSync),
     renameSync: wrap('rename', real.renameSync),
     unlinkSync: wrap('unlink', real.unlinkSync),
   };
@@ -85,26 +86,116 @@ describe('sentinel lock races', () => {
     expect(fs.readFileSync(file, 'utf8')).toBe(third);
   });
 
-  it('never removes a lock that replaced its own while it lets go', () => {
+  it('leaves the lock of the holder that took it over alone when it lets go', () => {
     const file = lockFile();
-    const lock = tryProcessLock(file)!;
-    const third = lockOf(77, 'cccccccccccccccccccccccc');
-    // Between reading its lock and removing it, the lock is taken over (moved aside) and a
-    // third process creates a new one.
-    let replaced = false;
+    const a = tryProcessLock(file)!;
+    // B took A's lock over (moved it aside, created its own); A's heartbeat has not noticed.
+    fs.renameSync(file, `${file}.taken`);
+    fs.unlinkSync(`${file}.taken`);
+    const b = tryProcessLock(file)!;
+    expect(b).not.toBeNull();
+    const ino = fs.statSync(file).ino;
+    let moved = 0;
+    let bHeld: boolean;
+    let c: ReturnType<typeof tryProcessLock>;
     hook.fn = (op, path) => {
-      if (replaced || op !== 'unlink' || !(path === file || path.startsWith(`${file}.`))) return;
-      if (path.includes('.new-')) return;
-      replaced = true;
-      if (path === file) fs.renameSync(file, `${file}.gone`);
-      fs.writeFileSync(file, third, { flag: 'wx' });
+      if (op === 'rename' && path === file) moved++;
     };
     try {
-      lock.release();
+      a.release();
+      bHeld = b.held();
+      c = tryProcessLock(file);
     } finally {
       hook.fn = null;
     }
-    expect(replaced).toBe(true);
-    expect(fs.readFileSync(file, 'utf8')).toBe(third);
+    // A never moved B's lock: B still holds it, nobody else can take it.
+    expect(moved).toBe(0);
+    expect(fs.statSync(file).ino).toBe(ino);
+    expect(bHeld).toBe(true);
+    expect(c).toBeNull();
+    // B lets go: the lock is free, not brought back by anyone.
+    b.release();
+    expect(fs.existsSync(file)).toBe(false);
+    tryProcessLock(file)!.release();
+  });
+
+  it('puts back a lock that replaced its own between its look and its move', () => {
+    const file = lockFile();
+    const a = tryProcessLock(file)!;
+    const theirs = lockOf(77, 'bbbbbbbbbbbbbbbbbbbbbbbb');
+    // Right after A looked at its lock and found it its own, B takes it over.
+    hook.fn = (op, path) => {
+      if (op !== 'rename' || path !== file || !path) return;
+      hook.fn = null;
+      fs.renameSync(file, `${file}.taken`);
+      fs.unlinkSync(`${file}.taken`);
+      fs.writeFileSync(file, theirs, { flag: 'wx' });
+    };
+    try {
+      a.release();
+    } finally {
+      hook.fn = null;
+    }
+    expect(fs.readFileSync(file, 'utf8')).toBe(theirs);
+    expect(fs.readdirSync(join(file, '..'))).toEqual(['lock']);
+  });
+
+  it('never deletes a newer lock when it cannot put one back', () => {
+    const file = lockFile();
+    const theirs = lockOf(77, 'bbbbbbbbbbbbbbbbbbbbbbbb');
+    const newer = lockOf(88, 'cccccccccccccccccccccccc');
+    for (const links of [true, false]) {
+      // Without hard links the put-back is an exclusive copy.
+      const link = (existing: string, path: string): void => {
+        if (existing.includes('.release-')) {
+          // In the instant before the put-back, C creates a lock.
+          fs.writeFileSync(path, newer, { flag: 'wx' });
+          if (!links) noLinks();
+        }
+        fs.linkSync(existing, path);
+      };
+      const a = tryProcessLock(file, { link })!;
+      hook.fn = (op, path) => {
+        if (op !== 'rename' || path !== file) return;
+        hook.fn = null;
+        fs.unlinkSync(file);
+        fs.writeFileSync(file, theirs, { flag: 'wx' });
+      };
+      try {
+        a.release();
+      } finally {
+        hook.fn = null;
+      }
+      // C's lock stands; B's, moved aside, is gone (B finds out at its next heartbeat).
+      expect(fs.readFileSync(file, 'utf8')).toBe(newer);
+      expect(fs.readdirSync(join(file, '..'))).toEqual(['lock']);
+      fs.unlinkSync(file);
+    }
+  });
+
+  it('does not count a lock that is away for a moment as lost', () => {
+    const file = lockFile();
+    const lock = tryProcessLock(file)!;
+    // Another process has it renamed aside to look at it: two reads fail, then it is back.
+    let fails = 2;
+    hook.fn = (op, path) => {
+      if (op === 'read' && path === file && fails > 0) {
+        fails--;
+        throw Object.assign(new Error('no such file'), { code: 'ENOENT' });
+      }
+    };
+    try {
+      expect(lock.held()).toBe(true);
+    } finally {
+      hook.fn = null;
+    }
+    expect(lock.signal.aborted).toBe(false);
+    // One that stays away is not ours as far as anyone can tell, but not taken over either.
+    fs.renameSync(file, `${file}.away`);
+    expect(lock.held()).toBe(false);
+    expect(lock.signal.aborted).toBe(false);
+    fs.renameSync(`${file}.away`, file);
+    expect(lock.held()).toBe(true);
+    lock.release();
   });
 });
