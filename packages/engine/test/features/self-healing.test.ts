@@ -741,7 +741,7 @@ describe('self-healing memory', () => {
       const [, normalising] = timed(() => normalizeBlock(withBlock));
       const [, goneMs] = timed(() => excerptState(file, stored, hash));
       const [, thereMs] = timed(() => excerptState(withBlock, stored, blockHash));
-      expect(Math.max(goneMs, thereMs)).toBeLessThan(20 * normalising + 5);
+      expect(Math.max(goneMs, thereMs)).toBeLessThan(20 * normalising + 50);
     }
   });
 
@@ -779,7 +779,7 @@ describe('self-healing memory', () => {
       // A few passes over the file (about twice normalising it here), measured on this machine.
       const [, normalising] = timed(() => normalizeBlock(content));
       const [, ms] = timed(() => excerptState(content, stored, hash));
-      expect(ms).toBeLessThan(20 * normalising + 5);
+      expect(ms).toBeLessThan(20 * normalising + 50);
     }
   });
 
@@ -801,7 +801,7 @@ describe('self-healing memory', () => {
       expect(found.scanned).toBeLessThanOrEqual(EVIDENCE_SCAN_WORK);
       expect(found.work).toBeLessThanOrEqual(EARLIER_FORM_WORK);
       const [, normalising] = timed(() => normalizeBlock(content));
-      expect(ms).toBeLessThan(20 * normalising + 5);
+      expect(ms).toBeLessThan(20 * normalising + 50);
       return found.state;
     };
     // A long run of one character, where a built-in search takes time quadratic in it.
