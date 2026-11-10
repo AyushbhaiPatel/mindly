@@ -1,3 +1,5 @@
+import { stripInvisible } from './text.js';
+
 /**
  * Secret redaction. Every piece of user or agent text passes through `redact()` before it is
  * stored, logged, sent to a model provider or put in a notification.
@@ -5,8 +7,6 @@
  * Patterns are written to be linear-time (no nested unbounded quantifiers) and input is capped,
  * so hostile content cannot stall a hook with catastrophic regex backtracking.
  */
-
-import { stripInvisible } from './text.js';
 
 export const REDACTED = '[REDACTED]';
 
