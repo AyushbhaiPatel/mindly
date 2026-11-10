@@ -84,14 +84,27 @@ const LABEL_WORDS: Record<NoticeSource, string> = {
 // When to come back, which is how a notice goes on after the phrase.
 const HINT =
   '(?:(?:please )?(?:try again|retry|wait|resets?|upgrade|check (?:your|quota))\\b|your (?:limit|quota) will reset\\b|\\(e\\.g\\.)';
+// Words that start another clause: "..., and the new resetAt field says when", "which ...".
+const CLAUSE =
+  ',\\s*(?:and|but|which|so|because|while|when|then|since|though|once)\\b|\\b(?:which|because|while|whereas|once|so that|and the|that the)\\b';
+// What may follow a hint: a time, a plan, where to go. Never another clause or sentence.
+const REST = `(?:(?!${CLAUSE}|[.!?;]\\s)[^\\n]){0,60}?`;
+const SEP = '[.,;:!|\\u00b7\\u2219\\u2022\\u2013\\u2014/-]?';
+// One part of the tail of a notice: "· resets 3pm", ". Try again at 5pm", ". Upgrade to Pro or
+// try again in 3 hours", ". Your quota will reset after 2h".
+const SEGMENT = `\\s*${SEP}\\s*${HINT}${REST}`;
+const END = '\\s*[.!]?\\s*$';
 // What may follow the phrase. For the client's reports: the end of the line, punctuation or a
-// hint. For the assistant the line has to end there (or with the reset time some clients
-// append as "|<epoch>") or go on with a hint, so that "Usage limit reached: discussed in
-// standup" stays a sentence.
+// hint. For the assistant only a notice's own tail and then the end of the line (or the reset
+// time some clients append as "|<epoch>"), so that "Usage limit reached: discussed in standup"
+// or "Your limit will reset at midnight, and the new field says when" stays a sentence.
 const TAIL: Record<NoticeSource, string> = {
-  assistant: `(?=\\s*(?:[.!]?\\s*$|\\|\\d{9,13}\\s*$|[.,;:!|\\u00b7\\u2219\\u2022\\u2013\\u2014-]?\\s*${HINT}))`,
+  assistant: `(?=(?:${SEGMENT}){0,3}${END}|\\s*\\|\\d{9,13}\\s*$)`,
   client: `(?=\\s*(?:$|[.,:;!(\\[{|\\u00b7\\u2219\\u2022]|[-\\u2013\\u2014]\\s|${HINT}))`,
 };
+// A line that is only the tail of a notice, as a client prints it under the notice:
+// "/upgrade to increase your usage limit.", "Try again at 5pm."
+const TAIL_ONLY_LINE = new RegExp(`^(?:${SEGMENT}){1,3}${END}`, 'i');
 
 function label(source: NoticeSource): string {
   return `(?:\\[?(?:${LABEL_WORDS[source]})\\b\\]?\\s*[:\\-]?\\s*(?:\\(?\\d{3}\\)?\\s*[:\\-]?\\s*)?)`;
@@ -155,7 +168,11 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
       'claude.limit_reached',
       opening(`(?:${PLAN} ){0,2}limit reached|${HIT} your (?:${PLAN} ){0,2}limit`),
     ),
-    account('claude.limit_will_reset', () => '^(?:your )?limit will reset (?:at|in|on)\\b'),
+    // "Your limit will reset at 3pm (Europe/Berlin)."
+    account(
+      'claude.limit_will_reset',
+      (l, tail) => `^${l}?(?:your )?limit will reset (?:at|in|on|after)\\b${REST}${tail}`,
+    ),
     // 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}',
     // "API Error: Request rejected (429) · rate_limit_error"
     api('claude.rate_limit_error', () => '\\brate_limit_error\\b'),
@@ -180,8 +197,8 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
     // on this model. Your quota will reset after 2h."
     account(
       'gemini.quota_exhausted',
-      (l) =>
-        `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)\\b`,
+      (l, tail) =>
+        `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)(?: (?:on|for) (?:this|the) model)?${tail}`,
     ),
     // "Resource has been exhausted (e.g. check quota)."
     api('gemini.resource_exhausted', opening('resource has been exhausted')),
@@ -246,37 +263,76 @@ function stripLead(line: string): string {
   return rest;
 }
 
+/** Every signature that names the account's limit, of any agent: the shape of a notice. */
+const ACCOUNT_SIGNATURES: readonly RateLimitSignature[] = Object.values(RATE_LIMIT_SIGNATURES)
+  .flat()
+  .filter((sig) => sig.account);
+
+/** True when `line` (decoration stripped) is a notice or the tail a client prints under one. */
+function noticeShaped(line: string): boolean {
+  return TAIL_ONLY_LINE.test(line) || ACCOUNT_SIGNATURES.some((sig) => sig.re.test(line));
+}
+
+/** A non-empty line of a message, and whether it is a fence marker or inside a fence. */
+interface MessageLine {
+  raw: string;
+  fenced: boolean;
+}
+
+function messageLines(text: string): MessageLine[] {
+  const out: MessageLine[] = [];
+  let fenced = false;
+  for (const raw of text.split(/\r?\n/)) {
+    if (FENCE.test(raw)) {
+      fenced = !fenced;
+      out.push({ raw, fenced: true });
+    } else if (raw.trim() !== '') out.push({ raw, fenced });
+  }
+  return out;
+}
+
+/** `raw` as a candidate notice line from `source`, or null when it can never be one. */
+function candidate(raw: string, source: NoticeSource): string | null {
+  if (raw.length > 2 * MAX_NOTICE_LINE_CHARS[source] || RETRYING.test(raw)) return null;
+  if (source === 'assistant' && WRITTEN_ABOUT.test(raw.trimStart())) return null;
+  const line = stripLead(raw).trimEnd();
+  return line.length === 0 || line.length > MAX_NOTICE_LINE_CHARS[source] ? null : line;
+}
+
 /**
  * The lines of one message that could be a notice, without the decoration, timestamp or tag in
  * front of them. Lines in a code fence are never one (that is where logs are quoted), and
  * neither is a line that says the client is retrying.
  *
- * An error the client reported is read line by line. Of what the assistant wrote only the last
- * line is read, whatever came before it: a limit is the last thing said in a message. That
- * line is dropped when it is written about something (a list item, a quotation, a test result).
+ * An error the client reported is read line by line. Of what the assistant wrote only the end
+ * is read, whatever came before it: a limit is the last thing said in a message. That end is
+ * the last line, or the last two or three when each of them is shaped like a notice or its tail
+ * ("You've hit your limit · resets 10pm" then "/upgrade to increase your usage limit."). It is
+ * not a notice when it is written about something (a list item, a quotation, a test result) or
+ * introduced by a line ending in a colon ("The banner now reads:").
  */
 export function noticeLines(text: string, source: NoticeSource = 'assistant'): string[] {
-  const out: string[] = [];
-  let fenced = false;
-  let lastWasNotice = false;
-  for (const raw of text.split(/\r?\n/)) {
-    if (FENCE.test(raw)) {
-      fenced = !fenced;
-      lastWasNotice = false;
-      continue;
-    }
-    if (raw.trim() === '') continue;
-    lastWasNotice = false;
-    if (fenced || raw.length > 2 * MAX_NOTICE_LINE_CHARS[source]) continue;
-    if (RETRYING.test(raw)) continue;
-    if (source === 'assistant' && WRITTEN_ABOUT.test(raw.trimStart())) continue;
-    const line = stripLead(raw).trimEnd();
-    if (line.length === 0 || line.length > MAX_NOTICE_LINE_CHARS[source]) continue;
-    out.push(line);
-    lastWasNotice = true;
+  const lines = messageLines(text);
+  if (source === 'client') {
+    return lines
+      .filter((l) => !l.fenced)
+      .map((l) => candidate(l.raw, source))
+      .filter((l): l is string => l !== null);
   }
-  if (source === 'client') return out;
-  return lastWasNotice ? out.slice(-1) : [];
+  const run: string[] = [];
+  let i = lines.length - 1;
+  for (; i >= 0 && run.length < 3; i--) {
+    const l = lines[i];
+    const line = !l || l.fenced ? null : candidate(l.raw, source);
+    if (line === null || (run.length > 0 && !noticeShaped(line))) break;
+    run.unshift(line);
+  }
+  if (run.length === 0) return [];
+  // Only the last line is taken on its own; a longer run must be all notice and tail.
+  if (run.length > 1 && !run.every(noticeShaped)) return run.slice(-1);
+  const before = lines[i];
+  if (before && !before.fenced && /:\s*$/.test(before.raw)) return [];
+  return run;
 }
 
 /**
@@ -526,37 +582,66 @@ function parseTs(v: unknown): number | null {
   return null;
 }
 
-/** Parses JSONL transcript text (Claude Code / Codex style). Non-JSON lines become raw entries. */
-export function parseTranscriptTail(tail: string): TranscriptEntry[] {
-  const out: TranscriptEntry[] = [];
-  for (const line of tail.split('\n').slice(-MAX_ENTRIES)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let obj: unknown;
-    try {
-      obj = JSON.parse(trimmed);
-    } catch {
-      out.push({
-        ts: null,
-        user: false,
-        agent: true,
-        client: false,
-        tool: false,
-        text: trimmed.slice(0, MAX_TEXT_PER_ENTRY),
-      });
-      continue;
-    }
-    const said = agentText(obj);
-    out.push({
-      ts: parseTs(field(obj, 'timestamp')),
-      user: isUserSide(obj) && !isSidechain(obj),
-      agent: said !== null,
-      client: said?.client ?? false,
-      tool: isToolEntry(obj),
-      text: (said?.text ?? '').slice(0, MAX_TEXT_PER_ENTRY),
-    });
+function entryOf(obj: unknown): TranscriptEntry {
+  const said = agentText(obj);
+  return {
+    ts: parseTs(field(obj, 'timestamp')),
+    user: isUserSide(obj) && !isSidechain(obj),
+    agent: said !== null,
+    client: said?.client ?? false,
+    tool: isToolEntry(obj),
+    text: (said?.text ?? '').slice(0, MAX_TEXT_PER_ENTRY),
+  };
+}
+
+function parseJson(text: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(text) as unknown };
+  } catch {
+    return { ok: false };
   }
-  return out;
+}
+
+// A line of pretty-printed JSON: a bracket, or a `"key": value` pair.
+const JSON_FRAGMENT = /^\s*(?:[{}[\],]+|"(?:[^"\\]|\\.)*"\s*:.*)$/;
+
+/**
+ * Parses transcript text. JSONL (Claude Code, Codex): one entry per line; a line that does not
+ * parse (cut off by the tail, or still being written) is not an entry. A transcript that is one
+ * JSON document (Gemini CLI is believed to keep its session that way; unverified) is read from
+ * its `messages` array, or from the document when it is an array; one cut by the tail is not
+ * read at all. Text that is not JSON at all is read one line per entry.
+ */
+export function parseTranscriptTail(tail: string): TranscriptEntry[] {
+  const lines = tail
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const parsed = lines.map((l) => parseJson(l));
+  if (parsed.some((r) => r.ok && r.value !== null && typeof r.value === 'object')) {
+    return parsed
+      .slice(-MAX_ENTRIES)
+      .flatMap((r) => (r.ok && r.value !== null && typeof r.value === 'object' ? [r.value] : []))
+      .map(entryOf);
+  }
+  const first = tail.trimStart()[0];
+  if (first === '{' || first === '[') {
+    const doc = parseJson(tail);
+    if (doc.ok) {
+      const messages = Array.isArray(doc.value) ? doc.value : field(doc.value, 'messages');
+      return Array.isArray(messages) ? messages.slice(-MAX_ENTRIES).map(entryOf) : [];
+    }
+  }
+  const fragments = lines.filter((l) => JSON_FRAGMENT.test(l)).length;
+  if (lines.length > 0 && fragments * 2 >= lines.length) return [];
+  return lines.slice(-MAX_ENTRIES).map((l) => ({
+    ts: null,
+    user: false,
+    agent: true,
+    client: false,
+    tool: false,
+    text: l.slice(0, MAX_TEXT_PER_ENTRY),
+  }));
 }
 
 /**
@@ -601,6 +686,25 @@ export function turnEntries(entries: readonly TranscriptEntry[], since: number):
     .slice(start)
     .filter((e) => !e.user || e.tool)
     .filter((e) => e.tool || (e.agent && e.text.trim() !== ''));
+}
+
+/** Something the model said, not a tool call and not an error of the client. */
+function isAnswer(e: TranscriptEntry): boolean {
+  return e.agent && !e.client && !e.tool;
+}
+
+/**
+ * The entries a turn ended with: the errors the client reported last, and what the agent said
+ * just before them. Anything else after a notice (a tool call, an answer) means the agent got
+ * past it.
+ */
+function turnEnding(turn: readonly TranscriptEntry[]): TranscriptEntry[] {
+  const isClientError = (e: TranscriptEntry | undefined) => !!e && e.agent && e.client && !e.tool;
+  let k = turn.length;
+  while (isClientError(turn[k - 1])) k--;
+  const before = turn[k - 1];
+  if (before && isAnswer(before)) k--;
+  return turn.slice(k);
 }
 
 async function safely<T>(p: Promise<T>, fallback: T): Promise<T> {
@@ -885,8 +989,9 @@ export class FailoverService {
     const path = p.transcriptPath ?? session.transcriptPath;
     let transcriptRead = true;
     let ranTools = false;
-    // How the turn ended: with an answer, with an error of the client, or unknown.
+    // How the turn ended: the last entry, and the entries that make up its ending.
     let last: TranscriptEntry | null = null;
+    let ending: TranscriptEntry[] = [];
     if (path) {
       const tail = readTranscriptTail(path, this.homeDir);
       if (tail === null) transcriptRead = false;
@@ -894,19 +999,25 @@ export class FailoverService {
         const turn = turnEntries(parseTranscriptTail(tail), since);
         // The transcript holds every tool call of the turn, whatever the tool was.
         ranTools = turn.some((e) => e.tool);
-        said.push(...turn.filter((e) => e.agent && !e.client).map((e) => e.text));
+        said.push(...turn.filter(isAnswer).map((e) => e.text));
         last = turn[turn.length - 1] ?? null;
+        ending = turnEnding(turn);
       }
     }
     const signature =
-      (last?.agent
-        ? detectRateLimit(session.agentKind, [last.text], last.client ? 'client' : 'assistant')
-        : null) ?? (lastMessage ? detectRateLimit(session.agentKind, [lastMessage]) : null);
+      ending
+        .map((e) => detectRateLimit(session.agentKind, [e.text], e.client ? 'client' : 'assistant'))
+        .find((id) => id !== null) ??
+      (lastMessage ? detectRateLimit(session.agentKind, [lastMessage]) : null);
     if (!signature) {
       // The handoff an earlier limit left is withdrawn only by a turn that ended normally: with
-      // an answer, not with an error of any wording and not cut off after a tool call. Without
-      // the transcript the turn was not really looked at.
-      const endedNormally = last ? last.agent && !last.client : !path && said.length > 0;
+      // an answer, not with an error of any wording and not cut off after a tool call. A client
+      // can stop the hook before it writes the final answer to the transcript: a transcript
+      // that ends in a tool call while the hook reports an answer ended normally. Without the
+      // transcript the turn was not really looked at.
+      const endedNormally = last
+        ? isAnswer(last) || (last.tool && lastMessage.trim() !== '')
+        : !path && said.length > 0;
       if (lastPrompt && transcriptRead && endedNormally) {
         this.withdrawStaleHandoff(p.projectId, session, lastPrompt.createdAt, { ranTools, said });
       }

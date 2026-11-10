@@ -400,6 +400,73 @@ describe('rate-limit failover', () => {
     }
   });
 
+  it('reads only a notice-shaped end of what the assistant wrote', () => {
+    const sentences = [
+      'Your limit will reset at midnight UTC, and the new resetAt field in the response says exactly when.',
+      'You have exhausted your daily quota once 100 requests are made, which the new test asserts.',
+      'Usage limit reached. Try again at 5pm. Meanwhile I fixed the tests.',
+      'Usage limit reached in the billing module is now logged.',
+      "You've hit your usage limit when the counter passes 100, so the banner shows.",
+    ];
+    for (const kind of KINDS) {
+      for (const line of sentences) {
+        expect([kind, line, detectRateLimit(kind, [line])]).toEqual([kind, line, null]);
+        expect([kind, line, detectRateLimit(kind, [`${LONG_ANSWER}\n\n${line}`])]).toEqual([
+          kind,
+          line,
+          null,
+        ]);
+      }
+    }
+
+    // A notice is never introduced by a colon line.
+    const quoted = [
+      "The banner now reads:\nYou've hit your usage limit. Upgrade to Pro or try again later.",
+      "The banner now reads:\n\nYou've hit your usage limit. Upgrade to Pro or try again later.",
+      'The banner now reads:\nUsage limit reached. Try again at 5pm.',
+      `${LONG_ANSWER}\n\nThe page shows:\nYou’ve hit your limit · resets 10pm\n/upgrade to increase your usage limit.`,
+    ];
+    for (const text of quoted)
+      expect([text, detectRateLimit('codex', [text])]).toEqual([text, null]);
+
+    // A notice over two lines, the second its tail, alone or at the end of an answer.
+    const twoLines = 'You’ve hit your limit · resets 10pm\n/upgrade to increase your usage limit.';
+    expect(detectRateLimit('claude-code', [twoLines])).toBe('claude.limit_reached');
+    expect(detectRateLimit('claude-code', [`${LONG_ANSWER}\n\n${twoLines}`])).toBe(
+      'claude.limit_reached',
+    );
+    expect(detectRateLimit('cursor', ["You've hit your usage limit\nTry again at 5pm."])).toBe(
+      'generic.usage_limit',
+    );
+    // The tail alone is not a notice, nor is a notice line followed by an ordinary one.
+    expect(detectRateLimit('claude-code', ['/upgrade to increase your usage limit.'])).toBeNull();
+    expect(detectRateLimit('claude-code', ['Try again at 5pm.'])).toBeNull();
+    expect(
+      detectRateLimit('claude-code', ['Usage limit reached.\nI will pick this up after lunch.']),
+    ).toBeNull();
+  });
+
+  it('does not hand off when a summary ends in a sentence that opens with a limit wording', async () => {
+    for (const line of [
+      'Your limit will reset at midnight UTC, and the new resetAt field in the response says exactly when.',
+      'You have exhausted your daily quota once 100 requests are made, which the new test asserts.',
+    ]) {
+      const { root, clock, mindly, sent } = setupFailover();
+      await claudeTurn(mindly, root, () => clock.advance(1000));
+      const summary = `Done. The quota endpoint is in.\n\n${line}`;
+      const transcript = join(root, 'summary.jsonl');
+      writeFileSync(transcript, jsonl([assistant(summary, clock.t)]));
+      await mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'stop', {
+          transcriptPath: transcript,
+          lastMessage: summary,
+        }),
+      );
+      const pid = mindly.store.projects.list()[0]!.id;
+      expect([line, mindly.store.handoffs.list(pid).length, sent.length]).toEqual([line, 0, 0]);
+    }
+  });
+
   it('does not take a retry for a limit', () => {
     const retries = [
       'Rate limited, retrying in 30s.',
@@ -1109,6 +1176,176 @@ describe('rate-limit failover', () => {
       expect([name, mindly.store.handoffs.get(h!.id).status]).toEqual([name, 'pending']);
       expect(mindly.store.handoffs.list(pid)).toHaveLength(1);
     }
+  });
+
+  async function resumedTurn(entries: (ts: number) => object[], lastMessage?: string) {
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    await hitLimit(mindly, root);
+    const [h] = mindly.store.handoffs.list(pid);
+    clock.advance(3_600_000);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'continue' }));
+    clock.advance(1000);
+    const transcript = join(root, 'resumed-turn.jsonl');
+    writeFileSync(transcript, jsonl(entries(clock.t)));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'stop', {
+        transcriptPath: transcript,
+        ...(lastMessage === undefined ? {} : { lastMessage }),
+      }),
+    );
+    return {
+      status: mindly.store.handoffs.get(h!.id).status,
+      count: mindly.store.handoffs.list(pid).length,
+    };
+  }
+
+  it('takes the reported last message as the end of a turn the transcript has not caught up with', async () => {
+    const working = (ts: number) => [toolUse(ts), toolResult(ts + 1)];
+    expect(await resumedTurn(working, 'All done, tests pass.')).toEqual({
+      status: 'cancelled',
+      count: 1,
+    });
+    expect(await resumedTurn(working)).toEqual({ status: 'pending', count: 1 });
+    expect(
+      await resumedTurn(working, "You've hit your usage limit. Upgrade to Pro or try again later."),
+    ).toEqual({ status: 'pending', count: 1 });
+  });
+
+  it('reads every error the client reported at the end of the turn', async () => {
+    const at = (ts: number) => new Date(ts).toISOString();
+    const notice = (ts: number) => ({
+      type: 'assistant',
+      timestamp: at(ts),
+      isApiErrorMessage: true,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'You’ve hit your limit · resets 10pm (Asia/Tokyo)' }],
+      },
+    });
+    const systemError = (ts: number) => ({
+      type: 'system',
+      level: 'error',
+      timestamp: at(ts),
+      content: 'Stop hook failed with exit code 1',
+    });
+    for (const [name, entries] of [
+      [
+        'client notice, then a system error',
+        (ts: number) => [toolUse(ts), toolResult(ts + 1), notice(ts + 2), systemError(ts + 3)],
+      ],
+      [
+        'assistant notice, then a system error',
+        (ts: number) => [
+          toolUse(ts),
+          toolResult(ts + 1),
+          assistant('Usage limit reached. Your limit will reset at 3pm.', ts + 2),
+          systemError(ts + 3),
+        ],
+      ],
+    ] as const) {
+      const { root, clock, mindly } = setupFailover();
+      await claudeTurn(mindly, root, () => clock.advance(1000));
+      const transcript = join(root, 'ending.jsonl');
+      writeFileSync(transcript, jsonl(entries(clock.t)));
+      await mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'stop', { transcriptPath: transcript }),
+      );
+      const pid = mindly.store.projects.list()[0]!.id;
+      expect([name, mindly.store.handoffs.list(pid).length]).toEqual([name, 1]);
+    }
+  });
+
+  it('skips a line that is cut off or still being written', async () => {
+    const partial = '{"type":"assistant","message":{"role":"assistant","content":[{"type":"te';
+    const entries = parseTranscriptTail(
+      `${jsonl([toolUse(1), assistant('Usage limit reached.', 2)])}${partial}\n`,
+    );
+    expect(entries).toHaveLength(2);
+    expect(detectRateLimit('claude-code', [entries[1]!.text])).toBe('claude.usage_limit_reached');
+
+    // A partial line is no answer: the resumed turn below was cut off after a tool result.
+    const { root, clock, mindly } = setupFailover();
+    await claudeTurn(mindly, root, () => clock.advance(1000));
+    const pid = mindly.store.projects.list()[0]!.id;
+    await hitLimit(mindly, root);
+    const [h] = mindly.store.handoffs.list(pid);
+    clock.advance(3_600_000);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'continue' }));
+    clock.advance(1000);
+    const transcript = join(root, 'partial.jsonl');
+    writeFileSync(transcript, `${jsonl([toolUse(clock.t), toolResult(clock.t + 1)])}${partial}`);
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'stop', { transcriptPath: transcript }),
+    );
+    expect(mindly.store.handoffs.get(h!.id).status).toBe('pending');
+
+    // And with the notice before the partial line, the limit is still found.
+    const fresh = setupFailover();
+    await claudeTurn(fresh.mindly, fresh.root, () => fresh.clock.advance(1000));
+    const cut = join(fresh.root, 'cut.jsonl');
+    writeFileSync(
+      cut,
+      `${jsonl([toolUse(fresh.clock.t), toolResult(fresh.clock.t + 1), assistant('Usage limit reached.', fresh.clock.t + 2)])}${partial}`,
+    );
+    await fresh.mindly.hooks.handle(
+      event(fresh.root, 'claude-code', 'cc', 'stop', { transcriptPath: cut }),
+    );
+    const fpid = fresh.mindly.store.projects.list()[0]!.id;
+    expect(fresh.mindly.store.handoffs.list(fpid)).toHaveLength(1);
+  });
+
+  it('reads a transcript that is one JSON document', async () => {
+    const session = {
+      sessionId: 'g1',
+      messages: [
+        { type: 'user', content: 'fix the tests' },
+        { type: 'gemini', content: 'Running them.', toolCalls: [{ name: 'run_shell_command' }] },
+        { type: 'gemini', content: 'You have exhausted your daily quota on this model.' },
+      ],
+    };
+    const pretty = `${JSON.stringify(session, null, 2)}\n`;
+    const entries = parseTranscriptTail(pretty);
+    expect(entries.map((e) => [e.user, e.agent, e.tool])).toEqual([
+      [true, false, false],
+      [false, true, true],
+      [false, true, false],
+    ]);
+    expect(parseTranscriptTail(JSON.stringify(session.messages, null, 2))).toHaveLength(3);
+    // Cut by the tail it is not read at all: no stray "}" taken for something the agent said.
+    expect(parseTranscriptTail(pretty.slice(pretty.indexOf('\n', 40) + 1))).toEqual([]);
+
+    const { root, clock, mindly } = setupFailover({
+      config: (c) => {
+        c.failover.order = ['gemini', 'claude-code'];
+      },
+    });
+    await mindly.hooks.handle(event(root, 'gemini', 'gm', 'session_start'));
+    clock.advance(1000);
+    await mindly.hooks.handle(event(root, 'gemini', 'gm', 'prompt', { prompt: 'fix the tests' }));
+    const file = join(root, 'session.json');
+    writeFileSync(file, pretty);
+    await mindly.hooks.handle(event(root, 'gemini', 'gm', 'stop', { transcriptPath: file }));
+    const pid = mindly.store.projects.list()[0]!.id;
+    expect(mindly.store.handoffs.list(pid).map((h) => h.toAgentKind)).toEqual(['claude-code']);
+  });
+
+  it('does not take a model entry that ends in a tool call for an answer', async () => {
+    const geminiTool = (ts: number) => [
+      {
+        type: 'gemini',
+        timestamp: new Date(ts).toISOString(),
+        content: 'Running the tests now.',
+        toolCalls: [{ name: 'run_shell_command' }],
+      },
+    ];
+    expect(await resumedTurn(geminiTool)).toEqual({ status: 'pending', count: 1 });
+    const answered = (ts: number) => [
+      ...geminiTool(ts),
+      { type: 'gemini', timestamp: new Date(ts + 1).toISOString(), content: 'All 42 tests pass.' },
+    ];
+    expect(await resumedTurn(answered)).toEqual({ status: 'cancelled', count: 1 });
   });
 
   it('keeps the handoff when a long last message ends in the notice and there is no transcript', async () => {
