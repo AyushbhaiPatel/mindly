@@ -542,22 +542,101 @@ describe('self-healing memory', () => {
     expect(Math.max(sameMs, goneMs)).toBeLessThan(500);
   });
 
-  it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {
-    // Opens with a redaction, so only runs of 200 whole lines could place it: in a 500 KB file
-    // that is more hashing than one check may do.
+  it('decides earlier whole-line evidence in a large file from where its kept text is', () => {
+    const timed = <T>(f: () => T): [T, number] => {
+      const t = performance.now();
+      const r = f();
+      return [r, performance.now() - t];
+    };
     const lines: string[] = [];
     for (let i = 0, size = 0; size < 500 * 1024; i++) {
       lines.push(`g${i}: ${i},`);
       size += 12;
     }
+    // Opens with a redaction: no fixed start, so it is placed by the lines its kept text is on.
     const original = `abcdef123456\n${lines.slice(0, 199).join('\n')}`;
     const stored = `[REDACTED]\n${lines.slice(0, 199).join('\n')}`;
     const hash = sha256(normalizeBlock(original));
-    expect(excerptState(`other\n${lines.join('\n')}`, stored, hash)).toBe('unknown');
+    const [gone, goneMs] = timed(() => excerptState(`other\n${lines.join('\n')}`, stored, hash));
+    expect(gone).toBe('absent');
+    const [there, thereMs] = timed(() =>
+      excerptState(`abcdef123456\n${lines.join('\n')}`, stored, hash),
+    );
+    expect(there).toBe('present');
+    expect(Math.max(goneMs, thereMs)).toBeLessThan(500);
+
+    // `lines:` evidence of an earlier build of this release: a cited block of 40 lines.
+    const block = Array.from({ length: 40 }, (_, i) => `  "g${i}": ${i},`).join('\n');
+    const cited = `lines:40:${sha256(normalizeBlock(block))}`;
+    const big = lines.join('\n');
+    expect(excerptState(`${block}\n${big}`, block, cited)).toBe('present');
+    const [deleted, deletedMs] = timed(() => excerptState(big, block, cited));
+    expect(deleted).toBe('absent');
+    expect(deletedMs).toBeLessThan(500);
+  });
+
+  it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {
+    // Nothing but redactions was kept, on 40 lines: only every run of 40 whole lines could place
+    // it, and in a 500 KB file that is more hashing than one check may do.
+    const lines: string[] = [];
+    for (let i = 0, size = 0; size < 500 * 1024; i++) {
+      lines.push(`k${i}`);
+      size += 6;
+    }
+    const keys = Array.from({ length: 40 }, (_, i) => `abcdef1234567890${i}`);
+    const stored = keys.map(() => '[REDACTED]').join('\n');
+    const hash = sha256(normalizeBlock(keys.join('\n')));
+    expect(excerptState(lines.join('\n'), stored, hash)).toBe('unknown');
     // A small file is decided, both ways.
     const small = lines.slice(0, 400).join('\n');
-    expect(excerptState(`other\n${small}`, stored, hash)).toBe('absent');
-    expect(excerptState(`abcdef123456\n${small}`, stored, hash)).toBe('present');
+    expect(excerptState(small, stored, hash)).toBe('absent');
+    expect(excerptState(`${small}\n${keys.join('\n')}`, stored, hash)).toBe('present');
+  });
+
+  it('places earlier evidence holding characters that are both unsafe and whitespace', () => {
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    for (const [name, ch] of [
+      ['zero width no-break space', '\uFEFF'],
+      ['vertical tab', '\u000B'],
+      ['form feed', '\u000C'],
+      ['lone carriage return', '\r'],
+    ] as const) {
+      const original = `sep: "a${ch}b", token: "${secret}"`;
+      const stored = sanitizeForContext(redactText(original), 2000);
+      const hash = sha256(normalizeBlock(original));
+      expect(stored, name).toContain('[REDACTED]');
+      const content = `// header\nconst X = { ${original}, region: "eu" };\nexport {};\n`;
+      expect(excerptState(content, stored, hash), name).toBe('present');
+      expect(excerptState(content.replace(secret, 'sk_live_other'), stored, hash), name).toBe(
+        'absent',
+      );
+    }
+    // An invisible character just before what was kept (it was removed from the excerpt).
+    const original = `\u200Btoken: "${secret}", region: "eu"`;
+    const stored = sanitizeForContext(redactText(original), 2000);
+    expect(stored.startsWith('token')).toBe(true);
+    const content = `const X = { ${original} };\n`;
+    expect(excerptState(content, stored, sha256(normalizeBlock(original)))).toBe('present');
+  });
+
+  it('places a cut excerpt whose cut fell inside a pair of a character', () => {
+    let checked = 0;
+    for (let pad = 0; pad < 4; pad++) {
+      const original = `password=Xy7kQ2pZ ${'x'.repeat(pad)}${'ab😀'.repeat(500)}`.slice(0, 2000);
+      const stored = sanitizeForContext(redactText(original), 2000);
+      const hash = sha256(normalizeBlock(original));
+      expect(stored.endsWith('…')).toBe(true);
+      const content = `// header\nconst LONG = "${original} and more";\nexport {};\n`;
+      // Whether the cut fell inside a pair, between two characters, or the original itself ends
+      // with half of one (it was cut to 2000 code units when accepted).
+      expect(excerptState(content, stored, hash), `pad ${pad}`).toBe('present');
+      expect(
+        excerptState(content.replace('Xy7kQ2pZ', 'Qq1wW2eE'), stored, hash),
+        `pad ${pad}`,
+      ).toBe('absent');
+      checked++;
+    }
+    expect(checked).toBe(4);
   });
 
   it('finds redacted evidence past the first 20,000 lines of a file', async () => {
