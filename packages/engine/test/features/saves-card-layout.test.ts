@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { CARD_CHAR_WIDTH_EM, renderSavesCard, type SavesSummary } from '../../src/index.js';
+import {
+  CARD_CHAR_WIDTH_EM,
+  CARD_EMOJI_EM,
+  CARD_WIDE_CHAR_EM,
+  renderSavesCard,
+  type SavesSummary,
+} from '../../src/index.js';
+
+/** Wide by script or block, independent of the card's own table. */
+const WIDE =
+  /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}|[\u3000-\u303F\uFF00-\uFF60\uFFE0-\uFFE6]/u;
+const EMOJI = /\p{Extended_Pictographic}/u;
 
 /*
  * Lays the card's text out the way the card itself estimates it (a character is a fixed share of
@@ -40,7 +51,14 @@ function boxes(svg: string): { boxes: Box[]; W: number; H: number } {
       : family.includes('serif') && !family.includes('sans-serif')
         ? CARD_CHAR_WIDTH_EM.serif
         : CARD_CHAR_WIDTH_EM.sans;
-    const w = [...text].length * size * em;
+    // A wide character (CJK, Hangul, kana, fullwidth forms) takes a full em, an emoji a bit more.
+    let ems = 0;
+    for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(
+      text,
+    )) {
+      ems += EMOJI.test(segment) ? CARD_EMOJI_EM : WIDE.test(segment) ? CARD_WIDE_CHAR_EM : em;
+    }
+    const w = ems * size;
     const anchor = attr('text-anchor') ?? 'start';
     const x0 = Number(attr('x'));
     const x = anchor === 'end' ? x0 - w : anchor === 'middle' ? x0 - w / 2 : x0;
@@ -142,6 +160,63 @@ describe('share card layout', () => {
     expect(svg).toContain('+');
     expect(svg).toContain('more');
     expect(svg).toContain('src/a.ts, src/b.ts<');
+  });
+
+  it('measures wide characters and emoji at their real width', () => {
+    const summary: SavesSummary = {
+      since: 1_749_400_000_000,
+      total: 3,
+      byKind: { impact_warned: 3 },
+      byAgent: { codex: 2, 'エージェント-助手-도우미-代理人-アシスタント': 1 },
+      recent: [],
+    };
+    const japanese = [
+      'docs/設計/ユーザー管理機能の詳細設計書_第二版.md',
+      'docs/設計/決済サービス連携の仕様と移行計画.md',
+      'docs/議事録/2025年度第三四半期の振り返り.md',
+    ];
+    const svg = renderSavesCard({
+      summary,
+      until: UNTIL,
+      details: {
+        projectName: '顧客オンボーディング基盤のモノレポジトリ第二版ステージング環境用の設定一式',
+        saves: [
+          { title: 'Codex was told Claude Code changed code it uses', paths: japanese },
+          {
+            title: `${'결제 서비스의 변경 사항을 읽기 전에 덮어쓰지 않도록 멈췄습니다 '.repeat(3)}`,
+            paths: ['src/한국어/결제서비스연동모듈의상세구현과테스트코드.ts', 'src/a.ts'],
+          },
+          {
+            title: `Shipped 🚀🚀🚀 ${'👩‍💻'.repeat(60)}`,
+            paths: [`assets/${'🎉'.repeat(40)}.png`, `assets/${'🔥'.repeat(40)}.png`],
+          },
+          {
+            title: 'ＦＵＬＬＷＩＤＴＨ ＴＩＴＬＥ '.repeat(6),
+            paths: ['ｓｒｃ／ｆｕｌｌｗｉｄｔｈ／ｆｉｌｅ＿ｎａｍｅ＿ｏｎｅ.ts'],
+          },
+        ],
+      },
+    });
+    expect(problems(svg)).toEqual([]);
+    // The file names are kept, the middles elided, and what does not fit is counted.
+    expect(svg).toContain('docs/設計/ユーザー管理機能の詳細設計書_第二版.md, ');
+    expect(svg).toMatch(/移行計画\.md, \+1 more</);
+    expect(svg).toMatch(/assets\/🎉+…🎉+\.png/u);
+    // An emoji sequence is never split.
+    expect(svg).not.toMatch(/‍…|‍</);
+  });
+
+  it('leaves room for a large total next to its caption', () => {
+    for (const total of [7, 42, 999, 1234, 98_765]) {
+      const svg = renderSavesCard({
+        summary: { since: 1_749_400_000_000, total, byKind: {}, byAgent: {}, recent: [] },
+        until: UNTIL,
+      });
+      expect(problems(svg), String(total)).toEqual([]);
+      // The serif's figures run wider than its letters: about 0.6 em each at 132 px.
+      const caption = Number(/<text x="(\d+)" y="250" font-size="40"/.exec(svg)?.[1]);
+      expect(caption, String(total)).toBeGreaterThanOrEqual(64 + String(total).length * 132 * 0.6);
+    }
   });
 
   it('keeps the standard 1200x630 card for up to six kinds', () => {

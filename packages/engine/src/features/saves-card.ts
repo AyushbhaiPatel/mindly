@@ -94,58 +94,104 @@ const MONO = "ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
  */
 export const CARD_CHAR_WIDTH_EM = { sans: 0.55, serif: 0.5, mono: 0.6 } as const;
 
+/** Width of a wide character (CJK, Hangul, kana, fullwidth forms), in em. */
+export const CARD_WIDE_CHAR_EM = 1;
+/** Width of an emoji, in em: colour emoji fonts draw them a little wider than square. */
+export const CARD_EMOJI_EM = 1.25;
+
 type CardFont = keyof typeof CARD_CHAR_WIDTH_EM;
 
-function charWidth(size: number, font: CardFont): number {
-  return size * CARD_CHAR_WIDTH_EM[font];
+/**
+ * Characters that take a full em in any font, the East Asian Wide and Fullwidth ranges: Hangul
+ * Jamo, CJK radicals and symbols, kana, CJK ideographs and their extensions, Yi, Hangul
+ * syllables, compatibility ideographs, vertical and small forms, fullwidth forms.
+ */
+const WIDE =
+  /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uA960-\uA97F\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6\u{20000}-\u{3FFFD}]/u;
+/** Marks (variation selectors among them) and format characters such as joiners: no width. */
+const ZERO_WIDTH = /^(?:\p{M}|\p{Cf})+$/u;
+const PICTOGRAPHS = /\p{Extended_Pictographic}/gu;
+
+const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** The user-perceived characters of `text` (an emoji sequence or a letter with marks is one). */
+function graphemes(text: string): string[] {
+  return Array.from(segmenter.segment(text), (s) => s.segment);
+}
+
+function graphemeEm(g: string, font: CardFont): number {
+  // A joined emoji is one glyph where the font has it and one per part where it does not.
+  const pictographs = g.match(PICTOGRAPHS)?.length ?? 0;
+  if (pictographs > 0) return pictographs * CARD_EMOJI_EM;
+  if (WIDE.test(g)) return CARD_WIDE_CHAR_EM;
+  if (ZERO_WIDTH.test(g)) return 0;
+  return CARD_CHAR_WIDTH_EM[font];
 }
 
 function textWidth(text: string, size: number, font: CardFont): number {
-  return [...text].length * charWidth(size, font);
+  let em = 0;
+  for (const g of graphemes(text)) em += graphemeEm(g, font);
+  return em * size;
+}
+
+/** The leading graphemes of `gs` that fit in `maxWidth`. */
+function takeWidth(
+  gs: readonly string[],
+  size: number,
+  font: CardFont,
+  maxWidth: number,
+): string[] {
+  const out: string[] = [];
+  let width = 0;
+  for (const g of gs) {
+    width += graphemeEm(g, font) * size;
+    if (width > maxWidth) break;
+    out.push(g);
+  }
+  return out;
 }
 
 /** `text`, cut at the end with an ellipsis when it is wider than `maxWidth`. */
 function fitEnd(text: string, size: number, font: CardFont, maxWidth: number): string {
-  const max = Math.max(1, Math.floor(maxWidth / charWidth(size, font)));
-  const chars = [...text];
-  return chars.length <= max
-    ? text
-    : `${chars
-        .slice(0, max - 1)
-        .join('')
-        .trimEnd()}…`;
+  if (textWidth(text, size, font) <= maxWidth) return text;
+  const room = maxWidth - textWidth('…', size, font);
+  return `${takeWidth(graphemes(text), size, font, room).join('').trimEnd()}…`;
 }
 
-/** A path of at most `max` characters: the start and the file name, the middle elided. */
-function elideMiddle(path: string, max: number): string {
-  const chars = [...path];
-  if (chars.length <= max) return path;
-  const head = Math.ceil((max - 1) * 0.4);
-  const tail = max - 1 - head;
-  return `${chars.slice(0, head).join('')}…${chars.slice(chars.length - tail).join('')}`;
+/** `path` no wider than `maxWidth`: its start and its file name, the middle elided. */
+function elideMiddle(path: string, size: number, font: CardFont, maxWidth: number): string {
+  if (textWidth(path, size, font) <= maxWidth) return path;
+  const room = Math.max(0, maxWidth - textWidth('…', size, font));
+  const gs = graphemes(path);
+  const tail = takeWidth([...gs].reverse(), size, font, room * 0.6).reverse();
+  const head = takeWidth(gs, size, font, room - textWidth(tail.join(''), size, font));
+  return `${head.join('')}…${tail.join('')}`;
 }
 
-/** Longest path shown on a details line, so that two fit next to a "+N more". */
+/** Widest path shown on a details line, in average characters, so two fit next to "+N more". */
 const PATH_MAX_CHARS = 48;
 
 /**
- * The files of one save on a line of at most `maxChars` characters: up to three paths, long
- * ones shortened in the middle, and "+N more" for the ones that do not fit.
+ * The files of one save on a line no wider than `maxWidth`: up to three paths, long ones
+ * shortened in the middle, and "+N more" for the ones that do not fit.
  */
-function filesLine(paths: readonly string[], maxChars: number): string {
-  const all = paths.map((p) => elideMiddle(sanitizeLine(p, 200), PATH_MAX_CHARS));
+function filesLine(paths: readonly string[], size: number, maxWidth: number): string {
+  const font = 'mono';
+  const pathMax = PATH_MAX_CHARS * CARD_CHAR_WIDTH_EM[font] * size;
+  const all = paths.map((p) => elideMiddle(sanitizeLine(p, 200), size, font, pathMax));
   const more = (n: number): string => (n > 0 ? `+${n} more` : '');
   const join = (shown: string[], rest: number): string =>
     [...shown, more(rest)].filter(Boolean).join(', ');
   const shown: string[] = [];
   for (const p of all.slice(0, 3)) {
     const next = [...shown, p];
-    if ([...join(next, all.length - next.length)].length > maxChars) break;
+    if (textWidth(join(next, all.length - next.length), size, font) > maxWidth) break;
     shown.push(p);
   }
   if (shown.length === 0) {
     const suffix = all.length > 1 ? `, ${more(all.length - 1)}` : '';
-    return `${elideMiddle(all[0] ?? '', maxChars - [...suffix].length)}${suffix}`;
+    const room = maxWidth - textWidth(suffix, size, font);
+    return `${elideMiddle(all[0] ?? '', size, font, room)}${suffix}`;
   }
   return join(shown, all.length - shown.length);
 }
@@ -190,7 +236,14 @@ export function renderSavesCard(input: SavesCardInput): string {
       X + 132,
       94,
       22,
-      esc(`· ${sanitizeLine(details.projectName, 60)}`),
+      esc(
+        fitEnd(
+          `· ${sanitizeLine(details.projectName, 60)}`,
+          22,
+          'sans',
+          W - X - textWidth(period, 22, 'sans') - 24 - (X + 132),
+        ),
+      ),
       `font-family="${SANS}" fill="#6b6a64"`,
     );
   }
@@ -199,7 +252,8 @@ export function renderSavesCard(input: SavesCardInput): string {
   const noun = summary.total === 1 ? 'save' : 'saves';
   const when = savesPeriodWords(summary.since, input.until);
   t(X, 250, 132, String(summary.total), `font-family="${SERIF}" fill="#141413"`);
-  const numberWidth = String(summary.total).length * 66 + 24;
+  // Old-style figures in the serif run to about 0.6 em at this size.
+  const numberWidth = Math.ceil(String(summary.total).length * 132 * 0.6) + 24;
   t(
     X + numberWidth,
     250,
@@ -273,7 +327,7 @@ export function renderSavesCard(input: SavesCardInput): string {
       const title = fitEnd(sanitizeLine(s.title, 200), 20, 'sans', W - 2 * X);
       t(X, dy, 20, esc(title), `font-family="${SANS}" fill="#3d3d3a"`);
       if (s.paths.length > 0) {
-        const files = filesLine(s.paths, Math.floor((W - 2 * X - 16) / charWidth(16, 'mono')));
+        const files = filesLine(s.paths, 16, W - 2 * X - 16);
         t(X + 16, dy + 22, 16, esc(files), `font-family="${MONO}" fill="#6b6a64"`);
       }
       dy += s.paths.length > 0 ? 56 : 34;
