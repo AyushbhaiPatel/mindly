@@ -631,6 +631,12 @@ describe('redact', () => {
     'curl.exe https://x.test ^\r\n  -H "Authorization: ^\r\n    Bearer PW"',
     // A header map in JSON, the key quoted, on a line that names a client.
     '{"tool":"curl","url":"https://x.test","headers":{"Authorization":"Bearer PW"}}',
+    // A quote opened before the continuation, or a value glued to it across one.
+    'http POST https://x.test Authorization:"\\\n  Bearer PW"',
+    'curl https://x.test -H Authorization:"\\\n  Bearer PW"',
+    'curl https://x.test -H "Authorization: Bearer "\\\n"PW"',
+    // Backslash-escaped spaces in an unquoted value.
+    'curl x -H Authorization:\\ Bearer\\ PW',
   ])('redacts a header token: %j', (template) => {
     const secret = 'f00dfacecafebeef1234567890abcdef';
     const out = redactText(template.replace('PW', secret));
@@ -643,6 +649,12 @@ describe('redact', () => {
     `{"env":{"Authorization":""},"args":["curl","-H","Authorization: Negotiate PW"]}`,
     `{"env":{"Authorization":"none"},"argv":["curl","-H","Proxy-Authorization: NTLM PW"]}`,
     `curl x -H"Authorization":-H"Proxy-Authorization: NTLM PW"`,
+    // A variable or a placeholder is no credential either.
+    `{"env":{"Authorization":"$GITHUB_TOKEN_VALUE"},"args":["curl","-H","Authorization: Negotiate PW"]}`,
+    `{"env":{"Authorization":"<your-access-token>"},"args":["curl","-H","Proxy-Authorization: NTLM PW"]}`,
+    `curl x -H"Authorization:$AUTH_HEADER_VALUE"-H"Proxy-Authorization: NTLM PW"`,
+    // Every header of a run is read, each one after the value of the one before.
+    `curl x "-H","Authorization:0123456789abcdef0123456789abcdef","-H","Proxy-Authorization:PW"`,
   ])('redacts a header after one with no credential: %j', (template) => {
     const secret = 'f00dfacecafebeef1234567890abcdef';
     expect(redactText(template.replace('PW', secret))).not.toContain(secret);

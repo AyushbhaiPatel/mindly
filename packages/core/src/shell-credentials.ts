@@ -73,7 +73,7 @@ const AUTH_HEADER = /(?:proxy-)?authorization["']?[ \t]*:[ \t]*/giy;
 
 /** The scheme before the credentials in an `Authorization` header, kept as written. */
 const AUTH_SCHEME =
-  /(bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|aws4-[a-z0-9-]+|hoba|mutual|vapid)(?:[ \t]+|(?=[ \t]*[\\^`]\r?\n))/iy;
+  /(bearer|basic|token|apikey|api-key|digest|negotiate|ntlm|aws4-[a-z0-9-]+|hoba|mutual|vapid)(?:[ \t]+|\\[ \t]|(?=[ \t]*["']?[\\^`]\r?\n))/iy;
 
 /**
  * Schemes whose credentials are `name=value` parameters: Digest, and AWS Signature Version 4 in
@@ -380,59 +380,70 @@ class Finder {
    * An `Authorization` header from `at`, just after its colon, when its value looks like a
    * credential: a scheme and a token of at least 8 characters, or a single token of at least 16.
    * The scheme is kept. A word in a sentence (`the Authorization: header`), or a quote that
-   * closes before any value (`headers['Authorization: ']`), is not a credential.
+   * closes before any value (`headers['Authorization: ']`), is not a credential. `open` is the
+   * quote the header name is inside (`"Authorization: ...`), or '' when it is in none.
+   *
+   * Returns where the value read ends, so the search for the next header in the run goes on
+   * from there.
    */
-  private header(at: number, lineEnd: number): boolean {
+  private header(at: number, lineEnd: number, open: string): number {
     const text = this.text;
-    let from = this.skipQuoting(at, lineEnd);
+    const quote = { open };
+    let from = this.gap(at, lineEnd, quote);
     // A quote right at the colon closes the string the header name was in: no value follows.
-    if (from > at && (text[from] === ']' || text[from] === ',' || text[from] === ')')) return false;
+    if (from > at && (text[from] === ']' || text[from] === ',' || text[from] === ')')) return from;
     AUTH_SCHEME.lastIndex = from;
     const scheme = AUTH_SCHEME.exec(text);
-    if (scheme !== null) from = this.skipQuoting(from + scheme[0].length, lineEnd);
+    if (scheme !== null) from = this.gap(from + scheme[0].length, lineEnd, quote);
     let to = from;
     while (to < lineEnd) {
       const c = text[to] ?? '';
       if (isSpace(c) || c === '"' || c === "'" || c === '\\' || c === '`') break;
       to++;
     }
-    if (to - from < (scheme !== null ? MIN_SCHEME_TOKEN : MIN_BARE_TOKEN)) return false;
+    if (to - from < (scheme !== null ? MIN_SCHEME_TOKEN : MIN_BARE_TOKEN)) return to;
     // Digest and AWS Signature parameters (`username="u"`) are read by `params`, on the line; a
     // single token after those schemes (`Digest dXNlcm5h...==`) is redacted as one.
     const params = PARAM_SCHEME.test(scheme?.[1] ?? '');
-    if (params && PARAM_START.test(text.slice(from, to))) return true;
-    this.push(from, to);
-    return true;
+    if (!(params && PARAM_START.test(text.slice(from, to)))) this.push(from, to);
+    return to;
   }
 
   /**
-   * From `at`: past quotes and backslashes, and past a line continuation (`\`, `^` or a backtick
-   * at the end of a physical line) with the spaces before and after it, which a header value can
-   * be split by (`-H "Authorization: \` and then `Bearer ...` on the next line). A continuation is
-   * crossed only while the value is still open: never after a quote, which may close it
-   * (`-H "Authorization:" \` removes the header, and the next line is another argument).
+   * From `at`, inside a header value: past the quotes around it, read as a shell reads them
+   * (`quote.open` is the quote open at `at`, and is kept up to date), and past a line
+   * continuation (`\`, `^` or a backtick at the end of a physical line) that stays inside the
+   * value: one inside an open quote (`-H "Authorization: \` and then `Bearer ...`), or one glued
+   * to the value (`"Bearer "\` and then `"<token>"`). After a closing quote, a space ends the
+   * value (`-H "Authorization:" \` removes the header; the next line is another argument). A
+   * backslash-escaped space outside quotes is part of the value (`Authorization:\ Bearer\ ...`).
    */
-  private skipQuoting(at: number, lineEnd: number): number {
+  private gap(at: number, lineEnd: number, quote: { open: string }): number {
     const text = this.text;
+    const toggle = (q: string): void => {
+      if (quote.open === '') quote.open = q;
+      else if (quote.open === q) quote.open = '';
+    };
     let k = at;
-    let quoted = false;
     while (k < lineEnd) {
       const c = text[k] ?? '';
-      const next = text[k + 1] === '\r' ? k + 2 : k + 1;
-      if (!quoted && (c === '\\' || c === '^' || c === '`') && text[next] === '\n') {
-        k = next + 1;
-        while (k < lineEnd && (text[k] === ' ' || text[k] === '\t')) k++;
-      } else if (c === '"' || c === "'" || c === '\\') {
-        if (c !== '\\') quoted = true;
+      const d = text[k + 1] ?? '';
+      const newline = d === '\r' ? k + 2 : k + 1;
+      if ((c === '\\' || c === '^' || c === '`') && text[newline] === '\n') {
+        const glued = k > at || (k > 0 && !isSpace(text[k - 1] ?? ''));
+        if (quote.open === '' && !glued) break;
+        k = newline + 1;
+        if (quote.open !== '') while (k < lineEnd && (text[k] === ' ' || text[k] === '\t')) k++;
+      } else if (c === '\\' && (d === '"' || d === "'")) {
+        toggle(d);
+        k += 2;
+      } else if (c === '"' || c === "'") {
+        toggle(c);
         k++;
-      } else if (!quoted && (c === ' ' || c === '\t')) {
-        // Spaces count only before a continuation.
-        let j = k;
-        while (j < lineEnd && (text[j] === ' ' || text[j] === '\t')) j++;
-        const after = text[j + 1] === '\r' ? j + 2 : j + 1;
-        const cj = text[j] ?? '';
-        if (!((cj === '\\' || cj === '^' || cj === '`') && text[after] === '\n')) break;
-        k = j;
+      } else if (c === '\\' && (d === ' ' || d === '\t') && quote.open === '') {
+        k += 2;
+      } else if ((c === ' ' || c === '\t') && quote.open !== '') {
+        k++;
       } else {
         break;
       }
@@ -543,10 +554,13 @@ class Finder {
         if (header === null) continue;
         const glued = k >= runStart + 2 && text[k - 2] === '-' && text[k - 1] === 'H';
         if (!glued && k > runStart && /[\p{L}\p{N}_-]/u.test(text[k - 1] ?? '')) continue;
-        // A header with no credential (`"Authorization":""`, `-H "Authorization:"`) does not end
-        // the search: a real one may come later in the same run.
-        if (this.header(k + header[0].length, end)) break;
-        k += header[0].length - 1;
+        // Every header in the run is read, each from where the one before it ends: one with no
+        // credential (`"Authorization":"$TOKEN"`) does not hide a real one after it.
+        const keyClosed = /["']\s*:/.test(header[0]);
+        const before = text[k - 1] ?? '';
+        const open = !keyClosed && (before === '"' || before === "'") ? before : '';
+        const resume = this.header(k + header[0].length, end, open);
+        k = Math.max(k + header[0].length, resume) - 1;
       }
       const option = readOption(text, runStart, runEnd, gate(runStart));
       if (option === null) continue;
