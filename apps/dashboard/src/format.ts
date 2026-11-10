@@ -129,28 +129,42 @@ export function splitList(s: string): string[] {
 /**
  * Splits the "applies to files" field into path patterns: one per line, or separated by commas.
  * A comma inside braces belongs to the pattern (`src/{api,web}/**`), so it does not split there.
+ *
+ * Braces are read the way the matcher reads them: one group at a time, never nested (a `{`
+ * inside a group is a plain character, and the first `}` closes the group). The alternatives of
+ * a group are trimmed, so `{api, web}` means `api` or `web`, not `api` or ` web`.
  */
 export function splitGlobs(s: string): string[] {
   const out: string[] = [];
   let cur = '';
-  let depth = 0;
+  /** The text of the open group after its `{`, or null outside a group. */
+  let group: string | null = null;
+  const closeLine = (): void => {
+    // Braces never span lines: an unclosed one must not swallow the patterns below it.
+    out.push(group === null ? cur : `${cur}{${group}`);
+    cur = '';
+    group = null;
+  };
   for (const ch of s) {
     if (ch === '\n' || ch === '\r') {
-      // Braces never span lines: an unclosed one must not swallow the patterns below it.
+      closeLine();
+    } else if (group !== null) {
+      if (ch === '}') {
+        const alternatives = group.split(',').map((a) => a.trim());
+        cur += `{${alternatives.join(',')}}`;
+        group = null;
+      } else {
+        group += ch;
+      }
+    } else if (ch === ',') {
       out.push(cur);
       cur = '';
-      depth = 0;
-      continue;
+    } else if (ch === '{') {
+      group = '';
+    } else {
+      cur += ch;
     }
-    if (ch === ',' && depth === 0) {
-      out.push(cur);
-      cur = '';
-      continue;
-    }
-    if (ch === '{') depth++;
-    else if (ch === '}' && depth > 0) depth--;
-    cur += ch;
   }
-  out.push(cur);
+  closeLine();
   return out.map((x) => x.trim()).filter(Boolean);
 }
