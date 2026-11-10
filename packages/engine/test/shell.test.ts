@@ -554,8 +554,55 @@ describe('write targets of a shell command', () => {
     expect(targets('git config -f tool.ini a.b c')).toEqual(['tool.ini']);
     expect(whole('git config -f tool.ini a.b c')).toBe(false);
     expect(whole('git config -f .git/config user.email x@example.invalid')).toBe(false);
-    // Settings given to a shell stay with it.
-    expect(whole("HOME=fakehome sh -c 'true'; git status")).toBe(false);
+    // A variable git reads, set anywhere on the line, counts for every git command on it: which
+    // shell gets it, and whether it comes before or after, is not followed.
+    for (const cmd of [
+      "HOME=fakehome sh -c 'true'; git status",
+      'git status; export GIT_DIR=../other/.git',
+      'f() { export GIT_DIR=x; }; git status',
+      '(HOME=fakehome); git status',
+      'for HOME in x; do :; done; git status',
+      'read -r GIT_DIR < f; git status',
+      'read -a PATH < f; git status',
+      'printf -v HOME x; git status',
+      'mapfile -t PATH < f; git status',
+      'getopts ab GIT_DIR; git status',
+      'let HOME=1; git status',
+      '(( GIT_DIR = 1 )); git status',
+      'echo $(( HOME += 1 )); git status',
+      '(( PATH++ )); git status',
+      'declare -n r=x; git status',
+      'local -n r; git status',
+      'declare -x msg=x; git status',
+      'export msg; git status',
+      'set -a; git status',
+      'set -o allexport; git status',
+      '. ./env.sh; git status',
+      'eval "$cmd"; git status',
+      'trap "$cmd" EXIT; git status',
+      'declare "$name=x"; git status',
+      'export "$name"; git status',
+      'git status; GIT_PAGER=$p git log',
+      'X[0]=1; git status',
+    ]) {
+      expect(whole(cmd), cmd).toBe(true);
+    }
+    // A lower-case variable that is not exported is the shell's own; harmless ones are harmless.
+    for (const cmd of [
+      'msg=fix; git status',
+      'msg="fix"; git commit -qam "$msg"',
+      'for f in a b; do git add "$f"; done',
+      'while read -r line; do git add "$line"; done < list',
+      'local out=$(git status); git status',
+      'let i=i+1; git status',
+      '(( n == 1 )); git status',
+      'export LANG=C GIT_PAGER=cat; git status',
+      'set -euo pipefail; git status',
+      "trap 'rm -f x' EXIT; git status",
+      'f() { echo hi; }; f; git status',
+    ]) {
+      expect(whole(cmd), cmd).toBe(false);
+    }
     // Files and folders git fills.
     expect(targets('git read-tree --index-output=certs/idx.pem HEAD')).toEqual(['certs/idx.pem']);
     expect(lands('git init -q -b main --bare vendor')).toEqual(['vendor']);
@@ -617,6 +664,11 @@ describe('write targets of a shell command', () => {
       'GIT_DIR=other.git git checkout -- secret/key.txt',
       'git --git-dir=other.git checkout -- secret/key.txt',
       'git --icase-pathspecs checkout -- secret/key.txt',
+      // A variable git reads, set anywhere on the line: after it, or in a shell of its own.
+      'git checkout -- secret/key.txt; export GIT_DIR=other.git',
+      'git checkout -- secret/key.txt; f() { export GIT_INDEX_FILE=x; }',
+      '(HOME=elsewhere); git checkout -- secret/key.txt',
+      'git checkout -- secret/key.txt; for GIT_DIR in other.git; do :; done',
     ]) {
       const later = questions(cmd).filter((x) => x.pathspecs.some((p) => p.endsWith('key.txt')));
       expect(later, cmd).toEqual([]);

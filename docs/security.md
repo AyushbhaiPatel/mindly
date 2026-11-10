@@ -47,13 +47,21 @@ memory, which is then injected into every other agent.
   index, when its subcommand is known to do so and every option and setting it is given keeps it
   so. Anything else is taken as a possible change of the whole working tree, which gets a warning
   when a covered file is there: an alias, a subcommand or option not known here, a `-c` setting
-  not known to be harmless, a variable set for git or exported earlier on the line (also for a
-  shell that runs git, with `+=` as with `=`, under `set -a`, or by `eval`, a `trap` or a file
-  read with `source`) other than locale, time zone, terminal, author and harmless pager or editor
-  ones, a push into a repository on this machine, and a config write that changes what later
-  commands do. A variable set without `export` counts when its name is upper-case, as one already
-  in the environment (`HOME`, `PATH`) may be; a lower-case one (`msg=fix`) stays the shell's. The folders git fills (a clone, a new repository or working tree, a submodule) are
-  checked as written as a whole, and the code it runs (`rebase --exec`, `bisect run`,
+  not known to be harmless, a variable git may read set anywhere on the line, a push into a
+  repository on this machine, and a config write that changes what later commands do. Variables
+  are read line-wide: one set anywhere on the line, before or after the git command, in a
+  function, a group, a subshell, `$( … )`, code run by `eval`, a `trap`, `bash -c` or git
+  itself, counts for every git command on it, whatever shell it ends up in. It counts when the
+  line assigns, exports, declares, loops over (`for X in`), reads (`read`, `mapfile`, `printf
+-v`, `getopts`) or computes (`let`, `(( … ))`) an upper-case or `GIT_*` variable other than
+  locale, time zone, terminal, prompt, author and harmless pager or editor ones; when it exports
+  any variable (`export`, `declare -x`) or turns on `set -a`; when it makes a nameref
+  (`declare -n`); when it reads a file with `source` or `.`; when `eval` or `trap` is given code
+  that is not plain text (`eval "$(…)"`); and when a variable's own name is not plain text. A
+  lower-case variable that is not exported (`msg=fix`) stays the shell's. So a line that exports
+  anything, or sets an upper-case variable for any program (`CI=1 npm test && git commit`), gets
+  a warning for each of its git commands when a covered file is there. The folders git fills (a
+  clone, a new repository or working tree, a submodule) are checked as written as a whole, and the code it runs (`rebase --exec`, `bisect run`,
   `difftool --extcmd`, `submodule foreach`, a `!` alias) is read like any other command. What
   git runs on its own, from settings already in place, is not seen: hooks in `.git/hooks` or
   under a `core.hooksPath` set earlier (husky, lint-staged and the like running on commit),

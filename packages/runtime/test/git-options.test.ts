@@ -39,6 +39,9 @@ const AHEAD =
   'git checkout -q -b ahead && echo k9 > certs/server.pem && git commit -qam k9 && git checkout -q main && git config receive.denyCurrentBranch updateInstead';
 const HOOK =
   "mkdir -p hk && printf '#!/bin/sh\\necho hook > certs/server.pem\\n' > hk/pre-commit && chmod +x hk/pre-commit";
+/** A home directory whose settings run the hook above. */
+const FAKE_HOME = `${HOOK} && mkdir -p fakehome && printf '[core]\\n\\thooksPath = hk\\n' > fakehome/.gitconfig`;
+const COMMIT = 'git commit -q --allow-empty -m x';
 
 const cases: {
   name: string;
@@ -336,6 +339,79 @@ const cases: {
     command: 'git push --recurse-submodules no . ahead:main',
     want: ['warn', 'deny'],
   },
+  // A variable set anywhere on the line counts for every git command on it: in a function, before
+  // or after, in a shell of its own or not, in whatever form the shell sets one.
+  {
+    name: 'export in a function called before git',
+    command: `f() { export GIT_EXTERNAL_DIFF=${EXT}; }; f; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'export in a function defined with the keyword',
+    command: `function f { export GIT_EXTERNAL_DIFF=${EXT}; }; f; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'HOME set in a function',
+    prep: FAKE_HOME,
+    command: `f() { HOME=fakehome; }; f; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'eval in a function',
+    command: `f() { eval "export GIT_EXTERNAL_DIFF=${EXT}"; }; f; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'source in a function',
+    command: `printf '%s\\n' "export GIT_EXTERNAL_DIFF=${EXT}" > env.sh; f() { source ./env.sh; }; f; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'git in a function, export after it',
+    command: `f() { git diff v1; }; export GIT_EXTERNAL_DIFF=${EXT}; f`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'git in an EXIT trap, export after it',
+    command: `trap 'git diff v1' EXIT; export GIT_EXTERNAL_DIFF=${EXT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'an empty array, then an export in a group',
+    command: `a=(); { export GIT_EXTERNAL_DIFF=${EXT}; }; git diff v1`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'for HOME in',
+    prep: FAKE_HOME,
+    command: `for HOME in fakehome; do ${COMMIT}; done`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'read HOME',
+    prep: FAKE_HOME,
+    command: `read HOME <<< fakehome; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'printf -v HOME',
+    prep: FAKE_HOME,
+    command: `printf -v HOME fakehome; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'declare -n, then a lower-case assignment',
+    prep: FAKE_HOME,
+    command: `declare -n h=HOME; h=fakehome; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'typeset -n, then a lower-case assignment',
+    prep: FAKE_HOME,
+    command: `typeset -n h=HOME; h=fakehome; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
 ];
 
 /** Commands that write no covered file: never blocked, and not warned about. */
@@ -383,9 +459,13 @@ const quiet: { name: string; prep?: string; command: string }[] = [
     command: 'msg="fix"; git commit -qam "$msg"',
   },
   {
-    name: 'an export in a subshell or a pipeline stays there',
-    command: `(export GIT_EXTERNAL_DIFF=${EXT}); export GIT_PAGER=x | true; git status`,
+    name: 'a harmless export in a subshell or a pipeline',
+    command: '(export GIT_PAGER=cat); export LANG=C | true; git status',
   },
+  { name: 'a function that only prints', command: 'f() { echo hi; }; f; git status' },
+  { name: 'a loop that adds files', command: 'for f in src/a.ts; do git add "$f"; done' },
+  { name: 'strict shell options', command: 'set -euo pipefail; git status' },
+  { name: 'a trap that removes a file', command: "trap 'rm -f x' EXIT; git status" },
 ];
 
 describe('git commands that write a covered file through an option or a setting', () => {
@@ -430,6 +510,25 @@ describe('git commands read without false warnings or slow reading', () => {
       for (const flags of ['--recurse-submodules', '--recursive', '--ipv4', '-4 --no-recursive']) {
         const r = await g.shell(`git clone ${flags} https://github.com/o/r.git`);
         expect(verdictOf(r), flags).toBe('allow');
+      }
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('repeated options with values are read in good time', async () => {
+    const g = setUp(PEM);
+    try {
+      for (const [head, unit] of [
+        ['git push', ' -o x'],
+        ['git log', ' -Lx'],
+        ['git clone', ' -c x'],
+        ['git', ' -c a=b'],
+      ] as const) {
+        const command = `${head}${unit.repeat(Math.floor((199_980 - head.length) / unit.length))} origin`;
+        const t0 = Date.now();
+        await g.shell(command);
+        expect(Date.now() - t0, `${head}${unit}`).toBeLessThan(1000);
       }
     } finally {
       g.mindly.close();

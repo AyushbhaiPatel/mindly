@@ -418,6 +418,8 @@ interface Word {
   mask: string;
   /** Holds a variable or substitution whose value is unknown. */
   dynamic: boolean;
+  /** Where in `text` the first value not known here stands (set with `dynamic` while parsing). */
+  dynamicAt?: number | undefined;
   /**
    * A brace expansion too large to read, written as a wildcard that matches every word it stands
    * for: only part of what it names was read.
@@ -449,6 +451,8 @@ interface SimpleCommand {
   apart: boolean;
   /** The here-document is expanded by the shell (its delimiter was not quoted). */
   stdinExpands: boolean;
+  /** Text of `(( … ))` and `$(( … ))` arithmetic written in this command. */
+  arithmetic: string[];
   /** Not a command: where a `( … )` subshell starts or ends. */
   subshell?: 'open' | 'close';
 }
@@ -589,6 +593,7 @@ function parse(
     otherwise,
     apart: piped,
     stdinExpands: false,
+    arithmetic: [],
   });
   // Open `{ … }` groups; `true` for the body of a function, which runs only when it is called.
   const groups: boolean[] = [];
@@ -605,6 +610,12 @@ function parse(
   let heredocNext: { stripTabs: boolean } | null = null;
 
   const cur = (): Word => (open ??= { text: '', mask: '', dynamic: false });
+  /** The open word holds a value not known here, from where it has got to. */
+  const unknownValue = (): void => {
+    const w = cur();
+    w.dynamic = true;
+    w.dynamicAt ??= w.text.length;
+  };
   const put = (text: string, quoted: boolean): void => {
     const w = cur();
     w.text += text;
@@ -636,7 +647,13 @@ function parse(
     endWord();
     pendingRedirect = null;
     const c = current;
-    if (c.words.length > 0 || c.redirects.length > 0 || c.nested.length > 0 || c.stdin !== null)
+    if (
+      c.words.length > 0 ||
+      c.redirects.length > 0 ||
+      c.nested.length > 0 ||
+      c.stdin !== null ||
+      c.arithmetic.length > 0
+    )
       commands.push(c);
     current = blank(piped, otherwise);
   };
@@ -666,7 +683,7 @@ function parse(
     else if (what === 'git rev-parse --show-toplevel') put(TOP, quoted);
     else {
       current.nested.push(code);
-      cur().dynamic = true;
+      unknownValue();
     }
   };
   /** Reads `$…` at `i` into the open word; returns the index after it. */
@@ -675,7 +692,8 @@ function parse(
     if (next === '(' && src[i + 2] === '(') {
       // `$(( … ))`: arithmetic, a number nobody can read from the text.
       const end = src.indexOf('))', i + 3);
-      cur().dynamic = true;
+      current.arithmetic.push(src.slice(i + 3, end === -1 ? src.length : end));
+      unknownValue();
       return end === -1 ? src.length : end + 2;
     }
     if (next === '(') {
@@ -698,7 +716,7 @@ function parse(
     if (!m && next === '{') {
       // `${f%.ts}`, `${x:-y}`: a value that cannot be read from the text.
       const end = src.indexOf('}', i + 2);
-      cur().dynamic = true;
+      unknownValue();
       return end === -1 ? src.length : end + 1;
     }
     if (!m) {
@@ -709,7 +727,7 @@ function parse(
     if (name === 'PWD') put(HERE, quoted);
     else if (name === 'HOME') put(HOME, quoted);
     else if (name === 'OLDPWD') put(BACK, quoted);
-    else cur().dynamic = true;
+    else unknownValue();
     return i + m[0].length;
   };
   const backtick = (i: number, quoted: boolean): number => {
@@ -855,6 +873,7 @@ function parse(
     if (c === '(' && src[i + 1] === '(' && open === null) {
       // `(( … ))`: arithmetic. Its `>` and `<` compare numbers.
       const end = src.indexOf('))', i + 2);
+      current.arithmetic.push(src.slice(i + 2, end === -1 ? src.length : end));
       i = end === -1 ? src.length : end + 2;
       continue;
     }
@@ -1036,8 +1055,7 @@ type Verdict =
   | { kind: 'writes'; items: Item[] }
   | { kind: 'unknown'; args: Word[]; bare: boolean }
   | { kind: 'cd'; how: 'cd' | 'pushd' | 'popd'; dir: Word | null }
-  /** Shell code it runs: in a shell of its own, or in this one (`same`: `eval`, `trap`). */
-  | { kind: 'inline'; code: string; same?: boolean }
+  | { kind: 'inline'; code: string }
   | { kind: 'script'; code: string }
   | {
       kind: 'git';
@@ -1072,7 +1090,23 @@ const looksLikePath = (text: string): boolean =>
 /** A `host:path` argument of scp or rsync: not a local file. */
 const isRemote = (w: Word): boolean => /^[^/]+:/.test(w.text);
 
-function classify(words: readonly Word[], stdin: string | null, depth = 0): Verdict {
+/**
+ * How a git command a command runs is read: `settings`, a variable that may change what git
+ * does is set for it; `timeUp`, the reading is out of time.
+ */
+interface GitContext {
+  settings: boolean;
+  timeUp: () => boolean;
+}
+
+const PLAIN_GIT: GitContext = { settings: false, timeUp: () => false };
+
+function classify(
+  words: readonly Word[],
+  stdin: string | null,
+  depth = 0,
+  git: GitContext = PLAIN_GIT,
+): Verdict {
   const first = words[0];
   if (first === undefined) return READS;
   const unknown: Verdict = { kind: 'unknown', args: words.slice(1), bare: true };
@@ -1236,22 +1270,19 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
       }
       break;
     case 'git':
-      return readGit(words, stdin);
+      return readGit(words, stdin, git.settings, git.timeUp);
     case 'trap':
       // The first argument is what runs when the signal comes.
-      return args[0] && args.length > 1
-        ? { kind: 'inline', code: args[0].text, same: true }
-        : READS;
+      return args[0] && args.length > 1 ? { kind: 'inline', code: args[0].text } : READS;
     case 'alias': {
       const code = args
         .filter((w) => w.text.includes('='))
         .map((w) => w.text.slice(w.text.indexOf('=') + 1));
-      return code.length > 0 ? { kind: 'inline', code: code.join('\n'), same: true } : READS;
+      return code.length > 0 ? { kind: 'inline', code: code.join('\n') } : READS;
     }
     case 'eval':
       return {
         kind: 'inline',
-        same: true,
         code: words
           .slice(1)
           .map((w) => w.text)
@@ -1292,7 +1323,7 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
         KNOWN_WRITERS.has(name) ||
         Object.hasOwn(FIXERS, name);
       if (!explicit && !known) return none;
-      return classify(words.slice(words.indexOf(runs)), stdin, depth + 1);
+      return classify(words.slice(words.indexOf(runs)), stdin, depth + 1, git);
     }
     default:
       break;
@@ -1312,7 +1343,7 @@ function classify(words: readonly Word[], stdin: string | null, depth = 0): Verd
     if ((program === 'python' || program === 'python3') && words[1]?.text === '-m') {
       const module = words[2]?.text ?? '';
       const known = CHECKING_PROGRAMS.has(module) || Object.hasOwn(FIXERS, module);
-      if (known && depth < MAX_DEPTH) return classify(words.slice(2), stdin, depth + 1);
+      if (known && depth < MAX_DEPTH) return classify(words.slice(2), stdin, depth + 1, git);
       return { kind: 'unknown', args: [], bare: false };
     }
     const at = words.findIndex(
@@ -1610,69 +1641,171 @@ const variableWord = (w: Word): { name: string; value: string | null; adds: bool
  */
 const unsafeVariable = (w: Word): boolean => {
   const v = variableWord(w);
-  return v !== null && !harmlessVariable(v.name, v.value ?? '', v.adds);
+  // A value with a substitution in it is not known here.
+  return v !== null && !harmlessVariable(v.name, v.value ?? '', v.adds || w.dynamic);
 };
 
 /**
- * A variable that may already be in the environment, so that setting it without `export` still
- * reaches git: one named the way environment variables are (`HOME`, `PATH`, `GIT_DIR`). A
- * lower-case name (`msg=fix`) is the shell's own unless it is exported.
+ * Whether setting `name` may change what git does: a name the way environment variables are
+ * written (`HOME`, `PATH`, `GIT_DIR`), which may already be exported, and not a harmless one. A
+ * lower-case name (`msg=fix`) is the shell's own. `value` is null when it is not known here.
  */
-const environmentName = (w: Word): boolean =>
-  /^[A-Z_][A-Z0-9_]*$/.test(variableWord(w)?.name ?? '');
-
-/** Shell words that set variables for the commands after them (`export GIT_DIR=x`). */
-const EXPORTS = new Set(['export', 'declare', 'typeset', 'local', 'readonly']);
+const gitReads = (name: string | null, value: string | null): boolean =>
+  name === null ||
+  ((/^[A-Z_][A-Z0-9_]*$/.test(name) || /^git_/i.test(name)) &&
+    !harmlessVariable(name, value ?? '', value === null));
 
 /**
- * Whether a command that sets variables (`export`, `declare`, an assignment alone) may change
- * what a later git command runs with. `allExport`: `set -a` is on, so every variable set is
- * exported. Variables set without being exported reach git only when already in the environment.
+ * The variable a word names for a builtin that sets one (`export X=1`, `read X`, `declare
+ * "$n=1"`): its name, null when a value not known here stands in it, and its value, null when
+ * the text does not hold it (none given, `+=`, or a substitution in it).
  */
-function setsGitVariable(
-  program: string,
-  cmd: SimpleCommand,
-  words: readonly Word[],
-  allExport: boolean,
-): boolean {
-  if (words.length === 0) {
-    // Assignments alone: `X=1; git …`.
-    return cmd.words.some(
-      (w) => isAssignment(w) && unsafeVariable(w) && (allExport || environmentName(w)),
-    );
+function namedVariable(w: Word): { name: string | null; value: string | null } {
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?(\+?=)?/.exec(w.text);
+  const name = m?.[1];
+  if (name === undefined || (w.dynamic && (w.dynamicAt ?? 0) <= name.length)) {
+    return { name: null, value: null };
   }
-  if (!EXPORTS.has(program)) return false;
-  const flags = words.slice(1).filter(isFlag);
-  const names = words.slice(1).filter((w) => !isFlag(w) && !w.text.startsWith('+'));
-  // `-f` names functions; `export -n` takes the export away (as `declare +x` does).
-  const letters = flags.filter((f) => !f.text.startsWith('--')).map((f) => f.text.slice(1));
-  if (letters.some((l) => l.includes('f'))) return false;
-  if (program === 'export' && letters.some((l) => l.includes('n'))) return false;
-  const exported = program === 'export' || allExport || letters.some((l) => l.includes('x'));
-  return names.some(
-    (w) =>
-      unsafeVariable(w) && (exported || (environmentName(w) && variableWord(w)?.value !== null)),
-  );
+  const given = m?.[2] === '=' && !w.dynamic;
+  return { name, value: given ? w.text.slice((m as RegExpExecArray)[0].length) : null };
 }
 
-/** `set -a` / `set -o allexport` turns exporting every variable on, `set +a` off; null: neither. */
-function allExportSet(words: readonly Word[]): boolean | null {
-  let on: boolean | null = null;
-  for (let i = 1; i < words.length; i++) {
-    const t = (words[i] as Word).text;
-    if (/^[-+]o$/.test(t) && words[i + 1]?.text === 'allexport') on = t === '-o';
-    else if (/^-[a-zA-Z]*a/.test(t)) on = true;
-    else if (/^\+[a-zA-Z]*a/.test(t)) on = false;
+/** Whether a word that names a variable to set names one git may read. */
+const setsGitName = (w: Word | undefined): boolean => {
+  if (w === undefined) return false;
+  const v = namedVariable(w);
+  return gitReads(v.name, v.value);
+};
+
+/** Whether a word names a variable to export that is not a harmless one, whatever its case. */
+const exportsName = (w: Word): boolean => {
+  const v = namedVariable(w);
+  return v.name === null || !harmlessVariable(v.name, v.value ?? '', v.value === null);
+};
+
+/**
+ * The words of a builtin's options that hold a value, by letter (`read -p prompt`, `-pprompt`),
+ * and the names it sets given as such a value (`read -a NAME`, `printf -v NAME`). The rest are
+ * its operands. Reading stops at `--`.
+ */
+function builtinOperands(
+  args: readonly Word[],
+  valued: string,
+  naming: string,
+): { operands: Word[]; named: Word[] } {
+  const operands: Word[] = [];
+  const named: Word[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i] as Word;
+    if (w.text === '--') {
+      operands.push(...args.slice(i + 1));
+      break;
+    }
+    if (!/^-./.test(w.text)) {
+      operands.push(w);
+      continue;
+    }
+    for (let k = 1; k < w.text.length; k++) {
+      const letter = w.text[k] as string;
+      if (!valued.includes(letter) && !naming.includes(letter)) continue;
+      const value = k + 1 < w.text.length ? sliceWord(w, k + 1) : args[++i];
+      if (value && naming.includes(letter)) named.push(value);
+      break;
+    }
   }
-  return on;
+  return { operands, named };
+}
+
+/** Whether arithmetic (`let`, `(( … ))`, `$(( … ))`) assigns to a variable git may read. */
+function arithmeticSets(text: string): boolean {
+  const assigns =
+    /(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*(?:<<|>>|[-+*/%&|^])?=(?!=)|(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\+|--)|(?:\+\+|--)\s*([A-Za-z_][A-Za-z0-9_]*)/g;
+  for (const m of text.matchAll(assigns)) {
+    if (gitReads((m[1] ?? m[2] ?? m[3]) as string, null)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a simple command may set a variable git reads, for any git command on the line,
+ * wherever it stands and in whatever shell: an assignment, export, declaration, loop variable,
+ * `read`, `printf -v`, `mapfile`, `getopts` or arithmetic naming one; any `export`, `declare -x`,
+ * nameref or `set -a`; a file read with `source`; `eval` or `trap` code not known here.
+ */
+function setsGitVariable(cmd: SimpleCommand, words: readonly Word[], program: string): boolean {
+  if (cmd.arithmetic.some(arithmeticSets)) return true;
+  // Assignments before the program, or alone: `HOME=x`, `X+=1`, `X[0]=1`, `env GIT_DIR=x git`.
+  // One to an element (`X[0]=1`) is read here as the program's name.
+  const lead = words[0] ? cmd.words.slice(0, cmd.words.indexOf(words[0]) + 1) : cmd.words;
+  for (const w of lead) {
+    if (w.mask.startsWith('u') && /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/.test(w.text)) {
+      if (setsGitName(w)) return true;
+    }
+  }
+  const args = words.slice(1);
+  const operands = (): Word[] => args.filter((w) => !/^[-+]./.test(w.text));
+  switch (program) {
+    case 'source':
+    case '.':
+      return true;
+    case 'export':
+      return operands().some(exportsName);
+    case 'declare':
+    case 'typeset':
+    case 'local':
+    case 'readonly': {
+      // A name for another variable (`-n`), which setting it then sets, whatever it is called.
+      if (args.some((w) => /^-[A-Za-z]*n/.test(w.text))) return operands().length > 0;
+      // Exported (`-x`), whatever it is called.
+      if (args.some((w) => /^-[A-Za-z]*x/.test(w.text))) return operands().some(exportsName);
+      return operands().some(setsGitName);
+    }
+    case 'set': {
+      const end = args.findIndex((w) => w.text === '--');
+      const opts = end === -1 ? args : args.slice(0, end);
+      return opts.some(
+        (w, i) =>
+          /^-[A-Za-z]*a/.test(w.text) || (w.text === '-o' && opts[i + 1]?.text === 'allexport'),
+      );
+    }
+    case 'for':
+    case 'select':
+      return setsGitName(args[0]);
+    case 'read': {
+      const { operands: names, named } = builtinOperands(args, 'dinNptu', 'a');
+      return [...names, ...named].some(setsGitName);
+    }
+    case 'printf':
+      return builtinOperands(args, '', 'v').named.some(setsGitName);
+    case 'mapfile':
+    case 'readarray':
+      return setsGitName(builtinOperands(args, 'dnOsuCc', '').operands[0]);
+    case 'getopts':
+      return setsGitName(args[1]);
+    case 'let':
+      // A name not known here (`let "$n=1"`) may be any.
+      return args.some((w) => (w.dynamic && !w.dynamicAt) || arithmeticSets(w.text));
+    case 'eval':
+      return args.some((w) => w.dynamic);
+    case 'trap':
+      return (args[0]?.text === '--' ? args[1] : args[0])?.dynamic ?? false;
+    default:
+      return false;
+  }
 }
 
 const TRACKED_FILES: FileKinds = { tracked: true, untracked: false, ignored: false };
 /** Any file that is there, whatever git makes of it. */
 const ANY_FILE: FileKinds = { tracked: true, untracked: true, ignored: true };
 
-/** git's own options before the subcommand, and the subcommand with what follows it. */
-function gitCommand(words: readonly Word[]): {
+/**
+ * git's own options before the subcommand, and the subcommand with what follows it. `cut`: no
+ * time was left to read all of its options.
+ */
+function gitCommand(
+  words: readonly Word[],
+  timeUp: () => boolean = () => false,
+): {
   dir: Word | null;
   rest: Word[];
   trusted: boolean;
@@ -1683,27 +1816,36 @@ function gitCommand(words: readonly Word[]): {
   unsafe: boolean;
   /** Shell code a setting given here runs (`-c alias.x='!…'`). */
   exec: string[];
+  cut: boolean;
 } {
-  const rest = words.slice(1);
+  let at = 1;
+  const next = (): Word | null => (at < words.length ? (words[at++] as Word) : null);
   let dir: Word | null = null;
   let trusted = true;
   let nocase = false;
   let workTree: Word | null = null;
   let unsafe = false;
+  let cut = false;
   const exec: string[] = [];
-  while (rest[0] && isFlag(rest[0])) {
-    const flag = rest.shift() as Word;
+  while (words[at] && isFlag(words[at] as Word)) {
+    if (at % 1024 === 0 && timeUp()) {
+      cut = true;
+      break;
+    }
+    const flag = next() as Word;
     if (GIT_ELSEWHERE.test(flag.text)) trusted = false;
     if (/^--(git-dir|config-env)(=|$)|^--exec-path=/.test(flag.text)) unsafe = true;
     if (flag.text.startsWith('--work-tree=')) workTree = sliceWord(flag, '--work-tree='.length);
-    else if (flag.text === '--work-tree') workTree = rest[0] ?? null;
+    else if (flag.text === '--work-tree') workTree = words[at] ?? null;
     if (/^--icase-pathspecs$/.test(flag.text)) nocase = true;
     if (flag.text === '-C') {
       // Each `-C` is taken from where the one before it led.
-      const to = rest.shift() ?? null;
+      const to = next();
+      // One too long to place already is not followed further.
+      if (dir !== null && dir.text.length > MAX_PATH_CHARS) continue;
       dir = to === null || dir === null || to.text.startsWith('/') ? to : joinWords(dir, to);
     } else if (GIT_VALUED.includes(flag.text)) {
-      const value = rest.shift();
+      const value = next();
       // A setting that moves the working tree or changes how paths are matched.
       if (
         flag.text === '-c' &&
@@ -1713,9 +1855,9 @@ function gitCommand(words: readonly Word[]): {
       const set = /^core\.worktree=/i.exec(value?.text ?? '');
       if (set && value) workTree = sliceWord(value, set[0].length);
       if (flag.text === '-c' && value && !set) {
-        const at = value.text.indexOf('=');
-        const key = at === -1 ? value.text : value.text.slice(0, at);
-        const val = at === -1 ? '' : value.text.slice(at + 1);
+        const eq = value.text.indexOf('=');
+        const key = eq === -1 ? value.text : value.text.slice(0, eq);
+        const val = eq === -1 ? '' : value.text.slice(eq + 1);
         const harmless =
           GIT_HARMLESS_CONFIG.test(key) ||
           (GIT_PAGER_SETTING.test(key) && HARMLESS_PAGER.test(val));
@@ -1725,7 +1867,7 @@ function gitCommand(words: readonly Word[]): {
       }
     }
   }
-  return { dir, rest, trusted, nocase, workTree, unsafe, exec };
+  return { dir, rest: words.slice(at), trusted, nocase, workTree, unsafe, exec, cut };
 }
 
 /**
@@ -2077,9 +2219,15 @@ interface GitParsed {
   long: Set<string>;
   /** The values of the options that take one, by letter or long name. */
   values: Map<string, Word[]>;
+  /** No time was left to read all of its words. */
+  cut: boolean;
 }
 
-function parseGit(words: readonly Word[], options: GitOptions): GitParsed {
+function parseGit(
+  words: readonly Word[],
+  options: GitOptions,
+  timeUp: () => boolean = () => false,
+): GitParsed {
   const shortValued = options.short ?? '';
   const attached = options.attached ?? '';
   const longValued = options.long ?? [];
@@ -2092,12 +2240,19 @@ function parseGit(words: readonly Word[], options: GitOptions): GitParsed {
     short: new Set(),
     long: new Set(),
     values: new Map(),
+    cut: false,
   };
   const set = (key: string, value: Word | null): void => {
     if (value === null) return;
-    out.values.set(key, [...(out.values.get(key) ?? []), value]);
+    const list = out.values.get(key);
+    if (list) list.push(value);
+    else out.values.set(key, [value]);
   };
   for (let i = 1; i < words.length; i++) {
+    if (i % 1024 === 0 && timeUp()) {
+      out.cut = true;
+      break;
+    }
     const w = words[i] as Word;
     if (w.text === '--') {
       out.afterDashes = words.slice(i + 1);
@@ -2404,14 +2559,31 @@ function gitWildcards(text: string): string[] {
  * variable, which `settings` says) may change the whole working tree. The files it writes its
  * output to and the folders it fills are written, by name.
  */
-function readGit(words: readonly Word[], stdin: string | null, settings = false): Verdict {
-  const { dir, rest, trusted, nocase, workTree, unsafe, exec: aliases } = gitCommand(words);
+function readGit(
+  words: readonly Word[],
+  stdin: string | null,
+  settings = false,
+  timeUp: () => boolean = () => false,
+): Verdict {
+  const {
+    dir,
+    rest,
+    trusted,
+    nocase,
+    workTree,
+    unsafe,
+    exec: aliases,
+    cut,
+  } = gitCommand(words, timeUp);
+  const late: Verdict = { kind: 'unread', why: 'no time was left to read all of it' };
+  if (cut) return late;
   const sub = rest[0]?.text;
   if (sub === undefined) return READS;
   const command = [word('git'), ...rest.slice(1)];
   const table = GIT_OPTIONS[sub] ?? {};
   // Each subcommand's options are read with its own table: a value is never a flag or a path.
-  const p = parseGit(command, table);
+  const p = parseGit(command, table, timeUp);
+  if (p.cut) return late;
   const under = (list: readonly Word[]): Word[] =>
     dir ? list.map((w) => joinWords(dir, w)) : [...list];
   /** What may change any file of the tree, and cannot be asked: a warning when one is covered. */
@@ -2578,7 +2750,8 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
     case 'submodule': {
       // `submodule add` clones into the folder given, or one named after what it clones;
       // `foreach` runs shell code in each. Other verbs check out what the submodules record.
-      const q = parseGit([word('git'), ...rest.slice(1)], table);
+      const q = parseGit([word('git'), ...rest.slice(1)], table, timeUp);
+      if (q.cut) return late;
       const [action, ...args] = q.args;
       if (action === undefined || ['status', 'summary'].includes(action.text)) return done(READS);
       if (action.text === 'foreach') return running(whole(), [args.map((w) => w.text).join(' ')]);
@@ -2593,7 +2766,8 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
         gitValues(p, 'x', '--extcmd').map((w) => w.text),
       );
     case 'worktree': {
-      const q = parseGit([word('git'), ...rest.slice(2)], table);
+      const q = parseGit([word('git'), ...rest.slice(2)], table, timeUp);
+      if (q.cut) return late;
       if (['list', 'lock', 'unlock', 'prune', 'repair'].includes(verb ?? '')) return done(READS);
       // A new working tree is checked out in the folder given, with the files this one has; one
       // removed or moved goes with what is in it.
@@ -2753,12 +2927,9 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
       )
         return done(READS);
       const tail = [word('git'), ...rest.slice(verb === 'push' || verb === 'save' ? 2 : 1)];
-      const paths =
-        dashes !== -1
-          ? afterDashes
-          : verb === 'save'
-            ? []
-            : parseGit(tail, GIT_OPTIONS['stash'] as GitOptions).args;
+      const again = parseGit(tail, GIT_OPTIONS['stash'] as GitOptions, timeUp);
+      if (again.cut) return late;
+      const paths = dashes !== -1 ? afterDashes : verb === 'save' ? [] : again.args;
       const all = hasOption(tail, 'a', ['--all']);
       const untracked = all || hasOption(tail, 'u', ['--include-untracked']);
       return ask({
@@ -3261,9 +3432,19 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     questions: [],
     moved: false,
     gitEnv: false,
-    allExport: false,
+    later: [],
+    deferred: new Set(),
+    added: new Set(),
   };
   collectTargets(command, '', 0, reading);
+  if (reading.gitEnv) {
+    // A variable git reads is set somewhere on the line: what git would answer now is not what
+    // the commands will do, so it is asked nothing, and what each question stands for counts as
+    // written. The git commands read before it was known may change the whole tree too.
+    reading.questions.length = 0;
+    for (const t of reading.out.values()) t.fallback = null;
+    for (const then of reading.later) then();
+  }
   return {
     targets: [...reading.out.values()],
     questions: reading.questions,
@@ -3290,10 +3471,17 @@ interface Reading {
    * that is not only looking, a program or script that may run git, a `cd` out of the tree.
    */
   moved: boolean;
-  /** A variable that may change what git does was exported earlier on the line. */
+  /**
+   * Something on the line, anywhere and in any shell, may set a variable git reads: every git
+   * command on it may then change the whole tree, and git is asked about none of them.
+   */
   gitEnv: boolean;
-  /** `set -a` is on: every variable set is exported. */
-  allExport: boolean;
+  /** For each git command read before that was known: what it may change if so. */
+  later: (() => void)[];
+  /** The git commands (and where they run) already in `later`. */
+  deferred: Set<string>;
+  /** What `add` was already given, so a repeat of it costs nothing. */
+  added: Set<string>;
 }
 
 /**
@@ -3348,13 +3536,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   let previous: string | null = startDir;
   let stack: (string | null)[] = [];
   // What to return to when each open `( … )` ends.
-  const outer: {
-    dir: string | null;
-    previous: string | null;
-    stack: (string | null)[];
-    gitEnv: boolean;
-    allExport: boolean;
-  }[] = [];
+  const outer: { dir: string | null; previous: string | null; stack: (string | null)[] }[] = [];
   let bare = 0;
 
   /**
@@ -3404,9 +3586,24 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   const tilde = (w: Word): boolean => w.text.startsWith('~') && w.mask.startsWith('u');
 
   const add = (item: Item, from: string | null = dir): void => {
+    if (r.out.size >= MAX_TARGETS) {
+      r.limit ??= `more than ${MAX_TARGETS} write targets`;
+      return;
+    }
     const w = item.pattern ? { ...item.word, mask: 'u'.repeat(item.word.text.length) } : item.word;
     if (w.dynamic || w.text === '' || w.text === '-') return;
     if (w.cut) r.limit ??= `a brace expansion of more than ${MAX_BRACE_WORDS} words`;
+    // The same word, given the same way from the same place, adds nothing new: a long line of
+    // repeats is read in the time of one.
+    if (item.entries === undefined) {
+      const flags = `${item.tree ? 't' : ''}${item.certain === false ? 'u' : ''}${item.ifExists ? 'e' : ''}${item.pattern ? 'p' : ''}${item.dotfiles ? 'd' : ''}${item.nocase ? 'c' : ''}`;
+      const kinds = item.touches
+        ? `${item.touches.tracked ? 't' : ''}${item.touches.untracked ? 'u' : ''}${item.touches.ignored ? 'i' : ''}`
+        : '-';
+      const same = `${from === null ? '\u0001' : from}\0${previous === null ? '\u0001' : previous}\0${w.text}\0${w.mask}\0${flags}\0${item.how ?? ''}\0${kinds}\0${item.only?.join('/') ?? '\u0001'}`;
+      if (r.added.has(same)) return;
+      if (r.added.size < MAX_COMMANDS) r.added.add(same);
+    }
     const { pattern, glob, classes } = wordPattern(w);
     // A `[…]` class the shell cannot match stays in the name as written: both readings count.
     const forms = classes
@@ -3418,7 +3615,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     const certain = item.certain ?? true;
     const only = item.only ?? null;
     const how = item.how ?? 'write';
-    const entries = (item.entries ?? []).map((e) => ({
+    // No more than are kept are placed.
+    const entries = (item.entries ?? []).slice(0, MAX_ENTRIES).map((e) => ({
       name: e.name,
       source: e.from === null || e.from.dynamic ? null : place(e.from.text, tilde(e.from), from),
     }));
@@ -3480,6 +3678,126 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       ? r.top !== null && (at === r.top || at.startsWith(`${r.top}/`))
       : true);
 
+  type GitVerdict = Extract<Verdict, { kind: 'git' }>;
+  /**
+   * Where a git command works: where it runs (or where `-C` sends it), the working tree it reads
+   * paths in (`--work-tree`), and whether that is the tree the line starts in. Null, with the
+   * reason said, when the text does not tell, or it is a working tree outside this one.
+   */
+  const gitWhere = (
+    verdict: GitVerdict,
+    here: string | null,
+  ): { at: string; base: string; top: boolean } | null => {
+    const at = verdict.dir ? enter(verdict.dir, here) : here;
+    if (at === null) {
+      r.limit ??= 'a git command runs in a folder the text does not tell';
+      return null;
+    }
+    let base = at;
+    if (verdict.workTree !== null) {
+      const tree = enter(verdict.workTree, at);
+      if (tree === null || !insideTop(tree)) {
+        r.limit ??= 'a git command works on another working tree';
+        return null;
+      }
+      base = tree;
+    }
+    return { at, base, top: r.top !== null && insideTop(at) };
+  };
+  /**
+   * What a git command asks of git, from where it works. `settled`: git's answer now is what the
+   * command will do, so it is asked; the targets added stand for each question should git not
+   * answer. Otherwise only the stand-ins count: the paths it was given, and for the whole tree
+   * the files of the kinds it touches that exist there.
+   */
+  const gitAsks = (
+    verdict: GitVerdict,
+    where: { at: string; base: string; top: boolean },
+    settled: boolean,
+  ): void => {
+    const { at, base, top } = where;
+    for (const q of verdict.asks) {
+      if (q.pathspecs.some((w) => w.dynamic)) continue;
+      let index: number | undefined;
+      if (settled && !q.unasked && r.questions.length < MAX_QUESTIONS) {
+        index = r.questions.length;
+        r.questions.push({
+          cwd: at,
+          against: q.against,
+          pathspecs: q.pathspecs.map((w) => w.text),
+          untracked: q.untracked ?? false,
+          ignored: q.ignored ?? false,
+          ifExists: q.ifExists ?? false,
+          tracked: q.tracked ?? false,
+          mayFail: q.mayFail ?? false,
+          guess: q.guess ?? false,
+          listTree: q.listTree ?? false,
+          ...(q.unlessAncestor !== undefined ? { unlessAncestor: q.unlessAncestor } : {}),
+        });
+      }
+      // Pathspecs that only leave files out stand for everything else. One given again (the
+      // same text, read the same way) adds nothing.
+      const certain = !q.possible;
+      const seen = new Set<string>();
+      const given: { w: Word; magic: ReturnType<typeof pathspecMagic> }[] = [];
+      for (const w of q.pathspecs) {
+        const key = `${w.text}\0${w.mask}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const magic = pathspecMagic(w.text);
+        // A pathspec that leaves files out writes nothing itself.
+        if (!magic.exclude) given.push({ w, magic });
+      }
+      if (given.length === 0) {
+        add(
+          {
+            word: word(top ? TOP : '.'),
+            tree: true,
+            certain: certain && !r.moved,
+            fallback: index,
+            touches: q.touches,
+          },
+          base,
+        );
+        continue;
+      }
+      for (const { w, magic } of given) {
+        if (r.out.size >= MAX_TARGETS) {
+          r.limit ??= `more than ${MAX_TARGETS} write targets`;
+          return;
+        }
+        const bare = magic.rest === '' ? '.' : magic.rest;
+        const fromTop = magic.top && top;
+        const patterns = magic.literal || magic.glob ? [bare] : gitWildcards(bare);
+        for (const p of patterns) {
+          const text = fromTop ? `${TOP}/${p}` : p;
+          add(
+            {
+              word: {
+                text,
+                mask: (magic.literal ? 'q' : 'u').repeat(text.length),
+                dynamic: false,
+                cut: w.cut,
+              },
+              tree: true,
+              // The whole tree after a change is a possible write, like a command given no path.
+              certain: certain && !(r.moved && bare === '.'),
+              fallback: index,
+              ifExists: q.ifExists ?? false,
+              // git's wildcards also match names that start with a dot.
+              dotfiles: true,
+              nocase: verdict.nocase || magic.icase,
+              // The whole tree, and anything `git rm` is given (it only removes tracked
+              // files): the files of the kinds it touches that are there.
+              ...(bare === '.' || q.tracked ? { touches: q.touches } : {}),
+            },
+            base,
+          );
+        }
+      }
+    }
+  };
+
   let before: SimpleCommand | null = null;
   // Where the shell was before the last `cd`, for the command after `cd … ||`: that one runs
   // only when the `cd` failed.
@@ -3487,21 +3805,14 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   let wasCd = false;
   for (const cmd of parsed.commands) {
     if (cmd.subshell === 'open') {
-      outer.push({
-        dir,
-        previous,
-        stack: [...stack],
-        gitEnv: r.gitEnv,
-        allExport: r.allExport,
-      });
+      outer.push({ dir, previous, stack: [...stack] });
       before = null;
       continue;
     }
     if (cmd.subshell === 'close') {
       // An unmatched `)` (a `case` pattern) closes nothing.
       const back = outer.pop();
-      // What a subshell sets or exports stays in it.
-      if (back) ({ dir, previous, stack, gitEnv: r.gitEnv, allExport: r.allExport } = back);
+      if (back) ({ dir, previous, stack } = back);
       before = null;
       continue;
     }
@@ -3518,17 +3829,10 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // Substitutions run where they are written, before the command that holds them.
     const at = cmd.otherwise && wasCd ? beforeCd : dir;
     wasCd = false;
-    // Each runs in a shell of its own: what it sets or exports stays there.
-    const apart = (code: string, from: string | null, gitEnv: boolean): void => {
-      const was = { gitEnv: r.gitEnv, allExport: r.allExport };
-      r.gitEnv ||= gitEnv;
-      collectTargets(code, from, depth + 1, r);
-      ({ gitEnv: r.gitEnv, allExport: r.allExport } = was);
-    };
-    for (const inner of cmd.nested) apart(inner, at, false);
+    for (const inner of cmd.nested) collectTargets(inner, at, depth + 1, r);
     // The shell expands a here-document whose delimiter is not quoted: substitutions in it run.
     if (cmd.stdin !== null && cmd.stdinExpands) {
-      for (const inner of substitutions(cmd.stdin)) apart(inner, at, false);
+      for (const inner of substitutions(cmd.stdin)) collectTargets(inner, at, depth + 1, r);
     }
     const { words, chdir } = programWords(cmd.words);
     const here = chdir ? enter(chdir, at) : at;
@@ -3555,29 +3859,40 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       } else if (name === 'cat' && feeder.length === 1) stdin = before.stdin;
     }
     before = cmd;
-    // A variable set for git, or exported (or set, under `set -a`) earlier on the line, may make
-    // it do anything to the tree. What a pipeline's part or a background command sets stays in
-    // its own shell.
-    const kept = { gitEnv: r.gitEnv, allExport: r.allExport };
+    // A variable set for git, or anywhere on the line in any shell (before or after it, in a
+    // function, a subshell, code run by `eval`), may make it do anything to the tree. Which shell
+    // gets it, and when, is not followed: that is the line's, not each command's.
     const program = words[0] && !words[0].dynamic ? programName(words[0]) : '';
     const assigned = cmd.words
       .slice(0, words[0] ? cmd.words.indexOf(words[0]) : cmd.words.length)
       .some((w) => isAssignment(w) && unsafeVariable(w));
-    if (setsGitVariable(program, cmd, words, r.allExport)) r.gitEnv = true;
-    if (program === 'set') r.allExport = allExportSet(words) ?? r.allExport;
-    // A file read into this shell (`source x`, `. <(…)`) may set anything; it is not read here.
-    if (program === 'source' || program === '.') r.gitEnv = true;
-    const gitSettings = program === 'git' && (assigned || r.gitEnv);
-    const verdict = gitSettings ? readGit(words, stdin, true) : classify(words, stdin);
-    /**
-     * Code this command runs: in a shell of its own (a shell's, git's own), where the settings
-     * given to it hold, or in this one (`eval`, `trap`), where what it sets stays for the rest.
-     */
-    const nested = (code: string, from: string | null, same = false): void => {
-      if (!same) return apart(code, from, assigned);
-      r.gitEnv ||= assigned;
+    if (!r.gitEnv && setsGitVariable(cmd, words, program)) r.gitEnv = true;
+    const settings = assigned || r.gitEnv;
+    const verdict = classify(words, stdin, 0, { settings, timeUp: r.timeUp });
+    const runsGit = !settings && words.some((w) => !w.dynamic && programName(w) === 'git');
+    // A short command given again is read again only once.
+    const deferral =
+      runsGit && words.length <= 64
+        ? JSON.stringify([here, previous, stdin, words.map((w) => [w.text, w.mask, w.dynamic])])
+        : null;
+    if (runsGit && (deferral === null || !r.deferred.has(deferral))) {
+      // Read again, as given a setting, if one turns up later on the line: what it may then do
+      // that git cannot be asked about.
+      if (deferral !== null) r.deferred.add(deferral);
+      const from = { here, previous };
+      r.later.push(() => {
+        const again = classify(words, stdin, 0, { settings: true, timeUp: r.timeUp });
+        if (again.kind !== 'git') return;
+        const kept = previous;
+        previous = from.previous;
+        const where = gitWhere(again, from.here);
+        if (where) gitAsks({ ...again, asks: again.asks.filter((q) => q.unasked) }, where, false);
+        previous = kept;
+      });
+    }
+    /** Code this command runs: a shell's, git's own, or this shell's (`eval`, `trap`). */
+    const nested = (code: string, from: string | null): void =>
       collectTargets(code, from, depth + 1, r);
-    };
     switch (verdict.kind) {
       case 'reads':
         break;
@@ -3618,114 +3933,28 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       case 'git': {
         // Files and folders it names as such: an output file, a folder a clone is put in.
         for (const item of verdict.items ?? []) add(item, here);
-        // git runs where the command runs, or where `-C` sends it.
-        const at = verdict.dir ? enter(verdict.dir, here) : here;
-        if (at === null) {
-          r.limit ??= 'a git command runs in a folder the text does not tell';
-          break;
-        }
-        // A working tree named apart (`--work-tree`): paths are read in it. One outside the tree
-        // the line starts in is not checked here, and said.
-        let base = at;
-        if (verdict.workTree !== null) {
-          const tree = enter(verdict.workTree, at);
-          if (tree === null || !insideTop(tree)) {
-            r.limit ??= 'a git command works on another working tree';
-            break;
-          }
-          base = tree;
-        }
+        const where = gitWhere(verdict, here);
+        if (where === null) break;
         // What git says now is what the command would do now: not once an earlier command of
         // the line may have changed it, nor with settings that change where git finds its files
-        // or how it reads its paths. After such a command, the paths it names are written; what it
-        // does to the whole tree (a switch, a merge, a pop) is a possible write.
+        // or how it reads its paths, given to it or set anywhere on the line. After such a
+        // command, the paths it names are written; what it does to the whole tree (a switch, a
+        // merge, a pop) is a possible write.
         const settled =
           verdict.trusted &&
           !r.moved &&
-          !gitSettings &&
+          !settings &&
           !cmd.words.some((w) =>
             /^GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|OBJECT_DIRECTORY|NAMESPACE|[A-Z_]*PATHSPECS)=/.test(
               w.text,
             ),
           );
-        // The whole working tree, for a command given no path: from its top when it is the tree
-        // the command line starts in.
-        const top = r.top !== null && insideTop(at);
-        for (const code of verdict.exec ?? []) nested(code, at);
-        for (const q of verdict.asks) {
-          if (q.pathspecs.some((w) => w.dynamic)) continue;
-          let index: number | undefined;
-          if (settled && !q.unasked && r.questions.length < MAX_QUESTIONS) {
-            index = r.questions.length;
-            r.questions.push({
-              cwd: at,
-              against: q.against,
-              pathspecs: q.pathspecs.map((w) => w.text),
-              untracked: q.untracked ?? false,
-              ignored: q.ignored ?? false,
-              ifExists: q.ifExists ?? false,
-              tracked: q.tracked ?? false,
-              mayFail: q.mayFail ?? false,
-              guess: q.guess ?? false,
-              listTree: q.listTree ?? false,
-              ...(q.unlessAncestor !== undefined ? { unlessAncestor: q.unlessAncestor } : {}),
-            });
-          }
-          // Should git not answer, or not be asked: the paths it was given, and for the whole
-          // tree the files of the kinds it touches that exist there. Pathspecs that only leave
-          // files out stand for everything else.
-          const certain = !q.possible;
-          if (q.pathspecs.every((w) => pathspecMagic(w.text).exclude)) {
-            add(
-              {
-                word: word(top ? TOP : '.'),
-                tree: true,
-                certain: certain && !r.moved,
-                fallback: index,
-                touches: q.touches,
-              },
-              base,
-            );
-            continue;
-          }
-          for (const w of q.pathspecs) {
-            const magic = pathspecMagic(w.text);
-            // A pathspec that leaves files out writes nothing itself.
-            if (magic.exclude) continue;
-            const bare = magic.rest === '' ? '.' : magic.rest;
-            const fromTop = magic.top && top;
-            const patterns = magic.literal || magic.glob ? [bare] : gitWildcards(bare);
-            for (const p of patterns) {
-              const text = fromTop ? `${TOP}/${p}` : p;
-              add(
-                {
-                  word: {
-                    text,
-                    mask: (magic.literal ? 'q' : 'u').repeat(text.length),
-                    dynamic: false,
-                    cut: w.cut,
-                  },
-                  tree: true,
-                  // The whole tree after a change is a possible write, like a command given no path.
-                  certain: certain && !(r.moved && bare === '.'),
-                  fallback: index,
-                  ifExists: q.ifExists ?? false,
-                  // git's wildcards also match names that start with a dot.
-                  dotfiles: true,
-                  nocase: verdict.nocase || magic.icase,
-                  // The whole tree, and anything `git rm` is given (it only removes tracked
-                  // files): the files of the kinds it touches that are there.
-                  ...(bare === '.' || q.tracked ? { touches: q.touches } : {}),
-                },
-                base,
-              );
-            }
-          }
-        }
+        for (const code of verdict.exec ?? []) nested(code, where.at);
+        gitAsks(verdict, where, settled);
         break;
       }
       case 'inline':
-        nested(verdict.code, here, verdict.same);
+        nested(verdict.code, here);
         break;
       case 'script': {
         const found = readCode(verdict.code);
@@ -3777,7 +4006,6 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       // A write inside `.git` itself.
       r.moved = true;
     }
-    if (cmd.apart) ({ gitEnv: r.gitEnv, allExport: r.allExport } = kept);
   }
 }
 
