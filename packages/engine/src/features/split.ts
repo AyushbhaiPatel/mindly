@@ -23,6 +23,7 @@ import type { z } from 'zod';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { TaskService } from '../coordination/work.js';
 import type { WriteGuardResult } from '../hooks/handler.js';
+import { patternsMayOverlap } from '../hooks/scope.js';
 import type { Kernel } from '../kernel.js';
 import { cleanScopePaths, USER, type MemoryService } from '../memory/service.js';
 import type { Mindly, MindlyModule } from '../mindly.js';
@@ -1023,9 +1024,10 @@ export class SplitService {
         `${path} is owned by part "${owner.title}" (${owner.agentKind}) of this split; your part "${part.title}" owns ${part.owns.join(', ')}. Coordinate with the user before changing another part's files.`,
       );
     }
-    // A directory or wildcard written as a whole (`rm -r dir`): decided by what it can match.
+    // A directory or wildcard written as a whole (`rm -r dir`): decided by what it can match,
+    // segment by segment, so a top-level `*.log` does not reach into another part's folders.
     for (const pattern of whole) {
-      const owner = others.find((o) => o.owns.some((g) => globsMayOverlap(pattern, g, NOCASE)));
+      const owner = others.find((o) => o.owns.some((g) => patternsMayOverlap(pattern, g, NOCASE)));
       if (!owner) continue;
       denied.push(`${pattern} (part "${owner.title}", ${owner.agentKind})`);
       warnings.push(

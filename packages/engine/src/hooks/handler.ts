@@ -1,9 +1,8 @@
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import {
   EMPTY_HOOK_RESULT,
-  globsMayOverlap,
   globToRegExp,
   isDeniedPath,
   matchesAnyGlob,
@@ -30,29 +29,30 @@ import { commandKey, type MistakeService } from '../memory/mistakes.js';
 import {
   normalizeCommandLine,
   pathNamer,
+  readShellWrites,
   shellMayWrite,
   shellMayWriteFiles,
-  shellWriteTargets,
 } from './shell.js';
+import { isLiteralScope } from './scope.js';
+import { globsReaching, scopeLabel, ScopeSearch, type WrittenScope } from './search.js';
 import type { RuleService } from '../memory/rules.js';
 import type { ProjectContext, ProjectService } from '../projects.js';
 
 const MAX_PROMPT_STORED = 4000;
 
-/** Paths of one tool call that are checked against rules and guards (adapters report up to 500). */
-const MAX_CHECKED_PATHS = 500;
+/**
+ * Paths of one tool call that are checked against rules and guards. Adapters report up to 500
+ * edits, and a patch that moves files reports two paths for each. A call with more is refused.
+ */
+const MAX_CHECKED_PATHS = 1000;
 /** Paths of one tool call whose change is recorded (provenance, checkpoint, impact). */
 const MAX_RECORDED_PATHS = 50;
 /**
- * Entries looked at when a directory or wildcard a shell command writes is listed. A listing that
- * stops here is incomplete, and an incomplete listing never clears the command.
- */
-const MAX_TREE_ENTRIES = 2000;
-/**
- * Places outside the session's working tree that one tool call may have looked up (one git call
- * each) to learn whether they are another working tree of the project. Paths in trees already
- * found cost nothing. A path that would need a lookup beyond this is not checked, and a call
- * with such a path is denied rather than let through unchecked.
+ * Normally git lists every working tree of the project in one call, and a path outside the
+ * session's tree is placed by name. Only when that list cannot be had are places looked up one by
+ * one (one git call each, trees already found cost nothing), at most this many per tool call. A
+ * path that would need a lookup beyond this is not checked, and a call with such a path is
+ * denied rather than let through unchecked.
  */
 const MAX_TREE_LOOKUPS = 16;
 /** Files of one shell command that are checked again (decisions, exports) after it ran. */
@@ -77,21 +77,6 @@ interface Located extends CheckedPath {
   root: string;
 }
 
-/**
- * A whole directory or a wildcard pattern a shell command writes (`rm -r dir`, `rm dir/*.ts`),
- * inside a working tree of the project. It is judged by what it can match, not by a listing.
- */
-interface WrittenScope {
-  /** Glob relative to the tree root: `dir/**` for a directory, the pattern for a wildcard. */
-  pattern: string;
-  /** Directory that holds everything the pattern can match. */
-  base: string;
-  root: string;
-  own: boolean;
-  /** Files under `base` that match, listed at most once per hook call. */
-  listing?: { files: string[]; complete: boolean };
-}
-
 /** What a tool call writes, as far as it could be placed in the project. */
 interface Writes {
   paths: CheckedPath[];
@@ -100,9 +85,22 @@ interface Writes {
   unchecked: number;
 }
 
+/** A rule the user marked as enforced, and what it covers of a tool call. */
+interface RuleHit {
+  rule: Memory;
+  covers: string[];
+  /**
+   * Set when nothing covered was found but the search could not finish: the rule may or may not
+   * apply. That is a warning, never a block.
+   */
+  unfinished?: boolean;
+}
+
 /** Other working trees of the project found while placing the paths of one tool call. */
 interface TreeLookups {
   roots: string[];
+  /** True once `roots` holds every working tree of the project: nothing is left to look up. */
+  all?: boolean;
   /** Directory looked up, to the project tree that holds it (null: not this project). */
   dirs: Map<string, string | null>;
 }
@@ -326,10 +324,17 @@ export class HookHandler {
     const inTree = tryResolveInsideRoot(treeRoot, abs);
     if (inTree) return { ...inTree, root: treeRoot, own: !isDeniedPath(inTree.rel, deny) };
     if (trees === null) return null;
+    if (trees.all === undefined) {
+      // One call lists every working tree of the project; any path is then placed by name.
+      const listed = (await this.k.ports.git.workingTrees?.(treeRoot).catch(() => null)) ?? null;
+      trees.all = listed !== null;
+      if (listed !== null) trees.roots = listed.filter((t) => t !== treeRoot);
+    }
     for (const root of trees.roots) {
       const found = tryResolveInsideRoot(root, abs);
       if (found) return { ...found, root, own: false };
     }
+    if (trees.all) return null;
     const dir = nearestDirectory(abs);
     if (dir === null) return null;
     let root = trees.dirs.get(dir);
@@ -370,7 +375,8 @@ export class HookHandler {
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
     const out: CheckedPath[] = [];
     const seen = new Set<string>();
-    let unchecked = 0;
+    // What does not fit is counted as not checked, never dropped as fine.
+    let unchecked = Math.max(0, paths.length - MAX_CHECKED_PATHS);
     for (const p of paths.slice(0, MAX_CHECKED_PATHS)) {
       if (typeof p !== 'string' || p.length === 0 || p.length > 4096) continue;
       const found = await this.locate(
@@ -409,21 +415,23 @@ export class HookHandler {
    * only read them. A directory written as a whole and a wildcard become a scope: nothing is
    * listed here, and nothing outside the project is ever read. With `ownTreeOnly` (after the
    * command ran) only files in the session's working tree are placed, without any lookup.
+   * `limit` says why the command was not read to its end, when it was not.
    */
   private async shellWrites(
     project: ProjectContext,
     cwd: string,
     command: string,
     ownTreeOnly = false,
-  ): Promise<{ certain: Writes; possible: Writes }> {
+  ): Promise<{ certain: Writes; possible: Writes; limit: string | null }> {
     const certain: Writes = { paths: [], scopes: [], unchecked: 0 };
     const possible: Writes = { paths: [], scopes: [], unchecked: 0 };
-    const targets = shellWriteTargets(command, { home: homedir() });
-    if (targets.length === 0) return { certain, possible };
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
+    // The command is read as text; where it runs, the home directory and the repository root
+    // are handed in so `~`, `$HOME` and `$(git rev-parse --show-toplevel)` can be placed.
+    const reading = readShellWrites(command, { home: toPosix(homedir()), top: toPosix(treeRoot) });
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
     const seen = new Set<string>();
-    for (const t of targets) {
+    for (const t of reading.targets) {
       const into = t.certain ? certain : possible;
       const place = async (abs: string): Promise<Located | null> => {
         const found = await this.locate(project, treeRoot, abs, trees);
@@ -435,63 +443,132 @@ export class HookHandler {
         seen.add(`${t.certain}:${at.abs}`);
         into.paths.push({ rel: at.rel, abs: at.abs, own: at.own });
       };
-      const scope = (at: Located, pattern: string): void => {
-        into.scopes.push({ pattern, base: at.abs, root: at.root, own: at.own });
+      const scope = (at: Located, rest: string[]): void => {
+        const pattern = [...(at.rel === '' ? [] : [at.rel]), ...rest].join('/');
+        into.scopes.push({
+          // A single segment is written `./x`: this level only, not that name at any depth.
+          pattern: pattern.includes('/') || pattern === '**' ? pattern : `./${pattern}`,
+          base: at.abs,
+          rest,
+          root: at.root,
+          own: at.own,
+          only: t.only,
+        });
       };
       const path = isAbsolute(t.path) ? t.path : resolve(cwd, placeHome(t.path));
       if (t.glob) {
         // Everything the pattern can match is under the directory before its first wildcard.
         const segments = toPosix(path).split('/');
         const wild = segments.findIndex((x) => /[*?{]/.test(x));
-        const at = await place(segments.slice(0, wild).join('/') || '/');
-        if (at === null) continue;
-        const pattern = [...(at.rel === '' ? [] : [at.rel]), ...segments.slice(wild)].join('/');
-        scope(at, pattern);
-        if (t.tree) scope(at, `${pattern}/**`);
-      } else if (t.tree) {
-        const at = await place(path);
-        if (at === null) continue;
-        file(at);
-        scope(at, at.rel === '' ? '**' : `${at.rel}/**`);
-      } else if (t.entries.length > 0 && isDirectory(path)) {
-        for (const name of t.entries) file(await place(join(path, name)));
-      } else {
-        file(await place(path));
+        const base = segments.slice(0, wild).join('/') || '/';
+        const rest = segments.slice(wild);
+        const at = await place(base);
+        if (at !== null) {
+          scope(at, rest);
+          if (t.tree) scope(at, [...rest, '**']);
+        } else if (t.tree) {
+          // A pattern above the project that takes the project with it (`rm -rf ~/*`).
+          const left = downTo(base, treeRoot, rest);
+          const root = left === null ? null : await place(treeRoot);
+          if (root !== null) scope(root, [...(left as string[]), '**']);
+        }
+        continue;
       }
+      // A directory above the project, written with everything in it, holds the project too.
+      if (t.tree && t.certain && downTo(toPosix(path), treeRoot, []) !== null) {
+        const root = await place(treeRoot);
+        if (root !== null) scope(root, ['**']);
+        continue;
+      }
+      // A bare word given to an unknown program is a path only when such an entry exists.
+      if (t.ifExists && !exists(path)) continue;
+      const directory = isDirectory(path);
+      if (t.entries.length > 0 && directory) {
+        // A copy into a directory: each source lands under its own name, a directory with
+        // everything in it; `.` pours into the directory itself.
+        for (const name of t.entries) {
+          const at = await place(name === '.' ? path : join(path, name));
+          if (at === null) continue;
+          if (name !== '.') file(at);
+          if (t.tree) scope(at, ['**']);
+        }
+        continue;
+      }
+      const at = await place(path);
+      if (at === null) continue;
+      file(at);
+      // A whole tree is written when the text says so; a path merely given to a program counts
+      // as a tree only when it is a directory.
+      if (t.tree && (t.certain || directory)) scope(at, ['**']);
     }
     // What the text shows as written is not also reported as a mere possibility.
     const sure = new Set(certain.paths.map((p) => p.abs));
     possible.paths = possible.paths.filter((p) => !sure.has(p.abs));
-    return { certain, possible };
+    return { certain, possible, limit: reading.limit };
   }
 
   /**
-   * The rule the user marked as enforced that covers one of the written `paths` or can cover
-   * something in one of the written `scopes`, with what it covers (for the message).
+   * What the rules the user marked as enforced say about a write. `deny` is the first rule that
+   * covers a written path, or something a written scope certainly reaches. `warn` are rules that
+   * may apply: they cover a file the command would not rewrite, or the search for covered files
+   * could not finish.
+   *
+   * A scope (a directory or wildcard written as a whole) is decided exactly, not by giving up:
+   * a rule that names one path or one directory (`prisma/migrations/**`) is compared as text,
+   * with no listing; a rule with wildcards (a `.pem` file at any depth) applies when a file it covers exists
+   * there, which is searched within a budget. Only when the budget runs out is the answer not
+   * known, and then the command is warned, not blocked: denying on "could not look" would stop
+   * everyday commands (`rm -rf dist`) in every large repository, while the editing tools and
+   * every path a command names outright stay enforced.
    */
-  private enforcedRule(
+  private enforcedRules(
     projectId: string,
     paths: readonly string[],
-    scopes: readonly WrittenScope[] = [],
-  ): { rule: Memory; covers: string[] } | null {
-    if (paths.length === 0 && scopes.length === 0) return null;
+    scopes: readonly WrittenScope[],
+    search: ScopeSearch,
+  ): { deny: RuleHit | null; warn: RuleHit[] } {
+    const warn: RuleHit[] = [];
+    if (paths.length === 0 && scopes.length === 0) return { deny: null, warn };
     const rules = this.k.store.memories
       .list(projectId, { kinds: ['rule'], trust: ['approved', 'verified'], limit: 300 })
       .filter((m) => m.enforce && m.source.type === 'user' && m.scope.paths.length > 0);
     for (const rule of rules) {
-      const covers = [
-        ...paths.filter((p) => matchesAnyGlob(p, rule.scope.paths)),
-        ...scopes.flatMap((s) => scopeCovered(s, rule.scope.paths)),
-      ];
-      if (covers.length > 0) return { rule, covers };
+      const globs = rule.scope.paths;
+      const covers = paths.filter((p) => matchesAnyGlob(p, globs));
+      const maybe: string[] = [];
+      let unfinished = false;
+      for (const s of scopes) {
+        const reaching = globsReaching(s, globs);
+        if (reaching.length === 0) continue;
+        // A whole directory against a rule that names its path or directory: known from the
+        // text, and it also holds for files the command creates or brings back. A wildcard only
+        // stands for what exists, and a formatter only rewrites the kinds of file it knows: for
+        // those, existing files decide.
+        const wholeTree = s.rest.length === 1 && s.rest[0] === '**';
+        if (wholeTree && s.only === null && reaching.some(isLiteralScope)) {
+          covers.push(scopeLabel(s));
+          continue;
+        }
+        const found = search.covered(s, reaching);
+        const rewritten = found.files.filter((f) => writesKind(s, f));
+        if (rewritten.length > 0) covers.push(...rewritten.slice(0, 5));
+        else if (found.files.length > 0) maybe.push(...found.files.slice(0, 5));
+        else if (!found.complete) {
+          unfinished = true;
+          maybe.push(scopeLabel(s));
+        }
+      }
+      if (covers.length > 0) {
+        // `x` and `x/**` are one thing to the reader.
+        const named = covers.filter((c) => !(c.endsWith('/**') && covers.includes(c.slice(0, -3))));
+        return { deny: { rule, covers: [...new Set(named)] }, warn };
+      }
+      if (maybe.length > 0) warn.push({ rule, covers: maybe, unfinished });
     }
-    return null;
+    return { deny: null, warn };
   }
 
-  private ruleDenial(
-    hit: { rule: Memory; covers: readonly string[] },
-    context: string | null,
-  ): HookResult {
+  private ruleDenial(hit: RuleHit, context: string | null): HookResult {
     return {
       ...EMPTY_HOOK_RESULT,
       decision: 'deny',
@@ -521,7 +598,10 @@ export class HookHandler {
         evt.cwd,
         tool.edits.map((e) => e.path),
       );
-      if (unchecked > 0) return uncheckedDenial(unchecked);
+      // A patch too large to report in full is refused: the files that were cut are unknown.
+      if (unchecked > 0 || tool.editsCut === true) {
+        return uncheckedDenial(unchecked, tool.editsCut === true);
+      }
       if (checked.length === 0) {
         if (pending.length > 0)
           this.appendToolEvent(pid, session, 'tool.before', { tool: toolName });
@@ -544,9 +624,9 @@ export class HookHandler {
           ? await this.consultGuards(project, session, unrecorded)
           : { warnings: [], deny: null };
       const all = [...paths, ...unrecorded];
-      const rule = built?.deny
+      const rule: RuleHit | null = built?.deny
         ? { rule: built.deny, covers: coveredBy(built.deny, all) }
-        : this.enforcedRule(pid, unrecorded);
+        : this.enforcedRules(pid, unrecorded, [], new ScopeSearch()).deny;
       if (overlap.overlaps.length > 0 || rule || pending.length > 0) {
         // What Mindly told the agent before this write: the evidence of overlap and rule saves.
         this.appendToolEvent(pid, session, 'tool.before', {
@@ -572,15 +652,26 @@ export class HookHandler {
       // A command that writes a file (sed -i, cat > file, mv, rm) answers to the same rules and
       // guards as an editing tool, for the files its text shows it writes. A path that is only
       // handed to a program Mindly does not know may just be read: that is a warning, not a block.
-      const { certain, possible } = await this.shellWrites(project, evt.cwd, tool.command);
-      if (certain.unchecked > 0) return uncheckedDenial(certain.unchecked);
+      const { certain, possible, limit } = await this.shellWrites(project, evt.cwd, tool.command);
+      if (certain.unchecked > 0) return uncheckedDenial(certain.unchecked, false);
       const written = certain.paths.map((p) => p.rel);
       const named = possible.paths.map((p) => p.rel);
       const patterns = (w: Writes): string[] => w.scopes.map((x) => x.pattern);
-      const guard = await this.consultGuards(project, session, written, patterns(certain));
-      const soft = await this.consultGuards(project, session, named, patterns(possible));
-      const rule = this.enforcedRule(pid, written, certain.scopes);
-      const softRule = rule ? null : this.enforcedRule(pid, named, possible.scopes);
+      const search = new ScopeSearch();
+      const guarded = async (w: Writes, paths: string[]): Promise<WriteGuardResult> => {
+        const first = await this.consultGuards(project, session, paths, patterns(w));
+        if (first.deny === null && first.warnings.length === 0) return first;
+        // A wildcard only stands for what exists: when a guard objects to one, the files it
+        // expands to are what is really asked about. A whole directory stays a pattern.
+        const listed = expandWildcards(w.scopes, search);
+        if (listed === null) return first;
+        return this.consultGuards(project, session, [...paths, ...listed.files], listed.whole);
+      };
+      const guard = await guarded(certain, written);
+      const soft = await guarded(possible, named);
+      const rules = this.enforcedRules(pid, written, certain.scopes, search);
+      const rule = rules.deny;
+      const softRules = rule ? null : this.enforcedRules(pid, named, possible.scopes, search);
       if (mistakes.length > 0 || pending.length > 0 || rule) {
         const recorded = certain.paths.filter((p) => p.own).map((p) => p.rel);
         this.appendToolEvent(pid, session, 'tool.before', {
@@ -591,19 +682,32 @@ export class HookHandler {
         });
       }
       const warnings = [...guard.warnings, ...soft.warnings];
-      if (softRule) {
+      const names = (hit: RuleHit): string =>
+        hit.covers
+          .slice(0, 5)
+          .map((x) => sanitizeLine(x, 160))
+          .join(', ');
+      // A possible write only warns when a covered file was actually found.
+      const mayApply = softRules
+        ? [...(softRules.deny ? [softRules.deny] : []), ...softRules.warn].filter(
+            (h) => !h.unfinished,
+          )
+        : [];
+      for (const hit of [...rules.warn, ...mayApply].slice(0, 5)) {
         warnings.push(
-          `This command names ${softRule.covers
-            .slice(0, 5)
-            .map((x) => sanitizeLine(x, 160))
-            .join(
-              ', ',
-            )}, covered by a project rule the user marked as enforced: "${softRule.rule.title}". Do not change it without asking the user.`,
+          hit.unfinished
+            ? `Mindly could not finish looking through ${names(hit)} for files covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
+            : `This command names ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change it without asking the user.`,
         );
       }
       if (possible.unchecked > 0) {
         warnings.push(
           `${possible.unchecked} of the paths this command names lie outside this working tree and were not checked against the project's rules.`,
+        );
+      }
+      if (limit !== null) {
+        warnings.push(
+          `Mindly did not read this whole command (${limit}); the part it did not read was not checked against the project's rules. Do not use it to change files a rule protects.`,
         );
       }
       const sections = [
@@ -1001,11 +1105,13 @@ function coveredBy(rule: Memory, paths: readonly string[]): string[] {
   return covered.length > 0 ? covered : [...paths];
 }
 
-function uncheckedDenial(count: number): HookResult {
+function uncheckedDenial(count: number, cut: boolean): HookResult {
   return {
     ...EMPTY_HOOK_RESULT,
     decision: 'deny',
-    reason: `Mindly could not check ${count} of the paths this call writes: they lie outside this working tree, in more different places than it looks up at once. Make the change in smaller steps.`,
+    reason: cut
+      ? 'Mindly could not check this call: it changes more files than are reported at once. Make the change in smaller steps.'
+      : `Mindly could not check ${count} of the paths this call writes: they lie outside this working tree, in more different places than it looks up at once, or the call writes too many files. Make the change in smaller steps.`,
   };
 }
 
@@ -1018,68 +1124,76 @@ function placeHome(path: string): string {
   return m ? join(dirname(homedir()), m[1] as string, m[2] ?? '') : path;
 }
 
-/** Dependency and repository folders: not listed, and a rule covers them only by naming them. */
-const UNLISTED_DIRS = ['node_modules', '.git'];
-
 /**
- * What a rule's scope (`globs`) covers of a directory or wildcard a command writes as a whole.
- * Decided by what the two can match: when they cannot overlap, nothing. When they can, the files
- * that exist are listed as an aid, and the answer is exact if the listing is complete; a listing
- * that was cut short never clears the command, the scope itself then counts as covered.
+ * For a directory `from` above `root` and the pattern segments written below it: what is left of
+ * the pattern once it has walked down to `root`, or null when `from` is not above `root` or the
+ * pattern leads elsewhere. a wildcard right below a home that holds the project leaves nothing:
+ * the project goes as a whole.
  */
-function scopeCovered(scope: WrittenScope, globs: readonly string[]): string[] {
-  const inUnlisted = UNLISTED_DIRS.filter((d) => scope.pattern.split('/').includes(d));
-  const relevant = globs.filter(
-    (g) =>
-      globsMayOverlap(g, scope.pattern) &&
-      // `rm -rf node_modules` is not about a rule for `*.pem`, unless the rule says so.
-      inUnlisted.every((d) => g.includes(d)),
-  );
-  if (relevant.length === 0) return [];
-  scope.listing ??= listScope(scope);
-  const hits = scope.listing.files.filter((f) => matchesAnyGlob(f, relevant));
-  if (hits.length > 0) return hits.slice(0, 5);
-  // Nothing found: trusted only when everything was looked at, and no rule reaches into the
-  // folders a listing skips.
-  const skipsMatter = relevant.some((g) => UNLISTED_DIRS.some((d) => g.includes(d)));
-  return scope.listing.complete && !skipsMatter ? [] : [scope.pattern];
+function downTo(from: string, root: string, rest: readonly string[]): string[] | null {
+  const top = toPosix(root);
+  const above = from === '/' ? '/' : `${from.replace(/\/+$/, '')}/`;
+  if (from === top || !top.startsWith(above)) return null;
+  const between = top.slice(above.length).split('/');
+  let at = 0;
+  for (const name of between) {
+    const segment = rest[at];
+    if (segment === undefined) return [];
+    if (segment === '**') return rest.slice(at);
+    try {
+      if (!globToRegExp(segment).test(name)) return null;
+    } catch {
+      return null;
+    }
+    at++;
+  }
+  return rest.slice(at);
 }
 
-/**
- * Files under the scope's directory that its pattern matches, relative to the tree root. Names
- * only, nothing is read; symbolic links are not followed; bounded by {@link MAX_TREE_ENTRIES}.
- * The scope is always inside a working tree of the project, so nothing outside it is listed.
- */
-function listScope(scope: WrittenScope): { files: string[]; complete: boolean } {
-  let match: RegExp;
+/** Whether a file or directory is there (a link counts, wherever it points). */
+function exists(path: string): boolean {
   try {
-    match = globToRegExp(scope.pattern);
+    lstatSync(path);
+    return true;
   } catch {
-    return { files: [], complete: false };
+    return false;
   }
+}
+
+/** Files one hook call hands to the write guards in place of the wildcards that name them. */
+const MAX_EXPANDED_FILES = 1000;
+
+/**
+ * The files the wildcard scopes stand for, and the scopes that stay patterns: whole directories,
+ * and wildcards whose files could not all be listed. Null when there is no wildcard to expand.
+ */
+function expandWildcards(
+  scopes: readonly WrittenScope[],
+  search: ScopeSearch,
+): { files: string[]; whole: string[] } | null {
   const files: string[] = [];
-  const queue = [scope.base];
-  let looked = 0;
-  while (queue.length > 0) {
-    const current = queue.shift() as string;
-    let entries;
-    try {
-      entries = readdirSync(current, { withFileTypes: true });
-    } catch {
+  const whole: string[] = [];
+  let expanded = false;
+  for (const s of scopes) {
+    const tree = s.rest.length === 1 && s.rest[0] === '**';
+    const found = tree ? null : search.covered(s, ['**']);
+    if (
+      found === null ||
+      !found.complete ||
+      files.length + found.files.length > MAX_EXPANDED_FILES
+    ) {
+      whole.push(s.pattern);
       continue;
     }
-    for (const e of entries) {
-      if (++looked > MAX_TREE_ENTRIES) return { files, complete: false };
-      const full = join(current, e.name);
-      if (e.isDirectory()) {
-        if (!UNLISTED_DIRS.includes(e.name)) queue.push(full);
-        continue;
-      }
-      const rel = toPosix(relative(scope.root, full));
-      if (match.test(rel)) files.push(rel);
-    }
+    expanded = true;
+    files.push(...found.files.filter((f) => writesKind(s, f)));
   }
-  return { files, complete: true };
+  return expanded ? { files, whole } : null;
+}
+
+/** Whether what writes the scope rewrites a file of this kind. */
+function writesKind(scope: WrittenScope, file: string): boolean {
+  return scope.only === null || scope.only.includes(extname(file).slice(1).toLowerCase());
 }
 
 /**

@@ -161,11 +161,15 @@ higher priority than the user's live instructions.
    marked `enforce` can deny the tool call; so can a strict split, for another part's files. Shell
    commands are read as text for the files they write (redirections, `rm`, `mv`, `cp`, `sed -i`,
    `tee`, …) and those files answer to the same rules and guards; a path only given to an unknown
-   program is a warning. A directory or wildcard written as a whole (`rm -r dir`) is judged by
-   whether a rule's scope or another part's files can lie inside it: files are listed only inside
-   the project, only when that is possible, and a listing that was cut short never clears the
-   command. Every path of the call is checked, also deny-listed files and files in
-   another working tree of the project, which are matched by name and never recorded.
+   program is a warning. A directory written as a whole (`rm -r dir`, a recursive copy into it) is
+   compared with a rule that names a path or a directory as text, so the rule also holds for
+   files the command creates or brings back. A wildcard, and a rule that can match at any depth
+   (`*.pem`), are decided by the files that exist: they are searched inside the project only, and
+   only where the rule can match, within a budget of entries and time. When the budget runs out
+   the answer is not known and the command gets a warning, not a block. A formatter with its
+   fixing flag only counts for the kinds of file it rewrites. Every path of the call is checked,
+   also deny-listed files and files in another working tree of the project, which are matched by
+   name and never recorded.
 4. **After a tool runs** – file changes are recorded with provenance; the impact analyser compares
    the exported surface of the changed file before/after and notifies sessions whose work depends
    on it; memories whose evidence covers the file are re-verified (self-healing); contracts bound to

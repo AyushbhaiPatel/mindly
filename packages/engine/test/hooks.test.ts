@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Mindly, USER } from '../src/index.js';
 import { event, FakeClock, fakeGit, setup, shellTool, writeTool } from './helpers.js';
 
@@ -291,18 +291,43 @@ describe('hook flow', () => {
       expect(r.reason, command).toContain('Applied migrations are never edited');
     }
     // What the rule cannot reach is not held up, however large it is.
-    for (const command of ['rm -rf packages/web', 'rm -rf dist', 'rm packages/web/src/*.ts']) {
+    for (const command of [
+      'rm -rf packages/web',
+      'rm -rf dist',
+      'rm packages/web/src/*.ts',
+      'rm -rf packages/*/src',
+      'rm -rf **/dist',
+    ]) {
       expect((await shell(command)).decision, command).toBeNull();
     }
+    // A rule that names its directory also holds for files a command brings into it.
+    for (const command of [
+      'cp -r /tmp/prisma packages/db',
+      'cp -R /tmp/migrations packages/db/prisma/',
+      'rsync -a /tmp/db/ packages/db/',
+      'tar xf a.tar -C packages/db/prisma/migrations',
+      'unzip -o a.zip -d packages/db',
+      'find packages/db -type f -delete',
+      'git checkout HEAD~1 packages',
+      'git rm -r packages',
+      'git clean -fdx packages/db',
+      'sudo -u root rm packages/db/prisma/migrations/001.sql',
+      'cd packages/db && cd - && rm packages/db/prisma/migrations/001.sql',
+      'rm $(pwd)/packages/db/prisma/migrations/001.sql',
+      "bash <<'EOF'\nrm packages/db/prisma/migrations/001.sql\nEOF",
+      'rm packages/db/prisma/migrations/00[1].sql',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision, command).toBe('deny');
+      expect(r.reason, command).toContain('Applied migrations are never edited');
+    }
+    // A directory handed to a program that may walk it is worth a warning.
+    for (const command of ['rimraf packages/db/prisma', 'rimraf packages', 'tar xzf a.tgz']) {
+      const r = await shell(command);
+      expect(r.decision, command).toBeNull();
+      expect(r.context, command).toContain('Applied migrations are never edited');
+    }
 
-    rule('Certificates are issued by hand', '**/*.pem');
-    // The rule can reach any folder: a complete listing settles it, a cut-off one does not.
-    expect((await shell('rm -rf dist')).decision).toBeNull();
-    expect((await shell('rm -rf not-there')).decision).toBeNull();
-    const big = await shell('rm -rf packages/web');
-    expect(big.decision).toBe('deny');
-    expect(big.reason).toContain('Certificates are issued by hand');
-    expect(big.reason).toContain('packages/web/**');
     // Dependency folders are only a rule's business when the rule names them.
     expect((await shell('rm -rf node_modules')).decision).toBeNull();
     rule('Vendored patches stay', 'node_modules/left-pad/**');
@@ -310,6 +335,206 @@ describe('hook flow', () => {
     // A program that may only read a folder is told about the rule, not blocked.
     const tool = await shell('mytool packages/db/');
     expect(tool.decision).toBeNull();
+    expect(tool.context).toContain('Applied migrations are never edited');
+  });
+
+  it('decides a rule that can match at any depth by the files that exist, however many there are', async () => {
+    const { root, mindly } = setup();
+    const ctx = await mindly.projects.resolve(root);
+    for (const [title, scope] of [
+      ['Certificates are issued by hand', '**/*.pem'],
+      ['Env files are edited by hand', '**/.env'],
+    ] as const) {
+      mindly.memory.remember({
+        projectId: ctx.project.id,
+        projectRoot: root,
+        kind: 'rule',
+        title,
+        body: 'Ask first.',
+        scopePaths: [scope],
+        source: USER,
+        enforce: true,
+      });
+    }
+    // Well over two thousand entries in every folder an everyday command sweeps away.
+    const fill = (dir: string, n: number, ext: string) => {
+      for (let i = 0; i < n; i++) {
+        const d = join(root, dir, `m${i % 40}`);
+        mkdirSync(d, { recursive: true });
+        writeFileSync(join(d, `f${i}.${ext}`), '');
+      }
+    };
+    fill('dist', 2600, 'js');
+    fill('build', 2100, 'js');
+    fill('src', 2600, 'ts');
+    fill('packages/web/dist', 2100, 'js');
+    fill('packages/api/dist', 2100, 'js');
+    for (let i = 0; i < 2100; i++) writeFileSync(join(root, `top${i}.txt`), '');
+    writeFileSync(join(root, 'debug.log'), '');
+    mkdirSync(join(root, 'certs'));
+    writeFileSync(join(root, 'certs', 'server.pem'), '');
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    for (const command of [
+      'rm -rf dist',
+      'rm -rf dist build',
+      'rm -rf ./dist/',
+      'rm -rf packages/*/dist',
+      'rm -rf dist/*',
+      'rm -rf **/dist',
+      'mv dist dist.old',
+      'chmod -R u+w dist',
+      'eslint --fix src',
+      'prettier --write src',
+      'prettier --write "src/**/*.ts"',
+      'git checkout -- src',
+      'git restore src/',
+      'git clean -fdx dist',
+      'cp -r src src-copy',
+      'rm -f *.log',
+      'rm -rf *.tsbuildinfo',
+      'rm -rf coverage .next out',
+      "find . -name '*.js' -delete",
+      'find dist -type f -delete',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision, command).toBeNull();
+      expect(r.context ?? '', command).not.toContain('enforced');
+    }
+    // The same commands are blocked as soon as a file the rule covers is really there.
+    writeFileSync(join(root, 'dist', 'm7', 'leaf.pem'), '');
+    writeFileSync(join(root, 'packages', 'api', 'dist', 'm3', '.env'), '');
+    writeFileSync(join(root, 'old.pem'), '');
+    for (const [command, file, title] of [
+      ['rm -rf dist', 'dist/m7/leaf.pem', 'Certificates are issued by hand'],
+      ['rm -rf dist build', 'dist/m7/leaf.pem', 'Certificates are issued by hand'],
+      ['rm -rf dist/*', 'dist/m7/leaf.pem', 'Certificates are issued by hand'],
+      ['mv dist dist.old', 'dist/m7/leaf.pem', 'Certificates are issued by hand'],
+      ['rm -rf packages/*/dist', 'packages/api/dist/m3/.env', 'Env files are edited by hand'],
+      ['rm -rf certs', 'certs/server.pem', 'Certificates are issued by hand'],
+      ['git checkout -- .', '.pem', 'Certificates are issued by hand'],
+      ['rm -rf .', '.pem', 'Certificates are issued by hand'],
+      ['rm -f *.pem', 'old.pem', 'Certificates are issued by hand'],
+      ["find . -name '*.pem' -delete", '.pem', 'Certificates are issued by hand'],
+    ] as const) {
+      const r = await shell(command);
+      expect(r.decision, command).toBe('deny');
+      expect(r.reason, command).toContain(title);
+      expect(r.reason, command).toContain(file);
+    }
+    // A top-level wildcard is one level: it does not see what lies in folders.
+    expect((await shell('rm -f *.log')).decision).toBeNull();
+    expect((await shell('rm -f *.env')).decision).toBeNull();
+    // A formatter only rewrites the kinds of file it knows: a covered file of another kind is
+    // worth a warning, a change of mode too, and neither is a block.
+    for (const command of [
+      'prettier --write .',
+      'eslint --fix .',
+      'chmod -R 755 .',
+      'black dist',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision, command).toBeNull();
+      expect(r.context, command).toContain('Certificates are issued by hand');
+    }
+    for (const command of ['git checkout .', 'git restore .', 'rm -rf *']) {
+      expect((await shell(command)).decision, command).toBe('deny');
+    }
+  });
+
+  it('warns instead of blocking when the search for covered files cannot finish', async () => {
+    const { root, mindly } = setup();
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Certificates are issued by hand',
+      body: 'Ask first.',
+      scopePaths: ['**/*.pem'],
+      source: USER,
+      enforce: true,
+    });
+    mkdirSync(join(root, 'dist', 'deep'), { recursive: true });
+    writeFileSync(join(root, 'dist', 'deep', 'a.js'), '');
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    // The clock runs out while the first folder is being read.
+    let t = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => (t += 10_000));
+    try {
+      const r = await shell('rm -rf dist');
+      expect(r.decision).toBeNull();
+      expect(r.context).toContain('could not finish looking through dist/**');
+      expect(r.context).toContain('Certificates are issued by hand');
+      // What the command names outright is still blocked, with or without a search.
+      writeFileSync(join(root, 'dist', 'server.pem'), '');
+      expect((await shell('rm dist/server.pem')).decision).toBe('deny');
+      // A possible write that could not be looked through says nothing.
+      expect((await shell('mytool dist')).context ?? '').not.toContain('Certificates');
+    } finally {
+      clock.mockRestore();
+    }
+    expect((await shell('rm -rf dist')).decision).toBe('deny');
+  });
+
+  it('says so when a command is too long or too large to read to its end', async () => {
+    const { root, mindly } = setup();
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Certificates are issued by hand',
+      body: 'Ask first.',
+      scopePaths: ['**/*.pem'],
+      source: USER,
+      enforce: true,
+    });
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    // Sixty other targets first, or twenty thousand characters: the write is still seen.
+    const sixty = Array.from({ length: 60 }, (_, i) => `tmp/f${i}.txt`).join(' ');
+    expect((await shell(`rm ${sixty} certs/server.pem`)).decision).toBe('deny');
+    expect((await shell(`${'echo padding; '.repeat(2000)}rm certs/server.pem`)).decision).toBe(
+      'deny',
+    );
+    // Beyond the limits the rest is not read, and the agent is told it was not checked.
+    const many = Array.from({ length: 600 }, (_, i) => `tmp/f${i}.txt`).join(' ');
+    const cut = await shell(`rm ${many} certs/server.pem`);
+    expect(cut.decision).toBeNull();
+    expect(cut.context).toContain('did not read this whole command');
+    expect(cut.context).toContain('500 write targets');
+    const long = await shell(`${'echo padding; '.repeat(20_000)}rm certs/server.pem`);
+    expect(long.context).toContain('did not read this whole command');
+    expect((await shell('rm tmp/a.txt')).context ?? '').not.toContain('did not read');
+  });
+
+  it('refuses a patch that was cut instead of checking only the part it was given', async () => {
+    const { root, mindly } = setup();
+    const tool = {
+      ...writeTool('src/a.ts', 'x')!,
+      name: 'apply_patch',
+      editsCut: true,
+    };
+    const cut = await mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool }));
+    expect(cut.decision).toBe('deny');
+    expect(cut.reason).toContain('more files than are reported at once');
+    const whole = await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'pre_tool', { tool: { ...tool, editsCut: false } }),
+    );
+    expect(whole.decision).toBeNull();
+    // More paths than are checked in one call are refused too, not dropped.
+    const edits = Array.from({ length: 1001 }, (_, i) => ({
+      path: `src/f${i}.ts`,
+      addedText: 'x',
+      removedText: '',
+      wholeFile: true,
+    }));
+    const huge = await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'pre_tool', { tool: { ...tool, editsCut: false, edits } }),
+    );
+    expect(huge.decision).toBe('deny');
   });
 
   it('finds other working trees once and refuses what it cannot place', async () => {

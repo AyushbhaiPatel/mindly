@@ -482,22 +482,46 @@ describe('split through hook events', () => {
       ['echo x>src/api/billing.ts', 'src/api/billing.ts'],
       ['cd src/api && sed -i s/a/b/ billing.ts', 'src/api/billing.ts'],
       ['mv src/api/billing.ts src/app/billing.ts', 'src/api/billing.ts'],
-      // A directory or wildcard is judged by what it can reach, not by listing it.
+      // A whole directory is judged by what it can reach, not by listing it.
       ['rm -rf src/api', 'src/api/**'],
       ['rm -rf src', 'src/**'],
       ['rm -rf src/api/not-there-yet', 'src/api/not-there-yet/**'],
-      ['rm src/api/*.ts', 'src/api/*.ts'],
-      ['cd src && rm -rf *', 'src/*/**'],
+      ['cp -r /tmp/api src/', 'src/api/**'],
+      ['git checkout HEAD~1 src', 'src/**'],
+      // A wildcard stands for the files it expands to.
+      ['rm src/api/*.ts', 'src/api/billing.ts'],
+      ['rm -f src/**/*.ts', 'src/api/billing.ts'],
+      ['cd src && rm -rf *', 'src/api/billing.ts'],
+      ["find . -name '*.ts' -delete", 'src/api/billing.ts'],
     ] as const) {
       const r = await shell(command);
       expect(r.decision, command).toBe('deny');
       expect(r.reason, command).toContain(`${what} (part "Part api", claude-code)`);
     }
-    // Its own folders, and folders nobody owns, can go as a whole.
-    for (const command of ['rm -rf src/app/old', 'rm -rf dist', 'rm src/app/*.bak']) {
+    // Its own folders, folders nobody owns and wildcards that match none of another part's
+    // files can go, at the top level too.
+    for (const command of [
+      'rm -rf src/app/old',
+      'rm -rf dist',
+      'rm -rf node_modules dist',
+      'rm src/app/*.bak',
+      'rm -f *.log',
+      'rm -rf *.tsbuildinfo',
+      'rm -rf ./dist/*',
+      'rm -rf **/*.log',
+      'rm -rf **/dist',
+      'rm -rf **/node_modules',
+      'rm -f src/**/*.js',
+      'rm -rf src/*/dist',
+      'rm -rf packages/*/dist',
+      "find . -name '*.js' -delete",
+      'for f in src/*.ts; do echo $f; done',
+      'git clean -fd',
+    ]) {
       const r = await shell(command);
       expect(r.decision ?? null, command).toBeNull();
       expect(r.context ?? '', command).not.toContain('owned by part');
+      expect(r.context ?? '', command).not.toContain('reaches files owned');
     }
     // A program Mindly does not know is warned about the file, not blocked.
     const unknown = await shell('node scripts/codemod.js src/api/billing.ts');

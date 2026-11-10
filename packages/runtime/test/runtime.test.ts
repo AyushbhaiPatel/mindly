@@ -75,6 +75,80 @@ describe('openMindly', () => {
 });
 
 describe('linked worktrees', () => {
+  it('lists every working tree of a repository in one call', async () => {
+    const dir = repo();
+    const wt = `${dir}-wt`;
+    execFileSync('git', ['worktree', 'add', '-q', '-b', 'feat/list', wt], { cwd: dir });
+    const git = createGitPort();
+    const both = [dir, realpathSync(wt)].sort();
+    expect((await git.workingTrees?.(dir))?.sort()).toEqual(both);
+    expect((await git.workingTrees?.(realpathSync(wt)))?.sort()).toEqual(both);
+    expect(await git.workingTrees?.(realpathSync(tmpdir()))).toBeNull();
+  });
+
+  it('applies an enforced rule to a write that reaches the project from outside its tree', async () => {
+    const dir = repo();
+    const wt = realpathSync(
+      (() => {
+        const path = `${dir}-wt2`;
+        execFileSync('git', ['worktree', 'add', '-q', '-b', 'feat/reach', path], { cwd: dir });
+        return path;
+      })(),
+    );
+    const home = mkdtempSync(join(tmpdir(), 'mindly-home-'));
+    const mindly = openMindly({ home, disableNotify: true });
+    try {
+      const project = await mindly.projects.resolve(dir);
+      mindly.memory.remember({
+        projectId: project.project.id,
+        projectRoot: dir,
+        kind: 'rule',
+        title: 'Auth is frozen',
+        body: 'Ask first.',
+        scopePaths: ['auth.ts'],
+        source: { type: 'user', sessionId: null, agentKind: null },
+        enforce: true,
+      });
+      const shell = (cwd: string, command: string) =>
+        mindly.hooks.handle({
+          agentKind: 'codex',
+          event: 'pre_tool',
+          externalSessionId: 'reach',
+          cwd,
+          transcriptPath: null,
+          startSource: null,
+          prompt: null,
+          lastMessage: null,
+          tool: {
+            name: 'Bash',
+            writes: false,
+            shell: true,
+            edits: [],
+            command,
+            failed: false,
+            outputExcerpt: null,
+          },
+        });
+      // From the linked worktree into the main checkout, by an absolute path and from its root.
+      expect((await shell(wt, `rm ${dir}/auth.ts`)).decision).toBe('deny');
+      expect((await shell(wt, `cd ${dir} && rm -rf .`)).decision).toBe('deny');
+      expect((await shell(join(dir), `rm $(git rev-parse --show-toplevel)/auth.ts`)).decision).toBe(
+        'deny',
+      );
+      // Twenty places that are not the project: no limit is hit, nothing is refused.
+      const elsewhere = Array.from({ length: 20 }, (_, i) => {
+        const d = mkdtempSync(join(tmpdir(), `mindly-else-${i}-`));
+        return join(d, 'auth.ts');
+      });
+      expect((await shell(wt, `rm -f ${elsewhere.join(' ')}`)).decision).toBeNull();
+      expect((await shell(wt, `touch ${elsewhere.join(' ')} ${dir}/auth.ts`)).decision).toBe(
+        'deny',
+      );
+    } finally {
+      mindly.close();
+    }
+  });
+
   it('groups sessions from linked worktrees into one project with worktree-relative paths', async () => {
     const dir = repo();
     const wt = `${dir}-wt`;

@@ -39,7 +39,10 @@ memory, which is then injected into every other agent.
   command's text shows it writes. Files on the deny-list can be protected this way too: their
   names are matched against the rule, but they are still never read and nothing about them is
   stored. Reading a command is best effort, not a sandbox: a program can write a file its command
-  line never names.
+  line never names, a path held in a variable or passed through a pipe is not followed, and a
+  command too long to read to its end (200,000 characters, 500 write targets) is answered with a
+  warning that the rest was not checked. A patch with more files than are reported in one call
+  is refused.
 - Rendered memory text is sanitised: control characters stripped, fence/delimiter sequences
   neutralised, length capped.
 

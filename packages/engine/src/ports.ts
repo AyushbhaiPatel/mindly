@@ -26,6 +26,12 @@ export interface GitPort {
    * Optional; falls back to `findRepoRoot`.
    */
   projectRoot?(cwd: string): Promise<string | null>;
+  /**
+   * Canonical roots of every working tree of the repository containing `cwd` (the main checkout
+   * and its linked worktrees), or null when they cannot be listed. Optional: with it, whether a
+   * path outside the session's tree belongs to the project is known from one call.
+   */
+  workingTrees?(cwd: string): Promise<string[] | null>;
   currentBranch(cwd: string): Promise<string | null>;
   headCommit(cwd: string): Promise<string | null>;
   /** Project-relative paths with uncommitted changes (staged, unstaged, untracked). */

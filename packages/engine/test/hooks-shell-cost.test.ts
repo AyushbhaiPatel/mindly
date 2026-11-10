@@ -90,13 +90,72 @@ describe('what a shell hook costs', () => {
     expect((await hook('pre_tool', 'rm -rf src/generated')).decision).toBeNull();
     expect((await hook('pre_tool', 'rm src/generated/*.ts')).decision).toBeNull();
     expect(under(root)).toEqual([]);
-    // A rule that can reach it is settled by one listing of that directory, inside the project.
+    // A rule that names the directory is settled from the text, still without a listing.
     await enforce(mindly, root, 'src/generated/**');
     expect((await hook('pre_tool', 'rm -rf src/generated')).decision).toBe('deny');
+    expect((await hook('pre_tool', 'rm -rf src')).decision).toBe('deny');
+    expect(under(root)).toEqual([]);
+  });
+
+  it('looks only where a rule with wildcards can match, and only once', async () => {
+    const { root, mindly, hook, under } = project();
+    mkdirSync(join(root, 'docs', 'api'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'api', 'a.md'), '');
+    await enforce(mindly, root, 'src/**/*.gen.ts');
+    await enforce(mindly, root, 'src/**/*.snap');
+    // Nothing under docs can be covered: no listing.
+    expect((await hook('pre_tool', 'rm -rf docs')).decision).toBeNull();
+    expect(under(root)).toEqual([]);
+    // The whole project goes: only the folder the rules name is read, once for both rules.
+    expect((await hook('pre_tool', 'rm -rf .')).decision).toBeNull();
     expect(under(root).sort()).toEqual([
+      join(root, 'src'),
       join(root, 'src', 'generated'),
       join(root, 'src', 'generated', 'deep'),
     ]);
+    // A top-level wildcard reads the top level and nothing below it.
+    listed.length = 0;
+    await enforce(mindly, root, '**/*.log');
+    expect((await hook('pre_tool', 'rm -f *.log')).decision).toBeNull();
+    expect(under(root)).toEqual([root]);
+  });
+
+  it('answers within a fraction of a second in a repository of ten thousand files', async () => {
+    const { root, mindly, hook } = project();
+    for (const [dir, n] of [
+      ['dist', 2500],
+      ['src', 3000],
+      ['packages/web/dist', 1500],
+      ['packages/api/dist', 1500],
+      ['node_modules/dep', 2000],
+    ] as const) {
+      for (let i = 0; i < n; i++) {
+        const d = join(root, dir, `m${i % 50}`);
+        mkdirSync(d, { recursive: true });
+        writeFileSync(join(d, `f${i}.js`), '');
+      }
+    }
+    await enforce(mindly, root, '**/*.pem');
+    await enforce(mindly, root, 'src/**/*.snap');
+    await hook('pre_tool', 'echo warm up');
+    const worst: Record<string, number> = {};
+    for (const command of [
+      'rm -rf dist',
+      'rm -rf .',
+      'git checkout -- .',
+      'rm -rf packages/*/dist',
+      'rm -rf **/dist',
+      'prettier --write .',
+      "find . -name '*.js' -delete",
+      'rm -rf node_modules',
+    ]) {
+      const started = performance.now();
+      const r = await hook('pre_tool', command);
+      worst[command] = performance.now() - started;
+      expect(r.decision, command).toBeNull();
+      expect(r.context ?? '', command).not.toContain('could not finish');
+    }
+    for (const [command, ms] of Object.entries(worst)) expect(ms, command).toBeLessThan(500);
   });
 
   it('does not walk directories or look up other trees again after the command ran', async () => {

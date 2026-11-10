@@ -231,6 +231,20 @@ export function createGitPort(): GitPort {
         // Bare repositories (no main worktree) fall back to the worktree's own top level.
         return basename(common) === '.git' ? dirname(common) : top;
       }, null),
+    workingTrees: (cwd) =>
+      safe(async () => {
+        const res = await runGit(['worktree', 'list', '--porcelain'], { cwd, timeoutMs: 5_000 });
+        const trees: string[] = [];
+        for (const line of res.stdout.split('\n')) {
+          if (!line.startsWith('worktree ')) continue;
+          try {
+            trees.push(realpathSync(line.slice('worktree '.length)));
+          } catch {
+            // A worktree whose folder is gone holds no file.
+          }
+        }
+        return trees;
+      }, null),
     currentBranch: (cwd) => safe(() => currentBranch(cwd), null),
     headCommit: (cwd) => safe(() => headCommit(cwd), null),
     changedFiles: (cwd) => safe(async () => (await changedFiles(cwd)).map((f) => f.path), []),
