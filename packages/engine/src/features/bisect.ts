@@ -392,7 +392,7 @@ export class BisectService {
       `${step.agentKind} step ${step.seq} (${what}${paths.length > 3 ? ` and ${paths.length - 3} more` : ''}) broke \`${command}\`.`,
       `Found with ${bySentinel ? "Mindly's sentinel" : 'mindly bisect'}. See the edit and its prompt with: mindly bisect show ${step.seq}; undo that edit alone with: mindly bisect revert ${step.seq}`,
     ].join(' ');
-    return this.memory.remember({
+    const { memory, outcome } = this.memory.rememberResult({
       projectId: input.projectId,
       projectRoot: input.projectRoot,
       kind: 'mistake',
@@ -403,5 +403,8 @@ export class BisectService {
       source: bySentinel ? SYSTEM : USER,
       reason: bySentinel ? "found by Mindly's sentinel" : 'found by mindly bisect',
     });
+    // A memory with this title that the user rejected, or that an agent wrote in its own words,
+    // is not the record of this finding: the run is not linked to it.
+    return outcome === 'kept_rejected' || outcome === 'kept_other_author' ? null : memory;
   }
 }

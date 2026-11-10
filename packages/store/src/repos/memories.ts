@@ -111,6 +111,8 @@ export interface MemoryPatch {
   enforce?: boolean;
   pinned?: boolean;
   lastVerifiedAt?: number | null;
+  /** Who the memory is attributed to from now on (a higher authority took it over). */
+  source?: MemorySource;
 }
 
 export interface MemoryFilter {
@@ -214,6 +216,7 @@ export class MemoryRepo {
         status: patch.status ?? cur.status,
         enforce: patch.enforce ?? cur.enforce,
         pinned: patch.pinned ?? cur.pinned,
+        source: patch.source ?? cur.source,
         lastVerifiedAt:
           patch.lastVerifiedAt === undefined ? cur.lastVerifiedAt : patch.lastVerifiedAt,
       };
@@ -224,14 +227,15 @@ export class MemoryRepo {
         toJson(next.tags) !== toJson(cur.tags) ||
         toJson(next.scope) !== toJson(cur.scope) ||
         next.trust !== cur.trust ||
-        next.status !== cur.status;
+        next.status !== cur.status ||
+        toJson(next.source) !== toJson(cur.source);
       const now = this.clock.now();
       next.version = versioned ? cur.version + 1 : cur.version;
       this.db
         .prepare(
           `UPDATE memories SET title = ?, body = ?, tags = ?, scope_paths = ?, scope_branch = ?,
              trust = ?, status = ?, enforce = ?, pinned = ?, version = ?, last_verified_at = ?,
-             updated_at = ?
+             updated_at = ?, source_type = ?, source_session_id = ?, source_agent_kind = ?
            WHERE id = ?`,
         )
         .run(
@@ -247,6 +251,9 @@ export class MemoryRepo {
           next.version,
           next.lastVerifiedAt,
           versioned ? now : cur.updatedAt,
+          next.source.type,
+          next.source.sessionId,
+          next.source.agentKind,
           id,
         );
       const saved = this.get(id);
@@ -486,10 +493,20 @@ export class MemoryRepo {
     return toEvidence(this.db.prepare('SELECT * FROM memory_evidence WHERE id = ?').get(id) as Row);
   }
 
+  deleteEvidence(id: string): void {
+    this.db.prepare('DELETE FROM memory_evidence WHERE id = ?').run(id);
+  }
+
+  /** Removes every evidence row of a memory (its text was replaced by another author's). */
+  clearEvidence(memoryId: string): void {
+    this.db.prepare('DELETE FROM memory_evidence WHERE memory_id = ?').run(memoryId);
+  }
+
+  /** Evidence of a memory, oldest first. */
   evidenceFor(memoryId: string): MemoryEvidence[] {
     return (
       this.db
-        .prepare('SELECT * FROM memory_evidence WHERE memory_id = ? ORDER BY created_at')
+        .prepare('SELECT * FROM memory_evidence WHERE memory_id = ? ORDER BY created_at, id')
         .all(memoryId) as Row[]
     ).map(toEvidence);
   }

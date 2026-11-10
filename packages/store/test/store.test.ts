@@ -204,6 +204,36 @@ describe('memories', () => {
     expect(store.memories.findByTitle(project.id, 'rule', null, lower)).toBeNull();
   });
 
+  it('hands a memory over to another source and removes evidence rows', () => {
+    const { store, project } = setup();
+    const m = store.memories.create({
+      projectId: project.id,
+      kind: 'rule',
+      title: 'Use pnpm',
+      body: 'agent text',
+      trust: 'proposed',
+      source: { type: 'agent', sessionId: null, agentKind: 'codex' },
+    });
+    const taken = store.memories.update(
+      m.id,
+      { body: 'user text', source: user },
+      user,
+      'restated',
+    );
+    expect(taken).toMatchObject({ source: user, body: 'user text', version: 2 });
+    expect(store.memories.versions(m.id).map((v) => v.body)).toEqual(['agent text', 'user text']);
+    // A patch without a source leaves the attribution alone.
+    expect(store.memories.update(m.id, { body: 'again' }, user, null).source).toEqual(user);
+
+    const rows = ['a.ts', 'b.ts', 'c.ts'].map((ref) =>
+      store.memories.addEvidence({ memoryId: m.id, projectId: project.id, type: 'file', ref }),
+    );
+    store.memories.deleteEvidence(rows[1]!.id);
+    expect(store.memories.evidenceFor(m.id).map((e) => e.ref)).toEqual(['a.ts', 'c.ts']);
+    store.memories.clearEvidence(m.id);
+    expect(store.memories.evidenceFor(m.id)).toEqual([]);
+  });
+
   it('promotes branch memories', () => {
     const { store, project } = setup();
     const m = store.memories.create({

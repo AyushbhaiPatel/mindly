@@ -130,8 +130,8 @@ function notStored(outcome: RememberOutcome, m: Memory): CallToolResult | null {
       heading: 'Existing memory of another agent',
       text:
         'Not stored: another agent already proposed a memory with this title, and it was left ' +
-        'in its own words (new evidence, if any, was added to it). If yours says something ' +
-        'different, propose it under a different title.',
+        'in its own words. If yours says something different or adds evidence, propose it ' +
+        'under a different title.',
     },
   }[outcome];
   return ok(block([{ heading: reply.heading, lines: [memoryItem(m)] }], reply.text, reply.text), {
@@ -328,7 +328,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
           'Stored.',
           m.trust === 'proposed' ? 'Stored as proposed; the user can approve it.' : undefined,
         ),
-        { memory: memorySummary(m) },
+        { stored: true, outcome, memory: memorySummary(m) },
       );
     },
   );
@@ -426,6 +426,8 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       const kept = notStored(outcome, m);
       if (kept) return kept;
       return ok(block([{ heading: 'Recorded pitfall', lines: [memoryItem(m)] }], 'Recorded.'), {
+        stored: true,
+        outcome,
         memory: memorySummary(m),
       });
     },

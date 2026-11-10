@@ -291,7 +291,7 @@ describe('mindly MCP server', () => {
     });
     const id = (first.structured?.['memory'] as { id: string }).id;
     expect(first.text).not.toMatch(/Not stored/);
-    expect(first.structured).not.toHaveProperty('stored');
+    expect(first.structured).toMatchObject({ stored: true, outcome: 'created' });
     h.mindly.memory.approve(id);
 
     const corrected = await h.call('mindly_remember', {
@@ -476,7 +476,7 @@ describe('mindly MCP server', () => {
       version: 1,
       source: { agentKind: 'claude-code' },
     });
-    expect(h.mindly.store.memories.evidenceFor(id).map((e) => e.ref)).toEqual(['src/auth.ts']);
+    expect(h.mindly.store.memories.evidenceFor(id)).toEqual([]);
 
     // The agent that proposed it can still refine it by saying it again.
     const refined = await h.call('mindly_remember', {
@@ -484,7 +484,7 @@ describe('mindly MCP server', () => {
       title: 'Plain proposed fact from A',
       body: 'Refined by the first agent.',
     });
-    expect(refined.structured).not.toHaveProperty('stored');
+    expect(refined.structured).toMatchObject({ stored: true, outcome: 'updated' });
     expect(h.mindly.store.memories.get(id)).toMatchObject({
       body: 'Refined by the first agent.',
       version: 2,
