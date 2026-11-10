@@ -10,14 +10,13 @@ import './quiet-warnings.js';
  */
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  const [{ quietOnClosedPipe }, { failsOpen, nodeProblem }] = await Promise.all([
-    import('./closed-pipe.js'),
-    import('./node-check.js'),
-  ]);
+  const [{ quietOnClosedPipe }, { failsOpen, loadSqliteWithFts5, nodeProblem }] = await Promise.all(
+    [import('./closed-pipe.js'), import('./node-check.js')],
+  );
   quietOnClosedPipe();
   const problem = await nodeProblem(argv, {
     version: process.version,
-    loadSqlite: () => import('node:sqlite'),
+    loadSqlite: loadSqliteWithFts5,
   });
   if (problem !== null) {
     if (failsOpen(argv)) {

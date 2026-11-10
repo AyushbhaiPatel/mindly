@@ -12,7 +12,7 @@
 
 [![npm](https://img.shields.io/npm/v/mindly-cli?color=2b7489&label=npm)](https://www.npmjs.com/package/mindly-cli)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![node](https://img.shields.io/badge/node-%E2%89%A522.13-43853d)](#quickstart)
+[![node](https://img.shields.io/badge/node-%E2%89%A522.16-43853d)](#quickstart)
 
 ```bash
 npx mindly-cli init
@@ -53,7 +53,7 @@ team that never talks to each other:
 
 ## Quickstart
 
-You need **Node.js 22.13 or newer** (23.4 or newer if you are on Node 23) and **git**, on macOS or Linux.
+You need **Node.js 22.16 or newer, or 24 or newer** (Node 23 is not supported) and **git**, on macOS or Linux.
 
 **1. Install**
 

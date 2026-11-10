@@ -1,43 +1,79 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MINDLY_VERSION } from '@mindly/core';
 import { describe, expect, it } from 'vitest';
 import { inRunnerCache, installCommand } from '../src/commands/setup.js';
-import { failsOpen, nodeProblem, nodeVersionSupported } from '../src/node-check.js';
+import {
+  SUPPORTED_NODE,
+  failsOpen,
+  loadSqliteWithFts5,
+  nodeProblem,
+  nodeVersionSupported,
+} from '../src/node-check.js';
 import { tempDir } from './helpers.js';
 
 const loads = (): Promise<unknown> => Promise.resolve({});
 const missing = (): Promise<unknown> => Promise.reject(new Error('No such built-in module'));
 
 describe('supported Node versions', () => {
-  it('follows the range in engines: 22.13+ on 22, 23.4+ on 23, any later major', () => {
-    for (const v of ['v22.13.0', 'v22.23.4', 'v23.4.0', 'v23.11.1', 'v24.0.0', 'v26.1.0']) {
+  it('follows the range in engines: 22.16+ on 22, no 23, any later major', () => {
+    expect(SUPPORTED_NODE).toBe('^22.16.0 || >=24.0.0');
+    for (const v of ['v22.16.0', 'v22.23.4', 'v24.0.0', 'v25.0.0', 'v26.1.0']) {
       expect(nodeVersionSupported(v), v).toBe(true);
     }
-    for (const v of ['v20.18.0', 'v22.12.0', 'v22.0.0', 'v23.0.0', 'v23.3.0', 'v18.20.4', 'junk']) {
+    for (const v of [
+      'v20.18.0',
+      'v22.0.0',
+      'v22.13.0',
+      'v22.15.1',
+      'v23.4.0',
+      'v23.11.1',
+      'v18.20.4',
+      'junk',
+    ]) {
       expect(nodeVersionSupported(v), v).toBe(false);
+    }
+  });
+
+  it('matches engines in the CLI and workspace package.json', () => {
+    const root = join(import.meta.dirname, '..', '..', '..');
+    for (const file of [join(root, 'package.json'), join(root, 'apps', 'cli', 'package.json')]) {
+      const pkg = JSON.parse(readFileSync(file, 'utf8')) as { engines?: { node?: string } };
+      expect(pkg.engines?.node, file).toBe(SUPPORTED_NODE);
     }
   });
 
   it('names the version it found, before anything loads SQLite', async () => {
     let tried = false;
     const problem = await nodeProblem(['doctor'], {
-      version: 'v22.12.0',
+      version: 'v22.13.0',
       loadSqlite: () => {
         tried = true;
         return loads();
       },
     });
     expect(problem).toBe(
-      'Mindly needs Node.js 22.13 or newer (23.4 or newer on the 23 line); this is v22.12.0.',
+      'Mindly needs Node.js 22.16 or newer on the 22 line, or 24 or newer; this is v22.13.0.',
     );
     expect(tried).toBe(false);
   });
 
   it('refuses a supported version that does not provide node:sqlite', async () => {
     const problem = await nodeProblem(['init'], { version: 'v22.20.0', loadSqlite: missing });
-    expect(problem).toMatch(/built-in SQLite; this Node \(v22\.20\.0\) does not provide it/);
+    expect(problem).toMatch(
+      /built-in SQLite and full-text search \(FTS5\); this Node \(v22\.20\.0\)/,
+    );
+  });
+
+  it('refuses a SQLite without FTS5', async () => {
+    const noFts5 = (): Promise<unknown> => Promise.reject(new Error('no such module: fts5'));
+    const problem = await nodeProblem(['search', 'x'], { version: 'v24.1.0', loadSqlite: noFts5 });
+    expect(problem).toMatch(/^Mindly needs Node\.js 22\.16 .*FTS5.*v24\.1\.0/);
+  });
+
+  it('finds FTS5 in the SQLite of the Node running the tests', async () => {
+    await expect(loadSqliteWithFts5()).resolves.toBeUndefined();
   });
 
   it('lets version and help through on any Node, and passes a supported one', async () => {
@@ -129,7 +165,8 @@ describe.skipIf(!existsSync(BUILT_MAIN))('built binary', () => {
       encoding: 'utf8',
     });
     expect(cmd.status).toBe(1);
-    expect(cmd.stderr.trim()).toMatch(/^Mindly needs Node\.js 22\.13 or newer .*built-in SQLite/);
+    expect(cmd.stderr.trim()).toMatch(/^Mindly needs Node\.js 22\.16 or newer .*built-in SQLite/);
+    expect(cmd.stderr.trim().split('\n')).toHaveLength(1);
     const hook = spawnSync(
       process.execPath,
       ['--no-experimental-sqlite', BUILT_MAIN, 'hook', 'claude-code', 'Stop'],

@@ -8,7 +8,7 @@ laid out and what we look for in a pull request.
 
 ### Prerequisites
 
-- **Node.js 22.13 or newer** (23.4 or newer on Node 23). Mindly uses the built-in `node:sqlite` module, which needs no flag from those versions on.
+- **Node.js 22.16 or newer, or 24 or newer** (Node 23 is not supported). Mindly uses the built-in `node:sqlite` module and its FTS5 full-text search, which Node ships from 22.16 and 24.0; no 23.x release has FTS5.
 - **pnpm**, through Corepack (ships with Node).
 - **Git.**
 
