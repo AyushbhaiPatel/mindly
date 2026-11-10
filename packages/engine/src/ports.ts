@@ -245,11 +245,16 @@ export interface SplitGitPort {
    */
   gitDataIn(repoRoot: string, worktree: string): Promise<string[]>;
   /**
-   * What removing `worktree` would delete that a listing counts, as it is now: untracked files
-   * and ignored files on the deny-list (and `secretDeny`). Looked at right before the removal:
-   * once the confirmed work is gone, anything here appeared since.
+   * The last look at `worktree` before it is removed, in one pass: `stray`, what removing it
+   * would delete that a listing counts (untracked files, and ignored files on the deny-list or
+   * `secretDeny`): once the confirmed work is gone, anything here appeared since; `gitData`, as
+   * `gitDataIn`.
    */
-  strayWork(repoRoot: string, worktree: string, secretDeny: readonly string[]): Promise<string[]>;
+  lastLook(
+    repoRoot: string,
+    worktree: string,
+    secretDeny: readonly string[],
+  ): Promise<{ stray: string[]; gitData: string[] }>;
   /** Deletes a branch; with `expectedTip`, refuses (`conflict`) one that has moved since. */
   deleteBranch(repoRoot: string, branch: string, expectedTip?: string): Promise<boolean>;
   /**
@@ -282,7 +287,14 @@ export interface SplitGitPort {
     branch: string,
     extraDeny: readonly string[],
     secretDeny: readonly string[],
-  ): Promise<{ paths: string[]; denied: string[]; ignoredDenied: string[] }>;
+    since?: string,
+  ): Promise<{
+    paths: string[];
+    denied: string[];
+    ignoredDenied: string[];
+    /** With `since`: paths that differ between that commit and the worktree, as `changedSince`. */
+    changedSince?: string[];
+  }>;
   /** Paths that differ between `base` and the worktree's current content (committed or not). */
   changedSince(
     repoRoot: string,

@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { lstatSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { MindlyError, redactText, sanitizeLine } from '@mindly/core';
 
 /** Default wall-clock limit for one git invocation. */
@@ -366,6 +366,63 @@ export function versionAtLeast(v: GitVersion, major: number, minor: number): boo
  * is the user's own and is left alone; system config is never read.
  */
 export async function driverOverrides(cwd: string): Promise<string[]> {
+  const key = configStamp(cwd);
+  const hit = key ? OVERRIDES.get(cwd) : undefined;
+  if (key && hit && hit.key === key && Date.now() - hit.at < OVERRIDES_MAX_AGE_MS) return hit.value;
+  const value = await readDriverOverrides(cwd);
+  if (key) {
+    if (OVERRIDES.size >= 256) OVERRIDES.clear();
+    OVERRIDES.set(cwd, { key, at: Date.now(), value });
+  }
+  return value;
+}
+
+/*
+ * `driverOverrides` answers are kept per working-tree root while its config files are the same
+ * files with the same size and time, for a minute at most (an included config file is not
+ * looked at). Anything else asks git again.
+ */
+const OVERRIDES = new Map<string, { key: string; at: number; value: string[] }>();
+const OVERRIDES_MAX_AGE_MS = 60_000;
+
+/** Identity of the config files git reads for the repository whose top level is `root`. */
+function configStamp(root: string): string | null {
+  try {
+    const dotgit = join(root, '.git');
+    let gitdir = dotgit;
+    if (!lstatSync(dotgit).isDirectory()) {
+      const m = /^gitdir: (.+)$/m.exec(readFileSync(dotgit, 'utf8'));
+      if (!m) return null;
+      gitdir = resolve(root, (m[1] as string).trim());
+    }
+    let common = gitdir;
+    try {
+      common = resolve(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim());
+    } catch {
+      // Not a linked worktree: its git directory is the common one.
+    }
+    const stamp = (file: string): string => {
+      try {
+        const st = statSync(file);
+        return `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}`;
+      } catch {
+        return 'none';
+      }
+    };
+    return [
+      join(common, 'config'),
+      join(gitdir, 'config'),
+      join(gitdir, 'config.worktree'),
+      join(common, 'config.worktree'),
+    ]
+      .map((f) => `${f}=${stamp(f)}`)
+      .join('|');
+  } catch {
+    return null;
+  }
+}
+
+async function readDriverOverrides(cwd: string): Promise<string[]> {
   const res = await runGit(
     [
       'config',

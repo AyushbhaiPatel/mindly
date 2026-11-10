@@ -25,6 +25,7 @@ import {
   flaggedChanges,
   ignoredDeniedFiles,
   gitDataPaths,
+  worktreeScan,
   headCommit,
   hunkHashes,
   isManifestPath,
@@ -107,24 +108,16 @@ export function createSplitGitPort(): SplitGitPort {
     removeWorktree: (repoRoot, path, options) => removeWorktree(repoRoot, path, options),
     restoreFromHead: (_repoRoot, worktree, paths) => restoreFromHead(worktree, paths),
     gitDataIn: (_repoRoot, worktree) => gitDataPaths(worktree),
-    strayWork: async (_repoRoot, worktree, secretDeny) => {
-      const untracked = await runGit(['ls-files', '-z', '--others', '--exclude-standard'], {
-        cwd: worktree,
-        timeoutMs: 120_000,
-      });
-      return [
-        ...new Set([
-          ...untracked.stdout
-            .split('\0')
-            .filter((p) => p !== '')
-            .map((p) => p.replace(/\/$/, '')),
-          ...(await ignoredDeniedFiles(worktree, secretDeny)),
-        ]),
-      ].sort();
+    lastLook: async (_repoRoot, worktree, secretDeny) => {
+      const scan = await worktreeScan(worktree, secretDeny);
+      return {
+        stray: [...new Set([...scan.untracked, ...scan.ignoredDenied])].sort(),
+        gitData: scan.gitData,
+      };
     },
     deleteBranch: (repoRoot, branch, expectedTip) => deleteBranch(repoRoot, branch, expectedTip),
     branchOnlyWork: (repoRoot, branch, options) => branchOnlyWork(repoRoot, branch, options),
-    uncommittedWork: async (repoRoot, worktree, branch, extraDeny, secretDeny) => {
+    uncommittedWork: async (repoRoot, worktree, branch, extraDeny, secretDeny, since) => {
       const captured = await captureWorktreeCommit(worktree, {
         message: 'mindly split status',
         extraDeny,
@@ -153,10 +146,26 @@ export function createSplitGitPort(): SplitGitPort {
         ...captured.nested,
         ...flagged.changed,
       ]);
+      // The same look at the worktree, against another commit (status asks for both).
+      const changed =
+        since === undefined
+          ? undefined
+          : [
+              ...(
+                await runGit(
+                  ['diff', '--name-only', '-z', '--no-renames', since, captured.commit, '--'],
+                  { cwd: repoRoot, timeoutMs: 30_000 },
+                )
+              ).stdout
+                .split('\0')
+                .filter((p) => p !== ''),
+              ...captured.nested,
+            ];
       return {
         paths: [...paths].sort(),
         denied: [...new Set([...captured.skipped, ...ignored, ...flagged.denied])].sort(),
         ignoredDenied: ignored.filter((p) => !paths.has(p)),
+        ...(changed ? { changedSince: changed } : {}),
       };
     },
     changedSince: async (repoRoot, worktree, base, extraDeny) => {

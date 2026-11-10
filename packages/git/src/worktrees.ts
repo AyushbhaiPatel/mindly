@@ -3,6 +3,7 @@ import {
   existsSync,
   lstatSync,
   readdirSync,
+  readFileSync,
   readlinkSync,
   realpathSync,
   type Stats,
@@ -306,61 +307,129 @@ function isGitDir(root: string, dir: string): boolean {
   return Boolean(at('objects')?.isDirectory() && at('refs')?.isDirectory());
 }
 
+/** What a look at a worktree finds that removing it would lose (see `worktreeScan`). */
+export interface WorktreeScan {
+  /** Untracked files (not ignored), repository-relative. */
+  untracked: string[];
+  /** Ignored files on the secret deny-list or `secretDeny`, except installed ones. */
+  ignoredDenied: string[];
+  /** Git data no listing of files can stand for (see `worktreeScan`). */
+  gitData: string[];
+}
+
+/** The worktree's own git directory, from its `.git` entry: no git run. */
+function ownGitDir(root: string): string | null {
+  try {
+    const dotgit = join(root, '.git');
+    const st = lstatSync(dotgit);
+    if (st.isDirectory()) return dotgit;
+    const m = /^gitdir: (.+)$/m.exec(readFileSync(dotgit, 'utf8'));
+    return m ? resolve(root, (m[1] as string).trim()) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Git data in the working tree at `cwd` that removing it would destroy and that no listing of
- * files can stand for: repositories inside it (new ones and ones in ignored folders, as git lists
- * them: folders it does not descend into), populated submodules and committed repositories (from
- * the index), a `.git` file, folder or link in any folder that holds a tracked file (git looks
- * past those), git directories among its untracked or ignored files (a `--separate-git-dir`, a
- * bare repository), and a non-empty `modules` folder in the worktree's own git directory (the
- * git directories of its submodules, initialised or not). Folders are repository-relative;
- * that `modules` folder is absolute. Nothing in any of them is read.
+ * One look at the working tree at `cwd`, from two git listings read as they come (its status,
+ * with untracked and ignored files one by one, and its index) and a few `lstat`s; nothing in any
+ * file is read.
+ *
+ * `gitData`: git data that removing the worktree would destroy and no listing of files can stand
+ * for: repositories inside it (new ones and ones in ignored folders, as git lists them: folders
+ * it does not descend into), populated submodules and committed repositories (from the index),
+ * a `.git` file, folder or link in any folder that holds a tracked file (git looks past those),
+ * git directories among its untracked or ignored files (a `--separate-git-dir`, a bare
+ * repository), and a non-empty `modules` folder in the worktree's own git directory (the git
+ * directories of its submodules, initialised or not). Only the outermost of nested ones;
+ * repository-relative, but that `modules` folder is absolute.
  */
-export async function gitDataPaths(cwd: string): Promise<string[]> {
+export async function worktreeScan(
+  cwd: string,
+  secretDeny: readonly string[] = [],
+): Promise<WorktreeScan> {
   const root = await findRepoRoot(cwd);
   const opts = { cwd: root, timeoutMs: 300_000 };
   const found = new Set<string>();
-  const look = (rec: string): boolean => {
-    if (rec.endsWith('/')) found.add(rec.slice(0, -1));
-    else if (rec === 'HEAD' || rec.endsWith('/HEAD')) {
+  // A folder record is a repository git did not descend into; a `HEAD` may be a git directory.
+  const gitDataIn = (rec: string): boolean => {
+    if (rec.endsWith('/')) {
+      found.add(rec.slice(0, -1));
+      return true;
+    }
+    if (rec === 'HEAD' || rec.endsWith('/HEAD')) {
       const dir = rec.slice(0, -'HEAD'.length).replace(/\/$/, '');
       if (isGitDir(root, dir)) found.add(dir);
     }
     return false;
   };
-  // Every ignored file is listed: read as it comes, keeping nothing.
+  // Untracked (`??`) and ignored (`!!`) files one by one, repositories as folders, in one listing
+  // read as it comes (every ignored file is in it), keeping only what counts.
+  const untracked: string[] = [];
+  const ignoredDenied: string[] = [];
   await runGitRecords(
-    ['ls-files', '-z', '--others', '--ignored', '--exclude-standard'],
+    [
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--no-renames',
+      '--untracked-files=all',
+      '--ignored=traditional',
+      '--ignore-submodules=all',
+    ],
     opts,
-    look,
+    (rec) => {
+      const kind = rec.slice(0, 3);
+      if (kind !== '?? ' && kind !== '!! ') return false;
+      const path = rec.slice(3);
+      if (gitDataIn(path)) return false;
+      if (kind === '?? ') untracked.push(path);
+      else if (isDeniedPath(path, secretDeny) && !installed(root, path)) ignoredDenied.push(path);
+      return false;
+    },
   );
-  await runGitRecords(['ls-files', '-z', '--others', '--exclude-standard'], opts, look);
   // The index: submodules, and every folder that holds a tracked file.
   const folders = new Set<string>();
   await runGitRecords(['ls-files', '-z', '-s'], opts, (rec) => {
     const path = rec.slice(rec.indexOf('\t') + 1);
     if (rec.startsWith('160000 ')) {
-      if (lstatInTree(root, `${path}/.git`) !== null) found.add(path);
+      if (existsOrLink(join(root, path, '.git'))) found.add(path);
       return false;
     }
-    for (let i = path.indexOf('/'); i !== -1; i = path.indexOf('/', i + 1)) {
-      folders.add(path.slice(0, i));
+    for (let i = path.lastIndexOf('/'); i > 0; i = path.lastIndexOf('/', i - 1)) {
+      const dir = path.slice(0, i);
+      if (folders.has(dir)) break;
+      folders.add(dir);
     }
     return false;
   });
-  for (const dir of folders) if (lstatInTree(root, `${dir}/.git`) !== null) found.add(dir);
-  const out = outermostPaths(found);
-  const admin = resolve(
-    root,
-    (await runGit(['rev-parse', '--git-dir'], { cwd: root, timeoutMs: 30_000 })).stdout.trim(),
-  );
-  const modules = join(admin, 'modules');
-  try {
-    if (readdirSync(modules).length > 0) out.push(modules);
-  } catch {
-    // No such folder.
+  for (const dir of folders) if (existsOrLink(join(root, dir, '.git'))) found.add(dir);
+  const gitData = outermostPaths(found);
+  const own = ownGitDir(root);
+  if (own) {
+    const modules = join(own, 'modules');
+    try {
+      if (readdirSync(modules).length > 0) gitData.push(modules);
+    } catch {
+      // No such folder.
+    }
   }
-  return out;
+  return { untracked: untracked.sort(), ignoredDenied: ignoredDenied.sort(), gitData };
+}
+
+/** True when there is an entry at `abs`, a dangling link included. */
+function existsOrLink(abs: string): boolean {
+  try {
+    lstatSync(abs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The `gitData` of `worktreeScan`. */
+export async function gitDataPaths(cwd: string): Promise<string[]> {
+  return (await worktreeScan(cwd)).gitData;
 }
 
 /**

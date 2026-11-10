@@ -1,4 +1,13 @@
-import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { MindlyError, isDeniedPath } from '@mindly/core';
@@ -108,10 +117,7 @@ export async function captureWorktreeCommit(
   const timeoutMs = options.timeoutMs ?? 120_000;
   const parent = await headCommit(root);
   const overrides = await driverOverrides(root);
-  const indexPath = (
-    await runGit(['rev-parse', '--git-path', 'index'], { cwd: root })
-  ).stdout.trim();
-  const realIndex = isAbsolute(indexPath) ? indexPath : resolve(root, indexPath);
+  const realIndex = await indexFile(root);
 
   const tmp = mkdtempSync(join(tmpdir(), 'mindly-capture-'));
   try {
@@ -202,4 +208,20 @@ export async function captureWorktreeCommit(
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/** The index file of the working tree at `root`: from its `.git` entry, or else from git. */
+async function indexFile(root: string): Promise<string> {
+  try {
+    const dotgit = join(root, '.git');
+    if (lstatSync(dotgit).isDirectory()) return join(dotgit, 'index');
+    const m = /^gitdir: (.+)$/m.exec(readFileSync(dotgit, 'utf8'));
+    if (m) return join(resolve(root, (m[1] as string).trim()), 'index');
+  } catch {
+    // Asked of git below.
+  }
+  const indexPath = (
+    await runGit(['rev-parse', '--git-path', 'index'], { cwd: root })
+  ).stdout.trim();
+  return isAbsolute(indexPath) ? indexPath : resolve(root, indexPath);
 }

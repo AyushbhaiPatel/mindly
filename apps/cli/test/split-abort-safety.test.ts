@@ -544,8 +544,15 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     expect(forced.stdout).toContain('src/app/tool');
   });
 
-  it('takes about as long as before with dependency checkouts full of files', async () => {
+  it('takes about as long with dependency checkouts full of files as without', async () => {
     const sb = await splitSandbox((s) => write(s.repo, '.gitignore', 'deps/\n'));
+    // The same commands on this machine, before the checkouts: what the bounds are relative to.
+    const timed = async (argv: string[], opts = {}): Promise<number> => {
+      const t = Date.now();
+      await cli(sb, argv, opts);
+      return Date.now() - t;
+    };
+    const base = Math.min(await timed(['split', 'status']), await timed(['split', 'status']));
     const blob = Buffer.alloc(16 * 1024, 7);
     for (const key of ['api', 'page']) {
       for (const name of ['a', 'b', 'c']) {
@@ -557,14 +564,12 @@ describe('split abort never deletes git data in a worktree, short of a discard',
         writeFileSync(join(d, 'node_modules/pkg0/lib/f0.js'), blob);
       }
     }
-    let t = Date.now();
-    expect((await cli(sb, ['split', 'status'])).code).toBe(0);
-    const status = Date.now() - t;
-    t = Date.now();
-    expect((await cli(sb, ['split', 'abort', '--keep-branches'], { answers: ['y'] })).code).toBe(1);
-    const abort = Date.now() - t;
-    // Nothing in them is read: no more than a few git listings of their folders.
-    expect(status).toBeLessThan(2_000);
-    expect(abort).toBeLessThan(5_000);
+    const status = await timed(['split', 'status']);
+    const abort = await timed(['split', 'abort', '--keep-branches'], { answers: ['y'] });
+    expect(existsSync(join(partDir(sb, 'page'), 'deps/a/.git'))).toBe(true);
+    // Nothing in them is read, and git does not go into them: status costs what it did without
+    // them, and an abort (which looks at each part twice more) a few times that.
+    expect(status).toBeLessThan(2 * base + 300);
+    expect(abort).toBeLessThan(4 * base + 500);
   }, 300_000);
 });

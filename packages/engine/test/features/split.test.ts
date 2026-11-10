@@ -57,6 +57,8 @@ function fakeSplitGit(root: string) {
   const denied = new Set<string>();
   // Git data an abort never deletes (by worktree).
   const gitData = new Map<string, string[]>();
+  // Git data that shows up only at the last look before a removal (by worktree).
+  const lateGitData = new Map<string, string[]>();
   // What appeared right before a removal (by worktree).
   const stray = new Map<string, string[]>();
   // Commits only a branch has (by branch), as `branchOnlyWork` reports them; the branch tip is
@@ -90,7 +92,10 @@ function fakeSplitGit(root: string) {
       calls.restored.push({ worktree, paths: [...paths] });
     },
     gitDataIn: async (_root, worktree) => gitData.get(worktree) ?? [],
-    strayWork: async (_root, worktree) => stray.get(worktree) ?? [],
+    lastLook: async (_root, worktree) => ({
+      stray: stray.get(worktree) ?? [],
+      gitData: lateGitData.get(worktree) ?? gitData.get(worktree) ?? [],
+    }),
     deleteBranch: async (_root, b, expectedTip) => {
       if (expectedTip !== undefined && branches.has(b) && tipOf(b) !== expectedTip) {
         throw new MindlyError('conflict', `branch ${b} has commits made after it was checked`, {
@@ -143,6 +148,7 @@ function fakeSplitGit(root: string) {
     ignoredDenied,
     denied,
     gitData,
+    lateGitData,
     stray,
     onlyOn,
     calls,
@@ -1410,14 +1416,8 @@ describe('split through hook events', () => {
       connectedAgents: null,
     });
     const page = (created.parts as { worktree: string }[])[1] as { worktree: string };
-    let looks = 0;
-    const gitDataIn = fake.port.gitDataIn;
-    fake.port.gitDataIn = async (root, wt) => {
-      if (wt === page.worktree && ++looks === 2) return ['late'];
-      return gitDataIn(root, wt);
-    };
+    fake.lateGitData.set(page.worktree, ['late']);
     const aborted = await svc.abort(created.split.id);
-    expect(looks).toBe(2);
     expect(aborted.finished).toBe(false);
     expect(aborted.keptBecause[page.worktree]).toMatch(
       /^it holds git data that abort never deletes: late\./,

@@ -83,6 +83,7 @@ export {
   flaggedChanges,
   ignoredDeniedFiles,
   gitDataPaths,
+  worktreeScan,
   listFiles,
   mergeIntoNewBranch,
   removeWorktree,
@@ -93,6 +94,7 @@ export type {
   BranchOnlyWork,
   MergeIntoBranchResult,
   MergeSource,
+  WorktreeScan,
 } from './worktrees.js';
 
 export { DEFAULT_CHECK_OUTPUT_BYTES, checkEnv, runChecks } from './checks.js';

@@ -693,7 +693,31 @@ export class SplitService {
   }
 
   private async notOnBranch(git: SplitGitPort, root: string, part: SplitPart): Promise<string[]> {
-    return (await this.worktreeState(git, root, part)).paths.slice(0, PATHS_SHOWN);
+    const work = await this.worktreeWork(git, root, part);
+    return work ? [...new Set(work.paths)].sort().slice(0, PATHS_SHOWN) : [];
+  }
+
+  /**
+   * `uncommittedWork` of the part's worktree, or null when the worktree or its branch is gone.
+   * With `since`, also what differs from that commit, from the same look at the worktree.
+   */
+  private async worktreeWork(
+    git: SplitGitPort,
+    root: string,
+    part: SplitPart,
+    since?: string,
+  ): Promise<Awaited<ReturnType<SplitGitPort['uncommittedWork']>> | null> {
+    if (!existsSync(part.worktree) || !(await git.branchExists(root, part.branch))) return null;
+    return git.uncommittedWork(
+      root,
+      part.worktree,
+      part.branch,
+      this.extraDeny(part.projectId),
+      // Ignored files count only when they name secrets: the project's `ignore` list is about
+      // what Mindly reads, and ignored build output is no one's work.
+      this.k.config.redaction.denyPaths,
+      since,
+    );
   }
 
   /**
@@ -722,7 +746,8 @@ export class SplitService {
     files: Record<string, string>;
     opaque: string[];
   }> {
-    if (!existsSync(part.worktree) || !(await git.branchExists(root, part.branch))) {
+    const work = await this.worktreeWork(git, root, part);
+    if (!work) {
       const denied = new Set<string>();
       return {
         paths: [],
@@ -731,15 +756,6 @@ export class SplitService {
         ...worktreeFingerprint(part.worktree, [], denied),
       };
     }
-    const work = await git.uncommittedWork(
-      root,
-      part.worktree,
-      part.branch,
-      this.extraDeny(part.projectId),
-      // Ignored files count only when they name secrets: the project's `ignore` list is about
-      // what Mindly reads, and ignored build output is no one's work.
-      this.k.config.redaction.denyPaths,
-    );
     const paths = [...new Set(work.paths)].sort();
     const lost = [...new Set([...paths, ...work.ignoredDenied])].sort();
     const denied = new Set(work.denied);
@@ -792,19 +808,17 @@ export class SplitService {
   }
 
   /**
-   * Why the part's worktree must stay although its listed work is gone (or there was none):
-   * something a listing counts appeared since its last check, which git's own check would not
-   * all stop (it deletes ignored files). Null when there is nothing.
+   * Why the part's worktree must stay although its listed work is gone (or there was none): git
+   * data in it (a repository cloned after the yes), or something a listing counts that appeared
+   * since its last check, which git's own check would not all stop (it deletes ignored files).
+   * Null when there is nothing.
    */
-  private async strayWork(
-    git: SplitGitPort,
-    root: string,
-    part: SplitPart,
-  ): Promise<string | null> {
+  private async lastLook(git: SplitGitPort, root: string, part: SplitPart): Promise<string | null> {
     try {
-      const stray = await git.strayWork(root, part.worktree, this.k.config.redaction.denyPaths);
-      return stray.length > 0
-        ? `it got new work while the abort ran: ${describePaths(stray)}`
+      const look = await git.lastLook(root, part.worktree, this.k.config.redaction.denyPaths);
+      if (look.gitData.length > 0) return heldMessage(look.gitData);
+      return look.stray.length > 0
+        ? `it got new work while the abort ran: ${describePaths(look.stray)}`
         : null;
     } catch (err) {
       return `could not check it for new work: ${sanitizeLine(err instanceof Error ? err.message : String(err), 300)}`;
@@ -931,13 +945,17 @@ export class SplitService {
       let unmergedCommits: string[] = [];
       if (git && split.status !== 'aborted' && existsSync(part.worktree)) {
         try {
-          filesChanged = await git.changedSince(
-            root,
-            part.worktree,
-            split.baseCommit,
-            this.extraDeny(split.projectId),
-          );
-          uncommitted = await this.notOnBranch(git, root, part);
+          // One look at the worktree for both.
+          const work = await this.worktreeWork(git, root, part, split.baseCommit);
+          uncommitted = work ? [...new Set(work.paths)].sort().slice(0, PATHS_SHOWN) : [];
+          filesChanged =
+            work?.changedSince ??
+            (await git.changedSince(
+              root,
+              part.worktree,
+              split.baseCommit,
+              this.extraDeny(split.projectId),
+            ));
         } catch (err) {
           this.k.logger.warn('split status: could not diff a worktree', {
             part: part.key,
@@ -1415,22 +1433,8 @@ export class SplitService {
           keptBecause[part.worktree] = why;
         }
       }
-      // Git data that appeared since the listing (a repository cloned after the yes) keeps it too.
       if (!unfinished && limited && existsSync(part.worktree)) {
-        try {
-          const late = await git.gitDataIn(root, part.worktree);
-          if (late.length > 0) {
-            unfinished = true;
-            keptBecause[part.worktree] = heldMessage(late);
-          }
-        } catch (err) {
-          unfinished = true;
-          keptBecause[part.worktree] =
-            `could not check it for git data: ${sanitizeLine(err instanceof Error ? err.message : String(err), 300)}`;
-        }
-      }
-      if (!unfinished && limited && existsSync(part.worktree)) {
-        const why = await this.strayWork(git, root, part);
+        const why = await this.lastLook(git, root, part);
         if (why) {
           unfinished = true;
           keptBecause[part.worktree] = why;
