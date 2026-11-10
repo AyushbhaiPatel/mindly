@@ -10,7 +10,12 @@ import {
 /** Wide by script or block, independent of the card's own table. */
 const WIDE =
   /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}|[\u3000-\u303F\uFF00-\uFF60\uFFE0-\uFFE6]/u;
-const EMOJI = /\p{Extended_Pictographic}/u;
+/** Any emoji, flags and keycaps included (the `v` flag is newer than the compile target). */
+const RGI_EMOJI = new RegExp('^\\p{RGI_Emoji}$', 'v');
+const PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
+const isEmoji = (g: string): boolean => RGI_EMOJI.test(g) || PICTOGRAPHIC.test(g);
+/** A lone surrogate: half of a character cut in two. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /*
  * Lays the card's text out the way the card itself estimates it (a character is a fixed share of
@@ -56,7 +61,7 @@ function boxes(svg: string): { boxes: Box[]; W: number; H: number } {
     for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(
       text,
     )) {
-      ems += EMOJI.test(segment) ? CARD_EMOJI_EM : WIDE.test(segment) ? CARD_WIDE_CHAR_EM : em;
+      ems += isEmoji(segment) ? CARD_EMOJI_EM : WIDE.test(segment) ? CARD_WIDE_CHAR_EM : em;
     }
     const w = ems * size;
     const anchor = attr('text-anchor') ?? 'start';
@@ -204,6 +209,62 @@ describe('share card layout', () => {
     expect(svg).toMatch(/assets\/🎉+…🎉+\.png/u);
     // An emoji sequence is never split.
     expect(svg).not.toMatch(/‍…|‍</);
+  });
+
+  it('never cuts a character in two, and keeps the file name of a long path', () => {
+    const summary: SavesSummary = {
+      since: 1_749_400_000_000,
+      total: 1,
+      byKind: { overlap_avoided: 1 },
+      byAgent: { 'claude-code': 1 },
+      recent: [],
+    };
+    for (const at of [59, 60, 61, 199, 200, 201]) {
+      const svg = renderSavesCard({
+        summary,
+        until: UNTIL,
+        details: {
+          // An emoji (two UTF-16 units) across every cut point the text used to be cut at.
+          projectName: `${'p'.repeat(Math.min(at, 59))}🚀x`,
+          saves: [
+            { title: `${'t'.repeat(at)}🚀 done`, paths: [`src/${'d'.repeat(at - 4)}🚀/file.ts`] },
+          ],
+        },
+      });
+      expect(LONE_SURROGATE.test(svg), String(at)).toBe(false);
+      expect(problems(svg), String(at)).toEqual([]);
+      const files = /<text [^>]*font-size="16"[^>]*>([^<]*)<\/text>/.exec(svg)?.[1] ?? '';
+      expect(files, String(at)).toMatch(/^src\/d+…[^<]*\/file\.ts$/);
+    }
+  });
+
+  it('measures flags and keycaps as emoji', () => {
+    const summary: SavesSummary = {
+      since: 1_749_400_000_000,
+      total: 1,
+      byKind: { overlap_avoided: 1 },
+      byAgent: { 'claude-code': 1 },
+      recent: [],
+    };
+    const svg = renderSavesCard({
+      summary,
+      until: UNTIL,
+      details: {
+        projectName: '🇯🇵🇰🇷🇨🇳'.repeat(20),
+        saves: [
+          { title: '🇯🇵'.repeat(80), paths: [`flags/${'🇺🇳'.repeat(60)}.txt`] },
+          { title: '1️⃣#️⃣*️⃣'.repeat(30), paths: [`keys/${'9️⃣'.repeat(60)}.txt`] },
+        ],
+      },
+    });
+    expect(problems(svg)).toEqual([]);
+    // A flag is never cut into its two letters.
+    const shown = [...svg.matchAll(/>([^<]*)</g)].map((m) => m[1] ?? '').join('');
+    for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(
+      shown,
+    )) {
+      if (/^[\u{1F1E6}-\u{1F1FF}]$/u.test(segment)) throw new Error('half a flag');
+    }
   });
 
   it('leaves room for a large total next to its caption', () => {

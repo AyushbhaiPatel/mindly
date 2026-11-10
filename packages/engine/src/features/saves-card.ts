@@ -111,8 +111,35 @@ const WIDE =
 /** Marks (variation selectors among them) and format characters such as joiners: no width. */
 const ZERO_WIDTH = /^(?:\p{M}|\p{Cf})+$/u;
 const PICTOGRAPHS = /\p{Extended_Pictographic}/gu;
+/**
+ * Emoji that are not pictographs: a flag (a pair of regional indicator letters) and a keycap
+ * (a digit, # or * with the combining enclosing keycap). One of these is one emoji.
+ */
+const FLAG_OR_KEYCAP = /[\u{1F1E6}-\u{1F1FF}]|\u20E3/u;
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** At most this many characters of a text are looked at; more never fit on the card. */
+const MAX_LINE_GRAPHEMES = 400;
+
+/**
+ * `text` on one line, cleaned like any title (`sanitizeLine`) but cut only between characters as
+ * people see them: `sanitizeLine` cuts by UTF-16 unit, which can split an emoji in two. A path
+ * keeps its end (the file name) when it is cut; any other text keeps its start.
+ */
+function cleanLine(text: string, keep: 'start' | 'ends' = 'start'): string {
+  const gs = graphemes(text);
+  let bounded = text;
+  if (gs.length > MAX_LINE_GRAPHEMES) {
+    const half = MAX_LINE_GRAPHEMES / 2;
+    bounded =
+      keep === 'ends'
+        ? `${gs.slice(0, half).join('')}…${gs.slice(-half).join('')}`
+        : gs.slice(0, MAX_LINE_GRAPHEMES).join('');
+  }
+  // Cleaning never makes text longer, so this limit cuts nothing.
+  return sanitizeLine(bounded, bounded.length);
+}
 
 /** The user-perceived characters of `text` (an emoji sequence or a letter with marks is one). */
 function graphemes(text: string): string[] {
@@ -123,6 +150,7 @@ function graphemeEm(g: string, font: CardFont): number {
   // A joined emoji is one glyph where the font has it and one per part where it does not.
   const pictographs = g.match(PICTOGRAPHS)?.length ?? 0;
   if (pictographs > 0) return pictographs * CARD_EMOJI_EM;
+  if (FLAG_OR_KEYCAP.test(g)) return CARD_EMOJI_EM;
   if (WIDE.test(g)) return CARD_WIDE_CHAR_EM;
   if (ZERO_WIDTH.test(g)) return 0;
   return CARD_CHAR_WIDTH_EM[font];
@@ -178,7 +206,7 @@ const PATH_MAX_CHARS = 48;
 function filesLine(paths: readonly string[], size: number, maxWidth: number): string {
   const font = 'mono';
   const pathMax = PATH_MAX_CHARS * CARD_CHAR_WIDTH_EM[font] * size;
-  const all = paths.map((p) => elideMiddle(sanitizeLine(p, 200), size, font, pathMax));
+  const all = paths.map((p) => elideMiddle(cleanLine(p, 'ends'), size, font, pathMax));
   const more = (n: number): string => (n > 0 ? `+${n} more` : '');
   const join = (shown: string[], rest: number): string =>
     [...shown, more(rest)].filter(Boolean).join(', ');
@@ -238,7 +266,7 @@ export function renderSavesCard(input: SavesCardInput): string {
       22,
       esc(
         fitEnd(
-          `· ${sanitizeLine(details.projectName, 60)}`,
+          `· ${cleanLine(details.projectName)}`,
           22,
           'sans',
           W - X - textWidth(period, 22, 'sans') - 24 - (X + 132),
@@ -324,7 +352,7 @@ export function renderSavesCard(input: SavesCardInput): string {
     t(X, dy, 22, 'Details', `font-family="${SERIF}" fill="#141413"`);
     dy += 44;
     for (const s of detailRows) {
-      const title = fitEnd(sanitizeLine(s.title, 200), 20, 'sans', W - 2 * X);
+      const title = fitEnd(cleanLine(s.title), 20, 'sans', W - 2 * X);
       t(X, dy, 20, esc(title), `font-family="${SANS}" fill="#3d3d3a"`);
       if (s.paths.length > 0) {
         const files = filesLine(s.paths, 16, W - 2 * X - 16);
