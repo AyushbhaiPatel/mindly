@@ -77,7 +77,7 @@ const ENV_SPLIT = works("env -S 'true'");
 /** GNU `ln` takes abbreviated long options; BSD `ln` (macOS) does not. */
 const LN_LONG = works('d=$(mktemp -d) && ln --sy "$d" "$d/l" && rm -rf "$d"');
 /** bash 3.2 cannot parse a `case` inside `$(…)`. */
-const CASE_IN_SUBST = works('echo "$(case x in x) true;; esac)" >/dev/null');
+const CASE_IN_SUBST = works('[ "$(case x in x) echo ok;; esac)" = ok ]');
 /** util-linux `script` takes `-c`; BSD `script` (macOS) does not. */
 const SCRIPT_C = works('script -qec true /dev/null');
 /** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
