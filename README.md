@@ -61,9 +61,10 @@ You need **Node.js 22.16 or newer, or 24 or newer** (Node 23 is not supported) a
 npm i -g mindly-cli
 ```
 
-`npx mindly-cli <command>` works for one-off commands such as `npx mindly-cli doctor`, but not for
-`init`: npx runs Mindly from a cache npm can clear at any time, so `init` refuses to point your
-agents' hooks there and asks for the global install instead.
+Without a global install, `npx mindly-cli init` works too. npx runs Mindly from a cache npm can
+clear at any time, so `init` keeps a copy of Mindly in `~/.mindly/runtime` and your agents start
+it through `~/.mindly/bin/mindly.cjs`; run `npx mindly-cli init` again to update or repair it.
+`mindly uninstall` removes the copy.
 
 **2. Connect your agents** (run inside your repository)
 
