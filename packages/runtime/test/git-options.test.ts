@@ -27,8 +27,13 @@ const setUp = (scopes: string[], prep = '') => {
   return g;
 };
 
+/** A warning that part of the line was not read counts as a warning too. */
 const verdictOf = (r: { decision: string | null; context: string | null }): Verdict =>
-  r.decision === 'deny' ? 'deny' : (r.context ?? '').includes(RULE) ? 'warn' : 'allow';
+  r.decision === 'deny'
+    ? 'deny'
+    : (r.context ?? '').includes(RULE) || (r.context ?? '').includes('did not read')
+      ? 'warn'
+      : 'allow';
 
 const LOCAL_PEM = 'echo local > certs/server.pem';
 const PEM = ['**/*.pem'];
@@ -63,6 +68,11 @@ const works = (command: string): boolean => {
   }
 };
 const RBASH = works('command -v rbash');
+/** `test -v` came with bash 4.2; bash 3.2 does not `source` a process substitution. */
+const TEST_V = BASH_MAJOR >= 42;
+/** Programs that are not everywhere (Linux's util-linux, strace). */
+const has = (program: string): boolean => works(`command -v ${program}`);
+const CO = 'git checkout -q v1 -- certs/server.pem';
 const ENV_SPLIT = works("env -S 'true'");
 /** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
 const FIVE_HOME = `${HOOK} && mkdir -p 5 && printf '[core]\\n\\thooksPath = hk\\n' > 5/.gitconfig`;
@@ -630,6 +640,128 @@ const cases: {
     command: 'hash -p ./g.sh git; git status',
     want: ['warn', 'deny'],
   },
+  // A harmless builtin given the option that sets a variable or runs a command through a word
+  // that is not plain text.
+  {
+    name: 'printf -v given by a variable',
+    prep: FAKE_HOME,
+    command: `o=-v; printf "$o" HOME fakehome; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'printf -v given by a substitution',
+    prep: FAKE_HOME,
+    command: `printf "$(echo -v)" HOME fakehome; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'jobs -x given by a variable',
+    prep: FAKE_HOME,
+    command: `o=-x; jobs "$o" export HOME=fakehome; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  // `test -v` evaluates an element's subscript, running the substitution in it.
+  { name: 'test -v of an element', command: `test -v 'a[$(${CO})]'`, want: ['deny'], runs: TEST_V },
+  { name: '[ -v ] of an element', command: `[ -v 'a[$(${CO})]' ]`, want: ['deny'], runs: TEST_V },
+  // git under a program not known here, which may run it with settings of its own.
+  {
+    name: 'git reset --hard under taskset',
+    prep: LOCAL_PEM,
+    command: 'taskset -c 0 git reset -q --hard v1',
+    want: ['warn', 'deny'],
+    runs: has('taskset'),
+  },
+  {
+    name: 'git reset --hard under strace',
+    prep: LOCAL_PEM,
+    command: 'strace -f -o /dev/null git reset -q --hard v1',
+    want: ['warn', 'deny'],
+    runs: has('strace'),
+  },
+  {
+    name: 'git reset --hard under chrt',
+    prep: LOCAL_PEM,
+    command: 'chrt -o 0 git reset -q --hard v1',
+    want: ['warn', 'deny'],
+    runs: has('chrt'),
+  },
+  {
+    name: 'git under taskset, given HOME',
+    prep: FAKE_HOME,
+    command: `HOME=fakehome taskset -c 0 ${COMMIT}`,
+    want: ['warn', 'deny'],
+    runs: has('taskset'),
+  },
+  // flock's `-c` runs shell code.
+  { name: 'flock -c', command: `flock lk -c '${CO}'`, want: ['deny'], runs: has('flock') },
+  // Shell code from a shell's or `source`'s input, a file standing for it, or a process
+  // substitution: read when the text shows it, said as not read when it does not.
+  {
+    name: 'bash -s with arguments, from a here-string',
+    command: `bash -s x <<< '${CO}'`,
+    want: ['deny'],
+  },
+  {
+    name: 'bash /dev/stdin, from a here-string',
+    command: `bash /dev/stdin <<< '${CO}'`,
+    want: ['deny'],
+  },
+  {
+    name: 'bash -s with arguments, from a pipe',
+    command: `echo '${CO}' | bash -s x`,
+    want: ['deny'],
+  },
+  {
+    name: 'bash -s with arguments, from a quoted here-document',
+    command: `bash -s x <<'EOF'\n${CO}\nEOF`,
+    want: ['deny'],
+  },
+  { name: 'bash of a process substitution', command: `bash <(echo '${CO}')`, want: ['deny'] },
+  {
+    name: 'source /dev/stdin, from a here-string',
+    command: `source /dev/stdin <<< '${CO}'`,
+    want: ['deny'],
+    runs: BASH4,
+  },
+  {
+    name: 'source of a process substitution',
+    command: `source <(echo '${CO}')`,
+    want: ['deny'],
+    runs: BASH4,
+  },
+  {
+    name: 'bash given a here-string of a variable',
+    command: `c='${CO}'; bash <<< "$c"`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'bash given a here-document with a variable',
+    command: `c='${CO}'; bash <<EOF\n$c\nEOF`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'bash given a variable through a pipe',
+    command: `c='${CO}'; echo "$c" | bash`,
+    want: ['warn', 'deny'],
+  },
+  { name: 'eval of a variable', command: `c='${CO}'; eval "$c"`, want: ['warn', 'deny'] },
+  {
+    name: 'xargs running sh -c on its input',
+    command: `echo '${CO}' | xargs -I{} sh -c '{}'`,
+    want: ['warn', 'deny'],
+  },
+  // `cd` through a symbolic link: `..` after it leads elsewhere than the text says.
+  {
+    name: 'cd -P through a symbolic link',
+    command: `mkdir -p d/e && ln -s d/e l && cd -P l/.. && git checkout -q v1 -- ../certs/server.pem`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'cd through a symbolic link already there',
+    prep: 'mkdir -p d/e && ln -s d/e l',
+    command: 'cd l && git checkout -q v1 -- ../../certs/server.pem',
+    want: ['warn', 'deny'],
+  },
 ];
 
 /** Commands that write no covered file: never blocked, and not warned about. */
@@ -725,7 +857,60 @@ describe('git commands that write a covered file through an option or a setting'
   }
 });
 
+/**
+ * Commands that write no covered file but hold code the shell does not run (quoted text) on a
+ * line that may evaluate text as code: never blocked, perhaps warned about.
+ */
+const notBlocked: { name: string; command: string }[] = [
+  {
+    name: 'a quoted tip on a line with set -e',
+    command: `set -e; echo 'tip: run $(${CO}) to restore'`,
+  },
+  {
+    name: 'notes from a quoted here-document on a line with set -e',
+    command:
+      "set -e\ncat > notes.md <<'EOF'\nRotate with: $(openssl req -x509 -out certs/server.pem)\nEOF",
+  },
+];
+
+describe('code the shell does not run is never blocked', () => {
+  for (const c of notBlocked) {
+    it(c.name, async () => {
+      const g = setUp(PEM);
+      try {
+        const done = runInCopy(g.dir, c.command, covered);
+        expect(done.written, c.command).toEqual([]);
+        const r = await g.shell(c.command);
+        expect(verdictOf(r), `hook on \`${c.command}\`: ${r.reason ?? ''}`).not.toBe('deny');
+      } finally {
+        g.mindly.close();
+      }
+    });
+  }
+});
+
 describe('git commands read without false warnings or slow reading', () => {
+  it('env -S strings in a substitution on a line that may set variables are read once', async () => {
+    const g = setUp(PEM);
+    try {
+      const head = 'export X=1; : "$(';
+      const tail = ')"; git status';
+      const unit = 'env -S x ';
+      const command =
+        head + unit.repeat(Math.floor((199_000 - head.length - tail.length) / unit.length)) + tail;
+      await g.shell('true');
+      let best = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const t0 = performance.now();
+        await g.shell(command);
+        best = Math.min(best, performance.now() - t0);
+      }
+      expect(best).toBeLessThan(200);
+    } finally {
+      g.mindly.close();
+    }
+  });
+
   it('clone with harmless aliases of its options is not warned about', async () => {
     const g = setUp(PEM);
     try {

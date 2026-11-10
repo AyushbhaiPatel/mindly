@@ -66,6 +66,8 @@ const MAX_RECORDED_PATHS = 50;
  * denied rather than let through unchecked.
  */
 const MAX_TREE_LOOKUPS = 16;
+/** Folders a shell command's `cd`s pass through that are checked for symbolic links. */
+const MAX_LINK_LOOKUPS = 256;
 /** Files of one shell command that are checked again (decisions, exports) after it ran. */
 const MAX_SHELL_CHANGED = 20;
 /**
@@ -473,10 +475,23 @@ export class HookHandler {
     const treeRoot = repoRoot ?? project.root;
     // The command is read as text; where it runs, the home directory and the repository root
     // are handed in so `~`, `$HOME` and `$(git rev-parse --show-toplevel)` can be placed.
+    // A `cd` through a symbolic link leads elsewhere than its text says. Asked of the disk a
+    // bounded number of times; past that, or out of time, a path counts as one.
+    let lookups = 0;
+    const linked = (path: string): boolean => {
+      if (path.startsWith('~')) return false;
+      if (++lookups > MAX_LINK_LOOKUPS || timeUp()) return true;
+      try {
+        return lstatSync(resolve(cwd, path)).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    };
     const reading = readShellWrites(command, {
       home: toPosix(homedir()),
       top: toPosix(treeRoot),
       timeUp,
+      linked,
     });
     let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };

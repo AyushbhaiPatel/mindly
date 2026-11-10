@@ -657,6 +657,22 @@ describe('write targets of a shell command', () => {
       'bash -c "$cmd"; git status',
       'bash -c; git status',
       'cat <<EOF\n$((HOME=5))\nEOF\ngit status',
+      'o=-v; printf "$o" HOME x; git status',
+      'printf "$(echo -v)" HOME x; git status',
+      'o=-x; jobs "$o" true; git status',
+      'wait "$o" x; git status',
+      'test "$o" "$n"; git status',
+      '[ "$o" \'a[i=1]\' ]; git status',
+      "echo 'a[$(x)]'; git status",
+      'taskset -c 0 git status',
+      'strace -f -o /dev/null git status',
+      "flock lk -c 'export GIT_DIR=x'; git status",
+      'c=x; bash <<< "$c"; git status',
+      'echo "$c" | bash; git status',
+      'cat x.sh | bash; git status',
+      'bash; git status',
+      'source <(cat x); git status',
+      "echo x | xargs -I{} sh -c '{}'; git status",
     ]) {
       expect(whole(cmd), cmd).toBe(true);
     }
@@ -685,6 +701,13 @@ describe('write targets of a shell command', () => {
       'case $x in a) git status;; esac',
       'nice -n 5 git status',
       'timeout 60 git fetch -q',
+      '[ -f "$f" ] && [ "$a" = "$b" ] && git status',
+      'diff <(git show HEAD:a) <(git show HEAD~1:a); git status',
+      'bash scripts/check.sh && git status',
+      "bash -s x <<< 'echo hi'; git status",
+      "echo 'echo hi' | bash -s; git status",
+      "bash <(echo 'echo hi'); git status",
+      'man git; brew install git',
     ]) {
       expect(whole(cmd), cmd).toBe(false);
     }
@@ -1199,6 +1222,20 @@ describe('write targets of a shell command', () => {
     expect(targets('echo "$(echo ")")"; rm a.ts')).toEqual(['a.ts']);
     // The shell expands a here-document whose delimiter is not quoted.
     expect(targets('cat <<EOF\n$(rm a.ts)\nEOF')).toEqual(['a.ts']);
+    // Shell code from a shell's or `source`'s input, or a process substitution, the text shows.
+    expect(targets("bash -s x <<< 'rm a.ts'")).toEqual(['a.ts']);
+    expect(targets("bash /dev/stdin <<< 'rm a.ts'")).toEqual(['a.ts']);
+    expect(targets("echo 'rm a.ts' | bash -s x")).toEqual(['a.ts']);
+    expect(targets("bash -s <<'EOF'\nrm a.ts\nEOF")).toEqual(['a.ts']);
+    expect(targets("bash <(echo 'rm a.ts')")).toEqual(['a.ts']);
+    expect(targets("source <(printf '%s\\n' 'rm a.ts')")).toEqual(['a.ts']);
+    expect(targets("flock lk -c 'rm a.ts'")).toEqual(['a.ts']);
+    expect(targets("test -v 'a[$(rm a.ts)]'")).toEqual(['a.ts']);
+    expect(targets('taskset -c 0 git checkout v1 -- a.ts')).toContain('a.ts');
+    // Code the text does not show is said.
+    for (const cmd of ['c=x; bash <<< "$c"', 'echo "$c" | bash', 'eval "$c"', 'cat x | sh']) {
+      expect(readShellWrites(cmd).limit, cmd).toContain('does not show');
+    }
     expect(targets("cat <<'EOF'\n$(rm a.ts)\nEOF")).toEqual([]);
   });
 
