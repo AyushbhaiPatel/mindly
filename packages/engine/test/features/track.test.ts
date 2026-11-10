@@ -793,6 +793,50 @@ describe('attribution', () => {
     expect(row(w, 'claude-code').ruleAttempts.count).toBe(1);
   });
 
+  it('does not count an attempt in the area of an unprotected file of an earlier save', async () => {
+    const { w, cx } = await twoAgents();
+    await w.edit('codex', 'cx', 'src/web/client.ts', 'export const c = 1;\n');
+    const rule = w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    // As an earlier version recorded it: every path of the denied call.
+    const all = ['src/api/generated/a.ts', 'src/web/client.ts'];
+    const old = w.mindly.store.saves.record({
+      projectId: w.pid,
+      kind: 'rule_enforced',
+      title: 'blocked',
+      sessionIds: [cx.id],
+      paths: all,
+      evidence: ['e0'],
+      fingerprint: 'earlier',
+      refs: { ruleId: rule.id },
+    }).save;
+    w.mindly.store.saves.settle(old.id, 'confirmed');
+    const t = tool(join(w.root, all[0]!), 'x');
+    t!.edits.push({
+      path: join(w.root, all[1]!),
+      addedText: 'x',
+      removedText: '',
+      wholeFile: false,
+    });
+    const res = await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'pre_tool', { tool: t }));
+    expect(res.decision).toBe('deny');
+
+    const areas = report(w, { minEdits: 1 }).areas;
+    const attempts = (area: string) =>
+      areas.find((a) => a.area === area)!.agents.find((a) => a.agent === 'codex')!.ruleAttempts
+        .count;
+    expect(attempts('src/api')).toBe(1);
+    expect(attempts('src/web')).toBe(0);
+  });
+
   it('counts usage limits per agent from rate-limit events and handoffs', async () => {
     const { w, cc } = await twoAgents();
     w.mindly.store.events.append({

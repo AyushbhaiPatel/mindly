@@ -1,5 +1,11 @@
 import { readFileSync, statSync } from 'node:fs';
-import { invalidInput, isDeniedPath, sanitizeLine, tryResolveInsideRoot } from '@mindly/core';
+import {
+  invalidInput,
+  isDeniedPath,
+  matchesAnyGlob,
+  sanitizeLine,
+  tryResolveInsideRoot,
+} from '@mindly/core';
 import {
   TRACK_MAX_ROWS,
   type PendingSurvival,
@@ -611,6 +617,8 @@ interface Tree {
 export class TrackService {
   /** Where the all-projects survival scan stopped, so edits it cannot read never block others. */
   private cursor: { createdAt: number; id: string } | null = null;
+  /** Scopes of the rules looked up while one report is built. */
+  private readonly ruleScopes = new Map<string, readonly string[] | null>();
 
   constructor(private readonly k: Kernel) {}
 
@@ -784,6 +792,7 @@ export class TrackService {
     agentKinds: ReadonlyMap<string, string>,
   ): TrackOutcome[] & { truncated?: boolean } {
     const out: TrackOutcome[] & { truncated?: boolean } = [];
+    this.ruleScopes.clear();
     // Every confirmed save, not only those of the window: an old one can be run into again.
     const saves = this.k.store.track.confirmedSaves(projectId, 'rule_enforced', 0);
     const denials = this.k.store.track.ruleDenials(projectId, from);
@@ -794,7 +803,7 @@ export class TrackService {
       if (!s.ruleId) continue;
       let files = held.get(s.ruleId);
       if (!files) held.set(s.ruleId, (files = new Set()));
-      for (const p of s.paths) files.add(p);
+      for (const p of this.protectedPaths(s.ruleId, s.paths)) files.add(p);
     }
     /** Per session and rule, the protected files that session was stopped on. */
     const attempts = new Map<string, { sessionId: string; paths: Set<string> }>();
@@ -814,7 +823,9 @@ export class TrackService {
     for (const s of saves) {
       const sessionId = s.sessionIds[0];
       if (!s.ruleId || !sessionId || s.createdAt < from) continue;
-      if (!attempts.has(`${sessionId}\u0000${s.ruleId}`)) attempt(sessionId, s.ruleId, s.paths);
+      if (!attempts.has(`${sessionId}\u0000${s.ruleId}`)) {
+        attempt(sessionId, s.ruleId, this.protectedPaths(s.ruleId, s.paths));
+      }
     }
     for (const a of attempts.values()) {
       const agent = agentKinds.get(a.sessionId);
@@ -823,6 +834,27 @@ export class TrackService {
       }
     }
     return out;
+  }
+
+  /**
+   * The paths of a rule save that the rule's scope covers. Saves used to hold every path of the
+   * denied call; the others were never protected and say nothing about where the rule was hit.
+   * All of them are kept when the rule can no longer be read.
+   */
+  private protectedPaths(ruleId: string, paths: readonly string[]): readonly string[] {
+    let scope = this.ruleScopes.get(ruleId);
+    if (scope === undefined) {
+      scope = this.k.store.memories.find(ruleId)?.scope.paths ?? null;
+      this.ruleScopes.set(ruleId, scope);
+    }
+    if (!scope || scope.length === 0) return paths;
+    const globs = scope;
+    try {
+      const covered = paths.filter((p) => matchesAnyGlob(p, globs));
+      return covered.length > 0 ? covered : paths;
+    } catch {
+      return paths;
+    }
   }
 
   /**
