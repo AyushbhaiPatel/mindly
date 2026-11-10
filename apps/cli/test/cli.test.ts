@@ -871,7 +871,9 @@ describe('doctor, config, export, misc', () => {
     // Text stays text, lists take a,b or JSON.
     expect((await cli(sb, ['config', 'set', 'llm.model', '4'])).code).toBe(0);
     expect((await cli(sb, ['config', 'set', 'notify.triggers', 'standup'])).code).toBe(0);
-    expect((await cli(sb, ['config', 'set', 'failover.order', 'codex, claude-code'])).code).toBe(0);
+    expect(
+      (await cli(sb, ['config', 'set', 'failover.order', '["codex","claude-code"]'])).code,
+    ).toBe(0);
     expect((await cli(sb, ['config', 'set', 'redaction.denyPaths', '["a,b", "c"]'])).code).toBe(0);
     expect(json(readFileSync(file, 'utf8'))).toEqual({
       llm: { model: '4' },
@@ -880,6 +882,35 @@ describe('doctor, config, export, misc', () => {
       redaction: { denyPaths: ['a,b', 'c'] },
     });
     expect((await cli(sb, ['config', 'set', 'notify.triggers', 'standup,nope'])).code).toBe(1);
+  });
+
+  it('config keeps a list item that contains commas whole', async () => {
+    const sb = sandbox();
+    const file = join(sb.mindlyHome, 'config.json');
+    const pattern = 'ACME-[A-Z0-9]{20,40}';
+    const glob = 'config/{prod,staging}.json';
+    expect((await cli(sb, ['config', 'set', 'redaction.extraPatterns', pattern])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'redaction.denyPaths', glob])).code).toBe(0);
+    expect(json(readFileSync(file, 'utf8'))).toEqual({
+      redaction: { extraPatterns: [pattern], denyPaths: [glob] },
+    });
+    expect(json((await cli(sb, ['config', 'get', 'redaction.extraPatterns'])).stdout)).toEqual([
+      pattern,
+    ]);
+    expect(json((await cli(sb, ['config', 'get', 'redaction.denyPaths'])).stdout)).toEqual([glob]);
+    // The glob works as one: the files it names are refused, and nothing else breaks.
+    write(sb.repo, 'config/prod.json', '{}');
+    const why = await cli(sb, ['why', 'config/prod.json']);
+    expect(why.stderr).not.toContain('Unterminated');
+    // Several items come as a JSON array; unset takes the whole list away.
+    expect(
+      (await cli(sb, ['config', 'set', 'redaction.denyPaths', JSON.stringify([glob, 'a,b'])])).code,
+    ).toBe(0);
+    expect(json(readFileSync(file, 'utf8'))).toMatchObject({
+      redaction: { denyPaths: [glob, 'a,b'] },
+    });
+    expect((await cli(sb, ['config', 'unset', 'redaction.denyPaths'])).code).toBe(0);
+    expect(json((await cli(sb, ['config', 'get', 'redaction.denyPaths'])).stdout)).toEqual([]);
   });
 
   it('config set says why it will not read a linked config file', async () => {

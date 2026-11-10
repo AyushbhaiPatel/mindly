@@ -381,7 +381,8 @@ validates every value:
 ```bash
 mindly config get shadowMerge
 mindly config set checkpoints.keepDays 30
-mindly config set notify.triggers agent_blocked,standup   # a list: a,b or JSON
+mindly config set notify.triggers '["agent_blocked","standup"]'   # a list: a JSON array
+mindly config set redaction.extraPatterns 'ACME-[A-Z0-9]{20,40}' # one item as plain text
 mindly config unset standup.time                           # back to the default (here: off)
 ```
 

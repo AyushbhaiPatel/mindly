@@ -123,7 +123,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
   config
     .command('set')
     .argument('<key>', 'dotted key, e.g. hooks.timeoutMs')
-    .argument('<value>', 'JSON value or plain text; a list is JSON or a,b')
+    .argument(
+      '<value>',
+      'JSON value or plain text; a list takes one item as plain text, several as a JSON array: \'["a","b"]\'',
+    )
     .description('Validate and write one setting')
     .action(
       act(
