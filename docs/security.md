@@ -126,9 +126,13 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   scratch worktree under `$MINDLY_HOME/sentinel/` (mode `0700`), outside the repository, never in
   the user's checkout; the path is refused if it is inside or around the repository (the sentinel
   reports `MINDLY_HOME` inside the repository as not ready). One pass at a time holds a checkout,
-  by a lock that stays held while the process that took it lives (the lock records its PID, an
-  id of its own and, on Linux, when the process started, so a PID used again by another process
-  does not keep it), and the daemon queues passes behind the project's merge checks. Bisects the
+  by a lock that stays held while the process that took it lives. The lock records its PID, an
+  id of its own and, on Linux, when the process started and its PID namespace, so a PID used
+  again by another process does not keep it. A PID is only judged inside its own namespace:
+  seen from another one (two containers sharing `MINDLY_HOME`, or a container and the host), the
+  lock is held for as long as its holder keeps touching it (every 10 seconds) and counts as
+  abandoned a minute after it stopped. The daemon queues passes behind the project's merge
+  checks. Bisects the
   sentinel starts are capped per project per day (`sentinel.maxBisectsPerDay`), and a step where
   nothing could run, or whose pass failed, is retried with a growing back-off counted from the
   end of the pass (15 minutes up to 6 hours), not on every tick. Agents cannot start a pass:
