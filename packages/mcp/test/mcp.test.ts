@@ -14,7 +14,7 @@ import {
   splitOf,
 } from '@mindly/engine';
 import { createGitPort } from '@mindly/runtime';
-import { createMcpServer, startMcpServer, type McpContext } from '../src/index.js';
+import { createMcp, createMcpServer, startMcpServer, type McpContext } from '../src/index.js';
 
 const CLOSE = CONTEXT_CLOSE;
 
@@ -226,14 +226,19 @@ describe('mindly MCP server', () => {
     );
     const byName = new Map(tools.map((t) => [t.name, t]));
     for (const n of [
-      'mindly_context',
+      'mindly_inbox',
       'mindly_search_memory',
       'mindly_split_status',
+      'mindly_status',
       'mindly_tasks',
       'mindly_why',
     ]) {
       expect(byName.get(n)?.annotations?.readOnlyHint).toBe(true);
     }
+    // Reading the context picks up a handoff and marks messages delivered: a client must not
+    // treat it as safe to pre-fetch or repeat.
+    expect(byName.get('mindly_context')?.annotations?.readOnlyHint).toBe(false);
+    expect(byName.get('mindly_context')?.annotations?.idempotentHint).toBe(false);
     expect(byName.get('mindly_remember')?.annotations?.readOnlyHint).toBe(false);
     expect(byName.get('mindly_remember')?.inputSchema.properties).not.toHaveProperty('enforce');
   });
@@ -712,12 +717,301 @@ describe('mindly_split_status', () => {
   });
 });
 
+describe('the session a server speaks for', () => {
+  const sid = (out: ToolOut): string => out.structured?.['sessionId'] as string;
+
+  it('gives two clients of one agent kind a session each', async () => {
+    const a = await harness({ agentKind: 'cursor', pid: process.pid, startTime: 1 });
+    const b = await harness({ agentKind: 'cursor', pid: process.pid, startTime: 2 }, a);
+    const first = sid(await a.call('mindly_status'));
+    const second = sid(await b.call('mindly_status'));
+    expect(second).not.toBe(first);
+    // Each keeps its own from call to call, whoever was active last.
+    expect(sid(await a.call('mindly_status'))).toBe(first);
+    expect(sid(await b.call('mindly_status'))).toBe(second);
+
+    await a.call('mindly_task_create', { title: 'window 1 task' });
+    expect((await b.call('mindly_tasks', { mine: true })).text).toBe('No tasks.');
+    expect((await a.call('mindly_tasks', { mine: true })).text).toContain('window 1 task');
+
+    // They are two agents to each other: an overlap is reported and a message arrives.
+    await a.call('mindly_declare_intent', { summary: 'edit auth', files: ['src/auth.ts'] });
+    const overlap = await b.call('mindly_declare_intent', {
+      summary: 'edit auth too',
+      files: ['src/auth.ts'],
+    });
+    expect(overlap.text).toContain('Coordination warnings');
+    const sent = await b.call('mindly_send_message', { toSessionId: first, title: 'hello' });
+    expect(sent.isError).toBe(false);
+    expect((await a.call('mindly_inbox')).text).toContain('hello');
+  });
+
+  it('stays on its hook session when a second window of the same agent starts', async () => {
+    const a = await harness({ pid: process.pid, startTime: 1 });
+    await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'window-1', 'session_start'));
+    const first = sid(await a.call('mindly_status'));
+    const pid = (await a.call('mindly_status')).structured?.['project'] as { id: string };
+    expect(first).toBe(
+      a.mindly.store.sessions.findByExternal(pid.id, 'claude-code', 'window-1')?.id,
+    );
+    await a.call('mindly_task_create', { title: 'task of window 1' });
+
+    // A second window: its hooks run, then its own server makes its first call.
+    await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'window-2', 'session_start'));
+    expect(sid(await a.call('mindly_status'))).toBe(first);
+    expect((await a.call('mindly_tasks', { mine: true })).text).toContain('task of window 1');
+
+    const b = await harness({ pid: process.pid, startTime: 2 }, a);
+    const second = sid(await b.call('mindly_status'));
+    expect(second).toBe(
+      a.mindly.store.sessions.findByExternal(pid.id, 'claude-code', 'window-2')?.id,
+    );
+    expect(sid(await a.call('mindly_status'))).toBe(first);
+  });
+
+  it('moves on when its session has ended, and takes over from a server that is gone', async () => {
+    let otherAlive = true;
+    const a = await harness({ pid: 111, startTime: 1, alive: () => true });
+    await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'conv-1', 'session_start'));
+    const first = sid(await a.call('mindly_status'));
+    // Another server cannot take a session a running server speaks for.
+    const b = await harness({ pid: 222, startTime: 2, alive: () => otherAlive }, a);
+    expect(sid(await b.call('mindly_status'))).not.toBe(first);
+
+    // The conversation ends and a new one starts in the same window.
+    await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'conv-1', 'session_end'));
+    await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'conv-2', 'session_start'));
+    const next = sid(await a.call('mindly_status'));
+    expect(next).not.toBe(first);
+    expect(a.mindly.store.sessions.get(next).externalId).toBe('conv-2');
+
+    // A claim left by a process that no longer runs is free.
+    otherAlive = false;
+    const c = await harness({ pid: 333, startTime: 3, alive: () => otherAlive }, a);
+    expect(sid(await c.call('mindly_status'))).toBe(next);
+  });
+
+  it('ends the session it made for itself when the client disconnects', async () => {
+    const mindly = Mindly.open({ inMemory: true, ports: { git: createGitPort() } });
+    installDefaultModules(mindly);
+    const root = repo();
+    const mcp = createMcp(mindly, { agentKind: 'cursor', cwd: root, pid: 4242, startTime: 9 });
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([mcp.server.connect(serverT), client.connect(clientT)]);
+    await client.callTool({
+      name: 'mindly_declare_intent',
+      arguments: { summary: 'edit auth', files: ['src/auth.ts'] },
+    });
+    const project = await mindly.projects.resolve(root);
+    const own = mindly.store.sessions.findByExternal(project.project.id, 'cursor', 'mcp-4242-9');
+    expect(own?.status).toBe('active');
+    expect(mindly.store.intents.activeForSession(own!.id)).toHaveLength(1);
+
+    await client.close();
+    mcp.release();
+    expect(mindly.store.sessions.get(own!.id).status).toBe('ended');
+    expect(mindly.store.intents.activeForSession(own!.id)).toHaveLength(0);
+    expect(mindly.store.sessions.listLive(project.project.id, 60_000)).toHaveLength(0);
+    mindly.close();
+  });
+
+  it('hands a hook session back without ending it', async () => {
+    const mindly = Mindly.open({ inMemory: true, ports: { git: createGitPort() } });
+    installDefaultModules(mindly);
+    const root = repo();
+    await mindly.hooks.handle(hook(root, 'claude-code', 'cc-1', 'session_start'));
+    const mcp = createMcp(mindly, { agentKind: 'claude-code', cwd: root });
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([mcp.server.connect(serverT), client.connect(clientT)]);
+    const res = await client.callTool({ name: 'mindly_status', arguments: {} });
+    const id = (res.structuredContent as { sessionId: string }).sessionId;
+    await client.close();
+    mcp.release();
+    expect(mindly.store.sessions.get(id).status).not.toBe('ended');
+    expect(mindly.store.kv.get(`mcp:bound:${id}`)).toBeNull();
+    mindly.close();
+  });
+});
+
+describe('paths as the agent sees them', () => {
+  function worktree(main: string): string {
+    const wt = join(realpathSync(mkdtempSync(join(tmpdir(), 'mindly-mcp-wt-'))), 'feat');
+    execFileSync('git', ['worktree', 'add', '-q', '-b', 'feat', wt], { cwd: main });
+    writeFileSync(join(wt, 'src', 'auth.ts'), 'export function login() {\n  return 999;\n}\n');
+    writeFileSync(join(wt, 'src', 'wtonly.ts'), 'export const onlyInTheWorktree = true;\n');
+    return wt;
+  }
+
+  it('reads the files of the linked worktree the server runs in', async () => {
+    const main = repo();
+    const wt = worktree(main);
+    const mindly = Mindly.open({ inMemory: true, ports: { git: createGitPort() } });
+    installDefaultModules(mindly);
+    const w = await harness({ cwd: wt }, { root: wt, mindly });
+
+    const why = await w.call('mindly_why', { file: 'src/auth.ts', line: 2 });
+    expect(why.text).toContain('return 999;');
+    expect(
+      (await w.call('mindly_why', { file: join(wt, 'src', 'wtonly.ts'), line: 1 })).text,
+    ).toContain('onlyInTheWorktree');
+    const fact = await w.call('mindly_remember', {
+      kind: 'fact',
+      title: 'Login returns a number in this branch',
+      evidence: [{ path: 'src/wtonly.ts', excerpt: 'export const onlyInTheWorktree = true;' }],
+    });
+    expect(fact.isError).toBe(false);
+    expect((fact.structured?.['memory'] as { trust: string }).trust).toBe('verified');
+    const intent = await w.call('mindly_declare_intent', {
+      summary: 'edit',
+      files: [join(wt, 'src', 'wtonly.ts')],
+    });
+    expect(intent.structured?.['files']).toEqual(['src/wtonly.ts']);
+    // The main checkout is another tree: its files are not this agent's.
+    expect(
+      (await w.call('mindly_why', { file: join(main, 'src', 'auth.ts'), line: 1 })).text,
+    ).toMatch(/^path_outside_project/);
+    // A contract is still judged against the main checkout, and the answer says so.
+    const memoryId = (fact.structured?.['memory'] as { id: string }).id;
+    const contract = await w.call('mindly_add_contract', {
+      memoryId,
+      kind: 'file_exists',
+      path: 'src/wtonly.ts',
+    });
+    expect(contract.text).toContain('checked against the main checkout');
+  });
+
+  it('reads relative paths from the directory the server runs in', async () => {
+    const root = repo();
+    mkdirSync(join(root, 'pkg'));
+    writeFileSync(join(root, 'pkg', 'b.ts'), 'export const inPkg = 1;\n');
+    writeFileSync(join(root, 'b.ts'), 'export const atRoot = 1;\n');
+    const mindly = Mindly.open({ inMemory: true, ports: { git: createGitPort() } });
+    installDefaultModules(mindly);
+    const h = await harness({ cwd: join(root, 'pkg') }, { root, mindly });
+    const intent = await h.call('mindly_declare_intent', { summary: 'edit', files: ['./b.ts'] });
+    expect(intent.structured?.['files']).toEqual(['pkg/b.ts']);
+    expect((await h.call('mindly_why', { file: 'b.ts', line: 1 })).text).toContain('inPkg');
+    expect((await h.call('mindly_why', { file: '../b.ts', line: 1 })).text).toContain('atRoot');
+    expect((await h.call('mindly_why', { file: join(root, 'b.ts'), line: 1 })).text).toContain(
+      'atRoot',
+    );
+    expect((await h.call('mindly_why', { file: '../../outside.ts', line: 1 })).text).toMatch(
+      /^path_outside_project/,
+    );
+  });
+
+  it('keeps the git folder out of reach', async () => {
+    const h = await harness();
+    const why = await h.call('mindly_why', { file: '.git/config', line: 1 });
+    expect(why.isError).toBe(true);
+    expect(why.text).toMatch(/^forbidden/);
+    const note = await h.call('mindly_remember', { kind: 'note', title: 'A note with a contract' });
+    const memoryId = (note.structured?.['memory'] as { id: string }).id;
+    const contract = await h.call('mindly_add_contract', {
+      memoryId,
+      kind: 'pattern_present',
+      path: '.git/config',
+      pattern: 'url = ',
+    });
+    expect(contract.text).toMatch(/^forbidden/);
+    const evidence = await h.call('mindly_remember', {
+      kind: 'fact',
+      title: 'The remote is set',
+      evidence: [{ path: '.git/HEAD' }],
+    });
+    expect(evidence.text).toMatch(/^forbidden/);
+  });
+});
+
+describe('what agents send is cleaned before it is stored', () => {
+  const token = `ghp_${'a1B2c3D4e5'.repeat(4).slice(0, 36)}`;
+
+  async function withPatterns(patterns: string[]): Promise<Harness> {
+    const base = Mindly.open({ inMemory: true });
+    const config = structuredClone(base.config);
+    base.close();
+    config.redaction.extraPatterns = patterns;
+    const mindly = Mindly.open({ inMemory: true, config, ports: { git: createGitPort() } });
+    installDefaultModules(mindly);
+    return harness({}, { root: repo(), mindly });
+  }
+
+  it('redacts the summary and symbols of an intent, in the store and in the event log', async () => {
+    const h = await harness();
+    const out = await h.call('mindly_declare_intent', {
+      summary: `rotate ${token} everywhere`,
+      files: ['src/auth.ts'],
+      symbols: [`use ${token}`],
+    });
+    const intent = h.mindly.store.intents.activeForSession(sid(out, h))[0]!;
+    expect(intent.summary).not.toContain(token);
+    expect(intent.targets.symbols.join(' ')).not.toContain(token);
+    const events = h.mindly.store.events.query(intent.projectId, { types: ['intent.declared'] });
+    expect(JSON.stringify(events)).not.toContain(token);
+  });
+
+  it('applies the configured extra patterns to messages, source lines and tool output', async () => {
+    const h = await withPatterns(['ACME-[0-9]{6}']);
+    writeFileSync(join(h.root, 'src', 'auth.ts'), '// see ACME-333333\nexport const a = 1;\n');
+    const why = await h.call('mindly_why', { file: 'src/auth.ts', line: 1 });
+    expect(why.text).not.toContain('ACME-333333');
+
+    await h.mindly.hooks.handle(hook(h.root, 'codex', 'cx-1', 'session_start'));
+    await h.call('mindly_send_message', {
+      toAgentKind: 'codex',
+      title: 'msg ACME-111111',
+      body: 'body ACME-111111',
+    });
+    const project = await h.mindly.projects.resolve(h.root);
+    const stored = h.mindly.store.deliveries.list(project.project.id, { limit: 10 });
+    expect(JSON.stringify(stored)).not.toContain('ACME-111111');
+
+    const task = await h.call('mindly_task_create', {
+      title: 'Ship it',
+      description: 'ticket ACME-222222',
+    });
+    const id = (task.structured?.['task'] as { id: string }).id;
+    expect(h.mindly.store.tasks.get(id).description).not.toContain('ACME-222222');
+  });
+
+  it('refuses a task title that is empty once cleaned', async () => {
+    const h = await harness();
+    const blank = await h.call('mindly_task_create', { title: ' \t ' });
+    expect(blank.isError).toBe(true);
+    expect(blank.text).toContain('title');
+    const made = await h.call('mindly_task_create', { title: 'Real title' });
+    const id = (made.structured?.['task'] as { id: string }).id;
+    const wiped = await h.call('mindly_task_update', { id, title: '   ​ ' });
+    expect(wiped.isError).toBe(true);
+    expect(h.mindly.store.tasks.get(id).title).toBe('Real title');
+  });
+
+  function sid(out: ToolOut, h: Harness): string {
+    const intentId = out.structured?.['intentId'] as string;
+    const row = h.mindly.store.db
+      .prepare('SELECT session_id FROM intents WHERE id = ?')
+      .get(intentId) as { session_id: string };
+    return row.session_id;
+  }
+});
+
 describe('startMcpServer', () => {
   it('rejects an invalid agent kind before touching stdio', async () => {
     const home = mkdtempSync(join(tmpdir(), 'mindly-mcp-home-'));
     await expect(
       startMcpServer({ agentKind: 'Bad Kind!', cwd: repo(), env: {}, home }),
     ).rejects.toThrow(/invalid agent kind/);
+  });
+
+  it('does not take the names that say who a memory comes from as agent kinds', async () => {
+    for (const kind of ['user', 'system', 'repo-file']) {
+      const home = mkdtempSync(join(tmpdir(), 'mindly-mcp-home-'));
+      await expect(startMcpServer({ agentKind: kind, cwd: repo(), env: {}, home })).rejects.toThrow(
+        /invalid agent kind/,
+      );
+    }
   });
 });
 

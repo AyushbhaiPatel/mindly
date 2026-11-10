@@ -4,6 +4,7 @@ import {
   invalidInput,
   isUuid,
   notFound,
+  sanitizeLine,
   MEMORY_KINDS,
   MindlyError,
   TASK_STATUSES,
@@ -148,6 +149,14 @@ function ensureProject(scope: CallScope, projectId: string, what: string, id: st
   if (projectId !== scope.project.project.id) throw notFound(what, id);
 }
 
+/**
+ * A title must still say something once it is cleaned for storage: the schema's minimum length
+ * counts spaces and invisible characters, which are removed afterwards.
+ */
+function requireTitle(title: string): void {
+  if (sanitizeLine(title, 200) === '') throw invalidInput('title: must not be empty');
+}
+
 // ---------------------------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------------------------
@@ -199,10 +208,13 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       title: 'Mindly context',
       description:
         'Current Mindly context for this agent: project rules, other live agents, open conflicts, ' +
-        'key decisions, pitfalls and pending messages (which are marked delivered). With `query`, ' +
-        'returns memory relevant to that text plus pending messages.',
+        'key decisions, pitfalls and pending messages. Reading it has effects: the messages shown ' +
+        'are marked delivered, and a handoff waiting for you is picked up (its task becomes ' +
+        'yours), so each is shown once. With `query`, returns memory relevant to that text plus ' +
+        'pending messages.',
       input: z.strictObject({ query: z.string().min(1).max(2000).optional() }),
-      annotations: READ_ONLY,
+      // Not read-only and not idempotent: a client must not pre-fetch or repeat this call.
+      annotations: WRITE,
     },
     (args, { project, session }) => {
       const built = args.query
@@ -431,8 +443,14 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         agentKind: scope.session.agentKind,
       });
       const message = c.lastMessage ? safeLine(c.lastMessage, 200) : '';
+      // Contracts are checked against the main checkout, also when this agent works in a linked
+      // worktree: say so, or "does not exist" for a file the agent just made reads as a bug.
+      const elsewhere =
+        scope.project.root === scope.project.mainRoot
+          ? ''
+          : ' It is checked against the main checkout, not this worktree, so it reflects your changes once they are merged.';
       return ok(
-        `Contract ${c.id} (${c.kind} on ${safeLine(path, 300)}) is ${c.state}${message ? `: ${message}` : ''}.`,
+        `Contract ${c.id} (${c.kind} on ${safeLine(path, 300)}) is ${c.state}${message ? `: ${message}` : ''}.${elsewhere}`,
         { contract: { id: c.id, kind: c.kind, path, state: c.state, message } },
       );
     },
@@ -495,6 +513,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       annotations: WRITE,
     },
     (args, scope) => {
+      requireTitle(args.title);
       if (args.parentId) {
         const parent = mindly.store.tasks.find(args.parentId);
         if (!parent) throw notFound('task', args.parentId);
@@ -536,6 +555,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       annotations: WRITE_IDEMPOTENT,
     },
     (args, scope) => {
+      if (args.title !== undefined) requireTitle(args.title);
       const cur = mindly.store.tasks.find(args.id);
       if (!cur) throw notFound('task', args.id);
       ensureProject(scope, cur.projectId, 'task', args.id);
