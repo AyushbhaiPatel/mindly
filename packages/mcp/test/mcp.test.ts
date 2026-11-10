@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import type { NormalizedHookEvent } from '@mindly/core';
+import { hookAncestryKey, type NormalizedHookEvent, type ProcessRef } from '@mindly/core';
 import {
   CONTEXT_CLOSE,
   CONTEXT_OPEN,
@@ -830,8 +830,172 @@ describe('the session a server speaks for', () => {
     await client.close();
     mcp.release();
     expect(mindly.store.sessions.get(id).status).not.toBe('ended');
-    expect(mindly.store.kv.get(`mcp:bound:${id}`)).toBeNull();
+    expect(mindly.store.kv.get<Record<string, unknown>>('mcp:claims')).toEqual({});
+    expect(id).toBeTruthy();
     mindly.close();
+  });
+});
+
+describe('telling windows of one agent apart', () => {
+  const sid = (out: ToolOut): string => out.structured?.['sessionId'] as string;
+  const ref = (pid: number): ProcessRef => ({ pid, start: `s${pid}` });
+  // Two windows started from one terminal (pid 10): each client (100, 200) runs its hooks
+  // through a shell that is gone by now (101, 201) and starts its own server.
+  const TERMINAL = ref(10);
+  const running = new Set([10, 100, 200, 1000, 2000]);
+  const world = {
+    alive: (pid: number) => running.has(pid),
+    processes: (pid: number) => (running.has(pid) ? { ppid: 1, start: `s${pid}` } : null),
+  };
+  const windowA = { ...world, pid: 1000, startTime: 1, ancestors: [ref(100), TERMINAL] };
+  const windowB = { ...world, pid: 2000, startTime: 2, ancestors: [ref(200), TERMINAL] };
+
+  async function hookSession(h: Harness, externalId: string, chain: ProcessRef[]): Promise<string> {
+    await h.mindly.hooks.handle(hook(h.root, 'claude-code', externalId, 'session_start'));
+    h.mindly.store.kv.set(hookAncestryKey('claude-code', externalId), chain);
+    const project = await h.mindly.projects.resolve(h.root);
+    return h.mindly.store.sessions.findByExternal(project.project.id, 'claude-code', externalId)!
+      .id;
+  }
+
+  it('gives each server the session its own client made, whichever was active last', async () => {
+    const a = await harness(windowA);
+    const hookA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+    const hookB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+    // Window B was active last, and window A's server asks first.
+    await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'win-b', 'prompt', { prompt: 'hi' }));
+    expect(sid(await a.call('mindly_status'))).toBe(hookA);
+    const b = await harness(windowB, a);
+    expect(sid(await b.call('mindly_status'))).toBe(hookB);
+
+    // Window B closes: nothing of window A is touched.
+    await a.call('mindly_declare_intent', { summary: 'A edits', files: ['src/auth.ts'] });
+    await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'win-b', 'session_end'));
+    expect(a.mindly.store.intents.activeForSession(hookA)).toHaveLength(1);
+    expect(sid(await a.call('mindly_status'))).toBe(hookA);
+  });
+
+  it('gives back a session it only guessed when the server that owns it turns up', async () => {
+    const a = await harness(windowA);
+    const hookA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+    // Window B's server makes its first call before any hook of window B has run: the only
+    // session there is belongs to window A, and it takes it for want of a better one.
+    const b = await harness(windowB, a);
+    expect(sid(await b.call('mindly_status'))).toBe(hookA);
+    // Window A's server knows the session is its own and takes it.
+    expect(sid(await a.call('mindly_status'))).toBe(hookA);
+    const hookB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+    expect(sid(await b.call('mindly_status'))).toBe(hookB);
+    expect(sid(await a.call('mindly_status'))).toBe(hookA);
+  });
+
+  it('keeps the old rule when nothing is known about who started the hooks', async () => {
+    const a = await harness(windowA);
+    await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'plain', 'session_start'));
+    const project = await a.mindly.projects.resolve(a.root);
+    const plain = a.mindly.store.sessions.findByExternal(
+      project.project.id,
+      'claude-code',
+      'plain',
+    );
+    expect(sid(await a.call('mindly_status'))).toBe(plain?.id);
+  });
+});
+
+describe('a session over time', () => {
+  const sid = (out: ToolOut): string => out.structured?.['sessionId'] as string;
+  const MINUTE = 60_000;
+
+  function timed(): { mindly: Mindly; root: string; advance: (ms: number) => void } {
+    let now = Date.UTC(2026, 0, 1);
+    const mindly = Mindly.open({
+      inMemory: true,
+      ports: { git: createGitPort() },
+      clock: { now: () => now },
+    });
+    installDefaultModules(mindly);
+    return { mindly, root: repo(), advance: (ms) => (now += ms) };
+  }
+
+  it('keeps its hook session alive through MCP calls alone', async () => {
+    const t = timed();
+    const h = await harness({}, t);
+    await t.mindly.hooks.handle(hook(t.root, 'claude-code', 'cc-1', 'session_start'));
+    const first = sid(await h.call('mindly_status'));
+    await h.call('mindly_task_create', { title: 'long task' });
+    // An hour of work through MCP tools only: no hook runs in that time.
+    for (let i = 0; i < 4; i++) {
+      t.advance(20 * MINUTE);
+      expect(sid(await h.call('mindly_status'))).toBe(first);
+    }
+    expect((await h.call('mindly_tasks', { mine: true })).text).toContain('long task');
+    expect(t.mindly.store.sessions.get(first).externalId).toBe('cc-1');
+  });
+
+  it('holds its claim however long it sits idle, and notices when it lost it', async () => {
+    const t = timed();
+    const a = await harness({ pid: 111, startTime: 1, alive: () => true }, t);
+    await t.mindly.hooks.handle(hook(t.root, 'claude-code', 'cc-1', 'session_start'));
+    const first = sid(await a.call('mindly_status'));
+    // Idle for longer than a session stays "live": the claim of a running server still holds.
+    t.advance(45 * MINUTE);
+    await t.mindly.hooks.handle(hook(t.root, 'claude-code', 'cc-1', 'prompt', { prompt: 'x' }));
+    const b = await harness({ pid: 222, startTime: 2, alive: () => true }, t);
+    expect(sid(await b.call('mindly_status'))).not.toBe(first);
+    expect(sid(await a.call('mindly_status'))).toBe(first);
+
+    // The claim now names another server: this one stops speaking for the session.
+    const claims = t.mindly.store.kv.get<Record<string, { owner: string }>>('mcp:claims')!;
+    claims[first] = { ...claims[first]!, owner: 'someone-else' };
+    t.mindly.store.kv.set('mcp:claims', claims);
+    expect(sid(await a.call('mindly_status'))).not.toBe(first);
+  });
+
+  it('drops the claims of servers that are gone', async () => {
+    const t = timed();
+    let running = true;
+    const a = await harness({ pid: 111, startTime: 1, alive: () => running }, t);
+    await t.mindly.hooks.handle(hook(t.root, 'claude-code', 'cc-1', 'session_start'));
+    const first = sid(await a.call('mindly_status'));
+    // The server crashed: nothing released its claim.
+    running = false;
+    const b = await harness({ pid: 222, startTime: 2, alive: (pid) => pid === 222 }, t);
+    expect(sid(await b.call('mindly_status'))).toBe(first);
+    const claims = t.mindly.store.kv.get<Record<string, { pid: number }>>('mcp:claims')!;
+    expect(Object.values(claims).map((c) => c.pid)).toEqual([222]);
+  });
+
+  it('takes its tasks, intents and unread messages along to the hook session', async () => {
+    const t = timed();
+    const h = await harness({ pid: 4242, startTime: 5 }, t);
+    // The first tool call comes before the client's first hook.
+    const own = sid(await h.call('mindly_status'));
+    const task = await h.call('mindly_task_create', { title: 'started early' });
+    const taskId = (task.structured?.['task'] as { id: string }).id;
+    await h.call('mindly_declare_intent', { summary: 'edit auth', files: ['src/auth.ts'] });
+    await t.mindly.hooks.handle(hook(t.root, 'codex', 'cx-1', 'session_start'));
+    const project = await t.mindly.projects.resolve(t.root);
+    const codex = t.mindly.store.sessions.findByExternal(project.project.id, 'codex', 'cx-1')!;
+    t.mindly.telepathy.send({
+      projectId: project.project.id,
+      from: codex,
+      to: { sessionIds: [own] },
+      kind: 'message',
+      title: 'for the early bird',
+      body: '',
+    });
+
+    await t.mindly.hooks.handle(hook(t.root, 'claude-code', 'cc-1', 'session_start'));
+    const hooked = sid(await h.call('mindly_status'));
+    expect(t.mindly.store.sessions.get(hooked).externalId).toBe('cc-1');
+    expect(t.mindly.store.tasks.get(taskId).ownerSessionId).toBe(hooked);
+    expect((await h.call('mindly_tasks', { mine: true })).text).toContain('started early');
+    expect(t.mindly.store.intents.activeForSession(hooked).map((i) => i.summary)).toContain(
+      'edit auth',
+    );
+    expect((await h.call('mindly_inbox')).text).toContain('for the early bird');
+    expect(t.mindly.store.sessions.get(own).status).toBe('ended');
+    expect(t.mindly.store.sessions.get(hooked).currentTaskId).toBe(taskId);
   });
 });
 
@@ -902,11 +1066,62 @@ describe('paths as the agent sees them', () => {
     );
   });
 
+  it('reads the paths Mindly prints from the root of the tree, also in a subfolder', async () => {
+    const root = repo();
+    mkdirSync(join(root, 'pkg', 'x', 'src'), { recursive: true });
+    writeFileSync(join(root, 'pkg', 'x', 'src', 'c.ts'), 'export const c = 1;\n');
+    mkdirSync(join(root, 'pkg', 'x', 'pkg'));
+    const mindly = Mindly.open({ inMemory: true, ports: { git: createGitPort() } });
+    installDefaultModules(mindly);
+    const h = await harness({ cwd: join(root, 'pkg', 'x') }, { root, mindly });
+
+    // The path as `mindly_context` and the other tools print it: relative to the tree's root.
+    const printed = await h.call('mindly_declare_intent', {
+      summary: 'edit c',
+      files: ['pkg/x/src/c.ts'],
+    });
+    expect(printed.structured?.['files']).toEqual(['pkg/x/src/c.ts']);
+    expect((await h.call('mindly_why', { file: 'pkg/x/src/c.ts', line: 1 })).text).toContain(
+      'export const c = 1;',
+    );
+    // The same file the way a shell in that folder names it.
+    const local = await h.call('mindly_declare_intent', { summary: 'edit c', files: ['src/c.ts'] });
+    expect(local.structured?.['files']).toEqual(['pkg/x/src/c.ts']);
+    expect(local.structured?.['notes']).toEqual([]);
+    // A file about to be created in a folder that exists only from the root.
+    const fresh = await h.call('mindly_declare_intent', {
+      summary: 'new file',
+      files: ['src/new.ts'],
+    });
+    expect(fresh.structured?.['files']).toEqual(['pkg/x/src/new.ts']);
+    const rooted = await h.call('mindly_declare_intent', {
+      summary: 'new root file',
+      files: ['pkg/x/src/other.ts'],
+    });
+    expect(rooted.structured?.['files']).toEqual(['pkg/x/src/other.ts']);
+
+    // Two files the path could mean: the folder the server runs in wins, and the reply says so.
+    writeFileSync(join(root, 'src', 'c.ts'), 'export const rootC = 1;\n');
+    const both = await h.call('mindly_declare_intent', { summary: 'which c', files: ['src/c.ts'] });
+    expect(both.structured?.['files']).toEqual(['pkg/x/src/c.ts']);
+    expect(both.text).toContain('src/c.ts exists too');
+    // A folder that is nowhere: recorded, and said.
+    const nowhere = await h.call('mindly_declare_intent', {
+      summary: 'typo',
+      files: ['nope/deep/file.ts'],
+    });
+    expect(nowhere.text).toContain('does not exist in this checkout');
+  });
+
   it('keeps the git folder out of reach', async () => {
     const h = await harness();
     const why = await h.call('mindly_why', { file: '.git/config', line: 1 });
     expect(why.isError).toBe(true);
     expect(why.text).toMatch(/^forbidden/);
+    // The same folder on a file system that ignores letter case.
+    expect((await h.call('mindly_why', { file: '.GIT/config', line: 1 })).text).toMatch(
+      /^forbidden/,
+    );
     const note = await h.call('mindly_remember', { kind: 'note', title: 'A note with a contract' });
     const memoryId = (note.structured?.['memory'] as { id: string }).id;
     const contract = await h.call('mindly_add_contract', {

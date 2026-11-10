@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import { AgentKindSchema, MINDLY_VERSION, MindlyError } from '@mindly/core';
+import { AgentKindSchema, MINDLY_VERSION, MindlyError, type Logger } from '@mindly/core';
 import type { Mindly } from '@mindly/engine';
 import { openMindly } from '@mindly/runtime';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -55,7 +55,7 @@ export function createMcp(mindly: Mindly, ctx: McpContext): Mcp {
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
   useRedaction(mindly.config.redaction.extraPatterns);
-  const sessions = new SessionResolver(mindly, ctx);
+  const sessions = new SessionResolver(mindly, ctx, logger);
   registerTools(server, {
     mindly,
     logger,
@@ -83,62 +83,75 @@ export interface StartMcpOptions {
  * when the client disconnects. stdout carries only the protocol; logs go to the Mindly log file.
  */
 export async function startMcpServer(options: StartMcpOptions): Promise<void> {
-  // Agents must not be able to create or change saves: the MCP process never follows the event
-  // log for them.
-  const mindly = openMindly({
-    env: options.env,
-    saves: false,
-    ...(options.home !== undefined ? { home: options.home } : {}),
-  });
-  const logger = mindly.kernel.logger.child({ component: 'mcp', agent: options.agentKind });
-  let mcp: Mcp;
-  try {
-    mcp = createMcp(mindly, { agentKind: options.agentKind, cwd: options.cwd });
-  } catch (err) {
-    mindly.close();
-    throw err;
-  }
-  const { server } = mcp;
-  const transport = new StdioServerTransport();
-  let stop: () => void = () => {};
-  const closed = new Promise<void>((resolve) => {
-    stop = resolve;
-    server.server.onclose = () => resolve();
-  });
-  server.server.onerror = (err) => {
-    logger.warn('mcp transport error', { error: err.message });
-  };
   // Every way the client can go away ends the same way: the server is closed, its session is
-  // released and the store is closed. `stop` covers a close that never reports back.
+  // released and the store is closed. The signal handlers come first, before anything is opened:
+  // a client that gives up while the server is still starting must find them in place.
+  let stopped = false;
+  let stop: () => void = () => {};
+  let closeServer: () => void = () => {};
+  const closed = new Promise<void>((resolve) => {
+    stop = () => {
+      stopped = true;
+      resolve();
+    };
+  });
   const shutdown = (): void => {
-    void server.close().catch(() => undefined);
+    closeServer();
     stop();
   };
+  const signals = ['SIGTERM', 'SIGINT', 'SIGHUP'] as const;
+  for (const s of signals) process.once(s, shutdown);
+  // The binary installs handlers of its own before it loads this module; ours replace them.
+  (globalThis as { [EARLY_SIGNALS]?: () => void })[EARLY_SIGNALS]?.();
+
+  let mindly: Mindly | null = null;
+  let mcp: Mcp | null = null;
+  let logger: Logger | null = null;
   // A client that stops reading makes the next write fail with EPIPE on stdout. Without a
   // listener that is an unhandled error event, which ends the process before any of this runs.
   const onPipeError = (err: Error): void => {
-    logger.info('mcp client stopped reading', { error: err.message });
+    logger?.info('mcp client stopped reading', { error: err.message });
     shutdown();
   };
-  process.stdin.once('end', shutdown);
-  process.stdin.once('close', shutdown);
-  process.stdout.on('error', onPipeError);
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
-  process.once('SIGHUP', shutdown);
   try {
-    await server.connect(transport);
-    logger.info('mcp server started');
-    await closed;
+    // Agents must not be able to create or change saves: the MCP process never follows the
+    // event log for them.
+    mindly = openMindly({
+      env: options.env,
+      saves: false,
+      ...(options.home !== undefined ? { home: options.home } : {}),
+    });
+    const log = mindly.kernel.logger.child({ component: 'mcp', agent: options.agentKind });
+    logger = log;
+    mcp = createMcp(mindly, { agentKind: options.agentKind, cwd: options.cwd });
+    const { server } = mcp;
+    closeServer = () => void server.close().catch(() => undefined);
+    server.server.onclose = () => stop();
+    server.server.onerror = (err) => {
+      log.warn('mcp transport error', { error: err.message });
+    };
+    process.stdin.once('end', shutdown);
+    process.stdin.once('close', shutdown);
+    process.stdout.on('error', onPipeError);
+    if (!stopped) {
+      await server.connect(new StdioServerTransport());
+      log.info('mcp server started');
+      await closed;
+    }
   } finally {
+    for (const s of signals) process.off(s, shutdown);
     process.stdin.off('end', shutdown);
     process.stdin.off('close', shutdown);
     process.stdout.off('error', onPipeError);
-    process.off('SIGTERM', shutdown);
-    process.off('SIGINT', shutdown);
-    process.off('SIGHUP', shutdown);
-    mcp.release();
-    logger.info('mcp server stopped');
-    mindly.close();
+    mcp?.release();
+    logger?.info('mcp server stopped');
+    mindly?.close();
   }
 }
+
+/**
+ * Where the `mindly` binary leaves the call that removes the signal handlers it installs before
+ * this module is loaded (loading takes a few tens of milliseconds, and a signal in that time
+ * must still end the process quietly).
+ */
+export const EARLY_SIGNALS = Symbol.for('mindly.mcp.earlySignals');

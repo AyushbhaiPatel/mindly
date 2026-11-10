@@ -33,6 +33,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import {
   ok,
+  placePath,
   projectPath,
   safeLine,
   safeText,
@@ -473,7 +474,11 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       annotations: WRITE,
     },
     (args, { project, session }) => {
-      const files = [...new Set(args.files.map((f) => projectPath(mindly, project, f)))];
+      const placed = args.files.map((f) => placePath(mindly, project, f));
+      const files = [...new Set(placed.map((p) => p.rel))];
+      // How a path was read when that is not obvious (two files it could mean, a folder that is
+      // not there): the agent can then correct an intent recorded on the wrong file.
+      const notes = [...new Set(placed.flatMap((p) => (p.note ? [safeLine(p.note, 400)] : [])))];
       const { intent, overlap } = mindly.intents.declare(
         session,
         args.summary,
@@ -481,17 +486,23 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         args.symbols ?? [],
       );
       const warnings = overlap.warnings.map((w) => safeLine(w, 400));
-      const text = warnings.length
-        ? block(
-            [{ heading: 'Coordination warnings', lines: warnings.map((w) => `- ${w}`) }],
-            '',
-            `Intent recorded for ${files.length} file(s).`,
-          )
-        : `Intent recorded for ${files.length} file(s). No other agent is working on them.`;
+      const sections: Section[] = [
+        { heading: 'Coordination warnings', lines: warnings.map((w) => `- ${w}`) },
+        { heading: 'Paths', lines: notes.map((n) => `- ${n}`) },
+      ];
+      const text =
+        warnings.length || notes.length
+          ? block(
+              sections,
+              '',
+              `Intent recorded for ${files.length} file(s).${warnings.length ? '' : ' No other agent is working on them.'}`,
+            )
+          : `Intent recorded for ${files.length} file(s). No other agent is working on them.`;
       return ok(text, {
         intentId: intent.id,
         files,
         warnings,
+        notes,
         conflicts: overlap.conflicts.map((c) => c.id),
       });
     },
@@ -869,7 +880,8 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       annotations: READ_ONLY,
     },
     (args, { project }) => {
-      const rel = projectPath(mindly, project, args.file);
+      const placed = placePath(mindly, project, args.file);
+      const rel = placed.rel;
       const r = provenanceOf(mindly).why(project.project.id, project.root, rel, args.line);
       const t = now();
       const changes = r.changes.map((c) => {
@@ -888,6 +900,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
           lines: changes.length ? changes : ['- No agent edit on record for this line.'],
         },
         { heading: 'Memory backed by this file', lines: memories },
+        { heading: 'Path', lines: placed.note ? [`- ${safeLine(placed.note, 400)}`] : [] },
       ];
       return ok(block(sections, 'Nothing known.'), {
         path: r.path,

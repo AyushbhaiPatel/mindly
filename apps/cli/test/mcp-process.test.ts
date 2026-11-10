@@ -2,23 +2,36 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { cli, sandbox, type Sandbox } from './helpers.js';
+import { hookAncestryKey, type NormalizedHookEvent } from '@mindly/core';
+import { rememberClient } from '../src/hook.js';
+import { cli, fixture, sandbox, type Sandbox } from './helpers.js';
 
 const BUILT_MAIN = join(import.meta.dirname, '..', 'dist', 'main.js');
+
+/**
+ * Stands in for an agent window: one process that runs a SessionStart hook as its child, then
+ * starts its MCP server as its child on its own stdin and stdout, the way a client does.
+ */
+const WINDOW = `
+const { execFileSync, spawn } = require('node:child_process');
+const [main, payload] = process.argv.slice(1);
+execFileSync(process.execPath, [main, 'hook', 'claude-code', 'SessionStart'], {
+  input: payload,
+  stdio: ['pipe', 'ignore', 'ignore'],
+});
+const server = spawn(process.execPath, [main, 'mcp', '--agent', 'claude-code'], { stdio: 'inherit' });
+server.on('exit', (code) => process.exit(code ?? 0));
+`;
 
 interface Server {
   child: ChildProcessWithoutNullStreams;
   stderr: () => string;
-  exited: Promise<number | null>;
+  exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
   call: (name: string, args: Record<string, unknown>) => Promise<unknown>;
 }
 
-/** Starts `mindly mcp` as a client would and completes the handshake. */
-async function start(sb: Sandbox, agent: string): Promise<Server> {
-  const child = spawn(process.execPath, [BUILT_MAIN, 'mcp', '--agent', agent], {
-    cwd: sb.repo,
-    env: sb.env,
-  });
+/** Wires a spawned server (or window) up as a client would and completes the handshake. */
+async function connect(child: ChildProcessWithoutNullStreams): Promise<Server> {
   let err = '';
   let buf = '';
   let next = 0;
@@ -35,7 +48,9 @@ async function start(sb: Sandbox, agent: string): Promise<Server> {
       if (message.id !== undefined) waiting.get(message.id)?.(message);
     }
   });
-  const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+    child.on('exit', (code, signal) => resolve({ code, signal })),
+  );
   const request = (method: string, params: unknown): Promise<unknown> =>
     new Promise((resolve) => {
       const id = ++next;
@@ -56,6 +71,30 @@ async function start(sb: Sandbox, agent: string): Promise<Server> {
   };
 }
 
+/** Starts `mindly mcp` directly. */
+function start(sb: Sandbox, agent: string): Promise<Server> {
+  return connect(
+    spawn(process.execPath, [BUILT_MAIN, 'mcp', '--agent', agent], { cwd: sb.repo, env: sb.env }),
+  );
+}
+
+/** Opens a window whose hook session has the given id. */
+function openWindow(sb: Sandbox, sessionId: string): Promise<Server> {
+  const payload = JSON.stringify({
+    ...fixture('claude-code.SessionStart'),
+    cwd: sb.repo,
+    session_id: sessionId,
+  });
+  return connect(
+    spawn(process.execPath, ['-e', WINDOW, BUILT_MAIN, payload], { cwd: sb.repo, env: sb.env }),
+  );
+}
+
+function sessionOf(answer: unknown): string {
+  const result = (answer as { result: { structuredContent: { sessionId: string } } }).result;
+  return result.structuredContent.sessionId;
+}
+
 async function liveAgents(sb: Sandbox): Promise<string> {
   return (await cli(sb, ['status'])).stdout;
 }
@@ -69,7 +108,7 @@ describe.skipIf(!existsSync(BUILT_MAIN))('mindly mcp process', () => {
       expect(await liveAgents(sb)).toContain('Cursor');
       if (how === 'stdin') server.child.stdin.end();
       else server.child.kill(how);
-      expect(await server.exited).toBe(0);
+      expect((await server.exited).code).toBe(0);
       expect(server.stderr()).toBe('');
       expect(await liveAgents(sb)).toContain('No agent is working');
     }
@@ -83,8 +122,117 @@ describe.skipIf(!existsSync(BUILT_MAIN))('mindly mcp process', () => {
     server.child.stdout.destroy();
     void server.call('mindly_status', {});
     void server.call('mindly_status', {});
-    expect(await server.exited).toBe(0);
+    expect((await server.exited).code).toBe(0);
     expect(server.stderr()).toBe('');
     expect(await liveAgents(sb)).toContain('No agent is working');
+  });
+
+  it('exits quietly when it is stopped while it is still starting', async () => {
+    const sb = sandbox();
+    // Signalled at several moments of the start-up: never "killed by signal", never an error.
+    for (const delay of [15, 40, 80]) {
+      const child = spawn(process.execPath, [BUILT_MAIN, 'mcp', '--agent', 'cursor'], {
+        cwd: sb.repo,
+        env: sb.env,
+      });
+      let err = '';
+      child.stderr.on('data', (d: Buffer) => (err += d.toString()));
+      const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+        (resolve) => child.on('exit', (code, signal) => resolve({ code, signal })),
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      child.kill('SIGTERM');
+      const end = await exited;
+      // The very first milliseconds belong to the runtime, before any of our code has run.
+      if (end.signal === null) expect(end.code).toBe(0);
+      expect(err).toBe('');
+    }
+    expect(await liveAgents(sb)).toContain('No agent is working');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'gives each of two windows in one checkout its own session',
+    async () => {
+      const sb = sandbox();
+      const idA = 'aaaaaaaa-19fa-41d2-8238-13269b9b3ca0';
+      const idB = 'bbbbbbbb-19fa-41d2-8238-13269b9b3ca0';
+      const a = await openWindow(sb, idA);
+      // Window B opens later, so its session is the most recently active one when window A's
+      // server makes its first call.
+      const b = await openWindow(sb, idB);
+      const sessionA = sessionOf(await a.call('mindly_status', {}));
+      const sessionB = sessionOf(await b.call('mindly_status', {}));
+
+      const data = JSON.parse((await cli(sb, ['export'])).stdout) as {
+        sessions: { id: string; external_id: string }[];
+      };
+      const external = (id: string): string | undefined =>
+        data.sessions.find((s) => s.id === id)?.external_id;
+      expect(external(sessionA)).toBe(idA);
+      expect(external(sessionB)).toBe(idB);
+
+      a.child.stdin.end();
+      b.child.stdin.end();
+      await Promise.all([a.exited, b.exited]);
+    },
+  );
+});
+
+describe('rememberClient', () => {
+  function fakeStore(): { kv: Map<string, unknown>; mindly: unknown } {
+    const kv = new Map<string, unknown>();
+    const mindly = {
+      store: {
+        kv: {
+          get: (key: string) => kv.get(key) ?? null,
+          set: (key: string, value: unknown) => void kv.set(key, value),
+          delete: (key: string) => void kv.delete(key),
+        },
+      },
+    };
+    return { kv, mindly };
+  }
+  const event = (name: NormalizedHookEvent['event']): NormalizedHookEvent => ({
+    agentKind: 'claude-code',
+    event: name,
+    externalSessionId: 'sess-1',
+    cwd: '/nowhere',
+    transcriptPath: null,
+    startSource: null,
+    prompt: null,
+    tool: null,
+    lastMessage: null,
+  });
+  const key = hookAncestryKey('claude-code', 'sess-1');
+
+  it('records the ancestors of the first hook of a session and forgets them at its end', () => {
+    const { kv, mindly } = fakeStore();
+    rememberClient(mindly, event('session_start'));
+    const chain = kv.get(key) as { pid: number }[];
+    if (process.platform !== 'win32') expect(chain[0]?.pid).toBe(process.ppid);
+    // Later hooks leave the record alone.
+    kv.set(key, 'kept');
+    rememberClient(mindly, event('prompt'));
+    expect(kv.get(key)).toBe('kept');
+    rememberClient(mindly, event('session_end'));
+    expect(kv.has(key)).toBe(false);
+    // A session whose start was missed is recorded at its next hook.
+    rememberClient(mindly, event('pre_tool'));
+    expect(kv.has(key)).toBe(true);
+  });
+
+  it('never throws, whatever it is given', () => {
+    expect(() => rememberClient(null, event('session_start'))).not.toThrow();
+    expect(() => rememberClient({}, event('session_start'))).not.toThrow();
+    const broken = {
+      store: {
+        kv: {
+          get: () => {
+            throw new Error('database is locked');
+          },
+        },
+      },
+    };
+    expect(() => rememberClient(broken, event('prompt'))).not.toThrow();
   });
 });

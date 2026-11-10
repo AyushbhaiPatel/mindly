@@ -11,14 +11,24 @@ await startMcpServer({ agentKind: 'cursor', cwd: process.cwd(), env: process.env
 const server = createMcpServer(mindly, { agentKind: 'codex', cwd }); // any transport (tests)
 ```
 
-A server works out once which session it speaks for and keeps it: a live session of the agent
-kind that hooks created in the working tree of `cwd` and that no other running server speaks for,
-otherwise a session of its own with external id `mcp-<pid>-<startTime>`. It chooses again only
-when that session has ended, and a server on its own session moves to the client's hook session
-once one exists. Two clients of the same agent kind therefore get a session each, and a second
-window never takes over the first one's. When the client disconnects (stdin closes, the process
-is signalled, the client stops reading) the server's own session is ended and its intents are
-closed. `createMcp` returns the server together with that `release` call for other transports.
+A server works out which session it speaks for and keeps it. In order of preference:
+
+1. The session its own client's hooks made. The first hook of a session records which processes
+   started it; a server recognises the session whose hooks were started by the process that
+   started the server too. This is what tells two windows of one agent in one checkout apart.
+2. Where that says nothing (a client without hooks, a system where the process table cannot be
+   read): the most recently active live session of the agent kind in the working tree of `cwd`
+   that no other running server speaks for. This is a guess, and the server gives it up for (1)
+   as soon as it can.
+3. A session of its own, with external id `mcp-<pid>-<startTime>`.
+
+Each server records its claim, so two servers never share a session; a claim is free again only
+when its process is gone. A server on its own session moves to its client's hook session once
+that exists (the first tool call may come before the first hook) and takes its unfinished tasks,
+active intents and unread messages along. A session stays live while its server is being used.
+When the client disconnects (stdin closes, the process is signalled, the client stops reading)
+the server's own session is ended and its intents are closed. `createMcp` returns the server
+together with that `release` call for other transports.
 
 Logs go to `$MINDLY_HOME/logs/mindly.log`; stdout carries only the protocol.
 
@@ -47,11 +57,13 @@ Logs go to `$MINDLY_HOME/logs/mindly.log`; stdout carries only the protocol.
 Inputs are validated with strict zod schemas; errors come back as MCP tool errors of the form
 `<code>: <message>` (a `MindlyError` code, never a stack trace).
 
-Paths are the agent's own: a relative path is read from `cwd`, and files are those of the working
-tree the server runs in (a linked worktree when the client was started in one), as for hooks. They
-must stay inside that tree, off the secret deny-list and out of the `.git` folder. Contracts are
-the exception in one respect: they are always checked against the main checkout, and the tool says
-so when the server runs in a linked worktree.
+Paths are the agent's own: files are those of the working tree the server runs in (a linked
+worktree when the client was started in one), as for hooks. They must stay inside that tree, off
+the secret deny-list and out of the `.git` folder. When the server runs in a subfolder, a
+relative path is read from that folder if it names something there, and otherwise from the root
+of the tree, which is how Mindly prints paths; when both exist the subfolder wins and the reply
+says so. Contracts are the exception in one respect: they are always checked against the main
+checkout, and the tool says so when the server runs in a linked worktree.
 
 Intent summaries and symbols, messages and task descriptions are redacted before they are stored,
 with the user's `redaction.extraPatterns` as well as the built-in rules.
