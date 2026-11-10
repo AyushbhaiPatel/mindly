@@ -156,14 +156,16 @@ function compileExtra(source: string): RegExp | null {
 /**
  * `source` (a pattern of `RULES`) for a `mark` copy whose mark is `mark`: every character it
  * matches may be followed by the mark, which no character it matches can be, so a secret split by
- * marks is read as one and a word boundary holds next to a mark. The patterns are plain enough
+ * marks is read as one and a word boundary holds next to a mark. The mark is taken whenever it is
+ * there, so a secret's last part runs on past a mark as far as its characters go, as it would
+ * without the hidden character (a word glued after it goes with it). The patterns are plain enough
  * (characters, classes, groups, quantifiers and `\b`) for this to be read off their source.
  */
 function allowMarks(source: string, mark: string): string {
   const m = `\\u${mark.charCodeAt(0).toString(16).padStart(4, '0')}`;
   let out = '';
   const atom = (x: string): void => {
-    out += `(?:(?!${m})${x}${m}??)`;
+    out += `(?:(?!${m})${x}${m}?)`;
   };
   let i = 0;
   while (i < source.length) {
@@ -219,10 +221,20 @@ const TOKEN_KINDS = new Set([
   'jwt',
 ]);
 
-/** A token rule for a `mark` copy; `find` lists its matches when a plain search is not linear. */
+/** A rule, with `find` listing its matches where a plain search is not linear. */
 interface MarkedRule extends Rule {
   find?: (text: string) => { at: number; match: string }[];
 }
+
+/** A rule whose matches `findJwts` lists, for copies made with `mark` ('' for none). */
+function withJwtFinder(rule: Rule, mark: string): MarkedRule {
+  if (rule.kind !== 'jwt') return rule;
+  const sticky = new RegExp(rule.re.source, 'y');
+  return { ...rule, find: (text: string) => findJwts(text, mark, sticky) };
+}
+
+/** `RULES` for text without marks: JWTs are found in one pass (see `findJwts`). */
+const PLAIN_RULES: readonly MarkedRule[] = RULES.map((rule) => withJwtFinder(rule, ''));
 
 const markedRules = new Map<string, MarkedRule[]>();
 
@@ -230,12 +242,12 @@ const markedRules = new Map<string, MarkedRule[]>();
 function rulesForMarks(mark: string): MarkedRule[] {
   let rules = markedRules.get(mark);
   if (rules === undefined) {
-    rules = RULES.filter((rule) => TOKEN_KINDS.has(rule.kind)).map((rule) => {
-      const re = new RegExp(allowMarks(rule.re.source, mark), rule.re.flags);
-      if (rule.kind !== 'jwt') return { ...rule, re };
-      const sticky = new RegExp(re.source, 'y');
-      return { ...rule, re, find: (text: string) => findJwts(text, mark, sticky) };
-    });
+    rules = RULES.filter((rule) => TOKEN_KINDS.has(rule.kind)).map((rule) =>
+      withJwtFinder(
+        { ...rule, re: new RegExp(allowMarks(rule.re.source, mark), rule.re.flags) },
+        mark,
+      ),
+    );
     markedRules.set(mark, rules);
   }
   return rules;
@@ -256,15 +268,16 @@ function isWordUnit(c: number): boolean {
 const JWT_HEAD_MAX = 2003;
 
 /**
- * The matches of the `jwt` rule (`sticky`, made for `mark`) in a `mark` copy, in one pass. A JWT's
- * first part ends at the first character that is neither a JWT unit nor a mark, which must be a
- * `.`: every start inside one run of such characters reaches the same `.` and reads the same rest,
- * so a run that does not end in a `.` is passed over, and in one that does only the first start
- * (`eyJ` after a word boundary) whose first part is not too long is tried. A plain search tried
- * every `eyJ` after a mark and read up to 2,000 characters from each.
+ * The matches of the `jwt` rule (`sticky`, made for `mark`, or '' for text without marks), in one
+ * pass and the same as a search with that rule finds. A JWT's first part ends at the first
+ * character that is neither a JWT unit nor a mark, which must be a `.`: every start inside one run
+ * of such characters reaches the same `.` and reads the same rest, so a run that does not end in a
+ * `.` is passed over, and in one that does only the first start (`eyJ` after a word boundary)
+ * whose first part is not too long is tried. A plain search tried every `eyJ` after a boundary
+ * (`a-eyJa-eyJ...`, or after each mark) and read up to 2,000 characters from each.
  */
 function findJwts(text: string, mark: string, sticky: RegExp): { at: number; match: string }[] {
-  const m = mark.charCodeAt(0);
+  const m = mark === '' ? -1 : mark.charCodeAt(0);
   const isRunUnit = (c: number): boolean => c === m || isJwtUnit(c);
   const head = (k: number): boolean => {
     let o = k;
@@ -382,7 +395,7 @@ function redactVisible(input: string, options: RedactOptions = {}, mark = ''): R
     if (pass && pass.edits.length > 0) recording?.push(pass);
   };
 
-  for (const rule of mark ? rulesForMarks(mark) : RULES) apply(rule.kind, rule);
+  for (const rule of mark ? rulesForMarks(mark) : PLAIN_RULES) apply(rule.kind, rule);
   if (mark) return { text, count, kinds: [...kinds] };
   for (const source of options.extraPatterns ?? []) {
     const re = compileExtra(source);

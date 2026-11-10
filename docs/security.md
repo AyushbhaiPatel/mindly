@@ -104,7 +104,8 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   of the text with those characters removed, turned into spaces, or a mix of the two, and in one
   where each run of them between letters or digits becomes a mark that the token patterns (API
   keys, access tokens, JWTs) read past and count as a word boundary, so a key split inside and
-  glued to words on either side is still found. The mark is the first of the noncharacters
+  glued to words on either side is still found (a word glued after it by such characters is
+  replaced with it, as the key's characters run on). The mark is the first of the noncharacters
   U+FDD0..U+FDEF, then the private-use characters U+E000..U+E0FF, that the text does not hold; a
   text that holds all 288 gets no such copy, and there a key both split inside and glued to words
   on both sides by hidden characters can be missed. What any copy finds is replaced in the

@@ -65,7 +65,9 @@ describe('a key split and glued to words by hidden characters', () => {
     const text = `see foo\u200bbar\u200d${split}\u200bbaz\u200bqux.`;
     const out = redactText(text);
     expect(shown(out)).not.toContain(GHP.slice(4, 16));
-    expect(out).toBe(`see foo\u200bbar\u200d${REDACTED}\u200bbaz\u200bqux.`);
+    // The token's characters run on past the hidden characters after it, so the words glued
+    // after it go with it; those before it are kept.
+    expect(out).toBe(`see foo\u200bbar\u200d${REDACTED}.`);
   });
 
   it('is found when the text also holds a private-use or noncharacter', () => {
@@ -82,16 +84,37 @@ describe('a key split and glued to words by hidden characters', () => {
     const jwt =
       'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
     const text = `x foo\u200beyJhbG\u200b${jwt.slice(6)}\u200bbar`;
-    expect(redactText(text)).toBe(`x foo\u200b${REDACTED}\u200bbar`);
+    expect(redactText(text)).toBe(`x foo\u200b${REDACTED}`);
   });
 });
 
-describe('JWT heads glued by hidden characters', () => {
+describe('a key glued on the left and split twice by hidden characters', () => {
+  // The last part of the key stopped at the first hidden character it did not need, and the rest
+  // of the key stayed in clear.
+  it('is redacted to its end: an Anthropic key', () => {
+    const tail = `YzAbCdEfGhIjKlMnOpQrStUvWx${'YzAbCdEfGhIjKlMnOpQrStUv'.repeat(2)}-AA`;
+    const text = `see foo\u200bsk-ant-ap\u200bi03-AbCdEfGhIjKlMnOpQrStUvWx\u200b${tail} done`;
+    expect(redactText(text)).toBe(`see foo\u200b${REDACTED} done`);
+  });
+
+  it('is redacted to its end: a JWT signature', () => {
+    const sigTail = 'mNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+    const text =
+      `see foo\u200beyJhb\u200bGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.` +
+      `dozjgNryP4J3jV\u200b${sigTail} done`;
+    expect(redactText(text)).toBe(`see foo\u200b${REDACTED} done`);
+  });
+});
+
+describe('JWT heads in a row', () => {
   it.each([
     ['eyJ\u200b'],
     ['eyJaaaaaaaa\u200b'],
     ['eyJhbG\u200bciOiJIUzI1NiJ9\u200b'],
     ['eyJa-a\u200b'],
+    // Without hidden characters, each `eyJ` after a `-` started a search for the `.`.
+    ['a-eyJ'],
+    ['a-eyJaaaaaaaa'],
   ])('reads 250 KB of %j in linear time', (unit) => {
     const text = unit.repeat(Math.ceil(250_000 / unit.length));
     let best = Infinity;
