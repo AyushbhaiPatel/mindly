@@ -562,4 +562,12 @@ export class KvRepo {
   delete(key: string): void {
     this.db.prepare('DELETE FROM kv WHERE key = ?').run(key);
   }
+
+  /** Deletes the keys `<prefix><session id>` of every session of a project; returns how many. */
+  deleteForSessions(prefix: string, projectId: string): number {
+    const r = this.db
+      .prepare('DELETE FROM kv WHERE key IN (SELECT ? || id FROM sessions WHERE project_id = ?)')
+      .run(prefix, projectId);
+    return Number(r.changes);
+  }
 }

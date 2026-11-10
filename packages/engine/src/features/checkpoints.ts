@@ -33,9 +33,11 @@ const ORPHAN_REF_MIN_AGE_MS = HOUR_MS;
 const MAX_SETTLED_PATHS = 200;
 /** Writes in flight remembered per session (parallel subagents share one session). */
 const MAX_WRITE_NOTES = 8;
+/** Key prefix of a session's notes of writes in flight (followed by the session id). */
+const WRITE_NOTE_PREFIX = 'checkpoints:writing:';
 /** A write whose post-tool hook has not come by then is no longer waited for. */
 const WRITE_NOTE_TTL_MS = 5 * 60_000;
-/** Files larger than this are not hashed: their content before a write is unknown. */
+/** Files larger than this are not hashed: their size and modification time stand in. */
 const MAX_HASHED_FILE_BYTES = 8 * 1024 * 1024;
 
 /** What one agent edit tells the service. */
@@ -130,8 +132,9 @@ export class CheckpointService {
   /**
    * Notes that an agent is about to write `paths` (relative to the working tree of `cwd`): its
    * pre-tool hook, the start of the window in which a rescan may take the edit before the
-   * agent's own step. One note per session and set of paths, consumed by the edit's post-tool
-   * hook; at most a few per session, each dropped after a few minutes.
+   * agent's own step. One note per write, consumed by the write's post-tool hook (writes of the
+   * same paths may overlap: parallel subagents share their session); at most a few per session,
+   * each dropped after a few minutes.
    */
   async noteWriteStart(sessionId: string, cwd: string, paths: readonly string[]): Promise<void> {
     if (!this.enabled || paths.length === 0) return;
@@ -147,15 +150,14 @@ export class CheckpointService {
       };
       const key = this.writeKey(sessionId);
       this.k.store.transaction(() => {
-        const notes = this.writeNotes(sessionId).filter((n) => !sameWrite(n, note));
-        this.k.store.kv.set(key, [...notes, note].slice(-MAX_WRITE_NOTES));
+        this.k.store.kv.set(key, [...this.writeNotes(sessionId), note].slice(-MAX_WRITE_NOTES));
       });
     } catch {
       // Without it a rescan that takes this edit first keeps it as an outside step.
     }
   }
 
-  /** Drops the session's notes of writes in flight (it ended). */
+  /** Drops the session's notes of writes in flight (it ended, or its project is forgotten). */
   forgetWrites(sessionId: string): void {
     try {
       this.k.store.kv.delete(this.writeKey(sessionId));
@@ -164,17 +166,24 @@ export class CheckpointService {
     }
   }
 
-  /** The note of this session's write of exactly `paths` in `worktree`, removed; null if none. */
+  /**
+   * A note of this session's write of exactly `paths` in `worktree`, removed; null if none. Of
+   * several, the newest one that began before `stepAt` (the latest step, which a rescan may have
+   * taken from that write), else the oldest: each overlapping write then finds its own.
+   */
   private takeWriteNote(
     sessionId: string,
     worktree: string,
     paths: readonly string[],
+    stepAt: number | null,
   ): WriteNote | null {
     try {
       return this.k.store.transaction(() => {
         const notes = this.writeNotes(sessionId);
         const wanted = { worktree, paths: [...paths] };
-        const note = notes.find((n) => sameWrite(n, wanted)) ?? null;
+        const mine = notes.filter((n) => sameWrite(n, wanted));
+        const before = stepAt === null ? [] : mine.filter((n) => n.at < stepAt);
+        const note = before.at(-1) ?? mine[0] ?? null;
         const rest = notes.filter((n) => n !== note);
         if (rest.length > 0) this.k.store.kv.set(this.writeKey(sessionId), rest);
         else this.k.store.kv.delete(this.writeKey(sessionId));
@@ -208,7 +217,7 @@ export class CheckpointService {
   }
 
   private writeKey(sessionId: string): string {
-    return `checkpoints:writing:${sessionId}`;
+    return `${WRITE_NOTE_PREFIX}${sessionId}`;
   }
 
   /**
@@ -281,7 +290,12 @@ export class CheckpointService {
       // The files as the agent's write left them, read before the capture compares them.
       const note =
         step.kind === 'agent'
-          ? this.takeWriteNote(step.session.id, worktree, step.edit.paths)
+          ? this.takeWriteNote(
+              step.session.id,
+              worktree,
+              step.edit.paths,
+              latest?.createdAt ?? null,
+            )
           : null;
       const after = note ? note.paths.map((p) => fileHash(join(worktree, p))) : null;
       let result;
@@ -633,6 +647,8 @@ export class CheckpointService {
         this.k.logger.warn('checkpoint refs not deleted', { error: describeError(err) });
       }
     }
+    // Writes in flight of its sessions name its files and what they held.
+    this.k.store.kv.deleteForSessions(WRITE_NOTE_PREFIX, projectId);
     return { refsDeleted, rowsDeleted: this.k.store.checkpoints.delete(rows.map((r) => r.id)) };
   }
 
@@ -659,10 +675,15 @@ function sameWrite(
   return b.paths.every((p) => set.has(p));
 }
 
-/** sha256 of a file's bytes, `''` when it does not exist, null when it cannot be read. */
+/**
+ * What a file holds: the sha256 of its bytes, or for a large file its size and modification time
+ * (a write that changes it changes those); `''` when it does not exist, null when it cannot be
+ * read.
+ */
 function fileHash(path: string): string | null {
   try {
-    if (statSync(path).size > MAX_HASHED_FILE_BYTES) return null;
+    const st = statSync(path, { bigint: true });
+    if (st.size > BigInt(MAX_HASHED_FILE_BYTES)) return `stat:${st.size}:${st.mtimeNs}`;
     return sha256(readFileSync(path));
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'ENOENT' ? '' : null;

@@ -485,4 +485,24 @@ describe('misc repos', () => {
     store.kv.set('k', { a: 1 });
     expect(store.kv.get('k')).toEqual({ a: 1 });
   });
+
+  it("deletes the keys of a project's sessions under a prefix", () => {
+    const { store, a, b } = setup();
+    const other = store.projects.upsertByRoot('/elsewhere', 'elsewhere');
+    const c = store.sessions.upsert({
+      projectId: other.id,
+      agentKind: 'codex',
+      externalId: 'cx-2',
+      worktree: '/elsewhere',
+      branch: 'main',
+      transcriptPath: null,
+    }).session;
+    for (const s of [a, b, c]) store.kv.set(`notes:${s.id}`, [1]);
+    store.kv.set(`other:${a.id}`, 1);
+    expect(store.kv.deleteForSessions('notes:', a.projectId)).toBe(2);
+    expect(store.kv.get(`notes:${a.id}`)).toBeNull();
+    expect(store.kv.get(`notes:${b.id}`)).toBeNull();
+    expect(store.kv.get(`notes:${c.id}`)).toEqual([1]);
+    expect(store.kv.get(`other:${a.id}`)).toBe(1);
+  });
 });
