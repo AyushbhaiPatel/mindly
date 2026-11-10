@@ -489,8 +489,9 @@ export class CheckpointService {
         .map((r) => git.refName(r.worktree, r.seq)),
     );
     const now = this.k.clock.now();
+    // A ref whose age cannot be told (0) may be one whose row is still being written: kept.
     const refs = (await git.listRefs(root)).filter(
-      (r) => !kept.has(r.ref) && now - r.createdAt >= ORPHAN_REF_MIN_AGE_MS,
+      (r) => !kept.has(r.ref) && r.createdAt > 0 && now - r.createdAt >= ORPHAN_REF_MIN_AGE_MS,
     );
     const wanted = new Set([
       ...refs.map((r) => r.ref),

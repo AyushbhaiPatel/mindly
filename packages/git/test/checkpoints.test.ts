@@ -22,7 +22,20 @@ import {
   tryLockCheckpoint,
   worktreeId,
 } from '../src/index.js';
-import { git, makeRepo, tempDir, write } from './helpers.js';
+import { commitAll, git, makeRepo, tempDir, write } from './helpers.js';
+
+/** A repository that keeps its refs in reftables, or null when this git cannot (before 2.45). */
+function reftableRepo(): string | null {
+  const root = tempDir('syn-reftable-');
+  try {
+    git(root, 'init', '-q', '--ref-format=reftable');
+  } catch {
+    return null;
+  }
+  write(root, 'a.txt', 'a\n');
+  commitAll(root);
+  return root;
+}
 
 /** Everything in the user's checkout a checkpoint must leave byte-identical. */
 function checkoutState(root: string): {
@@ -510,6 +523,23 @@ describe('checkpoint refs', () => {
     const [packed] = await listCheckpointRefs(root);
     expect(packed?.commit).toBe(r.commit);
     expect(packed?.createdAt).toBeGreaterThanOrEqual(started - 2000);
+  });
+
+  const reftable = reftableRepo();
+  it.skipIf(reftable === null)('dates a ref kept in a reftable by its table list', async () => {
+    const root = reftable as string;
+    const started = Date.now();
+    await captureCheckpoint({
+      worktree: root,
+      indexFile: join(tempDir(), 'index'),
+      parent: null,
+      paths: null,
+      always: true,
+      ref: checkpointRefName(root, 1),
+      message: 'step 1',
+    });
+    const [ref] = await listCheckpointRefs(root);
+    expect(ref?.createdAt).toBeGreaterThanOrEqual(started - 2000);
   });
 
   it('reports only remotes configured as mirrors', async () => {

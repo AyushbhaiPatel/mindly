@@ -358,8 +358,11 @@ export async function listCheckpointRefs(
     { cwd: root, timeoutMs: 10_000 },
   );
   const commonDir = await gitCommonDir(root);
-  // A ref is its own file until git packs it; `packed-refs` is never older than a ref it holds.
-  const packedAt = writtenAt(join(commonDir, 'packed-refs'));
+  // A ref is its own file until git packs it; `packed-refs` is never older than a ref it holds,
+  // and neither is the table list of a repository that keeps its refs in reftables.
+  const packedAt =
+    writtenAt(join(commonDir, 'packed-refs')) ||
+    writtenAt(join(commonDir, 'reftable', 'tables.list'));
   const out: CheckpointRefEntry[] = [];
   for (const line of res.stdout.split('\n')) {
     if (line === '') continue;

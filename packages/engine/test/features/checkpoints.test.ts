@@ -510,6 +510,16 @@ describe('checkpoints through hooks', () => {
     expect(fake.deleted).toEqual([{ worktree: root, refs: [ref] }]);
   });
 
+  it('leaves a ref without a row alone when its age cannot be told', async () => {
+    const { root, clock, mindly, fake, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const ref = `refs/mindly/steps/${basename(root)}/2`;
+    fake.refs.push({ worktreeId: basename(root), seq: 2, ref, commit: 'commit-x', createdAt: 0 });
+    clock.advance(30 * DAY_MS);
+    await mindly.checkpoints.prune(pid());
+    expect(fake.refs.map((r) => r.ref)).toContain(ref);
+  });
+
   it('keeps only the newest maxPerWorktree checkpoints', async () => {
     const { root, mindly, pid, rows } = make((c) => {
       c.checkpoints.maxPerWorktree = 2;
