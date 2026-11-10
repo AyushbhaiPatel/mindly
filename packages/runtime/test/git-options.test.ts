@@ -34,6 +34,8 @@ const LOCAL_PEM = 'echo local > certs/server.pem';
 const PEM = ['**/*.pem'];
 const VENDOR = ['vendor/**'];
 const covered = (rel: string) => rel.endsWith('.pem') || rel.startsWith('vendor/');
+const HOOK =
+  "mkdir -p hk && printf '#!/bin/sh\\necho hook > certs/server.pem\\n' > hk/pre-commit && chmod +x hk/pre-commit";
 
 const cases: {
   name: string;
@@ -178,6 +180,96 @@ const cases: {
     command: 'git push . ahead:main',
     want: ['warn', 'deny'],
   },
+  // An output file of read-tree.
+  {
+    name: 'read-tree --index-output',
+    command: 'git read-tree --index-output=certs/idx.pem HEAD',
+    want: ['deny'],
+  },
+  // init's options, and the folders it fills.
+  {
+    name: 'init -b main --bare into it',
+    scopes: VENDOR,
+    command: 'git init -q -b main --bare vendor',
+    want: ['deny'],
+  },
+  {
+    name: 'init --separate-git-dir into it',
+    scopes: VENDOR,
+    command: 'git init -q --separate-git-dir=vendor y',
+    want: ['deny'],
+  },
+  {
+    name: 'init --template, then a commit runs its hook',
+    prep: "mkdir -p tpl/hooks && printf '#!/bin/sh\\necho hook > certs/server.pem\\n' > tpl/hooks/pre-commit && chmod +x tpl/hooks/pre-commit",
+    command: 'git init -q --template=tpl && git commit -q --allow-empty -m x',
+    want: ['warn', 'deny'],
+  },
+  // Settings written to a config file git reads.
+  {
+    name: 'config --file=.git/config core.hooksPath',
+    prep: HOOK,
+    command: 'git config --file=.git/config core.hooksPath hk && git commit -q --allow-empty -m x',
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'config -f .git/config core.fsmonitor',
+    command:
+      "git config -f .git/config core.fsmonitor 'echo hook > certs/server.pem; false' && git status -s",
+    want: ['warn', 'deny'],
+  },
+  // Variables git honours besides its own.
+  {
+    name: 'EDITOR',
+    command: "EDITOR='echo hook > certs/server.pem; true' git commit --allow-empty -q",
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'VISUAL',
+    // git takes VISUAL only on a terminal that can show it.
+    command: "TERM=xterm VISUAL='echo hook > certs/server.pem; true' git commit --allow-empty -q",
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'HOME with another .gitconfig',
+    prep: `${HOOK} && mkdir -p fakehome && printf '[core]\\n\\thooksPath = hk\\n' > fakehome/.gitconfig`,
+    command: 'HOME=fakehome git commit -q --allow-empty -m x',
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'XDG_CONFIG_HOME with another config',
+    prep: `${HOOK} && mkdir -p xdg/git && printf '[core]\\n\\thooksPath = hk\\n' > xdg/git/config`,
+    command: 'XDG_CONFIG_HOME=xdg git commit -q --allow-empty -m x',
+    want: ['warn', 'deny'],
+  },
+  // Settings given to a shell that runs git.
+  {
+    name: 'GIT_CONFIG_* given to bash -c',
+    prep: HOOK,
+    command:
+      "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=hk bash -c 'git commit -q --allow-empty -m x'",
+    want: ['warn', 'deny'],
+  },
+  // Folders a clone or a submodule fills.
+  {
+    name: 'clone of a bundle',
+    scopes: VENDOR,
+    prep: 'git bundle create -q vendor.bundle --all',
+    command: 'git clone -q vendor.bundle',
+    want: ['deny'],
+  },
+  {
+    name: 'submodule add into it',
+    scopes: VENDOR,
+    command: 'git -c protocol.file.allow=always submodule add -q ./ vendor/lib',
+    want: ['deny'],
+  },
+  // The command bisect runs at each step.
+  {
+    name: 'bisect run',
+    command: 'git bisect start HEAD v1 && git bisect run rm certs/server.pem',
+    want: ['deny'],
+  },
 ];
 
 /** Commands that write no covered file: never blocked, and not warned about. */
@@ -204,6 +296,20 @@ const quiet: { name: string; prep?: string; command: string }[] = [
   { name: 'format-patch into another folder', command: 'git format-patch -q -1 -o patches' },
   { name: 'archive to a file', command: 'git archive -o out.tar HEAD' },
   { name: 'diff to another file', command: 'git diff --output=out.diff v1' },
+  { name: 'status with a locale', prep: LOCAL_PEM, command: 'LANG=C LC_ALL=C git status -s' },
+  { name: 'log with a time zone and PAGER', command: 'TZ=UTC PAGER=cat git log -1' },
+  { name: 'commit with EDITOR=true', prep: LOCAL_PEM, command: 'EDITOR=true git commit -qa' },
+  {
+    name: 'commit without signing',
+    prep: LOCAL_PEM,
+    command: 'git -c commit.gpgsign=false commit -qam x',
+  },
+  { name: 'log with --not', command: 'git log --oneline main --not v1' },
+  { name: 'diff --compact-summary', command: 'git diff --compact-summary v1' },
+  { name: 'log with an abbreviated option', command: 'git log --onel -1' },
+  { name: 'fetch with a server option', command: 'git fetch -q -o x . v1:refs/tags/again || true' },
+  { name: 'config of a file of its own', command: 'git config -f tool.ini core.hooksPath x' },
+  { name: 'submodule status', command: 'git submodule status' },
 ];
 
 describe('git commands that write a covered file through an option or a setting', () => {

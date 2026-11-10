@@ -1563,31 +1563,34 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
  * prints, who commits. Any other may run a program or move what git works on.
  */
 const GIT_HARMLESS_CONFIG =
-  /^(color\.[\w.-]+|advice\.[\w.-]+|user\.(name|email)|log\.[\w.-]+|i18n\.[\w.-]+|column\.[\w.-]+|format\.pretty|core\.quotepath|diff\.(noprefix|mnemonicprefix)|init\.defaultbranch|status\.(short|branch|showstash))$/i;
+  /^(color\.[\w.-]+|advice\.[\w.-]+|user\.(name|email)|log\.[\w.-]+|i18n\.[\w.-]+|column\.[\w.-]+|format\.pretty|core\.quotepath|diff\.(noprefix|mnemonicprefix)|init\.defaultbranch|status\.(short|branch|showstash)|(commit|tag)\.gpgsign)$/i;
 
 /** A pager setting is harmless only as a pager that just shows text. */
 const GIT_PAGER_SETTING = /^(core\.pager|pager\.[\w.-]+)$/i;
 const HARMLESS_PAGER = /^(cat|less|more|true|false)?$/;
 
 /**
- * Variables that may be set for a git command without changing what it does to files. Any other
- * `GIT_*` setting may point git elsewhere or run a program.
+ * Variables that may be set for git, or exported before it, without changing what it does to
+ * files: how it prints, and who commits when. Any other may point git at other settings or files
+ * (`HOME`, `XDG_CONFIG_HOME`, `GIT_DIR`, `GIT_CONFIG_*`) or run a program (`EDITOR`, `PATH`,
+ * `SSH_ASKPASS`, `GIT_EXTERNAL_DIFF`).
  */
-function harmlessGitVariable(name: string, value: string): boolean {
+function harmlessVariable(name: string, value: string): boolean {
   if (/^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)$/.test(name)) return true;
-  if (name === 'GIT_TERMINAL_PROMPT') return true;
-  if (name === 'GIT_PAGER') return HARMLESS_PAGER.test(value);
-  if (name === 'GIT_EDITOR' || name === 'GIT_SEQUENCE_EDITOR') return /^(true|:|cat)?$/.test(value);
+  if (/^(GIT_TERMINAL_PROMPT|LANG|LANGUAGE|LC_[A-Z]+|TZ|NO_COLOR|TERM)$/.test(name)) return true;
+  if (name === 'GIT_PAGER' || name === 'PAGER') return /^(cat|less)?$/.test(value);
+  if (/^(GIT_EDITOR|GIT_SEQUENCE_EDITOR|EDITOR|VISUAL)$/.test(name))
+    return /^(true|:|cat)?$/.test(value);
   return false;
 }
 
 /**
- * A `GIT_*` variable set in a way that may change what git does: `GIT_X=…`, or a bare name that
- * `export` gives a value set before. Harmless ones are left out.
+ * A variable set in a way that may change what git does: `X=…`, or a bare name that `export`
+ * gives a value set before. Harmless ones are left out.
  */
-const unsafeGitVariable = (w: Word): boolean => {
-  const m = /^(GIT_[A-Za-z0-9_]*)(?:=(.*))?$/s.exec(w.text);
-  return m !== null && !harmlessGitVariable(m[1] as string, m[2] ?? '');
+const unsafeVariable = (w: Word): boolean => {
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$/s.exec(w.text);
+  return m !== null && !harmlessVariable(m[1] as string, m[2] ?? '');
 };
 
 /** Shell words that may give a variable to the commands after them (`export GIT_DIR=x`). */
@@ -1607,6 +1610,8 @@ function gitCommand(words: readonly Word[]): {
   workTree: Word | null;
   /** A setting given here may run a program or move what git works on. */
   unsafe: boolean;
+  /** Shell code a setting given here runs (`-c alias.x='!…'`). */
+  exec: string[];
 } {
   const rest = words.slice(1);
   let dir: Word | null = null;
@@ -1614,6 +1619,7 @@ function gitCommand(words: readonly Word[]): {
   let nocase = false;
   let workTree: Word | null = null;
   let unsafe = false;
+  const exec: string[] = [];
   while (rest[0] && isFlag(rest[0])) {
     const flag = rest.shift() as Word;
     if (GIT_ELSEWHERE.test(flag.text)) trusted = false;
@@ -1643,10 +1649,12 @@ function gitCommand(words: readonly Word[]): {
           GIT_HARMLESS_CONFIG.test(key) ||
           (GIT_PAGER_SETTING.test(key) && HARMLESS_PAGER.test(val));
         if (!harmless) unsafe = true;
+        // An alias that starts with `!` is shell code.
+        if (/^alias\./i.test(key) && val.startsWith('!')) exec.push(val.slice(1));
       }
     }
   }
-  return { dir, rest, trusted, nocase, workTree, unsafe };
+  return { dir, rest, trusted, nocase, workTree, unsafe, exec };
 }
 
 /**
@@ -1705,7 +1713,7 @@ const DIFF_LOG_SAFE = {
     --porcelain --line-porcelain --incremental --show-stats --show-email --show-name
     --show-number --score-debug --ignore-rev --ignore-revs-file --contents --objects
     --objects-edge --no-walk --do-walk --in-commit-order --bisect --timestamp --header
-    --no-pager --summary --format --group --no-merges --progress`),
+    --no-pager --summary --format --group --no-merges --progress --not --compact-summary`),
 };
 
 /** Options of `git status`. */
@@ -1730,7 +1738,7 @@ const GREP_SAFE = {
 
 /** Options of `git fetch`: not `--upload-pack`, which runs a program, nor `--update-head-ok`. */
 const FETCH_SAFE = {
-  letters: 'qvfpPtnjamk46',
+  letters: 'qvfpPtnjamko46',
   long: optionNames(`--quiet --verbose --all --append --atomic --depth --deepen --shallow-since
     --shallow-exclude --unshallow --update-shallow --negotiation-tip --negotiate-only
     --dry-run --porcelain --write-fetch-head --no-write-fetch-head --force --keep
@@ -1837,7 +1845,20 @@ const GIT_OPTIONS: Readonly<Record<string, GitOptions>> = {
       '--all --force --quiet --no-create --index --stdin --temp --ignore-skip-worktree-bits',
     ),
   },
-  'read-tree': { long: ['--prefix', '--exclude-per-directory', '--index-output'] },
+  'read-tree': {
+    strict: true,
+    long: ['--prefix', '--exclude-per-directory', '--index-output'],
+    flags: optionNames(`--reset --trivial --aggressive --empty --dry-run --verbose --quiet
+      --no-sparse-checkout --recurse-submodules --no-recurse-submodules`),
+    output: ['--index-output'],
+  },
+  init: {
+    strict: true,
+    short: 'b',
+    long: optionNames(`--initial-branch --template --separate-git-dir --object-format
+      --ref-format`),
+    flags: optionNames('--quiet --bare --shared'),
+  },
   'format-patch': {
     short: 'ov',
     long: optionNames(`--output-directory --output --subject-prefix --in-reply-to --to --cc --suffix
@@ -1847,12 +1868,27 @@ const GIT_OPTIONS: Readonly<Record<string, GitOptions>> = {
       --notes --thread --attach --inline`),
   },
   clone: {
+    strict: true,
     short: 'obucj',
     long: optionNames(`--origin --branch --upload-pack --reference --reference-if-able
       --separate-git-dir --depth --shallow-since --shallow-exclude --config --template --jobs
       --filter --server-option --bundle-uri --ref-format --revision`),
+    flags: optionNames(`--quiet --verbose --progress --no-progress --no-checkout --checkout
+      --bare --mirror --local --no-local --no-hardlinks --shared --recurse-submodules
+      --no-recurse-submodules --shallow-submodules --no-shallow-submodules --remote-submodules
+      --no-remote-submodules --single-branch --no-single-branch --tags --no-tags --sparse
+      --also-filter-submodules --dissociate --reject-shallow --no-reject-shallow`),
   },
   worktree: { short: 'bB', long: ['--reason', '--orphan'] },
+  // `submodule add`'s options; another verb is a change of the whole tree, or only looks.
+  submodule: {
+    short: 'b',
+    long: optionNames('--branch --name --reference --depth --jobs'),
+    flags: optionNames('--quiet --force --recursive --cached --files --dissociate'),
+  },
+  bisect: {},
+  'sparse-checkout': {},
+  difftool: { short: 'xtX', long: optionNames('--extcmd --tool --rotate-to --skip-to') },
   rebase: { short: 'sXx', long: ['--onto', '--exec', '--strategy', '--strategy-option'] },
   merge: {
     short: 'msXF',
@@ -1890,7 +1926,11 @@ const GIT_OPTIONS: Readonly<Record<string, GitOptions>> = {
     flags: ['--open-files-in-pager'],
     safe: GREP_SAFE,
   },
-  fetch: { short: 'j', long: ['--upload-pack', '--depth', '--refmap'], safe: FETCH_SAFE },
+  fetch: {
+    short: 'jo',
+    long: ['--upload-pack', '--depth', '--refmap', '--server-option'],
+    safe: FETCH_SAFE,
+  },
   'ls-remote': {
     long: ['--upload-pack', '--sort', '--server-option'],
     safe: {
@@ -1968,7 +2008,9 @@ function parseGit(words: readonly Word[], options: GitOptions): GitParsed {
   const shortValued = options.short ?? '';
   const attached = options.attached ?? '';
   const longValued = options.long ?? [];
-  const known = [...longValued, ...(options.flags ?? [])];
+  // The options that keep a command looking count too: git takes an abbreviation of them alike.
+  const safe = typeof options.safe === 'object' ? options.safe.long : [];
+  const known = [...new Set([...longValued, ...(options.flags ?? []), ...safe])];
   const out: GitParsed = {
     args: [],
     afterDashes: null,
@@ -2055,6 +2097,33 @@ function gitOptionsSafe(p: GitParsed, table: GitOptions): boolean {
 const localRepository = (w: Word | undefined): boolean =>
   w !== undefined &&
   (/^(file:|[.~/])/.test(w.text) || (w.text.includes('/') && !w.text.includes(':')));
+
+/** Where a clone comes from is on this machine: a path, not a URL nor `host:path`. */
+const localSource = (w: Word | undefined): boolean =>
+  w !== undefined &&
+  (/^file:/.test(w.text) || (!w.text.includes('://') && !/^[^/]*:/.test(w.text)));
+
+/** The folder a clone of `from` goes to when none is given: its last part, less `.git`/`.bundle`. */
+const cloneName = (from: Word | undefined): Word[] => {
+  const name = from?.text
+    .replace(/\/+$/, '')
+    .replace(/\/\.git$/, '')
+    .replace(/\.(git|bundle)$/, '')
+    .split(/[/:]/)
+    .pop();
+  return name ? [word(name)] : [];
+};
+
+/** A config file git reads its settings from, or one that cannot be told. */
+const gitReadsConfig = (w: Word): boolean =>
+  w.dynamic ||
+  /(^|\/)\.git(\/|$)|(^|\/)\.git(config|modules)$|(^|\/)git\/config$|^\/etc\/gitconfig$/.test(
+    w.text,
+  ) ||
+  w.text.startsWith('~');
+
+/** A word in single quotes, for the shell to read back as it is. */
+const quoted = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`;
 
 /** git subcommands that leave refs, the index and the working tree as they are. */
 const GIT_LOOKS = new Set([
@@ -2257,7 +2326,7 @@ function gitWildcards(text: string): string[] {
  * output to and the folders it fills are written, by name.
  */
 function readGit(words: readonly Word[], stdin: string | null, settings = false): Verdict {
-  const { dir, rest, trusted, nocase, workTree, unsafe } = gitCommand(words);
+  const { dir, rest, trusted, nocase, workTree, unsafe, exec: aliases } = gitCommand(words);
   const sub = rest[0]?.text;
   if (sub === undefined) return READS;
   const command = [word('git'), ...rest.slice(1)];
@@ -2277,11 +2346,18 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
   /** The verdict, and any file of the tree on top when a setting given to it may do anything. */
   const done = (v: Verdict, any = unsafe || settings): Verdict => {
     if (!any) return v;
-    if (v.kind === 'git') return { ...v, asks: [...v.asks, anything] };
+    if (v.kind === 'git') return running({ ...v, asks: [...v.asks, anything] }, aliases);
     const items = v.kind === 'writes' ? v.items : [];
     if (v.kind !== 'reads' && v.kind !== 'writes') return v;
-    return { kind: 'git', dir, asks: [anything], items, trusted, nocase, workTree };
+    return running(
+      { kind: 'git', dir, asks: [anything], items, trusted, nocase, workTree },
+      aliases,
+    );
   };
+  /** Shell code it runs besides, read like any other (`rebase --exec`, `bisect run`). */
+  function running(v: Verdict, code: readonly string[]): Verdict {
+    return v.kind === 'git' && code.length > 0 ? { ...v, exec: [...(v.exec ?? []), ...code] } : v;
+  }
   /** Files it writes, named as files and not as pathspecs, and folders it fills. */
   const outputs = (files: readonly Word[], lands: readonly Word[] = [], any = false): Verdict =>
     done(
@@ -2299,6 +2375,8 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
     const changes = !gitOptionsSafe(p, table) || (sub === 'push' && localRepository(p.args[0]));
     return outputs(gitValues(p, ...(table.output ?? [])), [], changes);
   }
+  // A subcommand whose options are not known here: any word may be an option's value.
+  const unknownTable = GIT_OPTIONS[sub] === undefined;
   // An option not known here, to a command whose options are, may change what it does.
   const known = [...(table.long ?? []), ...(table.flags ?? [])];
   if (table.strict && [...p.long].some((n) => !known.includes(n))) return done(READS, true);
@@ -2343,6 +2421,7 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
     const cut = w.text.lastIndexOf('/');
     return cut === -1 ? word('.') : sliceWord(w, 0, cut + 1);
   };
+  if (unknownTable) return whole();
   switch (sub) {
     case 'format-patch': {
       // Patch files named after their commits, in the folder given or where it runs: what they
@@ -2372,11 +2451,12 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
             '--rename-section',
           ]));
       if (reads) return done(READS);
-      // A file of its own is only that file; git reads it only when told to.
+      // A file of its own is only that file, unless it is one git reads its settings from (the
+      // repository's, the user's, the system's, `.gitmodules`).
       const file = gitValues(p, 'f', '--file');
+      const own = file.length > 0 && !file.some(gitReadsConfig);
       const key = (verb === 'set' ? p.args[1] : p.args[0])?.text ?? '';
-      const harmless =
-        !gitHas(p, 'e', ['--edit']) && (file.length > 0 || GIT_HARMLESS_CONFIG.test(key));
+      const harmless = !gitHas(p, 'e', ['--edit']) && (own || GIT_HARMLESS_CONFIG.test(key));
       return outputs(file, [], !harmless);
     }
     case 'merge-file':
@@ -2392,33 +2472,47 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
       return outputs(p.args);
     }
     case 'read-tree': {
-      // Without -u it only reads into the index.
-      if (!gitHas(p, 'u')) return done(READS);
+      // An index written elsewhere is a file. Without -u nothing else of the tree changes.
+      const out = gitValues(p, '--index-output');
+      if (!gitHas(p, 'u')) return outputs(out);
       const prefix = gitValues(p, '--prefix')[0];
-      return prefix ? outputs([], [prefixDir(prefix)]) : whole();
+      return prefix ? outputs(out, [prefixDir(prefix)]) : outputs(out, [], true);
     }
     case 'init':
-      // A new repository, in the folder given or where it runs.
-      return outputs([], p.args[0] ? [p.args[0]] : []);
+      // A new repository, in the folder given or where it runs, with its own files apart when
+      // told (`--separate-git-dir`). The hooks of a template run on later commands.
+      return outputs(
+        [],
+        [...p.args.slice(0, 1), ...gitValues(p, '--separate-git-dir')],
+        p.long.has('--template'),
+      );
     case 'clone': {
-      // The new repository's folder: given, or named after what is cloned. It runs code from what
-      // it clones only when told to (a program to fetch with, hooks from a template or a setting).
+      // The new repository's folder: given, or named after what is cloned, and its own files when
+      // put apart. It runs code from what it clones only when told to (a program to fetch with,
+      // hooks from a template or a setting). One cloned from here brings the files this one has,
+      // covered ones included.
       const [from, to] = p.args;
-      const name = from?.text
-        .replace(/\/+$/, '')
-        .replace(/\/?\.git$/, '')
-        .split(/[/:]/)
-        .pop();
-      const into = to ?? (name ? word(name) : null);
-      const runs = gitHas(p, 'uc', [
-        '--upload-pack',
-        '--template',
-        '--config',
-        '--separate-git-dir',
-      ]);
-      // A clone of a repository here brings the files this one has, covered ones included.
-      return outputs([], into ? [into] : [], runs || localRepository(from));
+      const into = [...(to ? [to] : cloneName(from)), ...gitValues(p, '--separate-git-dir')];
+      const runs = gitHas(p, 'uc', ['--upload-pack', '--template', '--config']);
+      return outputs([], into, runs || localSource(from));
     }
+    case 'submodule': {
+      // `submodule add` clones into the folder given, or one named after what it clones;
+      // `foreach` runs shell code in each. Other verbs check out what the submodules record.
+      const q = parseGit([word('git'), ...rest.slice(1)], table);
+      const [action, ...args] = q.args;
+      if (action === undefined || ['status', 'summary'].includes(action.text)) return done(READS);
+      if (action.text === 'foreach') return running(whole(), [args.map((w) => w.text).join(' ')]);
+      if (action.text !== 'add') return whole();
+      const [from, to] = args;
+      return outputs([], to ? [to] : cloneName(from), localSource(from));
+    }
+    case 'difftool':
+      // A program given to run on each pair of files is shell code.
+      return running(
+        whole(),
+        gitValues(p, 'x', '--extcmd').map((w) => w.text),
+      );
     case 'worktree': {
       const q = parseGit([word('git'), ...rest.slice(2)], table);
       if (['list', 'lock', 'unlock', 'prune', 'repair'].includes(verb ?? '')) return done(READS);
@@ -2428,10 +2522,16 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
       if (verb === 'remove' || verb === 'move') return done(writes(...trees(under(q.args))));
       return whole();
     }
-    case 'bisect':
-      return ['log', 'visualize', 'view', 'help', 'terms'].includes(verb ?? '')
-        ? done(READS)
-        : whole();
+    case 'bisect': {
+      if (['log', 'visualize', 'view', 'help', 'terms'].includes(verb ?? '')) return done(READS);
+      if (verb !== 'run') return whole();
+      // The command it runs at each step: one word is shell code, several are a program and its
+      // arguments, which no shell reads again.
+      const run = rest.slice(2);
+      const code =
+        run.length === 1 ? (run[0] as Word).text : run.map((w) => quoted(w.text)).join(' ');
+      return running(whole(), run.length > 0 ? [code] : []);
+    }
     case 'sparse-checkout':
       return verb === 'list' ? done(READS) : whole();
     case 'restore': {
@@ -2682,7 +2782,7 @@ function readGit(words: readonly Word[], stdin: string | null, settings = false)
         );
         // The commands it runs after each commit are read like any other shell code.
         const exec = gitArgs(command, 'x', ['--exec']).all.flatMap((w) => (w ? [w.text] : []));
-        return rebase.kind === 'git' ? { ...rebase, exec } : rebase;
+        return running(rebase, exec);
       }
       if (revs.length === 0) return ask(unknown);
       // A commit picked or reverted: what it changed against its parent (the one `-m` names). A
@@ -3358,11 +3458,19 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     const program = words[0] && !words[0].dynamic ? programName(words[0]) : '';
     const assigned = cmd.words
       .slice(0, words[0] ? cmd.words.indexOf(words[0]) : cmd.words.length)
-      .some((w) => isAssignment(w) && unsafeGitVariable(w));
+      .some((w) => isAssignment(w) && unsafeVariable(w));
     if (words.length === 0 && assigned) r.gitEnv = true;
-    if (EXPORTS.has(program) && words.slice(1).some(unsafeGitVariable)) r.gitEnv = true;
+    if (EXPORTS.has(program) && words.slice(1).some((w) => !isFlag(w) && unsafeVariable(w)))
+      r.gitEnv = true;
     const gitSettings = program === 'git' && (assigned || r.gitEnv);
     const verdict = gitSettings ? readGit(words, stdin, true) : classify(words, stdin);
+    /** Code this command runs (a shell's, git's own): the settings given to it hold there. */
+    const nested = (code: string, from: string | null): void => {
+      const was = r.gitEnv;
+      r.gitEnv ||= assigned;
+      collectTargets(code, from, depth + 1, r);
+      r.gitEnv = was;
+    };
     switch (verdict.kind) {
       case 'reads':
         break;
@@ -3436,7 +3544,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         // The whole working tree, for a command given no path: from its top when it is the tree
         // the command line starts in.
         const top = r.top !== null && insideTop(at);
-        for (const code of verdict.exec ?? []) collectTargets(code, at, depth + 1, r);
+        for (const code of verdict.exec ?? []) nested(code, at);
         for (const q of verdict.asks) {
           if (q.pathspecs.some((w) => w.dynamic)) continue;
           let index: number | undefined;
@@ -3510,7 +3618,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         break;
       }
       case 'inline':
-        collectTargets(verdict.code, here, depth + 1, r);
+        nested(verdict.code, here);
         break;
       case 'script': {
         const found = readCode(verdict.code);
@@ -3520,7 +3628,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           if (looksLikePath(p.text)) add(item, here);
           else if (p.certain && /^[\w@+.-]+$/.test(p.text)) add({ ...item, ifExists: true }, here);
         }
-        for (const line of found.commands) collectTargets(line, here, depth + 1, r);
+        for (const line of found.commands) nested(line, here);
         break;
       }
       case 'unknown':
@@ -3611,7 +3719,7 @@ export function isReadOnlyCommand(command: string): boolean {
       const sub = words.slice(1).find((t) => !t.text.startsWith('-'));
       if (sub === undefined || !READ_ONLY_GIT.has(sub.text)) return false;
       // An option or a setting may still make it write (`git diff --output=x`).
-      const settings = cmd.words.some((w) => isAssignment(w) && unsafeGitVariable(w));
+      const settings = cmd.words.some((w) => isAssignment(w) && unsafeVariable(w));
       if (readGit(words, null, settings).kind !== 'reads') return false;
       continue;
     }
