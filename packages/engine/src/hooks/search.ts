@@ -69,10 +69,17 @@ const UNLISTED_DIRS = ['node_modules', '.git'];
 
 /**
  * Bounds of the search, as an object so a test can lower them. `entries` is what one walk (one
- * ignored directory, or one written directory without git) may look at; `walks` how many such
- * walks one hook call starts; `pathspecs` how many patterns one git call is given.
+ * ignored directory, or one folder of a written directory without git) may look at, and
+ * `firstPass` what each folder gets before any gets more; `walks` how many such walks one hook
+ * call starts; `pathspecs` how many patterns one git call is given.
  */
-export const SEARCH_LIMITS = { entries: 150_000, walks: 24, pathspecs: 48, gitMs: 400 };
+export const SEARCH_LIMITS = {
+  entries: 150_000,
+  firstPass: 2000,
+  walks: 24,
+  pathspecs: 48,
+  gitMs: 400,
+};
 
 /** The scope pattern as shown to people. */
 export function scopeLabel(scope: WrittenScope): string {
@@ -418,6 +425,12 @@ export class ScopeSearch {
     return { files: all.files.filter(byRule), complete: all.complete };
   }
 
+  /**
+   * Every file under `dir`, at most `maxDepth` levels down. The folders right below it are each
+   * walked on their own: first all of them with a small budget, then those not finished with
+   * the full one. A large folder therefore never keeps a small one beside it from being searched.
+   * Done once per hook call for a directory, whatever the rules that ask.
+   */
   private walkAll(
     root: string,
     dir: string,
@@ -434,7 +447,44 @@ export class ScopeSearch {
       return result;
     }
     this.walksLeft--;
-    let left = SEARCH_LIMITS.entries;
+    // The directory itself, one level.
+    const top = this.walkTree(root, dir, deps, 1, SEARCH_LIMITS.entries);
+    result.files.push(...top.files);
+    if (!top.complete) {
+      result.complete = false;
+      return result;
+    }
+    if (maxDepth <= 1) return result;
+    // Then each folder below it on its own, small budgets first.
+    let pending = top.dirs;
+    for (const budget of [SEARCH_LIMITS.firstPass, SEARCH_LIMITS.entries]) {
+      const unfinished: string[] = [];
+      for (const child of pending) {
+        if (this.timeLeft() <= 0) {
+          unfinished.push(child);
+          continue;
+        }
+        const sub = this.walkTree(root, child, deps, maxDepth - 1, budget);
+        if (sub.complete) result.files.push(...sub.files);
+        else unfinished.push(child);
+      }
+      pending = unfinished;
+      if (pending.length === 0) break;
+    }
+    if (pending.length > 0) result.complete = false;
+    return result;
+  }
+
+  /** Files under `dir` (and, at its top level, the folders to go into), within `budget` entries. */
+  private walkTree(
+    root: string,
+    dir: string,
+    deps: readonly string[],
+    maxDepth: number,
+    budget: number,
+  ): { files: string[]; dirs: string[]; complete: boolean } {
+    const result = { files: [] as string[], dirs: [] as string[], complete: true };
+    let left = budget;
     const queue: { path: string; depth: number }[] = [{ path: dir, depth: 1 }];
     while (queue.length > 0) {
       const { path, depth } = queue.pop() as { path: string; depth: number };
@@ -459,6 +509,7 @@ export class ScopeSearch {
             if (e.name === '.git' || (UNLISTED_DIRS.includes(e.name) && !deps.includes(e.name)))
               continue;
             if (depth < maxDepth) queue.push({ path: join(path, e.name), depth: depth + 1 });
+            else if (depth === 1) result.dirs.push(join(path, e.name));
             continue;
           }
           result.files.push(`${prefix}${e.name}`);

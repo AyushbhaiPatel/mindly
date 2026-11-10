@@ -458,17 +458,21 @@ describe('hook flow', () => {
       enforce: true,
     });
     mkdirSync(join(root, 'dist', 'deep'), { recursive: true });
-    writeFileSync(join(root, 'dist', 'deep', 'a.js'), '');
+    for (const name of ['a.js', 'b.js', 'c.js'])
+      writeFileSync(join(root, 'dist', 'deep', name), '');
     const shell = (command: string) =>
       mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
     // A search budget too small for the folder: what it found is not the whole answer.
     const before = { ...SEARCH_LIMITS };
     SEARCH_LIMITS.entries = 1;
+    SEARCH_LIMITS.firstPass = 1;
     try {
       const r = await shell('rm -rf dist');
       expect(r.decision).toBeNull();
       expect(r.context).toContain('could not search all of dist');
       expect(r.context).toContain('Certificates are issued by hand');
+      // A possible write that could not be looked through says nothing.
+      expect((await shell('mytool dist')).context ?? '').not.toContain('Certificates');
       // What the command names outright is still blocked, with or without a search.
       writeFileSync(join(root, 'dist', 'server.pem'), '');
       expect((await shell('rm dist/server.pem')).decision).toBe('deny');
@@ -478,8 +482,6 @@ describe('hook flow', () => {
       const both = await shell('rm -rf dist certs');
       expect(both.decision).toBe('deny');
       expect(both.reason).toContain('certs/a.pem');
-      // A possible write that could not be looked through says nothing.
-      expect((await shell('mytool dist')).context ?? '').not.toContain('Certificates');
     } finally {
       Object.assign(SEARCH_LIMITS, before);
     }
