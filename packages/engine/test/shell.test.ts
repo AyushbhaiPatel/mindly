@@ -1360,6 +1360,18 @@ describe('write targets of a shell command', () => {
     for (const line of [
       'echo $HOME',
       'git commit -m "$msg"',
+      // Only a leading `cd <folder> &&` is read.
+      'cd a; ls',
+      'cd a',
+      'ls && cd a && ls',
+      'cd a && cd b && ls',
+      'cd a b && ls',
+      'cd -P a && ls',
+      'cd - && ls',
+      'pushd a && ls',
+      'popd && ls',
+      'mkdir x && cd x && ls',
+      'if true; then cd a; fi; ls',
       // Programs whose writes are not modelled completely, or options not known here.
       'npm test 2>&1 | tail -20',
       'pnpm build > build.log 2>&1',
@@ -1451,6 +1463,7 @@ describe('write targets of a shell command', () => {
 
   it('answers a line of 200,000 characters of any shape in good time', () => {
     for (const unit of [
+      'mkdir x && cd x && ',
       'xargs -i ',
       'echo $(x) ',
       'a[$(b)] ',

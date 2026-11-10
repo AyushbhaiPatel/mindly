@@ -316,7 +316,6 @@ describe('hook flow', () => {
       'git checkout HEAD~1 packages',
       'git rm -r packages',
       'git clean -fdx packages/db',
-      'cd packages/db && cd - && rm packages/db/prisma/migrations/001.sql',
     ]) {
       const r = await shell(command);
       expect(r.decision, command).toBe('deny');
@@ -332,6 +331,8 @@ describe('hook flow', () => {
       'tar xf a.tar -C packages/db/prisma/migrations',
       'find packages/db -type f -delete',
       'sudo -u root rm packages/db/prisma/migrations/001.sql',
+      // Where a second `cd` lands is not followed.
+      'cd packages/db && cd - && rm packages/db/prisma/migrations/001.sql',
     ]) {
       const r = await shell(command);
       expect(r.decision, command).toBeNull();

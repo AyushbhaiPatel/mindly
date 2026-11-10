@@ -916,6 +916,86 @@ cases.push(
   },
 );
 
+// Only a leading `cd <folder> &&` is read: where any other `cd` lands is not followed, as it
+// may fail, never run, or go where the line has just changed the disk.
+cases.push(
+  {
+    name: 'a cd to a folder made and removed earlier in the chain',
+    scopes: ['certs/**'],
+    command: 'mkdir x && rm -r x && cd x; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a cd to a folder made and rmdir-ed earlier in the chain',
+    scopes: ['certs/**'],
+    command: 'mkdir x && rmdir x && cd x; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a cd after a mkdir that fails on a file',
+    scopes: ['certs/**'],
+    prep: 'touch x',
+    command: 'mkdir x && cd x; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a cd after a mkdir that fails on a folder already there',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    command: 'mkdir sub && cd sub; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a cd after a failed &&',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    command: 'false && cd sub; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a cd after a succeeding ||',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    command: 'true || cd sub; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a cd in an if branch not taken',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    command: 'if false; then cd sub; fi; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a cd to a folder removed earlier on the line',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    command: 'rm -rf sub; cd sub; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a cd to a folder rmdir-ed earlier on the line',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    command: 'rmdir sub; cd sub; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a cd given two operands',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    command: 'cd sub x; rm -f certs/server.pem',
+    want: ['warn'],
+  },
+  {
+    name: 'a leading cd to a folder there, then a path named from it',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    command: 'cd sub && rm -f ../certs/server.pem',
+    want: ['deny'],
+  },
+);
+
 describe('git commands that write a covered file through an option or a setting', () => {
   for (const c of cases) {
     it(c.name, async () => {
@@ -1256,6 +1336,7 @@ describe('git commands read without false warnings or slow reading', () => {
     try {
       await g.shell('true');
       for (const unit of [
+        'mkdir x && cd x && ',
         'xargs -i ',
         'echo $(x) ',
         'a[$(b)] ',
@@ -1268,6 +1349,24 @@ describe('git commands read without false warnings or slow reading', () => {
         await g.shell(command);
         expect(performance.now() - t0, unit).toBeLessThan(1000);
       }
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('a line of 200,000 characters of mkdir and cd is answered well inside its time', async () => {
+    const g = setUp(PEM);
+    try {
+      await g.shell('true');
+      const unit = 'mkdir x && cd x && ';
+      const command = `${unit.repeat(Math.floor(199_000 / unit.length))}git status`;
+      let best = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const t0 = performance.now();
+        await g.shell(command);
+        best = Math.min(best, performance.now() - t0);
+      }
+      expect(best).toBeLessThan(200);
     } finally {
       g.mindly.close();
     }

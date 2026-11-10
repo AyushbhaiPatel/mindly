@@ -115,8 +115,8 @@ const cases: {
     want: 'deny',
   },
   {
+    // A second `cd` makes the line one not read fully: git is asked nothing about it.
     name: 'HEAD written from inside .git, then reset --hard',
-    known: true,
     command: () =>
       "cd .git && echo 'ref: refs/heads/certs-change' > HEAD && cd .. && git reset -q --hard",
     writes: ['certs/server.pem'],
