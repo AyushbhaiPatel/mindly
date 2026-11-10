@@ -117,9 +117,8 @@ function notStored(outcome: RememberOutcome, m: Memory): CallToolResult | null {
     kept_approved: {
       heading: 'Existing approved memory',
       text:
-        'Not stored: an approved memory with this title exists and was left unchanged (new ' +
-        'evidence, if any, was added to it). Propose the change under a different title or ask ' +
-        'the user to edit it.',
+        'Not stored: an approved memory with this title exists and was left unchanged. Propose ' +
+        'the change under a different title or ask the user to edit it.',
     },
     kept_rejected: {
       heading: 'Rejected',

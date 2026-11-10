@@ -1,5 +1,14 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { clampTrust, detectRules, memoryLine, ruleTitle, USER } from '../src/index.js';
+import {
+  clampTrust,
+  detectRules,
+  memoryLine,
+  ruleTitle,
+  selfHealingOf,
+  USER,
+} from '../src/index.js';
 import { setup } from './helpers.js';
 
 const agent = { type: 'agent' as const, sessionId: null, agentKind: 'codex' };
@@ -175,7 +184,7 @@ describe('trust layer', () => {
       mindly.memory.rememberResult({ ...base, title: 'Login is in auth', body: 'v2' }),
     ).toMatchObject({ outcome: 'updated', memory: { id: created.memory.id, body: 'v2' } });
 
-    // Approved: the text stays, but evidence that checks out and the occurrence are recorded.
+    // Approved: nothing about the memory changes, evidence included; the occurrence is recorded.
     const approved = mindly.memory.approve(created.memory.id);
     const before = updates();
     const kept = mindly.memory.rememberResult({
@@ -187,9 +196,7 @@ describe('trust layer', () => {
     expect(kept.outcome).toBe('kept_approved');
     expect(kept.memory).toEqual(mindly.store.memories.get(approved.id));
     expect(kept.memory).toMatchObject({ body: 'v2', trust: 'approved', version: approved.version });
-    expect(mindly.store.memories.evidenceFor(approved.id).map((e) => e.ref)).toEqual([
-      'src/auth.ts',
-    ]);
+    expect(mindly.store.memories.evidenceFor(approved.id)).toEqual([]);
     expect(updates()).toBe(before + 1);
     // Evidence that does not check out is refused as before, not dropped.
     expect(() =>
@@ -211,8 +218,103 @@ describe('trust layer', () => {
       evidence: [{ path: 'src/auth.ts', excerpt: 'export function login(user: string) {' }],
     });
     expect(refused).toMatchObject({ outcome: 'kept_rejected', memory: { trust: 'rejected' } });
-    expect(mindly.store.memories.evidenceFor(approved.id)).toHaveLength(1);
+    expect(mindly.store.memories.evidenceFor(approved.id)).toEqual([]);
     expect(updates()).toBe(events);
+  });
+
+  it('does not let a restatement make an approved memory go stale', () => {
+    const { root, mindly, pid } = project();
+    writeFileSync(join(root, 'src', 'version.ts'), 'export const VERSION = 1;\n');
+    const base = { projectId: pid, projectRoot: root, kind: 'rule' as const };
+    const rule = mindly.memory.remember({
+      ...base,
+      title: 'Never log the session token',
+      body: '',
+      source: { type: 'agent', sessionId: null, agentKind: 'claude-code' },
+    });
+    mindly.memory.approve(rule.id);
+    const restated = mindly.memory.rememberResult({
+      ...base,
+      title: 'Never log the session token',
+      body: '',
+      evidence: [{ path: 'src/version.ts', excerpt: 'export const VERSION = 1;' }],
+      source: agent,
+    });
+    expect(restated.outcome).toBe('kept_approved');
+    expect(mindly.store.memories.evidenceFor(rule.id)).toEqual([]);
+    // The line the restatement pointed at changes: the rule is still approved and still shown.
+    writeFileSync(join(root, 'src', 'version.ts'), 'export const VERSION = 2;\n');
+    selfHealingOf(mindly).sweep(pid);
+    expect(mindly.store.memories.get(rule.id).trust).toBe('approved');
+    expect(
+      mindly.memory.list(pid, { kinds: ['rule'], trust: ['approved'] }).map((m) => m.id),
+    ).toEqual([rule.id]);
+  });
+
+  it('records one restatement per session and hour, and no duplicate evidence', () => {
+    const { root, mindly, clock } = setup();
+    const pid = mindly.store.projects.upsertByRoot(root, 'r').id;
+    const claude = { type: 'agent' as const, sessionId: null, agentKind: 'claude-code' };
+    const base = { projectId: pid, projectRoot: root, kind: 'fact' as const };
+    const evidence = [{ path: 'src/auth.ts', excerpt: 'export function login(user: string) {' }];
+    const fact = mindly.memory.remember({
+      ...base,
+      title: 'Login is in auth',
+      body: 'a',
+      source: claude,
+    });
+    const restatedEvents = (): number =>
+      mindly.store.events
+        .query(pid, { types: ['memory.updated'], limit: 5000 })
+        .filter((e) => e.payload['memoryId'] === fact.id && e.payload['restated'] === true).length;
+
+    // Another agent corroborating a proposal 200 times: one evidence row, one event.
+    for (let n = 0; n < 200; n++) {
+      mindly.memory.remember({
+        ...base,
+        title: 'Login is in auth',
+        body: 'b',
+        evidence,
+        source: agent,
+      });
+    }
+    expect(mindly.store.memories.evidenceFor(fact.id)).toHaveLength(1);
+    expect(restatedEvents()).toBe(1);
+    // Different evidence is still added, and the author repeating its own is not duplicated.
+    mindly.memory.remember({
+      ...base,
+      title: 'Login is in auth',
+      body: 'b',
+      evidence: [...evidence, { path: 'src/auth.ts', excerpt: 'return { role: "admin" };' }],
+      source: agent,
+    });
+    for (let n = 0; n < 3; n++) {
+      mindly.memory.remember({
+        ...base,
+        title: 'Login is in auth',
+        body: 'a',
+        evidence,
+        source: claude,
+      });
+    }
+    expect(mindly.store.memories.evidenceFor(fact.id)).toHaveLength(2);
+
+    // A new hour, or another session, is a new occurrence.
+    clock.advance(61 * 60 * 1000);
+    mindly.memory.remember({ ...base, title: 'Login is in auth', body: 'b', source: agent });
+    expect(restatedEvents()).toBe(2);
+    const { session } = mindly.store.sessions.upsert({
+      projectId: pid,
+      agentKind: 'codex',
+      externalId: 'cx-9',
+      worktree: root,
+      branch: null,
+      transcriptPath: null,
+    });
+    const inSession = { type: 'agent' as const, sessionId: session.id, agentKind: 'codex' };
+    mindly.memory.remember({ ...base, title: 'Login is in auth', body: 'b', source: inSession });
+    mindly.memory.remember({ ...base, title: 'Login is in auth', body: 'b', source: inSession });
+    expect(restatedEvents()).toBe(3);
   });
 
   it('keeps a proposal in the words of the agent it is attributed to', () => {
@@ -325,7 +427,8 @@ describe('trust layer', () => {
   });
 
   it('still records a command that fails again after its mistake was approved', () => {
-    const { root, mindly, pid } = project();
+    const { root, mindly, clock } = setup();
+    const pid = mindly.store.projects.upsertByRoot(root, 'r').id;
     const { session } = mindly.store.sessions.upsert({
       projectId: pid,
       agentKind: 'codex',
@@ -353,6 +456,10 @@ describe('trust layer', () => {
     expect(repeats()).toBe(0);
     const again = fail();
     expect(again).toMatchObject({ id: first!.id, trust: 'approved', version: approved.version });
+    // A command failing in a loop is one occurrence, not an event per failure.
+    for (let n = 0; n < 50; n++) fail();
+    expect(repeats()).toBe(1);
+    clock.advance(2 * 60 * 60 * 1000);
     fail();
     expect(repeats()).toBe(2);
     expect(mindly.mistakes.forCommand(pid, 'pnpm test --run').map((m) => m.id)).toEqual([

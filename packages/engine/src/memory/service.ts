@@ -54,13 +54,22 @@ export interface RememberInput {
 
 /**
  * What {@link MemoryService.rememberResult} did. `kept_approved`: a memory the user approved has
- * this title, so its text, scope and trust were left as they are (new evidence and the occurrence
- * are recorded). `kept_rejected`: the user rejected a memory with this title; nothing was stored.
+ * this title, so nothing about it changed (only the occurrence is recorded). `kept_rejected`: the user rejected a memory with this title; nothing was stored.
  * `kept_other_author`: a different agent proposed a memory with this title; it keeps its text, and
  * new evidence and the occurrence are recorded.
  */
 export type RememberOutcome =
   'created' | 'updated' | 'kept_approved' | 'kept_rejected' | 'kept_other_author';
+
+/** How long one `restated` event stands for every restatement by the same session. */
+const RESTATED_WINDOW_MS = 60 * 60 * 1000;
+
+/** Evidence that passed {@link MemoryService.checkEvidence}. */
+interface CheckedEvidence {
+  rel: string;
+  excerpt: string | null;
+  hash: string | null;
+}
 
 /** Whether two sources are the same author: the user, the system, or agents of one kind. */
 function sameAuthor(a: MemorySource, b: MemorySource): boolean {
@@ -243,7 +252,7 @@ export class MemoryService {
     if (existing && input.source.type !== 'user') {
       if (existing.trust === 'rejected') return { memory: existing, outcome: 'kept_rejected' };
       if (existing.trust === 'approved') {
-        return { memory: this.restated(existing, input, evidence), outcome: 'kept_approved' };
+        return { memory: this.restated(existing, input, []), outcome: 'kept_approved' };
       }
       // A memory stays in the words of whoever it is attributed to: another agent saying the same
       // thing corroborates it (its evidence and the occurrence are recorded) but cannot put its
@@ -287,16 +296,7 @@ export class MemoryService {
           reason: input.reason ?? null,
         });
       }
-      for (const e of evidence) {
-        this.k.store.memories.addEvidence({
-          memoryId: m.id,
-          projectId: input.projectId,
-          type: 'file',
-          ref: e.rel,
-          excerpt: e.excerpt,
-          contentHash: e.hash,
-        });
-      }
+      this.attachEvidence(m.id, input.projectId, evidence);
       this.k.store.events.append({
         projectId: input.projectId,
         sessionId: input.source.sessionId,
@@ -316,26 +316,33 @@ export class MemoryService {
   }
 
   /**
-   * Records that an approved memory was stated again, without changing it: evidence that checks
-   * out is added to it, and the event log keeps the occurrence (a command that failed again, an
-   * agent reaching the same conclusion) with who restated it.
+   * Records that a memory was stated again by someone who may not change it. The memory itself is
+   * untouched. `evidence` is attached only to a memory nobody has decided on yet: evidence on a
+   * memory the user approved would let any agent make it go stale later, by pointing it at a line
+   * that is bound to change. The trace is a `restated` event, at most one per memory and session
+   * in {@link RESTATED_WINDOW_MS}, so a command failing in a loop does not fill the event log.
    */
   private restated(
     existing: Memory,
     input: RememberInput,
-    evidence: readonly { rel: string; excerpt: string | null; hash: string | null }[],
+    evidence: readonly CheckedEvidence[],
   ): Memory {
     this.k.store.transaction(() => {
-      for (const e of evidence) {
-        this.k.store.memories.addEvidence({
-          memoryId: existing.id,
-          projectId: input.projectId,
-          type: 'file',
-          ref: e.rel,
-          excerpt: e.excerpt,
-          contentHash: e.hash,
-        });
-      }
+      this.attachEvidence(existing.id, input.projectId, evidence);
+      const noted = this.k.store.events
+        .query(input.projectId, {
+          types: ['memory.updated'],
+          since: this.k.clock.now() - RESTATED_WINDOW_MS,
+          order: 'desc',
+          limit: 1000,
+        })
+        .some(
+          (e) =>
+            e.sessionId === input.source.sessionId &&
+            e.payload['memoryId'] === existing.id &&
+            e.payload['restated'] === true,
+        );
+      if (noted) return;
       this.k.store.events.append({
         projectId: input.projectId,
         sessionId: input.source.sessionId,
@@ -352,6 +359,31 @@ export class MemoryService {
       });
     });
     return existing;
+  }
+
+  /** Adds file evidence to a memory, skipping rows it already has (same file and excerpt). */
+  private attachEvidence(
+    memoryId: string,
+    projectId: string,
+    evidence: readonly CheckedEvidence[],
+  ): void {
+    if (evidence.length === 0) return;
+    const key = (ref: string, hash: string | null): string => `${ref}\u0000${hash ?? ''}`;
+    const have = new Set(
+      this.k.store.memories.evidenceFor(memoryId).map((e) => key(e.ref, e.contentHash)),
+    );
+    for (const e of evidence) {
+      if (have.has(key(e.rel, e.hash))) continue;
+      have.add(key(e.rel, e.hash));
+      this.k.store.memories.addEvidence({
+        memoryId,
+        projectId,
+        type: 'file',
+        ref: e.rel,
+        excerpt: e.excerpt,
+        contentHash: e.hash,
+      });
+    }
   }
 
   /** The active memory of `kind` with the same normalised title on `branch`, if any. */
