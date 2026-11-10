@@ -507,7 +507,7 @@ describe('rate-limit failover', () => {
       '',
       ' and anything else the client wants to add, which may run on for a while, so be it.',
       '. Your quota will reset after 2h.',
-      ' on gemini-2.5-pro. Please see https://example.com/docs/quota?x=1 for details',
+      ' on gemini-2.5-pro. Please see https://docs.anthropic.com/en/api/errors?x=1 for details',
     ];
     for (const [kind, wording, id] of CLIENT_WORDINGS) {
       for (const tail of tails) {
@@ -563,6 +563,104 @@ describe('rate-limit failover', () => {
       'Usage limit reached. Then I fixed the tests.',
     ]) {
       expect([text, detectRateLimit('claude-code', [text])]).toEqual([text, null]);
+    }
+  });
+
+  it('reads the Gemini quota notice that names the model, from the session and from the hook', async () => {
+    const notice = 'You have exhausted your daily quota on gemini-2.5-pro.';
+    for (const text of [
+      notice,
+      'You have exhausted your capacity on gemini-2.5-flash. Your quota will reset after 2h.',
+      'You have exhausted your daily quota for today.',
+    ]) {
+      expect([text, detectRateLimit('gemini', [text])]).toEqual([text, 'gemini.quota_exhausted']);
+    }
+    expect(
+      detectRateLimit('gemini', ['You have exhausted your daily quota on the billing page.']),
+    ).toBeNull();
+    const entries = parseTranscriptTail(
+      JSON.stringify({
+        messages: [
+          { type: 'user', content: 'fix the tests' },
+          { type: 'gemini', content: notice },
+        ],
+      }),
+    );
+    const last = entries[entries.length - 1]!;
+    expect(detectRateLimit('gemini', [last.text], last.client ? 'client' : 'assistant')).toBe(
+      'gemini.quota_exhausted',
+    );
+
+    // End to end: the Gemini hook passes the answer as the last message, with no transcript.
+    const { root, clock, mindly } = setupFailover({
+      config: (c) => {
+        c.failover.order = ['gemini', 'claude-code'];
+      },
+    });
+    await mindly.hooks.handle(event(root, 'gemini', 'gm', 'session_start'));
+    clock.advance(1000);
+    await mindly.hooks.handle(event(root, 'gemini', 'gm', 'prompt', { prompt: 'fix the tests' }));
+    clock.advance(1000);
+    await mindly.hooks.handle(event(root, 'gemini', 'gm', 'stop', { lastMessage: notice }));
+    const pid = mindly.store.projects.list()[0]!.id;
+    expect(mindly.store.handoffs.list(pid).map((h) => h.toAgentKind)).toEqual(['claude-code']);
+  });
+
+  it('does not take a sentence that only mentions a tail word for the tail of a notice', () => {
+    for (const text of [
+      'Done.\n\nUsage limit reached — the banner now shows the plan name.',
+      'Usage limit reached. The settings page lists the quota.',
+      'Usage limit reached: users wait in a queue now.',
+      "You've hit your usage limit · the docs explain the billing cycle.",
+    ]) {
+      for (const kind of KINDS) {
+        expect([kind, text, detectRateLimit(kind, [text])]).toEqual([kind, text, null]);
+      }
+    }
+  });
+
+  it('does not take the rate limit of another service for the agent hitting its own', async () => {
+    const lines = [
+      'Error: rate limit exceeded for api.github.com',
+      'rate limit exceeded for the GitHub API',
+      'HTTP 429 Too Many Requests from registry.npmjs.org',
+      'Too many requests to https://api.stripe.com/v1/charges',
+      'API Error: 429 rate limit exceeded for api.github.com',
+    ];
+    for (const line of lines) {
+      for (const kind of KINDS) {
+        expect([kind, line, detectRateLimit(kind, [line], 'client')]).toEqual([kind, line, null]);
+      }
+    }
+    expect(
+      detectRateLimit('claude-code', ['API Error: 429 rate limit exceeded for api.github.com']),
+    ).toBeNull();
+    // The provider's own limit still counts, with or without its host.
+    expect(
+      detectRateLimit(
+        'claude-code',
+        ['API Error: 429 Too Many Requests (api.anthropic.com)'],
+        'client',
+      ),
+    ).toBe('claude.http_429');
+    expect(detectRateLimit('codex', ['stream error: rate limit reached for gpt-5'], 'client')).toBe(
+      'codex.rate_limit',
+    );
+
+    for (const [kind, entry] of [
+      ['claude-code', { type: 'system', level: 'error', content: lines[0] }],
+      ['codex', { type: 'event_msg', payload: { type: 'error', message: lines[1] } }],
+    ] as const) {
+      const { root, clock, mindly, sent } = setupFailover();
+      await mindly.hooks.handle(event(root, kind, 's', 'session_start'));
+      clock.advance(1000);
+      await mindly.hooks.handle(event(root, kind, 's', 'prompt', { prompt: 'sync the issues' }));
+      clock.advance(1000);
+      const transcript = join(root, 'third-party.jsonl');
+      writeFileSync(transcript, jsonl([{ timestamp: new Date(clock.t).toISOString(), ...entry }]));
+      await mindly.hooks.handle(event(root, kind, 's', 'stop', { transcriptPath: transcript }));
+      const pid = mindly.store.projects.list()[0]!.id;
+      expect([kind, mindly.store.handoffs.list(pid).length, sent.length]).toEqual([kind, 0, 0]);
     }
   });
 

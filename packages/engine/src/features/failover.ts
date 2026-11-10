@@ -93,9 +93,12 @@ const RESET_TIME = `(?:(?!${CLAUSE}|[.!?;]\\s)[^\\n]){0,60}`;
 // Every sentence of the tail of a notice says how to get going again.
 const TAIL_WORD =
   /\b(?:upgrade|try again|retry|resets?|credits?|plan|billing|usage|quota|admin|docs|settings|pricing|subscribe|subscription|wait)\b/i;
-// A tail line on its own starts with that word: "Try again at 5pm.", "/upgrade to ...".
+// ...and opens with what to do or when: "Try again at 5pm", "/upgrade to ...", "please check
+// your plan", "visit https://... to purchase more credits", "To continue now, upgrade to Max",
+// "For more information on this error, read the docs". A sentence that only mentions such a
+// word ("the banner now shows the plan name") is about something else.
 const TAIL_START =
-  /^(?:(?:please|or|and|then|to|you can)\s+)*(?:upgrade|try again|retry|resets?|wait|subscribe|check your|contact your admin|your (?:limit|quota) will reset)\b/i;
+  /^(?:(?:please|or|and|then|to|you can|to (?:continue|keep going)(?: now)?,)\s*)*(?:upgrade|try again|retry|resets?|wait|subscribe|check (?:your|the|quota|plan|billing|usage)|contact|visit|go to|send a request|purchase|buy|add (?:more )?credits|switch to|learn more|read the docs|for (?:more )?(?:information|details)|your (?:limit|quota) will reset|(?:limits?|quota) resets?)\b/i;
 // Code in a sentence makes it a sentence about code: "Retry logic added in src/limit.ts".
 const CODE_REF =
   /`|\b[\w-]+\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|swift|php|cs|md|json|ya?ml|toml|sql|sh|css|html)\b/i;
@@ -112,14 +115,12 @@ function tailSentences(text: string): string[] {
     .filter((t) => t.length > 0);
 }
 
-/** True when every sentence of `text` is about getting going again and none is about code. */
-function allTail(text: string, mustStart: boolean): boolean {
+/** True when every sentence of `text` says how to get going again and none is about code. */
+function allTail(text: string): boolean {
   const sentences = tailSentences(text);
   return (
     sentences.length > 0 &&
-    sentences.every(
-      (t) => TAIL_WORD.test(t) && !CODE_REF.test(t) && (!mustStart || TAIL_START.test(t)),
-    )
+    sentences.every((t) => TAIL_WORD.test(t) && TAIL_START.test(t) && !CODE_REF.test(t))
   );
 }
 
@@ -133,12 +134,12 @@ function allTail(text: string, mustStart: boolean): boolean {
 function noticeTail(rest: string): boolean {
   const t = rest.trim();
   if (/^[.!]?$/.test(t) || /^\|\d{9,13}$/.test(t)) return true;
-  return NOTICE_SEP.test(rest) && allTail(t.replace(/^[.,;:!|·∙•–—/-]+/, ''), false);
+  return NOTICE_SEP.test(rest) && allTail(t.replace(/^[.,;:!|·∙•–—/-]+/, ''));
 }
 
 /** A line that is only the tail of a notice, as a client prints it under the notice. */
 function tailOnlyLine(line: string): boolean {
-  return allTail(line, true);
+  return allTail(line);
 }
 
 function label(source: NoticeSource): string {
@@ -227,12 +228,13 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
     api('codex.http_429', HTTP_429),
   ],
   gemini: [
-    // "You have exhausted your daily quota on this model.", "You have exhausted your capacity
+    // "You have exhausted your daily quota on this model.", "...daily quota on gemini-2.5-pro.",
+    // "...daily quota for today.", "You have exhausted your capacity
     // on this model. Your quota will reset after 2h."
     account(
       'gemini.quota_exhausted',
       (l) =>
-        `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)(?: (?:on|for) (?:this|the) model)?`,
+        `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)(?: (?:on|for) (?:this|the) model| on (?:model )?[a-z][\\w.:-]*\\d(?:[\\w.:-]*[\\w-])?| for (?:today|this (?:month|week|period)))?`,
     ),
     // "Resource has been exhausted (e.g. check quota)."
     api('gemini.resource_exhausted', opening('resource has been exhausted')),
@@ -301,6 +303,21 @@ function stripLead(line: string): string {
 const ACCOUNT_SIGNATURES: readonly RateLimitSignature[] = Object.values(RATE_LIMIT_SIGNATURES)
   .flat()
   .filter((sig) => sig.account);
+
+// A rate limit of another service the agent called: a host that is not the model provider's,
+// or a named API ("for the GitHub API"). Only the provider's own limit stops the agent.
+const HOST = /\b(?:[a-z0-9-]+\.)+(?:com|io|org|net|dev|ai|co|app|cloud)\b/gi;
+const PROVIDER_HOST =
+  /(?:^|\.)(?:anthropic\.com|claude\.ai|openai\.com|chatgpt\.com|googleapis\.com|google\.com|cursor\.(?:com|sh))$/i;
+const OTHER_API =
+  /\b(?:for|from|by|calling|on|of)\s+(?:the\s+)?(?!(?:anthropic|openai|claude|gemini|google|cursor|codex)\b)[A-Z][\w.-]*\s+API\b/;
+
+/** True when `line` is about the rate limit of a service other than the model provider. */
+function otherService(line: string): boolean {
+  if (OTHER_API.test(line)) return true;
+  const hosts = line.replace(/\bhttps?:\/\//gi, ' ').match(HOST) ?? [];
+  return hosts.some((h) => !PROVIDER_HOST.test(h));
+}
 
 /** True when `line` is the notice of `sig` as the assistant would relay it: wording, then tail. */
 function relaysNotice(sig: RateLimitSignature, line: string): boolean {
@@ -396,7 +413,13 @@ export function detectRateLimit(
         : source;
     for (const line of noticeLines(text, from)) {
       for (const s of sigs) {
-        if (from === 'client' ? s.client.test(line) : s.account && relaysNotice(s, line)) {
+        // API vocabulary from the client counts unless it names another service; the account
+        // wordings are the provider's own.
+        const hit =
+          from === 'client'
+            ? s.client.test(line) && (s.account || !otherService(line))
+            : s.account && relaysNotice(s, line);
+        if (hit) {
           return s.id;
         }
       }
