@@ -328,6 +328,10 @@ describe('redact', () => {
       'PW',
     ],
     ['curl -H \'Authorization: Digest username="John, response="PW"\' x', 'PW'],
+    // An empty parameter does not hide the next one, and one token after Digest is a token.
+    ['curl -H \'Authorization: Digest username="u", nonce= response="PW"\' x', 'PW'],
+    ['curl -H "Authorization: Digest dXNlcm5hbWU6PW==" https://x.test', 'dXNlcm5hbWU6PW=='],
+    ["curl -H 'Authorization: AWS4-HMAC-SHA256 PW==' https://x.test", 'PW=='],
     // A quoted value with spaces: the secrets after it are still found.
     [
       'curl -H \'Authorization: Digest username="u", realm="Restricted Area", response="PW"\' x',
@@ -601,6 +605,21 @@ describe('redact', () => {
     ).toBe(header(REDACTED, REDACTED));
   });
 
+  it('reads every secret Digest parameter after an empty one', () => {
+    const names = ['response', 'nonce', 'cnonce', 'opaque', 'Signature', 'username', 'realm'];
+    const secrets = ['response', 'nonce', 'cnonce', 'opaque', 'Signature'];
+    for (const a of names) {
+      for (const b of secrets) {
+        for (const gap of [' ', ', ', '\t']) {
+          const line = `curl -H 'Authorization: Digest ${a}=${gap}${b}="hunter2SecretValue9"' x`;
+          expect(redactText(line), line).not.toContain('hunter2SecretValue9');
+          const bare = `curl -H 'Authorization: Digest ${a}=${gap}${b}=hunter2SecretValue9' x`;
+          expect(redactText(bare), bare).not.toContain('hunter2SecretValue9');
+        }
+      }
+    }
+  });
+
   it('reads a long quoted body as one argument', () => {
     // A body over 2,000 characters that mentions ssh once hid the -u after it.
     const log = 'ERROR backup_runner exitcode=12 retrying_in_300s\\n';
@@ -632,6 +651,7 @@ describe('redact', () => {
       `curl ${'x=-HAuthorization:Digest '.repeat(10_001)}`,
     ],
     ['Digest headers without parameters', `curl ${'Authorization:Digest x '.repeat(10_870)}`],
+    ['empty Digest parameters', `curl -H "Authorization: Digest ${'nonce= '.repeat(35_715)}"`],
     [
       'Digest parameters with unclosed quotes',
       `curl ${'-HAuthorization:Digest a="x b=\'y '.repeat(7_500)}`,

@@ -89,7 +89,14 @@ const PARAM_HEADER = /authorization["']?[ \t]*[:=][ \t]*["'\\]*(?:digest|aws4-hm
  * line that holds a `PARAM_HEADER` (the rest, `username` or `uri`, are kept).
  */
 const SECRET_PARAM =
-  /(?<![A-Za-z0-9_-])(?:response|cnonce|nonce|opaque|signature|password)[ \t]*=[ \t]*/gi;
+  /(?<![A-Za-z0-9_-])(?:response|cnonce|nonce|opaque|signature|password)[ \t]*=/gi;
+
+/**
+ * A Digest or AWS Signature parameter at the start of a header value (`username=`, `Credential=`):
+ * the value is parameters, read by `params`. Any other value is one token, as for `Basic`.
+ */
+const PARAM_START =
+  /^(?:username|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash|credential|signedheaders|signature|password)[ \t]*=/i;
 
 /** A credential after a scheme is one token of at least this many characters, no spaces. */
 const MIN_SCHEME_TOKEN = 8;
@@ -387,9 +394,10 @@ class Finder {
       to++;
     }
     if (to - from < (scheme !== null ? MIN_SCHEME_TOKEN : MIN_BARE_TOKEN)) return;
-    // Digest and AWS Signature parameters (`username="u"`) are read by `params`, on the line.
+    // Digest and AWS Signature parameters (`username="u"`) are read by `params`, on the line; a
+    // single token after those schemes (`Digest dXNlcm5h...==`) is redacted as one.
     const params = PARAM_SCHEMES.has((scheme?.[1] ?? '').toLowerCase());
-    if (params && text.slice(from, to).includes('=')) return;
+    if (params && PARAM_START.test(text.slice(from, to))) return;
     this.push(from, to);
   }
 
@@ -398,7 +406,9 @@ class Finder {
    * parameter named in `SECRET_PARAM`, wherever it is on the line: the same name elsewhere on the
    * line is redacted too, which garbles that value and nothing else. A value in quotes (`"..."`,
    * `\"...\"`) runs to the next same quote on the line, or to the end of the line when it never
-   * closes; any other runs to a space, comma, quote or backslash.
+   * closes; any other runs to a space, comma, quote or backslash. Spaces after the `=` are read
+   * only before a quoted value: in `nonce= response="..."` the value of `nonce` is empty, and
+   * `response` is read as its own parameter.
    *
    * Names are looked for again just inside a quoted value (`username="John, response="..."`),
    * which costs nothing more: a quoted value ends at the next same quote, so the values of one
@@ -409,7 +419,10 @@ class Finder {
     const line = text.slice(start, end);
     SECRET_PARAM.lastIndex = 0;
     for (let m = SECRET_PARAM.exec(line); m !== null; m = SECRET_PARAM.exec(line)) {
-      let open = start + m.index + m[0].length;
+      const value = start + m.index + m[0].length;
+      let open = value;
+      while (open < end && (text[open] === ' ' || text[open] === '\t')) open++;
+      const spaced = open > value;
       while (open < end && text[open] === '\\') open++;
       const q = text[open];
       if (q === '"' || q === "'") {
@@ -421,13 +434,14 @@ class Finder {
         SECRET_PARAM.lastIndex = open + 1 - start;
         continue;
       }
-      let to = start + m.index + m[0].length;
+      if (spaced) continue;
+      let to = value;
       while (to < end) {
         const c = text[to] ?? '';
         if (isSpace(c) || c === ',' || isQuoting(c)) break;
         to++;
       }
-      this.push(start + m.index + m[0].length, to);
+      this.push(value, to);
       SECRET_PARAM.lastIndex = Math.max(SECRET_PARAM.lastIndex, to - start);
     }
   }
