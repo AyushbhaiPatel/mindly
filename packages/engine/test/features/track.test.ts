@@ -28,7 +28,7 @@ import {
   type TrackInputs,
   type TrackReportOptions,
 } from '../../src/index.js';
-import { event, FakeClock, fakeGit } from '../helpers.js';
+import { event, FakeClock, fakeGit, shellTool } from '../helpers.js';
 
 const DAY = 86_400_000;
 const WINDOW = 30 * DAY;
@@ -835,6 +835,87 @@ describe('attribution', () => {
         .count;
     expect(attempts('src/api')).toBe(1);
     expect(attempts('src/web')).toBe(0);
+  });
+
+  it('decides for each session whether the block held, whatever the first session did', async () => {
+    const { w } = await twoAgents();
+    w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const file = 'src/api/generated/client.ts';
+    const blocked = async (agent: string, id: string) => {
+      const res = await w.mindly.hooks.handle(
+        event(w.root, agent, id, 'pre_tool', { tool: tool(join(w.root, file), 'x') }),
+      );
+      expect(res.decision).toBe('deny');
+      w.clock.advance(1000);
+    };
+    const attempts = (agent: string) => row(w, agent).ruleAttempts.count;
+
+    // Codex is stopped, then writes the file anyway: the save of the rule and file is rejected.
+    await blocked('codex', 'cx');
+    await w.edit('codex', 'cx', file, 'export const c = 1;\n');
+    expect(
+      w.mindly.store.saves.list(w.pid, { kinds: ['rule_enforced'] }).map((s) => s.status),
+    ).toEqual(['rejected']);
+    expect(attempts('codex')).toBe(0);
+
+    // Claude Code is stopped by the same rule on the same file, and the rule holds.
+    await blocked('claude-code', 'cc');
+    await w.mindly.hooks.handle(event(w.root, 'claude-code', 'cc', 'stop'));
+    expect(attempts('claude-code')).toBe(1);
+
+    // Another Claude Code session is the first to be stopped on another protected file, then
+    // copies it over through the shell: that session did not stay blocked.
+    const other = 'src/api/generated/other.ts';
+    await w.session('claude-code', 'cc2');
+    const res = await w.mindly.hooks.handle(
+      event(w.root, 'claude-code', 'cc2', 'pre_tool', { tool: tool(join(w.root, other), 'x') }),
+    );
+    expect(res.decision).toBe('deny');
+    w.clock.advance(1000);
+    const cp = shellTool(`cp /tmp/x ${other}`);
+    await w.mindly.hooks.handle(event(w.root, 'claude-code', 'cc2', 'pre_tool', { tool: cp }));
+    await w.mindly.hooks.handle(event(w.root, 'claude-code', 'cc2', 'post_tool', { tool: cp }));
+    expect(attempts('claude-code')).toBe(1);
+  });
+
+  it('does not count a session that wrote the file after an earlier one held', async () => {
+    const { w } = await twoAgents();
+    w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const file = 'src/api/generated/client.ts';
+    const blocked = async (agent: string, id: string) => {
+      const res = await w.mindly.hooks.handle(
+        event(w.root, agent, id, 'pre_tool', { tool: tool(join(w.root, file), 'x') }),
+      );
+      expect(res.decision).toBe('deny');
+      w.clock.advance(1000);
+    };
+    // Codex is stopped and its turn ends: the save is confirmed.
+    await blocked('codex', 'cx');
+    await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'stop'));
+    // Claude Code is stopped, then writes the protected file anyway.
+    await blocked('claude-code', 'cc');
+    await w.edit('claude-code', 'cc', file, 'export const c = 1;\n');
+    await w.mindly.hooks.handle(event(w.root, 'claude-code', 'cc', 'stop'));
+    expect(row(w, 'codex').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(0);
   });
 
   it('counts usage limits per agent from rate-limit events and handoffs', async () => {

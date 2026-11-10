@@ -298,7 +298,7 @@ interface TrackReport {
       bisect: TrackRate; // reliable bisect results whose first bad step is one edit of this agent (once per step)
       contracts: TrackRate; // contract breaks right after its edit in the project's own checkout
       mergeChecks: TrackRate; // merge conflicts (shadow merge, split merge check) naming only its session
-      ruleAttempts: TrackRate; // sessions an enforced rule stopped (confirmed rule_enforced saves); a count only (rate and interval always null)
+      ruleAttempts: TrackRate; // sessions an enforced rule stopped that did not write those files afterwards, once per session and rule; a count only (rate and interval always null)
       kept: TrackRate; // tracked lines (added or changed) still present, of those from edits at least 7 days old
       keptFrom: { edits: number; sessions: number }; // checked edits behind `kept`; its own minimum
     }[];

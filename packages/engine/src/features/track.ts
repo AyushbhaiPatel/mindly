@@ -61,7 +61,7 @@ export const TRACK_EXPLAIN = {
   breakages:
     'Broke: the three above added up, out of the edits in the area. Agents are compared on this only, and only when the higher count comes from at least 2 sessions. Outcomes involving several sessions count for nobody; dismissed conflicts do not count.',
   ruleAttempts:
-    'Tried to break a rule: writes of this agent that an enforced rule blocked and that stayed blocked (a confirmed save), once per session and rule. A count of attempts, not damage, and not a rate: blocked writes are not edits.',
+    'Tried to break a rule: writes of this agent that an enforced rule blocked and that stayed blocked (the session did not write those files afterwards), once per session and rule. A count of attempts, not damage, and not a rate: blocked writes are not edits.',
   kept: 'Kept: of the lines this agent added or changed at least 7 days ago (tracked lines, whole lines of the file), how many are still in the file on the branch it worked on. Later rewrites by anyone count as not kept; deny-listed files and files over 512 KB are skipped.',
   usageLimits:
     'Usage limits: sessions of this agent seen in the window that hit a usage limit or handed work off because of one. Per agent, not per area.',
@@ -780,11 +780,12 @@ export class TrackService {
   }
 
   /**
-   * Writes an enforced rule blocked, where the rule held (a confirmed save): one attempt per
-   * session and rule in the window, however often that session retried and however many saves
-   * the rule has. A save is recorded once per rule and files, whoever runs into it later, so the
-   * sessions come from the denials themselves; the saves say that the rule held for a file. An
-   * attempt is about the protected files that session was stopped on.
+   * Writes an enforced rule blocked and that stayed blocked: one attempt per session and rule in
+   * the window, however often that session retried. It counts when the session did not write
+   * the protected files it was stopped on afterwards (an edit, or a shell command that touched
+   * one), whatever other sessions did. Decided per session from its own events: a save is
+   * recorded once per rule and files, so its outcome is the first session's. An attempt is about
+   * the protected files that session was stopped on.
    */
   private ruleAttempts(
     projectId: string,
@@ -793,45 +794,47 @@ export class TrackService {
   ): TrackOutcome[] & { truncated?: boolean } {
     const out: TrackOutcome[] & { truncated?: boolean } = [];
     this.ruleScopes.clear();
-    // Every confirmed save, not only those of the window: an old one can be run into again.
-    const saves = this.k.store.track.confirmedSaves(projectId, 'rule_enforced', 0);
-    const denials = this.k.store.track.ruleDenials(projectId, from);
+    const store = this.k.store.track;
+    const denials = store.ruleDenials(projectId, from);
+    const saves = store.confirmedSaves(projectId, 'rule_enforced', from);
     out.truncated = saves.length >= TRACK_MAX_ROWS || denials.length >= TRACK_MAX_ROWS;
-    /** Per rule, the files it was confirmed to protect. */
-    const held = new Map<string, Set<string>>();
-    for (const s of saves) {
-      if (!s.ruleId) continue;
-      let files = held.get(s.ruleId);
-      if (!files) held.set(s.ruleId, (files = new Set()));
-      for (const p of this.protectedPaths(s.ruleId, s.paths)) files.add(p);
-    }
-    /** Per session and rule, the protected files that session was stopped on. */
-    const attempts = new Map<string, { sessionId: string; paths: Set<string> }>();
-    const attempt = (sessionId: string, ruleId: string, paths: readonly string[]): void => {
-      const key = `${sessionId}\u0000${ruleId}`;
-      let a = attempts.get(key);
-      if (!a) attempts.set(key, (a = { sessionId, paths: new Set() }));
-      for (const p of paths) a.paths.add(p);
-    };
+    /** Per session and rule: when it was first stopped, and on which protected files. */
+    const attempts = new Map<
+      string,
+      { sessionId: string; ruleId: string; since: number; paths: Set<string> }
+    >();
     for (const d of denials) {
-      const files = held.get(d.ruleId);
-      if (!files) continue;
-      const stopped = d.paths.filter((p) => files.has(p));
-      if (stopped.length > 0) attempt(d.sessionId, d.ruleId, stopped);
+      const stopped = this.protectedPaths(d.ruleId, d.paths);
+      if (stopped.length === 0) continue;
+      const key = `${d.sessionId}\u0000${d.ruleId}`;
+      let a = attempts.get(key);
+      if (!a) {
+        attempts.set(
+          key,
+          (a = { sessionId: d.sessionId, ruleId: d.ruleId, since: d.at, paths: new Set() }),
+        );
+      }
+      a.since = Math.min(a.since, d.at);
+      for (const p of stopped) a.paths.add(p);
     }
-    // The session a save of the window was recorded for, when its event is no longer kept.
+    const counted: { sessionId: string; paths: string[] }[] = [];
+    for (const a of attempts.values()) {
+      const paths = [...a.paths];
+      if (!store.sessionWrote(a.sessionId, a.since, paths)) {
+        counted.push({ sessionId: a.sessionId, paths });
+      }
+    }
+    // A confirmed save of the window whose denial is no longer in the event log: the rule held
+    // for the session it was recorded for.
     for (const s of saves) {
       const sessionId = s.sessionIds[0];
-      if (!s.ruleId || !sessionId || s.createdAt < from) continue;
-      if (!attempts.has(`${sessionId}\u0000${s.ruleId}`)) {
-        attempt(sessionId, s.ruleId, this.protectedPaths(s.ruleId, s.paths));
-      }
+      if (!s.ruleId || !sessionId || attempts.has(`${sessionId}\u0000${s.ruleId}`)) continue;
+      counted.push({ sessionId, paths: [...this.protectedPaths(s.ruleId, s.paths)] });
     }
-    for (const a of attempts.values()) {
-      const agent = agentKinds.get(a.sessionId);
-      if (agent) {
-        out.push({ agent, sessionId: a.sessionId, paths: [...a.paths], measure: 'ruleAttempts' });
-      }
+    for (const c of counted) {
+      const agent = agentKinds.get(c.sessionId);
+      if (agent)
+        out.push({ agent, sessionId: c.sessionId, paths: c.paths, measure: 'ruleAttempts' });
     }
     return out;
   }

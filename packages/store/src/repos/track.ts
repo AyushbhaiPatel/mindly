@@ -336,6 +336,32 @@ export class TrackRepo {
   }
 
   /**
+   * Whether a session wrote any of `paths` at or after `since`: an edit of its own, or a shell
+   * command of its own that may have written one (`touched`, as saves read it: recorded when the
+   * command is about to run, for files of the session's pending saves).
+   */
+  sessionWrote(sessionId: string, since: number, paths: readonly string[]): boolean {
+    const list = paths.slice(0, 50);
+    if (list.length === 0) return false;
+    const marks = list.map(() => '?').join(', ');
+    const edit = this.db
+      .prepare(
+        `SELECT 1 FROM file_changes
+         WHERE session_id = ? AND created_at >= ? AND path IN (${marks}) LIMIT 1`,
+      )
+      .get(sessionId, since, ...list);
+    if (edit) return true;
+    const shell = this.db
+      .prepare(
+        `SELECT 1 FROM events e, json_each(e.payload, '$.touched') t
+         WHERE e.session_id = ? AND e.type IN ('tool.before', 'tool.after') AND e.created_at >= ?
+           AND json_type(e.payload, '$.touched') = 'array' AND t.value IN (${marks}) LIMIT 1`,
+      )
+      .get(sessionId, since, ...list);
+    return shell !== undefined;
+  }
+
+  /**
    * When the kept event log of a project starts, if that is later than its first recorded edit at
    * or after `from`; otherwise null. Events are deleted after `retention.eventsDays` while edits
    * are kept, so a window can reach back further than the events that outcomes are read from.
