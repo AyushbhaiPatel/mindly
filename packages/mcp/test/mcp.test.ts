@@ -1022,6 +1022,39 @@ describe('telling windows of one agent apart', () => {
     }
   });
 
+  it('does not take a window that crashed earlier in the same shell, with a client called node', async () => {
+    // Shell 50 in the terminal. Window B (client 250, hooks through sh 251) ran in that shell and
+    // crashed without ending its session. Window A (client 100, a plain `node` process) runs
+    // there now; its own hooks have not been recorded yet.
+    const live = [50, 1300];
+    for (const pid of live) running.add(pid);
+    try {
+      const a = await harness({
+        ...world,
+        pid: 1300,
+        startTime: 1,
+        ancestors: [
+          { ...ref(100), name: 'node' },
+          { ...ref(50), name: 'bash' },
+          { ...TERMINAL, name: 'gnome-terminal-' },
+        ],
+      });
+      const stale = await hookSession(a, 'win-b', [ref(251), ref(250), ref(50), TERMINAL]);
+      const first = sid(await a.call('mindly_status'));
+      expect(first).not.toBe(stale);
+      // Hooks started straight from the client (no shell in between) do not change that.
+      const direct = await hookSession(a, 'win-c', [ref(300), ref(50), TERMINAL]);
+      const claims = a.mindly.store.kv.get<Record<string, { sure: boolean }>>('mcp:claims')!;
+      expect(claims[direct]?.sure).not.toBe(true);
+      // Window A's own record arrives: that one is known, and the server moves to it.
+      const own = await hookSession(a, 'win-a', [ref(101), ref(100), ref(50), TERMINAL]);
+      expect(sid(await a.call('mindly_status'))).toBe(own);
+      expect(sid(await a.call('mindly_status'))).toBe(own);
+    } finally {
+      for (const pid of live) running.delete(pid);
+    }
+  });
+
   it('never leaves its own session out of a guess, whatever stands between', async () => {
     // A helper process with a name that says nothing (not a known launcher) stands between.
     for (const pid of [120, 1200]) running.add(pid);

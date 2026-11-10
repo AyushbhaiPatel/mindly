@@ -6,6 +6,7 @@ import {
   completeLines,
   hookAncestryKey,
   isLauncherName,
+  isShellName,
   MAX_ANCESTORS,
   parseProcessChain,
   parsePsTable,
@@ -130,6 +131,13 @@ describe('ps output', () => {
     for (const name of ['claude', 'codex', 'Cursor Helper', 'tmux: server', undefined, '']) {
       expect(isLauncherName(name)).toBe(false);
     }
+    // macOS `ps` prints the full path, which may hold spaces.
+    expect(isLauncherName('/Users/x/Library/Application Support/fnm/node-versions/bin/node')).toBe(
+      true,
+    );
+    expect(isLauncherName('/Applications/Some App.app/Contents/MacOS/Some App')).toBe(false);
+    expect(isShellName('/bin/bash')).toBe(true);
+    expect(isShellName('node')).toBe(false);
   });
 });
 

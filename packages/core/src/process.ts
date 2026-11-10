@@ -179,12 +179,28 @@ export function processRef(pid: number, lookup: ProcessLookup = systemProcessLoo
  * is. Unknown names are not launchers.
  */
 export function isLauncherName(name: string | undefined): boolean {
-  if (!name) return false;
-  const first = name.trim().split(/\s+/)[0] ?? '';
-  const base = (first.split(/[\\/]/).pop() ?? '').toLowerCase().replace(/\.(exe|cmd)$/, '');
-  return /^(node|nodejs|npm|npx|pnpm|pnpx|yarn|bun|bunx|deno|corepack|sh|bash|zsh|dash|cmd|pwsh|powershell)$/.test(
-    base,
+  const base = programName(name);
+  return (
+    /^(node|nodejs|npm|npx|pnpm|pnpx|yarn|bun|bunx|deno|corepack)$/.test(base) || isShellName(name)
   );
+}
+
+/** True when `name` is a shell (a shell runs commands; it is never an agent client). */
+export function isShellName(name: string | undefined): boolean {
+  return /^(sh|bash|zsh|dash|fish|ksh|cmd|pwsh|powershell)$/.test(programName(name));
+}
+
+/**
+ * The bare program name in a process name: the file name of a path (which may hold spaces, as
+ * macOS paths under "Application Support" do), and the first word of a title such as
+ * "npm exec", lower case, without ".exe" or ".cmd".
+ */
+function programName(name: string | undefined): string {
+  if (!name) return '';
+  const trimmed = name.trim();
+  const file = /[\\/]/.test(trimmed) ? (trimmed.split(/[\\/]/).pop() ?? '') : trimmed;
+  const first = file.split(/\s+/)[0] ?? '';
+  return first.toLowerCase().replace(/\.(exe|cmd)$/, '');
 }
 
 /** Parses a stored chain; anything malformed yields an empty one. */

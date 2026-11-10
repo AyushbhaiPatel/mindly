@@ -3,6 +3,7 @@ import {
   ancestorChain,
   hookAncestryKey,
   isLauncherName,
+  isShellName,
   parseProcessChain,
   systemProcessLookup,
   type Logger,
@@ -181,9 +182,16 @@ export class SessionResolver {
     const below = recorded.slice(0, meet);
     const belowRuns = below.some((h) => this.runs(h));
     const windowAlive = belowRuns ? true : below.length <= 1 ? null : false;
+    // Seeing through launchers needs the meeting point to be a client: the process that started
+    // the hook (itself, or through the hook's own short-lived shell), and not a shell. A client
+    // that happens to be called `node` looks like a launcher by name; without these two checks
+    // a window that crashed earlier in the same shell would meet this server at that shell, past
+    // this server's own client, and pass for its own.
+    const meetsClient =
+      below.length <= 1 && !belowRuns && !isShellName(mine[depth]?.name) && depth <= MAX_LAUNCHERS;
     const throughLaunchers =
-      depth <= MAX_LAUNCHERS && mine.slice(0, depth).every((m) => isLauncherName(m.name));
-    const known = depth === 0 || (throughLaunchers && !belowRuns);
+      meetsClient && mine.slice(0, depth).every((m) => isLauncherName(m.name));
+    const known = depth === 0 || throughLaunchers;
     return { known, depth, windowAlive: known ? true : windowAlive };
   }
 
