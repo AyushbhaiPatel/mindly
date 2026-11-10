@@ -79,7 +79,7 @@ export async function runHook(
   } catch (err) {
     if (!(err instanceof StdinTooLarge)) return fail('stdin unreadable');
     // A write too large to read cannot be checked: refused, not let through unchecked.
-    const refused = refuseUnreadWrite(adapter, nativeEvent, io.cwd);
+    const refused = refuseUnreadWrite(adapter, nativeEvent, io.cwd, err.head);
     if (refused !== null) io.stdout.write(refused.stdout);
     return refused === null ? fail('payload too large') : refused.exitCode;
   }
@@ -150,20 +150,26 @@ function closeQuietly(mindly: Pick<Mindly, 'close'> | null): void {
 
 /**
  * The answer to a pre-tool event of a writing or shell tool whose payload was too large to read:
- * a refusal, rendered as the agent expects. Null for any other event, which fails open.
+ * a refusal, rendered as the agent expects. Null for any other event, and when the tool cannot
+ * be told from how the payload starts: those fail open.
  */
 function refuseUnreadWrite(
   adapter: AgentAdapter,
   nativeEvent: string,
   cwd: string,
+  head: string,
 ): { stdout: string; exitCode: number } | null {
   try {
-    // Only the event name is known; a stand-in payload tells what kind of event it is.
+    // Only the event name and the start of the payload are known: the tool's name is looked for
+    // there, and a stand-in payload tells what kind of event and tool it is.
+    const name = /"(?:tool_name|toolName|tool)"\s*:\s*"([^"\\]{1,200})"/.exec(head)?.[1];
     const stand = { session_id: 'x', conversation_id: 'x', cwd, workspace_roots: [cwd] };
+    const input = { file_path: 'x', content: '', command: 'x' };
+    // Without a name, only an event that is a write or a shell command whatever the tool counts.
     const evt = adapter.parse(nativeEvent, {
       ...stand,
-      tool_name: 'Write',
-      tool_input: { file_path: 'x', content: '' },
+      tool_name: name ?? 'Read',
+      tool_input: input,
     });
     if (evt?.event !== 'pre_tool' || !(evt.tool?.writes || evt.tool?.shell)) return null;
     return adapter.render(evt, {

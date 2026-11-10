@@ -441,6 +441,26 @@ describe('hook', () => {
     const out = JSON.parse(io.out.join(''));
     expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
     expect(out.hookSpecificOutput.permissionDecisionReason).toContain('too large to check');
+    // A large call of a tool that reads, or one whose tool cannot be told from how the payload
+    // starts, is let through as before.
+    const read = JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      session_id: 's',
+      cwd: sb.repo,
+      tool_name: 'Read',
+      tool_input: { file_path: join(sb.repo, 'a.ts'), padding: big },
+    });
+    const unnamed = JSON.stringify({
+      padding: big,
+      session_id: 's',
+      cwd: sb.repo,
+      tool_name: 'Write',
+    });
+    for (const stdin of [read, unnamed]) {
+      const other = testIo(sb, { stdin });
+      expect(await runHook('claude-code', 'PreToolUse', other)).toBe(0);
+      expect(other.out.join('')).toBe('');
+    }
     for (const native of ['PostToolUse', 'UserPromptSubmit']) {
       const other = testIo(sb, { stdin: write });
       expect(await runHook('claude-code', native, other)).toBe(0);

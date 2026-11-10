@@ -25,8 +25,18 @@ export interface CliIo {
   prompt: ((question: string) => Promise<string>) | null;
 }
 
-/** Thrown by {@link readStdin} when the input exceeds its limit. */
-export class StdinTooLarge extends Error {}
+/** Thrown by {@link readStdin} when the input exceeds its limit; `head` is how it starts. */
+export class StdinTooLarge extends Error {
+  constructor(
+    message: string,
+    readonly head = '',
+  ) {
+    super(message);
+  }
+}
+
+/** How much of an input that is too large is kept to look at. */
+const HEAD_BYTES = 64 * 1024;
 
 /** Reads stdin completely, refusing more than `max` bytes. */
 export async function readStdin(
@@ -38,7 +48,12 @@ export async function readStdin(
   for await (const chunk of stdin) {
     const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
     total += buf.length;
-    if (total > max) throw new StdinTooLarge('payload too large');
+    if (total > max) {
+      const head = Buffer.concat([...chunks, buf])
+        .subarray(0, HEAD_BYTES)
+        .toString('utf8');
+      throw new StdinTooLarge('payload too large', head);
+    }
     chunks.push(buf);
   }
   return Buffer.concat(chunks).toString('utf8');
