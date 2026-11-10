@@ -99,6 +99,34 @@ describe('cursor parse', () => {
       a.parse('beforeShellExecution', { ...shell, workspace_roots: roots, cwd: '/Users/dev/shop' })
         ?.cwd,
     ).toBe('/Users/dev/shop');
+    // The root only picks the project: a command run from a folder inside it keeps that folder,
+    // because its relative paths start there.
+    const inside = {
+      ...shell,
+      workspace_roots: roots,
+      cwd: '/Users/dev/shop/prisma',
+      command: 'rm -rf migrations',
+    };
+    expect(a.parse('beforeShellExecution', inside)).toMatchObject({
+      cwd: '/Users/dev/shop/prisma',
+      tool: { command: 'rm -rf migrations' },
+    });
+    expect(
+      a.parse('beforeShellExecution', {
+        ...shell,
+        workspace_roots: ['/Users/dev/shop'],
+        cwd: '/Users/dev/shop/prisma/migrations/001',
+      })?.cwd,
+    ).toBe('/Users/dev/shop/prisma/migrations/001');
+    // A file in another root than the working directory: the file's root, not a folder of it.
+    expect(
+      a.parse('preToolUse', {
+        ...fx,
+        workspace_roots: roots,
+        cwd: '/Users/dev/docs/guides',
+        tool_input: { file_path: '/Users/dev/shop/src/new.ts', contents: 'x' },
+      })?.cwd,
+    ).toBe('/Users/dev/shop');
     // Nothing points at another root: the first one, as with a single root.
     expect(
       a.parse('beforeShellExecution', { ...shell, workspace_roots: roots, cwd: '/somewhere/else' })

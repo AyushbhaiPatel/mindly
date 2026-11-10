@@ -86,12 +86,19 @@ function isUnder(root: string, path: string): boolean {
 }
 
 /**
- * The workspace root an event belongs to. Cursor reports every root of a multi-root workspace;
- * the event is about the one that holds the file being written, or else the one that holds the
- * reported working directory. With a single root, or when neither says, it is the first root.
+ * The directory an event is read from. Cursor reports every root of a multi-root workspace; the
+ * event belongs to the one that holds the file being written, or else the one that holds the
+ * reported working directory (the first root when neither says). The root only picks the
+ * project: when the reported working directory is inside it, that directory is kept, because a
+ * shell command's relative paths are relative to where it runs, not to the root.
  */
-function eventRoot(payload: Record<string, unknown>): string | null {
+function eventCwd(payload: Record<string, unknown>): string | null {
   const cwd = readNonEmptyString(payload, ['cwd'], MAX_PATH_CHARS + 1);
+  const root = eventRoot(payload, cwd);
+  return root !== null && cwd !== null && isUnder(root, cwd) ? cwd : root;
+}
+
+function eventRoot(payload: Record<string, unknown>, cwd: string | null): string | null {
   const listed = payload['workspace_roots'] ?? payload['workspaceRoots'];
   const roots = Array.isArray(listed)
     ? listed.filter((r): r is string => typeof r === 'string' && r.trim() !== '')
@@ -120,7 +127,7 @@ function parseCursor(nativeEvent: string, payload: unknown): NormalizedHookEvent
     const [name, spec] = found;
     const required = RequiredSchema.safeParse({
       id: readNonEmptyString(payload, ['conversation_id', 'session_id', 'conversationId'], 513),
-      cwd: eventRoot(payload),
+      cwd: eventCwd(payload),
     });
     if (!required.success) return null;
     const ev = baseEvent(KIND, spec.event, name, required.data.id, required.data.cwd);
