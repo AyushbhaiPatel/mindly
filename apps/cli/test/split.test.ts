@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { splitOf } from '@mindly/engine';
 import { openMindly } from '@mindly/runtime';
 import { cli, git, sandbox, tempDir, write, type Sandbox } from './helpers.js';
 
@@ -762,6 +763,105 @@ describe('split status, merge and abort (acceptance 4)', () => {
     ]);
   });
 
+  it('abort counts an uncommitted deny-listed file and an ignored local .env as work', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    // Documented env vars, never committed; and a local .env that git ignores.
+    write(partDir(sb, 'page'), 'src/app/.env.example', 'STRIPE_KEY=\nBILLING_URL=\n');
+    write(partDir(sb, 'page'), '.gitignore', '.env\nnode_modules/\n');
+    git(partDir(sb, 'page'), 'add', '.gitignore');
+    git(partDir(sb, 'page'), 'commit', '-q', '-m', 'ignore');
+    git(sb.repo, 'branch', 'keep/page', 'mindly/billing/page');
+    write(partDir(sb, 'page'), '.env', 'STRIPE_KEY=sk_live_secret\n');
+    write(partDir(sb, 'page'), 'node_modules/pkg/index.js', 'x\n');
+    expect((await statusJson(sb)).parts[2]!.uncommitted).toEqual(['src/app/.env.example']);
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('(not committed: .env, src/app/.env.example)');
+    expect(r.stderr).not.toContain('node_modules');
+    expect(r.stderr).not.toContain('sk_live_secret');
+    expect(existsSync(join(partDir(sb, 'page'), 'src/app/.env.example'))).toBe(true);
+    expect(existsSync(join(partDir(sb, 'page'), '.env'))).toBe(true);
+  });
+
+  it('abort before a merge refuses with -y alone, like after one', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    write(partDir(sb, 'page'), 'src/app/draft.ts', 'export const draft = 1;\n');
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('not committed: src/app/draft.ts; 1 commit only on its branch');
+    expect(r.stderr).not.toContain('squash');
+    expect(branches(sb)).toContain('mindly/billing/page');
+    // Keeping the branches keeps the commit; the draft file still stops it until it is committed.
+    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(1);
+    commitIn(partDir(sb, 'page'), 'src/app/draft.ts', 'export const draft = 1;\n');
+    const kept = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(kept.code).toBe(0);
+    expect(branches(sb)).toContain('mindly/billing/page');
+    expect(existsSync(worktreeRoot(sb))).toBe(false);
+  });
+
+  it('an abort left unfinished by a commit can be finished keeping the branch', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    const splitId = (await statusJson(sb)).split.id;
+    // The page agent commits on its branch while the abort removes its worktree.
+    const mindly = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
+    let late = '';
+    try {
+      const port = mindly.kernel.ports.git.split!;
+      const remove = port.removeWorktree.bind(port);
+      port.removeWorktree = async (root, path) => {
+        if (path === partDir(sb, 'page') && !late) {
+          commitIn(path, 'src/app/late.ts', 'export const late = 1;\n');
+          late = git(path, 'rev-parse', 'HEAD').trim();
+        }
+        return remove(root, path);
+      };
+      expect((await splitOf(mindly).abort(splitId, {})).finished).toBe(false);
+    } finally {
+      mindly.close();
+    }
+    expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(late);
+    const status = await cli(sb, ['split', 'status']);
+    expect(status.stdout).toContain('finish the abort: it lists what is left');
+    const again = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(again.stderr).toBe('');
+    expect(again.code).toBe(0);
+    expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(late);
+    expect((await cli(sb, ['split', 'status'])).stdout).not.toContain('finish the abort');
+  });
+
+  it('a yes never covers a nested repository, whatever is written into it while asked', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    const nested = join(partDir(sb, 'page'), 'src/app/vendor');
+    write(nested, 'lib.ts', 'export const lib = 1;\n');
+    git(nested, 'init', '-q', '-b', 'main');
+    git(nested, 'add', '-A');
+    git(nested, 'commit', '-q', '-m', 'vendor');
+    const answer = {
+      trim: (): string => {
+        write(nested, 'lib.ts', 'export const lib = 2;\n');
+        write(nested, 'new.ts', 'export const fresh = 1;\n');
+        return 'y';
+      },
+    };
+    const r = await cli(sb, ['split', 'abort'], { answers: [answer] as unknown as string[] });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('folders whose content cannot be checked: src/app/vendor');
+    expect(existsSync(join(nested, 'new.ts'))).toBe(true);
+    // Only a discard that was not asked about removes it.
+    expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
+    expect(existsSync(nested)).toBe(false);
+  });
+
   it('abort after a merge removes commits only on a part branch with --discard', async () => {
     const sb = await splitSandbox();
     await createSplit(sb);
@@ -925,7 +1025,15 @@ describe('split status, merge and abort (acceptance 4)', () => {
     expect(noTty.code).toBe(1);
     expect(noTty.stderr).toContain('Part "Billing API": src/api/wip.ts');
     expect(existsSync(partDir(sb, 'api'))).toBe(true);
-    const r = await cli(sb, ['split', 'abort', '--yes']);
+    // -y alone removes nothing that no branch has, before a merge too.
+    const yes = await cli(sb, ['split', 'abort', '--yes']);
+    expect(yes.code).toBe(1);
+    expect(yes.stderr).toContain(
+      'hold work no other branch has: "Billing API" (not committed: src/api/wip.ts)',
+    );
+    expect(yes.stderr).toContain('mindly split abort --yes --discard');
+    expect(existsSync(join(partDir(sb, 'api'), 'src/api/wip.ts'))).toBe(true);
+    const r = await cli(sb, ['split', 'abort', '--yes', '--discard']);
     expect(r.stderr).toBe('');
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('removed 3 worktrees, deleted 3');

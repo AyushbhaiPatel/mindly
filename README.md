@@ -199,12 +199,15 @@ combines them into one new branch, in dependency order, and never pushes.
 
 The merge takes what each agent committed on its part's branch. If a part's worktree still holds
 work that is not committed there, `mindly split merge` stops and names the files (`--force`
-merges without them). After a merge, `mindly split abort` removes nothing while the parts hold
-work no other branch has: uncommitted files, or commits only on a part branch. After a squash or
-rebase merge of the merged branch, every part commit is like that. Run
-`mindly split abort --keep-branches` to remove the worktrees and keep the part branches, so that
-nothing is lost; `mindly split abort --yes --discard` deletes it all. When you confirm an abort
-on the terminal, it removes only the work it listed: anything new stops it.
+merges without them). Before or after a merge, `mindly split abort` removes nothing while the
+parts hold work no other branch has: uncommitted files (secrets such as a local `.env` included,
+listed by name only), or commits only on a part branch. After a squash or rebase merge of the
+merged branch, every part commit is like that. Run `mindly split abort --keep-branches` to remove
+the worktrees and keep the part branches, so that no commit is lost; `mindly split abort --yes
+--discard` deletes it all. When you confirm an abort on the terminal, it removes only the work it
+listed: anything new, a listed file edited since, or a nested repository stops it. Other ignored
+files in a worktree (build output, dependencies) are not counted and go with it. If work appears
+while an abort runs, what holds it is kept; run `mindly split abort` again to finish.
 
 ### Which agent is better at what, in your repo
 

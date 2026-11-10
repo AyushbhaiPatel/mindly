@@ -8,6 +8,7 @@ import {
   branchExists,
   branchOnlyWork,
   deleteBranch,
+  ignoredDeniedFiles,
   listFiles,
   listWorktrees,
   mergeIntoNewBranch,
@@ -265,6 +266,22 @@ describe('worktrees', () => {
     expect(git(root, 'rev-parse', 'mindly/demo/p').trim()).toBe(late);
     expect(await deleteBranch(root, 'mindly/demo/p', late)).toBe(true);
     expect(await branchExists(root, 'mindly/demo/p')).toBe(false);
+  });
+
+  it('lists ignored files on the deny-list, and no other ignored files', async () => {
+    const root = makeRepo({ '.gitignore': '.env\nconfig/\nnode_modules/\n*.log\n' });
+    write(root, '.env', 'SECRET=1\n');
+    write(root, 'config/.env', 'SECRET=2\n');
+    write(root, 'config/settings.json', '{}\n');
+    write(root, 'node_modules/pkg/index.js', 'x\n');
+    write(root, 'debug.log', 'x\n');
+    write(root, 'src/server.key', 'not ignored\n');
+    expect(await ignoredDeniedFiles(root)).toEqual(['.env', 'config/.env']);
+    expect(await ignoredDeniedFiles(root, ['**/*.log'])).toEqual([
+      '.env',
+      'config/.env',
+      'debug.log',
+    ]);
   });
 
   it('lists tracked and untracked files, not ignored ones', async () => {

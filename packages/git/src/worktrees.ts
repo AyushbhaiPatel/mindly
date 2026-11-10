@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import { MindlyError } from '@mindly/core';
+import { DEFAULT_DENY_PATHS, MindlyError, isDeniedPath } from '@mindly/core';
 import { commitTree } from './capture.js';
 import { driverOverrides, gitVersion, runGit, versionAtLeast } from './exec.js';
 import { MIN_MERGE_TREE_VERSION, parseMergeTreeOutput } from './merge.js';
@@ -249,6 +249,38 @@ export async function branchOnlyWork(
   }
   ONLY_WORK_CACHE.set(key, out);
   return out;
+}
+
+/**
+ * Ignored files of the working tree at `cwd` that are on the secret deny-list (a local `.env`, a
+ * key): not part of any commit, but lost with the worktree. Repository-relative; their content is
+ * never read. Other ignored files (build output, dependencies) are not listed.
+ */
+export async function ignoredDeniedFiles(
+  cwd: string,
+  extraDeny: readonly string[] = [],
+): Promise<string[]> {
+  const root = await findRepoRoot(cwd);
+  const patterns = [...DEFAULT_DENY_PATHS, ...extraDeny].filter(
+    (p) => typeof p === 'string' && p !== '' && !p.includes('\0'),
+  );
+  const res = await runGit(
+    [
+      'ls-files',
+      '-z',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '--',
+      ...patterns.map((p) => `:(glob)${p}`),
+    ],
+    // The deny-list is made of globs: let git read these pathspecs as such.
+    { cwd: root, timeoutMs: 60_000, env: { GIT_LITERAL_PATHSPECS: '0' } },
+  );
+  return res.stdout
+    .split('\0')
+    .filter((p) => p !== '' && isDeniedPath(p, extraDeny))
+    .sort();
 }
 
 /** Tracked and untracked (non-ignored) files of the working tree at `cwd`, repository-relative. */

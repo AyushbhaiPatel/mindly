@@ -149,6 +149,12 @@ export function renderSplitStatus(sc: Screen, r: SplitStatusReport): void {
     );
   }
   if (check) renderMergeCheck(sc, check);
+  if (r.abortPending) {
+    sc.blank();
+    sc.text(
+      `${sc.mark('warn')} An abort of this split kept work that appeared while it ran. Run mindly split abort again to finish it.`,
+    );
+  }
   sc.next(nextSteps(r));
 }
 
@@ -212,6 +218,9 @@ export function unmergedLine(w: SplitUnmergedWork): string {
   if (commits.length > 0) {
     what.push(`${count(commits.length, 'commit')} only on its branch: ${list(commits)}`);
   }
+  if (w.opaque?.length) {
+    what.push(`folders whose content cannot be checked: ${list(w.opaque)}`);
+  }
   if (w.more) what.push('and more than can be listed');
   return `Part "${clean(w.title, 60)}": ${what.join('; ')}`;
 }
@@ -221,6 +230,9 @@ const COMMIT_WHY = 'commit the work there on the part branch: the merge only tak
 function nextSteps(r: SplitStatusReport): Step[] {
   const { split, parts } = r;
   const uncommitted = parts.filter((p) => p.uncommitted.length > 0);
+  if (r.abortPending) {
+    return [{ cmd: 'mindly split abort', why: 'finish the abort: it lists what is left' }];
+  }
   if (split.status === 'merged') {
     const withCommits = parts.some((p) => p.unmergedCommits.length > 0);
     return [

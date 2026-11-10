@@ -22,6 +22,7 @@ import {
   fileAtRef,
   fileStateAtRef,
   findRepoRoot,
+  ignoredDeniedFiles,
   headCommit,
   hunkHashes,
   isManifestPath,
@@ -103,6 +104,32 @@ export function createSplitGitPort(): SplitGitPort {
     removeWorktree: (repoRoot, path) => removeWorktree(repoRoot, path),
     deleteBranch: (repoRoot, branch, expectedTip) => deleteBranch(repoRoot, branch, expectedTip),
     branchOnlyWork: (repoRoot, branch, options) => branchOnlyWork(repoRoot, branch, options),
+    uncommittedWork: async (repoRoot, worktree, branch) => {
+      const captured = await captureWorktreeCommit(worktree, { message: 'mindly split status' });
+      const res = await runGit(
+        [
+          'diff',
+          '--name-only',
+          '-z',
+          '--no-renames',
+          `refs/heads/${branch}`,
+          captured.commit,
+          '--',
+        ],
+        { cwd: repoRoot, timeoutMs: 30_000 },
+      );
+      const ignored = await ignoredDeniedFiles(worktree);
+      const paths = new Set([
+        ...res.stdout.split('\0').filter((p) => p !== ''),
+        // Left out of the capture because they are on the deny-list: still work in the worktree.
+        ...captured.skipped,
+      ]);
+      return {
+        paths: [...paths].sort(),
+        denied: [...new Set([...captured.skipped, ...ignored])].sort(),
+        ignoredDenied: ignored.filter((p) => !paths.has(p)),
+      };
+    },
     changedSince: async (repoRoot, worktree, base) => {
       const captured = await captureWorktreeCommit(worktree, { message: 'mindly split status' });
       const res = await runGit(

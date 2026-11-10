@@ -42,6 +42,9 @@ function fakeSplitGit(root: string) {
   const changed = new Map<string, string[]>();
   // Paths of a worktree that are not on its branch (asked for with a branch as the base).
   const uncommitted = new Map<string, string[]>();
+  // Ignored files on the deny-list (by worktree), and which paths are deny-listed.
+  const ignoredDenied = new Map<string, string[]>();
+  const denied = new Set<string>();
   // Commits only a branch has (by branch), as `branchOnlyWork` reports them; the branch tip is
   // the newest of them.
   const onlyOn = new Map<string, { commit: string; subject: string }[]>();
@@ -78,6 +81,15 @@ function fakeSplitGit(root: string) {
       branches.has(b)
         ? { tip: tipOf(b), commits: onlyOn.get(b) ?? [], more: false }
         : { tip: null, commits: [], more: false },
+    uncommittedWork: async (_root, wt) => {
+      const paths = uncommitted.get(wt) ?? [];
+      const ignored = ignoredDenied.get(wt) ?? [];
+      return {
+        paths,
+        ignoredDenied: ignored,
+        denied: [...paths, ...ignored].filter((p) => denied.has(p)),
+      };
+    },
     changedSince: async (_root, wt, base) =>
       (base.startsWith('refs/heads/') ? uncommitted.get(wt) : changed.get(wt)) ?? [],
     mergeCheck: async (_root, _base, sides) =>
@@ -106,6 +118,8 @@ function fakeSplitGit(root: string) {
     worktrees,
     changed,
     uncommitted,
+    ignoredDenied,
+    denied,
     onlyOn,
     calls,
     setRunChecks: (fn: SplitGitPort['runChecks']) => {
@@ -856,7 +870,7 @@ describe('split through hook events', () => {
       ).rejects.toSatisfy(
         (e) =>
           isMindlyError(e, 'conflict') &&
-          /not shown when the abort was confirmed: "Part page" \(2 commits only on its branch: late0002late Second, late0001late First late page\)/.test(
+          /not shown when the abort was confirmed, or that cannot be checked: "Part page" \(2 commits only on its branch: late0002late Second, late0001late First late page\)/.test(
             (e as Error).message,
           ) &&
           (e as { details?: Record<string, unknown> }).details?.['appeared'] === true,
@@ -891,7 +905,7 @@ describe('split through hook events', () => {
     fake.port.branchOnlyWork = branchOnlyWork;
 
     // Confirmed as it is now, the abort goes ahead. A commit made after the check keeps the
-    // branch, and the split stays as it was so that the abort can be run again.
+    // branch and its worktree, and the split stays as it was so that the abort can be run again.
     const now = await svc.abortCheck(created.split.id);
     const removeWorktree = fake.port.removeWorktree;
     fake.port.removeWorktree = async (root, path) => {
@@ -906,17 +920,69 @@ describe('split through hook events', () => {
     const aborted = await svc.abort(created.split.id, { confirmed: now });
     fake.port.removeWorktree = removeWorktree;
     expect(aborted.finished).toBe(false);
-    expect(aborted.removedWorktrees).toEqual([api.worktree, page.worktree]);
+    expect(aborted.removedWorktrees).toEqual([api.worktree]);
+    expect(aborted.keptWorktrees).toEqual([page.worktree]);
     expect(aborted.deletedBranches).toEqual([api.branch]);
     expect(aborted.keptBranches).toEqual([page.branch]);
     expect(aborted.discarded).toEqual([]);
     expect(fake.branches.has(page.branch)).toBe(true);
+    expect((await svc.status(created.split.id)).abortPending).toBe(true);
     // Run again: the new commit is listed, confirmed and removed.
     const again = await svc.abortCheck(created.split.id);
     expect(again.work.map((w) => w.commits?.[0])).toEqual(['late0003late Third']);
     const done = await svc.abort(created.split.id, { confirmed: again });
     expect(done.finished).toBe(true);
+    expect(done.removedWorktrees).toEqual([page.worktree]);
     expect(done.deletedBranches).toEqual([page.branch]);
+    expect((await svc.status(created.split.id)).abortPending).toBe(false);
+  });
+
+  it('finishes an abort left unfinished by a commit, keeping the branch or once it is gone', async () => {
+    for (const how of ['keep-branches', 'deleted-by-hand'] as const) {
+      const { mindly, svc, pid, fake } = await setup();
+      const created = await svc.create({
+        projectId: pid,
+        plan: PLAN,
+        slug: 'billing',
+        plannedBy: 'plan-file',
+        connectedAgents: null,
+      });
+      const page = created.parts[1]!;
+      await mindly.hooks.handle(event(page.worktree, 'claude-code', 'page-1', 'session_start'));
+      for (const p of created.parts) mindly.tasks.update(p.taskId, { status: 'done' }, null);
+      await svc.merge(created.split.id);
+      // The page agent commits right as its worktree is removed: the branch is kept.
+      const removeWorktree = fake.port.removeWorktree;
+      fake.port.removeWorktree = async (root, path) => {
+        if (path === page.worktree) {
+          fake.onlyOn.set(page.branch, [{ commit: 'late0001late0001', subject: 'Late' }]);
+        }
+        return removeWorktree(root, path);
+      };
+      const first = await svc.abort(created.split.id);
+      fake.port.removeWorktree = removeWorktree;
+      expect(first.finished).toBe(false);
+      expect(first.removedWorktrees).toEqual([created.parts[0]!.worktree, page.worktree]);
+      expect(first.keptBranches).toEqual([page.branch]);
+      expect(fake.branches.has(page.branch)).toBe(true);
+      // Plain abort refuses: the commit is only on that branch.
+      await expect(svc.abort(created.split.id)).rejects.toSatisfy((e) =>
+        isMindlyError(e, 'conflict'),
+      );
+      if (how === 'deleted-by-hand') fake.branches.delete(page.branch);
+      const second = await svc.abort(created.split.id, {
+        keepBranches: how === 'keep-branches',
+      });
+      expect(second.finished).toBe(true);
+      expect(fake.branches.has(page.branch)).toBe(how === 'keep-branches');
+      expect(svc.abortPending(mindly.store.splits.get(created.split.id))).toBe(false);
+      // Done: nothing is left to finish.
+      if (how === 'deleted-by-hand') {
+        await expect(svc.abort(created.split.id)).rejects.toSatisfy(
+          (e) => isMindlyError(e, 'conflict') && /already gone/.test((e as Error).message),
+        );
+      }
+    }
   });
 
   it('keeps a worktree that gets new files during the abort, and lets the abort finish later', async () => {
@@ -954,6 +1020,11 @@ describe('split through hook events', () => {
     expect(mindly.store.tasks.get(page.taskId).status).not.toBe('abandoned');
     expect(mindly.store.tasks.get(api.taskId).status).toBe('abandoned');
     expect(mindly.store.splits.partForWorktree(pid, page.worktree)?.key).toBe('page');
+    // Only finishing the abort is left: a merge is refused, status says so.
+    expect((await svc.status(created.split.id)).abortPending).toBe(true);
+    await expect(svc.merge(created.split.id, { force: true })).rejects.toSatisfy(
+      (e) => isMindlyError(e, 'conflict') && /did not finish/.test((e as Error).message),
+    );
 
     // The abort can be run again to finish.
     fake.uncommitted.delete(page.worktree);
@@ -1061,7 +1132,109 @@ describe('split through hook events', () => {
     expect(next.context ?? '').not.toContain('Commit your work in this worktree');
   });
 
-  it('reports the uncommitted work an abort removes', async () => {
+  it('refuses before a merge too, and reports what a discard removes', async () => {
+    const { mindly, svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const [api, page] = created.parts as [
+      (typeof created.parts)[number],
+      (typeof created.parts)[number],
+    ];
+    fake.uncommitted.set(api.worktree, ['src/api/a.ts', 'src/api/b.ts']);
+    fake.onlyOn.set(page.branch, [{ commit: 'page0001page0001', subject: 'Page' }]);
+    await expect(svc.abort(created.split.id)).rejects.toSatisfy(
+      (e) =>
+        isMindlyError(e, 'conflict') &&
+        /hold work no other branch has: "Part api" \(not committed: src\/api\/a\.ts, src\/api\/b\.ts\); "Part page" \(1 commit only on its branch: page0001page Page\)$/.test(
+          (e as Error).message,
+        ),
+    );
+    // Keeping the branches keeps the commits; the uncommitted files still stop it.
+    await expect(svc.abort(created.split.id, { keepBranches: true })).rejects.toSatisfy(
+      (e) => isMindlyError(e, 'conflict') && !/Part page/.test((e as Error).message),
+    );
+    expect(mindly.store.splits.get(created.split.id).status).toBe('active');
+    fake.uncommitted.delete(api.worktree);
+    const kept = await svc.abort(created.split.id, { keepBranches: true });
+    expect(kept.finished).toBe(true);
+    expect(fake.branches.has(page.branch)).toBe(true);
+  });
+
+  it('counts deny-listed files as work, by name and without reading them', async () => {
+    const { mindly, svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const page = created.parts[1]!;
+    for (const p of created.parts) mindly.tasks.update(p.taskId, { status: 'done' }, null);
+    await svc.merge(created.split.id);
+    // An untracked `.env.example` (left out of every capture) and an ignored local `.env`.
+    mkdirSync(join(page.worktree, 'src', 'app'), { recursive: true });
+    writeFileSync(join(page.worktree, 'src', 'app', '.env.example'), 'STRIPE_KEY=\n');
+    writeFileSync(join(page.worktree, '.env'), 'STRIPE_KEY=sk_live_1\n');
+    fake.uncommitted.set(page.worktree, ['src/app/.env.example']);
+    fake.denied.add('src/app/.env.example').add('.env');
+    fake.ignoredDenied.set(page.worktree, ['.env']);
+    expect((await svc.status(created.split.id)).parts[1]!.uncommitted).toEqual([
+      'src/app/.env.example',
+    ]);
+    const shown = await svc.abortCheck(created.split.id);
+    expect(shown.work).toEqual([
+      { part: 'page', title: 'Part page', paths: ['.env', 'src/app/.env.example'] },
+    ]);
+    await expect(svc.abort(created.split.id)).rejects.toSatisfy(
+      (e) =>
+        isMindlyError(e, 'conflict') &&
+        /\.env, src\/app\/\.env\.example/.test((e as Error).message),
+    );
+    // A change to a deny-listed file is seen by its size and time.
+    writeFileSync(join(page.worktree, '.env'), 'STRIPE_KEY=sk_live_22\n');
+    await expect(svc.abort(created.split.id, { confirmed: shown })).rejects.toSatisfy((e) =>
+      isMindlyError(e, 'conflict'),
+    );
+    expect(existsSync(join(page.worktree, '.env'))).toBe(true);
+    const now = await svc.abortCheck(created.split.id);
+    expect((await svc.abort(created.split.id, { confirmed: now })).finished).toBe(true);
+    expect(existsSync(page.worktree)).toBe(false);
+  });
+
+  it('never lets a yes cover a nested repository, whose content cannot be checked', async () => {
+    const { svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const page = created.parts[1]!;
+    mkdirSync(join(page.worktree, 'src', 'app', 'vendor'), { recursive: true });
+    fake.uncommitted.set(page.worktree, ['src/app/vendor']);
+    const shown = await svc.abortCheck(created.split.id);
+    expect(shown.work).toEqual([
+      { part: 'page', title: 'Part page', paths: ['src/app/vendor'], opaque: ['src/app/vendor'] },
+    ]);
+    await expect(svc.abort(created.split.id, { confirmed: shown })).rejects.toSatisfy(
+      (e) =>
+        isMindlyError(e, 'conflict') &&
+        /folders whose content cannot be checked: src\/app\/vendor/.test((e as Error).message),
+    );
+    expect(existsSync(join(page.worktree, 'src', 'app', 'vendor'))).toBe(true);
+    const aborted = await svc.abort(created.split.id, { discardUncommitted: true });
+    expect(aborted.finished).toBe(true);
+    expect(existsSync(page.worktree)).toBe(false);
+  });
+
+  it('removes everything with a discard that was not asked about', async () => {
     const { svc, pid, fake } = await setup();
     const created = await svc.create({
       projectId: pid,
@@ -1072,7 +1245,7 @@ describe('split through hook events', () => {
     });
     fake.uncommitted.set(created.parts[0]!.worktree, ['src/api/a.ts', 'src/api/b.ts']);
     fake.onlyOn.set(created.parts[1]!.branch, [{ commit: 'page0001page0001', subject: 'Page' }]);
-    const aborted = await svc.abort(created.split.id);
+    const aborted = await svc.abort(created.split.id, { discardUncommitted: true });
     expect(aborted.discarded).toEqual([
       { part: 'api', title: 'Part api', paths: ['src/api/a.ts', 'src/api/b.ts'] },
       { part: 'page', title: 'Part page', paths: [], commits: ['page0001page Page'] },
