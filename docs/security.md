@@ -57,14 +57,22 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   stored or sent: private keys, common provider tokens (AWS, GitHub, Slack, Stripe, OpenAI,
   Anthropic, Google, npm, JWTs), `.env`-style assignments and high-entropy strings next to
   secret-like names.
+- Characters that render as nothing (zero-width and format characters, tag characters,
+  variation selectors) and control characters cannot hide a secret: it is looked for in copies
+  of the text with those characters removed, turned into spaces, or a mix of the two, and replaced
+  in the original together with any such characters inside it. Redaction changes nothing else:
+  a stored prompt, or a prompt passed to an agent or a model, keeps the user's own characters
+  (emoji joiners, a Persian zero-width non-joiner, bidi controls in a diff under review). Text that
+  one agent's work puts in front of another agent (shared context, memories, coordination
+  warnings, file paths) is shown without them.
 - Paths matching the default deny-list (`.env*`, `*.pem`, `*.key`, `id_*`, `.ssh/`, `.aws/`,
   `.npmrc`, `.netrc`, `secrets/`, credential stores) are never read for evidence and their content
   is never captured.
 - Model API keys are read from environment variables at call time and never written to disk by
   Mindly.
 - Pager payloads contain titles and counts only, never code or prompt text. They go through
-  the same redaction as stored text, `redaction.extraPatterns` included, after control and
-  invisible characters are removed. A hook never contacts a pager: a notification it raises is
+  the same redaction as stored text, `redaction.extraPatterns` included, and control and
+  invisible characters are removed from them. A hook never contacts a pager: a notification it raises is
   written, already redacted, to an outbox in the local database, and the hook starts one
   detached `mindly notify flush` that sends it and waits for the answer. The daemon flushes the
   outbox as well; a lease in the database lets only one process send at a time. One that

@@ -1,4 +1,11 @@
-import { hasHiddenChars, replaceInOriginal, withoutHiddenChars } from './hidden.js';
+import {
+  hasHiddenChars,
+  matchCopies,
+  matchCopy,
+  originalSpan,
+  replaceSpans,
+  type Span,
+} from './hidden.js';
 
 /**
  * Secret redaction. Every piece of user or agent text passes through `redact()` before it is
@@ -158,7 +165,10 @@ function redactVisible(input: string, options: RedactOptions = {}): RedactionRes
       if (skip?.(args.map((a) => (typeof a === 'string' ? a : '')))) return match;
       count++;
       kinds.add(kind);
-      return replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? ''));
+      return noteEdit(
+        args,
+        replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? '')),
+      );
     });
   };
 
@@ -217,18 +227,185 @@ export const DEFAULT_DENY_PATHS: readonly string[] = [
   '**/service-account*.json',
 ];
 
+/** The replacements one pass of a pattern made, in the offsets of that pass's input. */
+interface Pass {
+  input: string;
+  edits: { at: number; len: number; text: string }[];
+}
+
+/** Set while `redact` needs to know where replacements were made. */
+let recording: Pass[] | null = null;
+
 /**
- * Replaces the secrets in `input`. Secrets are looked for in a copy without characters that
- * render as nothing and without control characters (one inside a secret would hide it), and
- * only the secrets are replaced in `input`: every other character, hidden or not, is kept.
+ * Notes a replacement (from the callback of a `String.replace`: its arguments, and the text put
+ * in). Every change `redactVisible` makes must go through here, or `redact` cannot place it.
+ */
+function noteEdit(args: readonly unknown[], text: string): string {
+  if (recording) {
+    const i = args.findIndex((a) => typeof a === 'number');
+    const input = args[i + 1];
+    if (i > 0 && typeof input === 'string') {
+      let pass = recording[recording.length - 1];
+      if (!pass || pass.input !== input) {
+        pass = { input, edits: [] };
+        recording.push(pass);
+      }
+      pass.edits.push({ at: args[i] as number, len: String(args[0]).length, text });
+    }
+  }
+  return text;
+}
+
+/**
+ * Where, in `copy`, the replacements of `passes` were made: one span per replaced secret, with
+ * the text that took its place. A kept prefix or suffix (a variable name, an `@`) is not part of
+ * the span. Null when the passes do not lead from `copy` to `result` (a change was not noted).
+ */
+function replacedSpans(copy: string, passes: readonly Pass[], result: string): Span[] | null {
+  let text = copy;
+  // For each unit of `text`: the unit of `copy` it is (>= 0), or -(k + 1) for edit k's text.
+  let origin = new Int32Array(copy.length);
+  for (let u = 0; u < copy.length; u++) origin[u] = u;
+  const edits: (Span & { live: boolean })[] = [];
+  for (const pass of passes) {
+    if (pass.input !== text) return null;
+    const parts: string[] = [];
+    let room = text.length;
+    for (const e of pass.edits) room += e.text.length;
+    const next = new Int32Array(room);
+    let n = 0;
+    let cursor = 0;
+    for (const e of pass.edits) {
+      if (e.at < cursor) return null;
+      const match = text.slice(e.at, e.at + e.len);
+      const most = Math.min(e.len, e.text.length);
+      let p = 0;
+      while (p < most && match[p] === e.text[p]) p++;
+      let q = 0;
+      while (q < most - p && match[e.len - 1 - q] === e.text[e.text.length - 1 - q]) q++;
+      const from = e.at + p;
+      const to = e.at + e.len - q;
+      let start = Number.POSITIVE_INFINITY;
+      let end = Number.NEGATIVE_INFINITY;
+      for (let u = from; u < to; u++) {
+        const o = origin[u] ?? 0;
+        const inner = o < 0 ? edits[-o - 1] : undefined;
+        if (inner) inner.live = false;
+        start = Math.min(start, inner ? inner.start : o);
+        end = Math.max(end, inner ? inner.end : o + 1);
+      }
+      if (start === Number.POSITIVE_INFINITY) {
+        const o = from < origin.length ? (origin[from] ?? 0) : copy.length;
+        start = o < 0 ? (edits[-o - 1]?.start ?? 0) : o;
+        end = start;
+      }
+      const id = edits.length;
+      const replacement = e.text.slice(p, e.text.length - q);
+      edits.push({ start, end, text: replacement, live: true });
+      parts.push(text.slice(cursor, from), replacement);
+      next.set(origin.subarray(cursor, from), n);
+      n += from - cursor;
+      next.fill(-id - 1, n, n + replacement.length);
+      n += replacement.length;
+      cursor = to;
+    }
+    parts.push(text.slice(cursor));
+    next.set(origin.subarray(cursor, text.length), n);
+    n += text.length - cursor;
+    text = parts.join('');
+    origin = next.subarray(0, n);
+  }
+  if (text !== result) return null;
+  return edits.filter((e) => e.live).map(({ start, end, text: t }) => ({ start, end, text: t }));
+}
+
+/** Redacts `text` and says where the replacements were made, or null when that is not known. */
+function redactTraced(
+  text: string,
+  options: RedactOptions,
+): { result: RedactionResult; spans: Span[] | null } {
+  const passes: Pass[] = [];
+  recording = passes;
+  let result: RedactionResult;
+  try {
+    result = redactVisible(text, options);
+  } finally {
+    recording = null;
+  }
+  return { result, spans: result.count === 0 ? [] : replacedSpans(text, passes, result.text) };
+}
+
+/**
+ * Replaces the secrets in `input` and keeps every other character. Characters that render as
+ * nothing and control characters can hide a secret (inside it) or hide a word boundary (next to
+ * it), so secrets are looked for in several copies: without those characters, with each turned
+ * into a space, and mixes of the two (see `CopyMode`). What any finds is replaced in `input`, the
+ * hidden characters inside a secret included; everything else is returned as it was.
  */
 export function redact(input: string, options: RedactOptions = {}): RedactionResult {
-  const text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
+  let text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
   if (!hasHiddenChars(text)) return redactVisible(text, options);
-  const visible = withoutHiddenChars(text);
-  const r = redactVisible(visible, options);
-  if (r.count === 0) return { ...r, text };
-  // When the two cannot be lined up, the text without hidden characters is returned: it holds no
-  // secret, which matters more than keeping those characters.
-  return { ...r, text: replaceInOriginal(text, visible, r.text, REDACTED) ?? r.text };
+  let count = 0;
+  const kinds = new Set<string>();
+  // A secret glued to another one by a hidden character is found once its neighbour is replaced.
+  for (let round = 0; round < MAX_HIDDEN_ROUNDS; round++) {
+    const spans: Span[] = [];
+    for (const copy of matchCopies(text)) {
+      const { result, spans: found } = redactTraced(copy.text, options);
+      if (found === null) return untraced(text, options);
+      for (const k of result.kinds) kinds.add(k);
+      for (const f of found) {
+        const [start, end] = originalSpan(copy, f.start, f.end, text.length);
+        spans.push({ start, end, text: f.text });
+      }
+    }
+    if (spans.length === 0) break;
+    const replaced = replaceSpans(text, spans, REDACTED);
+    count += replaced.count;
+    // Another round finds something only next to a secret glued on by hidden characters.
+    const glued = spans.some((sp) => gluedAt(text, sp.start, -1) || gluedAt(text, sp.end, 1));
+    text = replaced.text;
+    if (!glued) break;
+  }
+  return { text, count, kinds: [...kinds] };
+}
+
+/**
+ * Whether hidden characters at `at`, going in `dir`, lead to a word character: a secret replaced
+ * there may have hidden another one glued to it.
+ */
+function gluedAt(text: string, at: number, dir: 1 | -1): boolean {
+  let o = dir === 1 ? at : at - 1;
+  let hidden = false;
+  while (o >= 0 && o < text.length) {
+    const cp = text.codePointAt(dir === 1 ? o : o - (isLowSurrogate(text, o) ? 1 : 0)) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    if (!hasHiddenChars(ch)) return hidden && /[A-Za-z0-9_]/.test(ch);
+    hidden = true;
+    o += dir * ch.length;
+  }
+  return false;
+}
+
+function isLowSurrogate(text: string, o: number): boolean {
+  const c = text.charCodeAt(o);
+  return c >= 0xdc00 && c <= 0xdfff && o > 0;
+}
+
+/** Rounds of `redact` on text with hidden characters; each runs only when the last found one. */
+const MAX_HIDDEN_ROUNDS = 4;
+
+/**
+ * Used only when a replacement was made that `noteEdit` did not see, so its place in the original
+ * is not known. The copy without hidden characters is redacted; when another copy finds more
+ * than that one, none of the text is kept.
+ */
+function untraced(text: string, options: RedactOptions): RedactionResult {
+  const removed = redactVisible(matchCopy(text, 'removed').text, options);
+  for (const copy of matchCopies(text)) {
+    const other = redactVisible(copy.text, options);
+    if (other.count > removed.count)
+      return { text: REDACTED, count: other.count, kinds: other.kinds };
+  }
+  return removed;
 }
