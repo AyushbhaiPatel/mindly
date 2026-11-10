@@ -213,7 +213,8 @@ An abort never moves, rewrites or deletes git data inside a part's worktree, sho
 checkout in `deps/` or `node_modules`, one made in a folder the part tracks), a submodule, a
 `.git` file, folder or link in any folder that holds a file (even one git does not accept as a
 repository), a git directory among untracked or ignored files (a `--separate-git-dir`, a bare
-clone: a folder with a `HEAD` and an `objects` folder that holds anything not tracked), files
+clone: a folder with a `HEAD` and an `objects` folder, holding anything not as in the last
+commit, staged, changed or new, there or where a link in it leads), files
 written into the folder of an uninitialised submodule (git lists nothing there; empty folders
 do not count), or the git directories of the part's submodules, initialised or not. A part holding any of it keeps its worktree and branch, the
 abort stays unfinished, and it says, naming each path (the worktree itself as "the worktree's
@@ -229,7 +230,7 @@ The other parts are removed as usual. A new nested repository, an edit in a fold
 `.git`, a submodule moved to another commit, or a file in the folder of an uninitialised
 submodule also counts as work not on the part branch: `mindly split merge` stops and names it,
 and `--force` merges without it and says so. The git directory rule errs on the safe side: a
-folder of your own with a `HEAD` entry and an `objects` folder, holding anything not tracked
+folder of your own with a `HEAD` entry and an `objects` folder, holding anything not committed
 (unusual outside git itself), is taken for one, and the abort asks you to move it out. One fully
 tracked and unchanged holds nothing outside a commit and does not count. One gap remains: a folder whose only content is a
 `.git` that git does not accept as a repository is not seen (git lists nothing in it), and goes

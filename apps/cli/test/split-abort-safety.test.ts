@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -596,6 +597,57 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     git(bare, 'repack', '-a', '-d', '-q');
     git(bare, 'pack-refs', '--all');
     await keptFor(sb, 'fx/remote.git');
+  });
+
+  it('keeps a bare repository whose files are only staged, on a terminal yes', async () => {
+    const sb = await splitSandbox();
+    const page = partDir(sb, 'page');
+    const bare = join(page, 'fixtures/remote.git');
+    mkdirSync(bare, { recursive: true });
+    git(bare, 'init', '-q', '--bare', '-b', 'main');
+    pushOnlyCopy(bare);
+    // As after `git add -A && git commit` whose commit failed: staged, not untracked.
+    git(page, 'add', '-A');
+    const r = await cli(sb, ['split', 'abort', '--json'], { answers: ['y'] });
+    expect(r.code).toBe(1);
+    expect((JSON.parse(r.stdout) as Aborted).keptBecause[page]).toBe(HELD('fixtures/remote.git'));
+    expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
+  });
+
+  it('keeps a tracked bare repository whose objects/pack links to an ignored store', async () => {
+    const sb = await splitSandbox((s) => {
+      write(s.repo, '.gitignore', 'packstore/\n');
+      const b = join(s.repo, 'fx/remote.git');
+      mkdirSync(b, { recursive: true });
+      git(b, 'init', '-q', '--bare', '-b', 'main');
+      git(b, 'config', 'receive.unpackLimit', '1');
+      const seed = join(tempDir('r10-seed-'), 's');
+      repoAt(seed, { 'seed.ts': 'seed\n' });
+      git(seed, 'push', '-q', b, 'main');
+      git(b, 'repack', '-a', '-d', '-q');
+      mkdirSync(join(s.repo, 'packstore'));
+      for (const f of readdirSync(join(b, 'objects/pack'))) {
+        renameSync(join(b, 'objects/pack', f), join(s.repo, 'packstore', f));
+      }
+      rmSync(join(b, 'objects/pack'), { recursive: true });
+      symlinkSync('../../../packstore', join(b, 'objects/pack'));
+      write(b, 'objects/info/.keep', '');
+      git(s.repo, 'add', '-f', 'packstore', 'fx');
+    });
+    const page = partDir(sb, 'page');
+    const bare = join(page, 'fx/remote.git');
+    // A pack pushed only there lands in the store, outside the repository's own folder.
+    const clone = join(tempDir('r10-cl-'), 'c');
+    git(page, 'clone', '-q', '--no-local', bare, clone);
+    write(clone, 'new.ts', 'hours of work\n');
+    git(clone, 'add', '-A');
+    git(clone, 'commit', '-q', '-m', 'only copy');
+    git(clone, 'push', '-q', 'origin', 'main');
+    rmSync(clone, { recursive: true, force: true });
+    const r = await cli(sb, ['split', 'abort', '--json'], { answers: ['y'] });
+    expect(r.code).toBe(1);
+    expect((JSON.parse(r.stdout) as Aborted).keptBecause[page]).toBe(HELD('fx/remote.git'));
+    expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
   });
 
   it('keeps a bare clone git accepts, whatever its HEAD looks like', async () => {

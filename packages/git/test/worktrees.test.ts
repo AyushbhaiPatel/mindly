@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -534,13 +535,56 @@ describe('worktrees', () => {
     for (const d of ['a', 'b', 'c', 'd', 'v']) write(path, `${d}/HEAD`, 'ref: refs/heads/main\n');
     // a: only the tracked file under objects/; b: an untracked one too.
     write(path, 'b/objects/ab/cdef', 'x');
-    // c: objects a file, not a folder; d: an empty folder now where the tracked file was.
+    // c: objects a file, not a folder; d: an empty folder now where the tracked file was (a
+    // tracked file deleted: not as in the last commit).
     rmSync(join(path, 'd/objects'));
     mkdirSync(join(path, 'd/objects/pack'), { recursive: true });
-    expect((await worktreeScan(path)).gitData).toEqual(['b']);
+    expect((await worktreeScan(path)).gitData).toEqual(['b', 'd']);
     // Something new in e, beside its tracked HEAD: now it counts.
     write(path, 'e/config', '[core]\n');
-    expect((await worktreeScan(path)).gitData).toEqual(['b', 'e']);
+    expect((await worktreeScan(path)).gitData).toEqual(['b', 'd', 'e']);
+  });
+
+  it('counts a git directory with staged files, or with new packs where a tracked link leads', async () => {
+    const pushOnlyCopy = (bare: string): void => {
+      const wt = join(tempDir('push-'), 'c');
+      write(wt, 'new.ts', 'hours of work\n');
+      git(wt, 'init', '-q', '-b', 'main');
+      commitAll(wt, 'only copy');
+      git(wt, 'push', '-q', bare, 'main');
+    };
+    const root = makeRepo({ '.gitignore': 'packstore/\n' });
+    // A tracked bare repository whose objects/pack is a tracked link into an ignored store.
+    const tracked = join(root, 'fx/remote.git');
+    git(root, 'init', '-q', '--bare', '-b', 'main', tracked);
+    git(tracked, 'config', 'receive.unpackLimit', '1');
+    pushOnlyCopy(tracked);
+    git(tracked, 'repack', '-a', '-d', '-q');
+    mkdirSync(join(root, 'packstore'));
+    for (const f of readdirSync(join(tracked, 'objects/pack'))) {
+      renameSync(join(tracked, 'objects/pack', f), join(root, 'packstore', f));
+    }
+    rmSync(join(tracked, 'objects/pack'), { recursive: true });
+    symlinkSync('../../../packstore', join(tracked, 'objects/pack'));
+    write(tracked, 'objects/info/.keep', '');
+    git(root, 'add', '-A');
+    git(root, 'add', '-f', 'packstore');
+    commitAll(root, 'skeleton');
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    // As committed: nothing to lose.
+    expect((await worktreeScan(path)).gitData).toEqual([]);
+    const clone = join(tempDir('cl-'), 'c');
+    git(tempDir(), 'clone', '-q', '--no-local', join(path, 'fx/remote.git'), clone);
+    write(clone, 'more.ts', 'more\n');
+    commitAll(clone, 'only here');
+    git(clone, 'push', '-q', 'origin', 'main');
+    // A bare repository whose files are only staged.
+    const staged = join(path, 'fixtures/remote.git');
+    git(path, 'init', '-q', '--bare', '-b', 'main', staged);
+    pushOnlyCopy(staged);
+    git(path, 'add', '-A', 'fixtures');
+    expect((await worktreeScan(path)).gitData).toEqual(['fixtures/remote.git', 'fx/remote.git']);
   });
 
   it('takes any HEAD beside an untracked objects for a git directory, as git would', async () => {

@@ -347,9 +347,10 @@ function noteHead(path: string, heads: Set<string>): void {
 }
 
 /**
- * Notes, for an untracked or ignored `path`, every folder it is inside of (not the top level)
- * in `newUnder`; a `HEAD` does not count for its own folder (only for the ones above). Stops at
- * a folder already there, whose own folders are then there too: linear in the listing.
+ * Notes, for a `path` that is not as in the last commit (staged, modified, deleted, untracked or
+ * ignored), every folder it is inside of (not the top level) in `newUnder`; a `HEAD` does not
+ * count for its own folder (only for the ones above). Stops at a folder already there, whose own
+ * folders are then there too: linear in the listing.
  */
 function noteNew(path: string, newUnder: Set<string>): void {
   let end = path.lastIndexOf('/');
@@ -361,15 +362,36 @@ function noteNew(path: string, newUnder: Set<string>): void {
   }
 }
 
+/** True when `abs`, a link, leads inside `root` to something under which a path changed. */
+function leadsToChange(root: string, abs: string, newUnder: ReadonlySet<string>): boolean {
+  try {
+    const target = realpathSync(abs);
+    if (target === root || !target.startsWith(`${root}/`)) return false;
+    const rel = target.slice(root.length + 1);
+    if (newUnder.has(rel)) return true;
+    // A file: anything changed beside it counts (it may be the one).
+    const slash = rel.lastIndexOf('/');
+    return !statSync(target).isDirectory() && slash > 0 && newUnder.has(rel.slice(0, slash));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * True when `dir` (not the top level), which holds an entry named `HEAD` (tracked, untracked or
  * ignored), is a git directory with something to lose: it has an `objects` that is a folder on
- * disk (through a link too), and something in it other than that `HEAD` is untracked or ignored
- * (`newUnder`), or, when `objects` is a link into the worktree, something under where it leads.
- * Nothing is read, and nothing is assumed from what is tracked: a fully tracked, unchanged one
- * holds nothing that is not in a commit, and a changed tracked file is already uncommitted work.
+ * disk (through a link too), and something in it other than that `HEAD` is not as in the last
+ * commit (`newUnder`: staged, modified, deleted, untracked or ignored), or something is under
+ * where a link in it leads, inside the worktree (`links`: its tracked links, and `objects` when
+ * it is one; an untracked link is itself a change). Nothing is read, and nothing is assumed from
+ * what is tracked: a fully tracked, unchanged one holds nothing that is not in a commit.
  */
-function isGitDir(root: string, dir: string, newUnder: ReadonlySet<string>): boolean {
+function isGitDir(
+  root: string,
+  dir: string,
+  newUnder: ReadonlySet<string>,
+  links: readonly string[],
+): boolean {
   if (dir === '') return false;
   const objects = join(root, dir, 'objects');
   try {
@@ -379,14 +401,11 @@ function isGitDir(root: string, dir: string, newUnder: ReadonlySet<string>): boo
   }
   if (newUnder.has(dir)) return true;
   try {
-    if (!lstatSync(objects).isSymbolicLink()) return false;
-    const target = realpathSync(objects);
-    if (target === root || !target.startsWith(`${root}/`)) return false;
-    // Anything new under where it leads.
-    return newUnder.has(target.slice(root.length + 1));
+    if (lstatSync(objects).isSymbolicLink() && leadsToChange(root, objects, newUnder)) return true;
   } catch {
-    return false;
+    // Gone since: nothing to follow.
   }
+  return links.some((l) => leadsToChange(root, join(root, l), newUnder));
 }
 
 /** How an uninitialised submodule folder that holds files is named in `gitData`. */
@@ -502,8 +521,12 @@ export async function worktreeScan(
     opts,
     (rec) => {
       const kind = rec.slice(0, 3);
-      if (kind !== '?? ' && kind !== '!! ') return false;
       const path = rec.slice(3);
+      if (kind !== '?? ' && kind !== '!! ') {
+        // Staged, modified or deleted: not as in the last commit either.
+        if (path !== '') noteNew(path, newUnder);
+        return false;
+      }
       // A folder: a repository git did not descend into.
       if (path.endsWith('/')) {
         if (path.length > 1) found.add(path.slice(0, -1));
@@ -521,16 +544,28 @@ export async function worktreeScan(
   // The index: submodules, and every folder that holds a tracked file.
   const gitlinks: string[] = [];
   const tracked = new Set<string>();
+  const trackedLinks: string[] = [];
   await runGitRecords(['ls-files', '-z', '-s'], opts, (rec) => {
     const path = rec.slice(rec.indexOf('\t') + 1);
     noteHead(path, heads);
     if (rec.startsWith('160000 ')) gitlinks.push(path);
     else addFolders(path, tracked);
+    if (rec.startsWith('120000 ')) trackedLinks.push(path);
     return false;
   });
   for (const dir of tracked) listedIn.add(dir);
+  // The tracked links inside each folder holding a `HEAD`.
+  const linksIn = new Map<string, string[]>();
+  for (const link of trackedLinks) {
+    for (let i = link.lastIndexOf('/'); i > 0; i = link.lastIndexOf('/', i - 1)) {
+      const dir = link.slice(0, i);
+      if (heads.has(dir)) linksIn.set(dir, [...(linksIn.get(dir) ?? []), link]);
+    }
+  }
   // A git directory (a `--separate-git-dir`, a bare clone) with something not in a commit.
-  for (const dir of heads) if (isGitDir(root, dir, newUnder)) found.add(dir);
+  for (const dir of heads) {
+    if (isGitDir(root, dir, newUnder, linksIn.get(dir) ?? [])) found.add(dir);
+  }
   // One `lstat` per folder named: a `.git` there, whatever git makes of it.
   for (const dir of listedIn) if (existsOrLink(join(root, dir, '.git'))) found.add(dir);
   for (const path of gitlinks) if (existsOrLink(join(root, path, '.git'))) found.add(path);
