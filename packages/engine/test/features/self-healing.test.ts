@@ -136,10 +136,13 @@ describe('self-healing memory', () => {
     expect(excerptState([...lookalikes, line].join('\n'), stored, hash)).toBe('present');
     expect(excerptState(lookalikes.join('\n'), stored, hash)).toBe('absent');
 
-    // An excerpt that opens or closes with the redaction cannot be placed: gone, as before.
+    // An excerpt that opens or closes with the redaction cannot be placed; what it kept is still
+    // there, so it is not decided (it keeps its validity).
     const open = sha256(normalizeLine('abcdef123456", retries: 3'));
-    expect(excerptState(line, '[REDACTED]", retries: 3', open)).toBe('absent');
-    expect(excerptState(line, 'token: "[REDACTED]', sha256('token: "abcdef123456'))).toBe('absent');
+    expect(excerptState(line, '[REDACTED]", retries: 3', open)).toBe('unknown');
+    expect(excerptState(line, 'token: "[REDACTED]', sha256('token: "abcdef123456'))).toBe(
+      'unknown',
+    );
   });
 
   it('keeps earlier evidence as it was when it cannot be placed in a few tries', async () => {
@@ -164,15 +167,18 @@ describe('self-healing memory', () => {
       .run('k="[REDACTED]";', sha256('k="abcdef123456";'), m.id);
     expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ checked: 1, invalid: 0 });
 
+    // Found where it was taken from: moved to the exact form, which sees any later change.
+    expect(mindly.store.memories.evidenceFor(m.id)[0]!.contentHash).toMatch(/^span:/);
     write('src/dense.ts', `${dense}\n`);
-    expect(selfHealingOf(mindly).sweep(pid)).toEqual({
-      checked: 0,
-      invalid: 0,
-      markedStale: 0,
-      restored: 0,
-    });
+    expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ checked: 1, invalid: 1 });
+
+    // Not moved yet, the same row is not decided in the dense file and keeps its validity.
+    mindly.store.db
+      .prepare('UPDATE memory_evidence SET content_hash = ?, valid = 1 WHERE memory_id = ?')
+      .run(sha256('k="abcdef123456";'), m.id);
+    write('src/dense.ts', `${dense}\n// touched\n`);
+    expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ checked: 0, invalid: 0 });
     expect(mindly.store.memories.evidenceFor(m.id)[0]!.valid).toBe(true);
-    expect(mindly.store.memories.get(m.id).trust).not.toBe('stale');
   });
 
   it('marks a memory stale when a redacted value at the end of its evidence is replaced', async () => {
@@ -470,9 +476,12 @@ describe('self-healing memory', () => {
       expect(stored, name).toContain('[REDACTED]');
       const content = `// header\nconst ${id} = { ${original}, region: "eu" };\nexport {};\n`;
       expect(excerptState(content, stored, hash), name).toBe('present');
+      // The value changed, what was kept is still there: not decided.
       expect(excerptState(content.replace(secret, 'sk_live_other'), stored, hash), name).toBe(
-        'absent',
+        'unknown',
       );
+      // What was kept is gone.
+      expect(excerptState('export {};\n', stored, hash), name).toBe('absent');
     }
 
     // Redaction made it longer than an excerpt may be, so it was stored cut short.
@@ -482,11 +491,15 @@ describe('self-healing memory', () => {
     expect(cut.stored.endsWith('…')).toBe(true);
     const line = `// header\nconst LONG = "${long} and more";\nexport {};\n`;
     expect(excerptState(line, cut.stored, cut.hash)).toBe('present');
-    expect(excerptState(line.replace('Xy7kQ2pZ', 'Qq1wW2eE'), cut.stored, cut.hash)).toBe('absent');
-    // Past where it was cut, only the hash knows the text: a change there is seen too.
+    // A changed value, or a change past where it was cut (only the hash knows that text): what
+    // was kept is still there, so it is not decided.
+    expect(excerptState(line.replace('Xy7kQ2pZ', 'Qq1wW2eE'), cut.stored, cut.hash)).toBe(
+      'unknown',
+    );
     const changedEnd = line.replace(long, `${long.slice(0, -1)}#`);
     expect(changedEnd).not.toBe(line);
-    expect(excerptState(changedEnd, cut.stored, cut.hash)).toBe('absent');
+    expect(excerptState(changedEnd, cut.stored, cut.hash)).toBe('unknown');
+    expect(excerptState('export {};\n', cut.stored, cut.hash)).toBe('absent');
   });
 
   it('re-checks earlier multi-line evidence of a large file within the hook budget', async () => {
@@ -557,8 +570,11 @@ describe('self-healing memory', () => {
     const original = `abcdef123456\n${lines.slice(0, 199).join('\n')}`;
     const stored = `[REDACTED]\n${lines.slice(0, 199).join('\n')}`;
     const hash = sha256(normalizeBlock(original));
+    // The redacted line changed, the kept lines are still there: not decided.
     const [gone, goneMs] = timed(() => excerptState(`other\n${lines.join('\n')}`, stored, hash));
-    expect(gone).toBe('absent');
+    expect(gone).toBe('unknown');
+    // The kept lines are gone.
+    expect(excerptState(lines.slice(300).join('\n'), stored, hash)).toBe('absent');
     const [there, thereMs] = timed(() =>
       excerptState(`abcdef123456\n${lines.join('\n')}`, stored, hash),
     );
@@ -593,7 +609,7 @@ describe('self-healing memory', () => {
         'absent',
       );
       expect(excerptState(content.replace(secret, 'sk_live_other'), stored, cited), name).toBe(
-        'absent',
+        'unknown',
       );
     }
   });
@@ -609,9 +625,10 @@ describe('self-healing memory', () => {
       lines.push(`k${i}`);
       size += 6;
     }
-    const file = lines.join('\n');
     // A cited block of 400 lines whose stored excerpt was cut short: no fixed end to place it by.
+    // The file holds what was kept of it, not the whole block.
     const block = Array.from({ length: 400 }, (_, i) => `v${i}`).join('\n');
+    const file = `${block.split('\n').slice(0, 399).join('\n')}\n${lines.join('\n')}`;
     const cut = timed(() =>
       excerptState(file, `${block.slice(0, 1500)}…`, `lines:400:${sha256(normalizeBlock(block))}`),
     );
@@ -633,6 +650,86 @@ describe('self-healing memory', () => {
     expect(Math.max(cut[1], redacted[1])).toBeLessThan(100);
   });
 
+  it('never calls earlier evidence gone while what it kept is in the file', () => {
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    /** `lines:` as an earlier build of this release wrote it: the whole lines the excerpt spans. */
+    const cited = (file: string, excerpt: string): string => {
+      const norm = normalizeBlock(file);
+      const ne = normalizeBlock(excerpt);
+      const at = norm.indexOf(ne);
+      expect(at).toBeGreaterThanOrEqual(0);
+      const start = norm.lastIndexOf('\n', at - 1) + 1;
+      const nl = norm.indexOf('\n', at + ne.length);
+      const c = norm.slice(start, nl === -1 ? norm.length : nl);
+      return `lines:${c.split('\n').length}:${sha256(c)}`;
+    };
+    for (const [name, file, excerpt] of [
+      // A lone carriage return quoted as a space (both normalise to one space).
+      [
+        'a lone carriage return quoted as a space',
+        `// header\na;\rb;\nconst TOKEN = "${secret}"; // billing\nexport {};\n`,
+        `a; b;\nconst TOKEN = "${secret}"; // billing`,
+      ],
+      // A `<` that only the file made safe neutralises (the next line starts with `Mindly`).
+      [
+        'a `<` before Mindly',
+        `const TOKEN = "${secret}"; // billing\ntype Store = Map<\n  MindlyKey,\n  number\n>;\n`,
+        `const TOKEN = "${secret}"; // billing\ntype Store = Map<`,
+      ],
+    ] as const) {
+      const stored = sanitizeForContext(redactText(excerpt), 2000);
+      expect(excerptState(file, stored, cited(file, excerpt)), name).toBe('present');
+    }
+
+    // Whole lines of the earliest form that open with a secret and end with a line of only an
+    // invisible character (the excerpt lost that line when it was made safe).
+    const block = `${secret}\nconst A = 1; // the production billing key\n\u200B`;
+    const stored = sanitizeForContext(redactText(block), 2000);
+    expect(stored).toBe('[REDACTED]\nconst A = 1; // the production billing key');
+    const hash = sha256(normalizeBlock(block));
+    expect(excerptState(`// header\n${block}\nexport {};\n`, stored, hash)).toBe('present');
+    expect(excerptState('// header\nexport {};\n', stored, hash)).toBe('absent');
+  });
+
+  it('decides earlier whole-line evidence of a large file with a stray invisible line quickly', () => {
+    /** The best of three runs: the time of the work, not of compiling it. */
+    const timed = <T>(f: () => T): [T, number] => {
+      let best = Infinity;
+      let r = f();
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now();
+        r = f();
+        best = Math.min(best, performance.now() - t);
+      }
+      return [r, best];
+    };
+    const rows: string[] = [];
+    for (let i = 0, size = 0; size < 500 * 1024; i++) {
+      rows.push(i % 2 ? '},' : `{ "password": "pw${i}xxxxxx",`);
+      size += 24;
+    }
+    const block = Array.from({ length: 30 }, (_, i) =>
+      i % 2 ? '},' : `{ "password": "secret${i}zzzzzz",`,
+    ).join('\n');
+    const stored = sanitizeForContext(redactText(block), 2000);
+    const hash = `lines:30:${sha256(normalizeBlock(block))}`;
+    const mid = rows.length >> 1;
+    // One line of only an invisible character, and one lone carriage return, in 500 KB.
+    for (const stray of ['\u200B', 'a\rb']) {
+      const file = [...rows.slice(0, mid), stray, ...rows.slice(mid)].join('\n');
+      // The block is not in the file; what it kept is everywhere: not decided, and quickly.
+      const [gone, goneMs] = timed(() => excerptState(file, stored, hash));
+      expect(gone).toBe('unknown');
+      // The block is there, ending in a line of only an invisible character.
+      const withBlock = `${block}\n\u200B\n${file}`;
+      const blockHash = `lines:31:${sha256(normalizeBlock(`${block}\n\u200B`))}`;
+      const [there, thereMs] = timed(() => excerptState(withBlock, stored, blockHash));
+      expect(there).not.toBe('absent');
+      // Tens of milliseconds on an idle machine.
+      expect(Math.max(goneMs, thereMs)).toBeLessThan(100);
+    }
+  });
+
   it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {
     // Nothing but redactions was kept, on 40 lines: only every run of 40 whole lines could place
     // it, and in a 500 KB file that is more hashing than one check may do.
@@ -645,9 +742,9 @@ describe('self-healing memory', () => {
     const stored = keys.map(() => '[REDACTED]').join('\n');
     const hash = sha256(normalizeBlock(keys.join('\n')));
     expect(excerptState(lines.join('\n'), stored, hash)).toBe('unknown');
-    // A small file is decided, both ways.
+    // In a small file it is found; nothing kept can show it gone, so it is never called gone.
     const small = lines.slice(0, 400).join('\n');
-    expect(excerptState(small, stored, hash)).toBe('absent');
+    expect(excerptState(small, stored, hash)).toBe('unknown');
     expect(excerptState(`${small}\n${keys.join('\n')}`, stored, hash)).toBe('present');
   });
 
@@ -666,6 +763,9 @@ describe('self-healing memory', () => {
       const content = `// header\nconst X = { ${original}, region: "eu" };\nexport {};\n`;
       expect(excerptState(content, stored, hash), name).toBe('present');
       expect(excerptState(content.replace(secret, 'sk_live_other'), stored, hash), name).toBe(
+        'unknown',
+      );
+      expect(excerptState(content.replace('sep: ', 'separator: '), stored, hash), name).toBe(
         'absent',
       );
     }
@@ -691,7 +791,7 @@ describe('self-healing memory', () => {
       expect(
         excerptState(content.replace('Xy7kQ2pZ', 'Qq1wW2eE'), stored, hash),
         `pad ${pad}`,
-      ).toBe('absent');
+      ).toBe('unknown');
       checked++;
     }
     expect(checked).toBe(4);
