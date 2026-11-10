@@ -213,9 +213,9 @@ An abort never moves, rewrites or deletes git data inside a part's worktree, sho
 checkout in `deps/` or `node_modules`, one made in a folder the part tracks), a submodule, a
 `.git` file, folder or link in any folder that holds a file (even one git does not accept as a
 repository), a git directory among untracked or ignored files (a `--separate-git-dir`, a bare
-repository: `HEAD`, `objects/` and `refs/` all there), files written into the folder of an
-uninitialised submodule (git lists nothing there), or the git directories of the part's
-submodules, initialised or not. A part holding any of it keeps its worktree and branch, the
+clone: a `HEAD` that reads like git's beside an `objects/` folder, refs packed or not), files
+written into the folder of an uninitialised submodule (git lists nothing there; empty folders
+do not count), or the git directories of the part's submodules, initialised or not. A part holding any of it keeps its worktree and branch, the
 abort stays unfinished, and it says, naming each path (the worktree itself as "the worktree's
 own folder"):
 

@@ -485,6 +485,27 @@ describe('worktrees', () => {
     expect((await flaggedChanges(path)).uninitialised).toEqual(['mods/sub/patch.ts']);
   });
 
+  it('tells a git directory by its HEAD and objects, refs packed or not', async () => {
+    const origin = makeRepo({ 'a.ts': 'a\n' });
+    const root = makeRepo({
+      '.gitignore': '.repos/\n',
+      'x/objects/a.txt': 'a\n',
+      'x/refs/b.txt': 'b\n',
+    });
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    // A bare clone after `git gc` (refs packed), and a fresh bare repository with no objects.
+    git(origin, 'clone', '-q', '--bare', origin, join(path, '.repos/lib.git'));
+    git(join(path, '.repos/lib.git'), 'gc', '-q');
+    git(path, 'init', '-q', '--bare', join(path, '.repos/empty.git'));
+    // A HEAD that reads like git's, beside tracked objects/ and refs/: not a git directory.
+    write(path, 'x/HEAD', 'ref: refs/heads/main\n');
+    // An untracked HEAD that does not read like git's, beside an untracked objects/.
+    write(path, 'y/HEAD', 'build output\n');
+    write(path, 'y/objects/o.txt', 'o\n');
+    expect((await worktreeScan(path)).gitData).toEqual(['.repos/empty.git', '.repos/lib.git']);
+  });
+
   it('finds git directories kept apart from their work tree, in ignored folders', async () => {
     const root = makeRepo({ '.gitignore': '.cache/\n.repos/\n' });
     const path = join(tempDir(), 'part');

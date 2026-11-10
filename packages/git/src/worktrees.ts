@@ -339,31 +339,89 @@ function addFolders(path: string, into: Set<string>): void {
   }
 }
 
-/** Notes the folders that `path` shows to hold a `HEAD`, an `objects/` or a `refs/` entry. */
-function noteGitDirParts(
-  path: string,
-  heads: Set<string>,
-  objects: Set<string>,
-  refs: Set<string>,
-): void {
+/** Notes the folders that `path` shows to hold a `HEAD` file or an `objects/` entry. */
+function noteGitDirParts(path: string, heads: Set<string>, objects: Set<string>): void {
   const parts = path.split('/');
   if (parts[parts.length - 1] === 'HEAD' && parts.length > 1) {
     heads.add(parts.slice(0, -1).join('/'));
   }
   for (let i = 1; i < parts.length - 1; i++) {
     if (parts[i] === 'objects') objects.add(parts.slice(0, i).join('/'));
-    else if (parts[i] === 'refs') refs.add(parts.slice(0, i).join('/'));
   }
+}
+
+/** git's `HEAD`: a symbolic ref, or a full object id. */
+const HEAD_CONTENT = /^(ref: refs\/\S+|[0-9a-f]{40}|[0-9a-f]{64})\s*$/;
+
+/**
+ * True when `dir` (under `root`, not the top level) is a git directory: its `HEAD` (untracked or
+ * ignored, as the caller saw) reads like git's, and it has an `objects` folder that is not a
+ * tracked one (`listedObjects`: untracked or ignored entries were seen under it). Its refs may
+ * all be in `packed-refs` (after `git gc`, in a bare clone), so `refs/` is not looked at. Only
+ * that small `HEAD` file is read.
+ */
+function isGitDir(
+  root: string,
+  dir: string,
+  listedObjects: ReadonlySet<string>,
+  tracked: ReadonlySet<string>,
+): boolean {
+  if (dir === '') return false;
+  try {
+    const head = join(root, dir, 'HEAD');
+    const st = lstatSync(head);
+    if (!st.isFile() || st.size > 256) return false;
+    if (!HEAD_CONTENT.test(readFileSync(head, 'utf8'))) return false;
+  } catch {
+    return false;
+  }
+  if (listedObjects.has(dir)) return true;
+  const objects = `${dir}/objects`;
+  return !tracked.has(objects) && Boolean(lstatInTree(root, objects)?.isDirectory());
 }
 
 /** How an uninitialised submodule folder that holds files is named in `gitData`. */
 export const uninitialisedSubmoduleLabel = (path: string): string =>
   `files in the uninitialised submodule folder ${path}`;
 
+/** Folders an uninitialised submodule's content check reads at most before it counts it. */
+const HOLDS_FILE_LIMIT = 10_000;
+
+/**
+ * True when the entry at `abs` is something other than empty folders: a file, a link, anything
+ * but a folder, or a folder with one of those somewhere below. Stops at the first one, and counts
+ * a tree too large to look through in full as holding something.
+ */
+function holdsFile(abs: string): boolean {
+  const stack = [abs];
+  let budget = HOLDS_FILE_LIMIT;
+  while (stack.length > 0) {
+    const at = stack.pop() as string;
+    let st: Stats;
+    try {
+      st = lstatSync(at);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) return true;
+    if (--budget < 0) return true;
+    let entries: string[];
+    try {
+      entries = readdirSync(at);
+    } catch {
+      return true;
+    }
+    for (const e of entries) stack.push(join(at, e));
+  }
+  return false;
+}
+
 /**
  * The top-level entries of the folders of uninitialised submodules (`gitlinks`, from the index,
- * with no `.git`) under `root`: files written there, which git lists nowhere (a gitlink hides
- * what is under it) and removes with the worktree. One `readdir` per gitlink.
+ * with no `.git`) under `root` that hold a file: work written there, which git lists nowhere (a
+ * gitlink hides what is under it) and removes with the worktree. A gitlink path that is not a
+ * folder of the worktree (a link: a type change, listed as such) is not looked into; empty
+ * folders do not count.
  */
 function inUninitialisedSubmodules(
   root: string,
@@ -371,6 +429,7 @@ function inUninitialisedSubmodules(
 ): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const path of gitlinks) {
+    if (!lstatInTree(root, path)?.isDirectory()) continue;
     if (existsOrLink(join(root, path, '.git'))) continue;
     let entries: string[];
     try {
@@ -378,10 +437,11 @@ function inUninitialisedSubmodules(
     } catch {
       continue;
     }
-    if (entries.length > 0)
+    const holding = entries.filter((e) => holdsFile(join(root, path, e))).sort();
+    if (holding.length > 0)
       out.set(
         path,
-        entries.sort().map((e) => `${path}/${e}`),
+        holding.map((e) => `${path}/${e}`),
       );
   }
   return out;
@@ -390,15 +450,16 @@ function inUninitialisedSubmodules(
 /**
  * One look at the working tree at `cwd`, from two git listings read as they come (its status,
  * with untracked and ignored files one by one, and its index), one `lstat` per folder they name
- * and one `readdir` per uninitialised submodule; nothing in any file is read.
+ * and one `readdir` per uninitialised submodule; nothing in any file is read but a listed `HEAD`
+ * (to tell a git directory).
  *
  * `gitData`: git data that removing the worktree would destroy and no listing of files can stand
  * for: repositories inside it (new ones and ones in ignored folders, as git lists them: folders
  * it does not descend into), populated submodules and committed repositories (from the index),
  * a `.git` file, folder or link in any folder that holds a tracked, untracked or ignored file
  * (git looks past those, and past a `.git` it does not accept), git directories among its
- * untracked or ignored files (a `--separate-git-dir`, a bare repository: `HEAD`, `objects/` and
- * `refs/` all there, untracked or ignored), files in the folder of an uninitialised submodule
+ * untracked or ignored files (a `--separate-git-dir`, a bare repository: see `isGitDir`), files
+ * in the folder of an uninitialised submodule
  * (git lists nothing under a gitlink), and a non-empty `modules` folder in the worktree's own
  * git directory (the git directories of its submodules, initialised or not). Only the outermost
  * of nested ones; repository-relative, but that `modules` folder is absolute. Never the worktree
@@ -414,7 +475,6 @@ export async function worktreeScan(
   const listedIn = new Set<string>();
   const heads = new Set<string>();
   const objects = new Set<string>();
-  const refs = new Set<string>();
   // Untracked (`??`) and ignored (`!!`) files one by one, repositories as folders, in one listing
   // read as it comes (every ignored file is in it), keeping only what counts.
   const untracked: string[] = [];
@@ -440,21 +500,24 @@ export async function worktreeScan(
         return false;
       }
       addFolders(path, listedIn);
-      noteGitDirParts(path, heads, objects, refs);
+      noteGitDirParts(path, heads, objects);
       if (kind === '?? ') untracked.push(path);
       else if (isDeniedPath(path, secretDeny) && !installed(root, path)) ignoredDenied.push(path);
       return false;
     },
   );
-  for (const dir of heads) if (objects.has(dir) && refs.has(dir)) found.add(dir);
   // The index: submodules, and every folder that holds a tracked file.
   const gitlinks: string[] = [];
+  const tracked = new Set<string>();
   await runGitRecords(['ls-files', '-z', '-s'], opts, (rec) => {
     const path = rec.slice(rec.indexOf('\t') + 1);
     if (rec.startsWith('160000 ')) gitlinks.push(path);
-    else addFolders(path, listedIn);
+    else addFolders(path, tracked);
     return false;
   });
+  for (const dir of tracked) listedIn.add(dir);
+  // A git directory (a `--separate-git-dir`, a bare clone): its `HEAD` is a listed file.
+  for (const dir of heads) if (isGitDir(root, dir, objects, tracked)) found.add(dir);
   // One `lstat` per folder named: a `.git` there, whatever git makes of it.
   for (const dir of listedIn) if (existsOrLink(join(root, dir, '.git'))) found.add(dir);
   for (const path of gitlinks) if (existsOrLink(join(root, path, '.git'))) found.add(path);

@@ -5,6 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -477,6 +478,92 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     expect(forced.stdout).toContain('src/app/vendor/patch.ts');
     await keptFor(sb, 'files in the uninitialised submodule folder src/app/vendor');
     expect(readFileSync(join(page, 'src/app/vendor/patch.ts'), 'utf8')).toContain('hours of work');
+  });
+
+  it('keeps a bare clone whose refs are packed, in an ignored folder', async () => {
+    const origin = tempDir('r10-origin-');
+    repoAt(origin, { 'only.ts': 'x\n' });
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', '.repos/\n'));
+    const page = partDir(sb, 'page');
+    const bare = join(page, '.repos/lib.git');
+    git(origin, 'clone', '-q', '--bare', origin, bare);
+    // A commit pushed only there, then `git gc`: `refs/` holds only empty folders.
+    const wt = join(tempDir('r10-wt-'), 'c');
+    git(origin, 'clone', '-q', bare, wt);
+    write(wt, 'new.ts', 'hours of work\n');
+    git(wt, 'add', '-A');
+    git(wt, 'commit', '-q', '-m', 'only here');
+    git(wt, 'push', '-q', 'origin', 'main');
+    git(bare, 'gc', '-q');
+    rmSync(wt, { recursive: true, force: true });
+    await keptFor(sb, '.repos/lib.git');
+    expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only here\n');
+  });
+
+  it('keeps a separate git directory whose refs are packed', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', '.cache/\n'));
+    const page = partDir(sb, 'page');
+    const lib = join(page, 'lib');
+    write(lib, 'a.ts', 'a\n');
+    write(page, '.cache/keep', '');
+    git(page, 'init', '-q', '--separate-git-dir', join(page, '.cache/lib.git'), lib);
+    git(lib, 'add', '-A');
+    git(lib, 'commit', '-q', '-m', 'only here');
+    git(lib, 'gc', '-q');
+    // Its work tree moved away by hand: only the git directory is left in the part.
+    renameSync(lib, join(tempDir('r10-away-'), 'lib'));
+    await keptFor(sb, '.cache/lib.git');
+  });
+
+  it('does not look through a link where a submodule folder is', async () => {
+    const sub = tempDir('r10-sub-');
+    repoAt(sub, { 'lib.ts': 'export const lib = 1;\n' });
+    const sb = await splitSandbox((s) => {
+      git(
+        s.repo,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        '-q',
+        'add',
+        sub,
+        'src/app/vendor',
+      );
+    });
+    const page = partDir(sb, 'page');
+    const outside = tempDir('r10-outside-');
+    write(outside, 'shared.ts', 'shared\n');
+    rmSync(join(page, 'src/app/vendor'), { recursive: true, force: true });
+    symlinkSync(outside, join(page, 'src/app/vendor'));
+    const st = JSON.parse((await cli(sb, ['split', 'status', '--json'])).stdout) as {
+      parts: { uncommitted: string[] }[];
+    };
+    // The type change is the part's work; what the link points at is not.
+    expect(st.parts.map((p) => p.uncommitted)).toEqual([[], ['src/app/vendor']]);
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('src/app/vendor');
+    expect(r.stderr).not.toContain('uninitialised');
+    expect(existsSync(join(outside, 'shared.ts'))).toBe(true);
+  });
+
+  it('does not count empty folders in an uninitialised submodule folder', async () => {
+    const sub = tempDir('r10-sub-');
+    repoAt(sub, { 'lib.ts': 'export const lib = 1;\n' });
+    const sb = await splitSandbox((s) => {
+      git(
+        s.repo,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        '-q',
+        'add',
+        sub,
+        'src/app/vendor',
+      );
+    });
+    mkdirSync(join(partDir(sb, 'page'), 'src/app/vendor/empty/deeper'), { recursive: true });
+    expect((await cli(sb, ['split', 'abort', '--yes'])).code).toBe(0);
   });
 
   it('keeps a repository git does not accept, in an ignored folder', async () => {
