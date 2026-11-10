@@ -83,10 +83,14 @@ export function readEdits(
   const patch = findPatchText(toolInput);
   if (patch !== null) return readApplyPatch(patch);
   const listed = isRecord(toolInput) ? toolInput['edits'] : undefined;
-  return {
-    edits: editsOf(toolName, toolInput),
-    cut: Array.isArray(listed) && listed.length > MAX_EDITS,
-  };
+  const edits = editsOf(toolName, toolInput);
+  if (!Array.isArray(listed) || listed.length <= MAX_EDITS) return { edits, cut: false };
+  // Edits beyond the cap only matter when they change a file the reported ones do not: many
+  // edits of one file (MultiEdit) are that file, whatever their number.
+  const reported = new Set(edits.map((e) => e.path));
+  const fallback = readPath(toolInput);
+  const cut = listed.slice(MAX_EDITS).some((e) => !reported.has(readPath(e) ?? fallback ?? ''));
+  return { edits, cut };
 }
 
 function editsOf(toolName: string, toolInput: unknown): FileEdit[] {
