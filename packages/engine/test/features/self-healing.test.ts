@@ -1,7 +1,9 @@
+import { utimesSync } from 'node:fs';
+import { join } from 'node:path';
 import { normalizeLine, sha256 } from '@mindly/core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { excerptPresent, excerptState, normalizeBlock, selfHealingOf } from '../../src/index.js';
-import { citedLinesHash } from '../../src/memory/evidence-hash.js';
+import { evidenceHash } from '../../src/memory/evidence-hash.js';
 import { event, writeTool } from '../helpers.js';
 import { agentSource, AUTH_V1, featureSetup } from './fixtures.js';
 
@@ -188,7 +190,7 @@ describe('self-healing memory', () => {
     });
     const stored = mindly.store.memories.evidenceFor(m.id)[0]!;
     expect(stored.excerpt).toBe('token: [REDACTED]');
-    expect(stored.contentHash).toMatch(/^lines:1:[0-9a-f]{64}$/);
+    expect(stored.contentHash).toMatch(/^span:\d+:[0-9a-f]{8}:[0-9a-f]{64}$/);
     expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ invalid: 0, markedStale: 0 });
 
     write('src/client.yaml', 'client:\n  token: ${VAULT_TOKEN}\n  retries: 3\n');
@@ -196,47 +198,44 @@ describe('self-healing memory', () => {
     expect(mindly.store.memories.get(m.id).trust).toBe('stale');
   });
 
-  it('compares the lines an excerpt was taken from, whatever the redaction left of it', () => {
-    const cited = (content: string, excerpt: string) =>
-      citedLinesHash(normalizeBlock(content), normalizeBlock(excerpt));
+  it('looks for the text a redacted excerpt was taken from, wherever it is', () => {
+    /** The hash stored for `found`, kept as `stored`. */
+    const hashFor = (found: string, stored: string) =>
+      evidenceHash(normalizeBlock(found), normalizeBlock(stored));
     const line = 'connect({ token: "abcdef123456", retries: 3 });';
     const file = `// client\n${line}\nexport {};\n`;
 
     // A redaction at the end of the excerpt, in the middle of a line.
-    const closing = cited(file, 'token: "abcdef123456');
-    expect(closing).toMatch(/^lines:1:/);
+    const closing = hashFor('token: "abcdef123456', 'token: "[REDACTED]');
+    expect(closing).toMatch(/^span:/);
     expect(excerptPresent(file, 'token: "[REDACTED]', closing)).toBe(true);
     expect(
       excerptPresent(file.replace('abcdef123456', 'zzzzzz999999'), 'token: "[REDACTED]', closing),
     ).toBe(false);
-    // Anything else on the cited line counts as a change of it.
+    // What is on the line besides the cited text is not part of the evidence.
     expect(
       excerptPresent(file.replace('retries: 3', 'retries: 4'), 'token: "[REDACTED]', closing),
-    ).toBe(false);
-    // Lines around it do not.
+    ).toBe(true);
     expect(excerptPresent(`// other\n${line}\n`, 'token: "[REDACTED]', closing)).toBe(true);
 
     // Nothing but a redaction.
-    const only = cited(file, 'abcdef123456');
+    const only = hashFor('abcdef123456', '[REDACTED]');
     expect(excerptPresent(file, '[REDACTED]', only)).toBe(true);
     expect(excerptPresent('', '[REDACTED]', only)).toBe(false);
     expect(excerptPresent('export const unrelated = 1;\n', '[REDACTED]', only)).toBe(false);
 
     // A secret line followed by a plain one, with the secret line removed.
-    const pair = 'x = 1\nabcdef123456\nmaxRetries = 3\n';
-    const two = cited(pair, 'abcdef123456\nmaxRetries = 3');
-    expect(two).toMatch(/^lines:2:/);
-    expect(excerptPresent(pair, '[REDACTED]\nmaxRetries = 3', two)).toBe(true);
+    const two = hashFor('abcdef123456\nmaxRetries = 3', '[REDACTED]\nmaxRetries = 3');
+    expect(
+      excerptPresent('x = 1\nabcdef123456\nmaxRetries = 3\n', '[REDACTED]\nmaxRetries = 3', two),
+    ).toBe(true);
     expect(excerptPresent('x = 1\nmaxRetries = 3\n', '[REDACTED]\nmaxRetries = 3', two)).toBe(
       false,
     );
     expect(excerptPresent('maxRetries = 3\n', '[REDACTED]\nmaxRetries = 3', two)).toBe(false);
 
     // The parts still exist, thousands of lines apart: that is not the excerpt.
-    const three = cited(
-      'abcdef123456\nalpha = 1\nomega = 2\n',
-      'abcdef123456\nalpha = 1\nomega = 2',
-    );
+    const three = hashFor('abcdef123456\nalpha = 1\nomega = 2', '[REDACTED]\nalpha = 1\nomega = 2');
     const filler = Array.from({ length: 5000 }, (_, i) => `line${i} = ${i}`).join('\n');
     expect(
       excerptPresent(
@@ -245,6 +244,135 @@ describe('self-healing memory', () => {
         three,
       ),
     ).toBe(false);
+
+    // An excerpt kept as it was found keeps the plain hash: the substring test decides.
+    expect(hashFor('retries: 3', 'retries: 3')).toBe(sha256('retries: 3'));
+  });
+
+  it('treats a redacted excerpt like any other: present while the cited text is', async () => {
+    const { root, mindly, pid, cc, write } = await featureSetup();
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    const copy = (comment: string) => `const key = "${secret}"; // ${comment}`;
+    write('src/keys.ts', `${copy('first')}\n${copy('second')}\n`);
+    const remember = (title: string, excerpt: string) =>
+      mindly.memory.remember({
+        projectId: pid,
+        projectRoot: root,
+        kind: 'fact',
+        title,
+        body: 'b',
+        source: agentSource(cc),
+        evidence: [{ path: 'src/keys.ts', excerpt }],
+      });
+    const redacted = remember('The key is inline', `const key = "${secret}";`);
+    write('src/plain.ts', 'export const retries = 3; // tuned\n');
+    const plain = mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'fact',
+      title: 'Retries are three',
+      body: 'b',
+      source: agentSource(cc),
+      evidence: [{ path: 'src/plain.ts', excerpt: 'export const retries = 3;' }],
+    });
+    expect(mindly.store.memories.evidenceFor(redacted.id)[0]!.excerpt).toContain('[REDACTED]');
+
+    // A comment edit on the first copy's line: the cited text is still there, twice over once.
+    write('src/keys.ts', `${copy('first, edited')}\n${copy('second')}\n`);
+    write('src/plain.ts', 'export const retries = 3; // tuned again\n');
+    expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ invalid: 0, markedStale: 0 });
+
+    // Both copies gone: the evidence ends.
+    write('src/keys.ts', 'const key = process.env.KEY;\n');
+    expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ invalid: 1, markedStale: 1 });
+    expect(mindly.store.memories.get(redacted.id).trust).toBe('stale');
+    expect(mindly.store.memories.get(plain.id).trust).not.toBe('stale');
+  });
+
+  it('finds redacted evidence past the first 20,000 lines of a file', async () => {
+    const { root, mindly, pid, cc, write } = await featureSetup();
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    const lines = Array.from({ length: 21_000 }, (_, i) => `k${i}=${i}`);
+    lines[20_500] = `API_KEY=${secret} # prod`;
+    write('src/long.env.txt', `${lines.join('\n')}\n`);
+    const m = mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'fact',
+      title: 'The API key is set inline',
+      body: 'b',
+      source: agentSource(cc),
+      evidence: [{ path: 'src/long.env.txt', excerpt: `API_KEY=${secret}` }],
+    });
+    expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ checked: 1, invalid: 0 });
+    lines[20_500] = 'API_KEY=${VAULT_KEY} # prod';
+    write('src/long.env.txt', `${lines.join('\n')}\n`);
+    expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ invalid: 1, markedStale: 1 });
+    expect(mindly.store.memories.get(m.id).trust).toBe('stale');
+  });
+
+  it('re-checks long redacted excerpts in time linear in the file, whatever their length', async () => {
+    const { root, clock, mindly, pid, cc, write } = await featureSetup();
+    const secret = (j: number) =>
+      ['sk', 'live', `a1B2c3D4e5F6g7H8i9J0${String(j).padStart(4, '0')}`].join('_');
+    // Blocks of up to 900 short lines, each opened by a secret, in a file of about 440 KB.
+    const block = (j: number, n: number) =>
+      [
+        `token=${secret(j)}`,
+        ...Array.from({ length: n - 1 }, (_, i) => String.fromCharCode(97 + (i % 26))),
+      ].join('\n');
+    const sizes = [900, 800, 700, 600, 500, 400, 300, 200, 100, 30];
+    const filler = Array.from({ length: 48_000 }, (_, i) => `v${i}=x`).join('\n');
+    const content = `${filler}\n${sizes.map((n, j) => block(j, n)).join('\n')}\n`;
+    expect(content.length).toBeGreaterThan(400_000);
+    write('src/blocks.txt', content);
+    const ids = sizes.map(
+      (n, j) =>
+        mindly.memory.remember({
+          projectId: pid,
+          projectRoot: root,
+          kind: 'fact',
+          title: `block ${j}`,
+          body: 'b',
+          source: agentSource(cc),
+          evidence: [{ path: 'src/blocks.txt', excerpt: block(j, n) }],
+        }).id,
+    );
+    const timed = <T>(f: () => T): [T, number] => {
+      const t = performance.now();
+      const r = f();
+      return [r, performance.now() - t];
+    };
+    const [same, sameMs] = timed(() =>
+      selfHealingOf(mindly).recheckFile(pid, root, 'src/blocks.txt', null),
+    );
+    expect(same.map((r) => r.state)).toEqual(sizes.map(() => 'valid'));
+
+    // Every secret rotated: all gone.
+    write('src/blocks.txt', content.replace(/token=sk_live_/g, 'token=rotated_'));
+    const [gone, goneMs] = timed(() =>
+      selfHealingOf(mindly).recheckFile(pid, root, 'src/blocks.txt', null),
+    );
+    expect(gone.map((r) => r.state)).toEqual(sizes.map(() => 'invalid'));
+    expect(mindly.store.memories.get(ids[0]!).trust).toBe('stale');
+    // Tens of milliseconds on an idle machine; the bound leaves room for a busy one.
+    expect(sameMs).toBeLessThan(1000);
+    expect(goneMs).toBeLessThan(1000);
+
+    // A sweep with the file unchanged does not look at evidence already found gone again. (The
+    // store's clock is a fixed one here; it is moved past the file's time, as a real one would be.)
+    clock.t = Date.now() + 60_000;
+    selfHealingOf(mindly).recheckFile(pid, root, 'src/blocks.txt', null);
+    const mark = vi.spyOn(mindly.store.memories, 'markEvidence');
+    const [swept, sweepMs] = timed(() => selfHealingOf(mindly).sweep(pid));
+    expect(swept).toMatchObject({ invalid: sizes.length, markedStale: 0 });
+    expect(mark).not.toHaveBeenCalled();
+    expect(sweepMs).toBeLessThan(1000);
+    // Once the file is written again, it is looked at.
+    write('src/blocks.txt', content);
+    const later = (Date.now() + 120_000) / 1000;
+    utimesSync(join(root, 'src/blocks.txt'), later, later);
+    expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ invalid: 0, restored: sizes.length });
   });
 
   const SK = ['sk', 'live', 'abcdefghijklmnop1234'].join('_');
@@ -430,7 +558,7 @@ describe('self-healing memory', () => {
     ].join('\n');
     expect(json.length).toBeGreaterThan(500_000);
     for (const i of [5, 3000, 5999]) {
-      const hash = citedLinesHash(normalizeBlock(json), `"token": "${value(i)}"`);
+      const hash = evidenceHash(`"token": "${value(i)}"`, '"token": "[REDACTED]"');
       const [there, ms] = timed(() => excerptState(json, '"token": "[REDACTED]"', hash));
       expect(there).toBe('present');
       const [gone, ms2] = timed(() =>
@@ -473,7 +601,7 @@ describe('self-healing memory', () => {
     );
     expect(rotated.map((r) => r.state)).toEqual(Array.from({ length: 20 }, () => 'invalid'));
     expect(mindly.store.memories.get(ids[0]!).trust).toBe('stale');
-    // The file is read and hashed once for all 20 rows.
+    // The file is read and normalised once for all 20 rows.
     expect(sameMs).toBeLessThan(250);
     expect(rotatedMs).toBeLessThan(250);
   });

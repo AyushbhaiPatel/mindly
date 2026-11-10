@@ -3,7 +3,7 @@ import { REDACTED, sha256, type MemoryEvidence, type Session } from '@mindly/cor
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
 import { stripManagedSection } from '../memory/managed-section.js';
-import { parseCitedLines } from '../memory/evidence-hash.js';
+import { parseCitedLines, parseSpan, spanIn } from '../memory/evidence-hash.js';
 import { normalizeBlock, readBounded, type MemoryService } from '../memory/service.js';
 import type { Mindly } from '../mindly.js';
 import {
@@ -78,9 +78,10 @@ function normFile(normContent: string): NormFile {
 
 /**
  * Decides whether an evidence excerpt is still present in `content`: the normalised stored
- * excerpt is in it as a substring, the way it was accepted, or the lines it was taken from are
- * (see `citedLinesHash`): some run of that many whole lines has the stored hash. That is exact
- * whatever the redaction did to the stored text, and costs one pass over the file.
+ * excerpt is in it as a substring, the way it was accepted. Evidence stored in another form than
+ * it was found (redacted, sanitised) carries a hash of the text that was found, and holds while
+ * that text occurs anywhere in the file (see `evidenceHash`). Either way it is one pass over the
+ * file, whatever the excerpt's length.
  */
 export function excerptPresent(
   content: string,
@@ -92,7 +93,7 @@ export function excerptPresent(
 
 /**
  * `excerptPresent` that also says when it could not tell. That only happens for evidence stored
- * with the earlier kind of hash (of the excerpt itself, not of its lines).
+ * with the earlier kind of hash for a redacted excerpt.
  */
 export function excerptState(
   content: string,
@@ -106,15 +107,18 @@ function excerptIn(file: NormFile, excerpt: string, contentHash: string | null):
   const normExcerpt = normalizeBlock(excerpt);
   if (normExcerpt.length > 0 && file.content.includes(normExcerpt)) return 'present';
   if (!contentHash) return 'absent';
+  const span = parseSpan(contentHash);
+  if (span) return spanIn(file.content, span) ? 'present' : 'absent';
+  // Hashes of whole lines, written by an earlier build of this release only.
   const cited = parseCitedLines(contentHash);
   if (cited) return file.hasLines(cited.lines, cited.hash) ? 'present' : 'absent';
 
-  // Stored with the hash of the excerpt itself.
+  // The bare hash of the excerpt.
   if (normExcerpt.length > 0 && sha256(normExcerpt) === contentHash) {
-    // The stored excerpt is the original; the substring test above is authoritative.
+    // The stored excerpt is what was found; the substring test above is authoritative.
     return 'absent';
   }
-  // The stored excerpt was redacted: the original was a run of whole lines, or a part of one.
+  // Stored redacted by an earlier version: the original was a run of whole lines, or a part of one.
   if (file.hasLines(Math.max(1, normExcerpt.split('\n').length), contentHash)) return 'present';
   return legacyPartIn(file.content, normExcerpt, contentHash);
 }
@@ -225,10 +229,20 @@ export class SelfHealingService {
     }
     if (!isFile) return { kind: 'missing' };
     const content = readBounded(p.abs);
-    // Rules Mindly wrote into an instruction file are not evidence for those same rules.
-    return content === null
-      ? { kind: 'unreadable' }
-      : { kind: 'present', file: normFile(normalizeBlock(stripManagedSection(content))) };
+    if (content === null) return { kind: 'unreadable' };
+    let mtimeMs = 0;
+    try {
+      mtimeMs = statSync(p.abs).mtimeMs;
+    } catch {
+      // gone meanwhile: compared as read
+    }
+    let file: NormFile | null = null;
+    return {
+      kind: 'present',
+      mtimeMs,
+      // Rules Mindly wrote into an instruction file are not evidence for those same rules.
+      file: () => (file ??= normFile(normalizeBlock(stripManagedSection(content)))),
+    };
   }
 
   private check(
@@ -242,12 +256,22 @@ export class SelfHealingService {
     if (file.kind === 'unreadable') {
       return { ...base, state: 'unknown', markedStale: false, restored: false };
     }
+    if (
+      file.kind === 'present' &&
+      !e.valid &&
+      e.checkedAt !== null &&
+      file.mtimeMs > 0 &&
+      file.mtimeMs < e.checkedAt
+    ) {
+      // Found gone, and the file has not been written since: nothing to look at again.
+      return { ...base, state: 'invalid', markedStale: false, restored: false };
+    }
     const found =
       file.kind !== 'present'
         ? 'absent'
         : e.excerpt === null
           ? 'present'
-          : excerptIn(file.file, e.excerpt, e.contentHash);
+          : excerptIn(file.file(), e.excerpt, e.contentHash);
     if (found === 'unknown') {
       // Evidence with the earlier kind of hash that could not be placed: it stays as it was.
       return { ...base, state: 'unknown', markedStale: false, restored: false };
@@ -284,8 +308,11 @@ export class SelfHealingService {
   }
 }
 
-/** A present file is normalised once, for every evidence row that points at it. */
-type FileState = { kind: 'present'; file: NormFile } | { kind: 'missing' } | { kind: 'unreadable' };
+/** A present file is normalised once, when the first evidence row needs it. */
+type FileState =
+  | { kind: 'present'; mtimeMs: number; file: () => NormFile }
+  | { kind: 'missing' }
+  | { kind: 'unreadable' };
 
 /** Feature module: re-verifies memory evidence on `files.changed`. */
 export const selfHealingModule = (mindly: Mindly): void => {
