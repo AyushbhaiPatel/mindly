@@ -1,10 +1,10 @@
 // Git commands and command lines, checked both ways: each runs in a scratch copy to see which
 // covered files it really writes, then the pre-tool hook is asked about it.
 //
-// A single git command is judged exactly: git is asked what it writes. On a line where an earlier
-// command may have changed what git would answer (a commit, a stash, a fetch, a switch, a script),
-// a later git command blocks on the paths it names, and what it does to the whole tree is a
-// possible write: a warning naming the rule, never a block, never silence.
+// git is not asked: a git command is read from its text. The paths it names are written and
+// blocked when a rule covers them; what it may do to the whole tree (a switch, a reset, a stash,
+// a merge, a rebase, a pick) is a warning naming the rule when a covered file is there, never a
+// block. Where it sits on the line changes nothing.
 import { describe, expect, it } from 'vitest';
 import { file, guarded, pem, runInCopy } from './written.js';
 
@@ -76,7 +76,7 @@ const cases: {
   verdict: Verdict;
   ran?: (g: G) => string;
 }[] = [
-  // Single commands: exact.
+  // Single commands that change the whole tree.
   {
     name: 'a picked range counts only its own side',
     prepare: (g) => {
@@ -86,7 +86,7 @@ const cases: {
     },
     command: 'git cherry-pick main..feature',
     writes: [],
-    verdict: 'allow',
+    verdict: 'warn',
   },
   {
     name: 'a symmetric pick takes both sides',
@@ -97,7 +97,7 @@ const cases: {
     },
     command: 'git cherry-pick main...feature',
     writes: ['certs/server.pem'],
-    verdict: 'deny',
+    verdict: 'warn',
   },
   {
     name: '`..B` picks from HEAD',
@@ -109,14 +109,14 @@ const cases: {
     },
     command: 'git cherry-pick ..certs-change',
     writes: ['certs/server.pem'],
-    verdict: 'deny',
+    verdict: 'warn',
   },
   {
     name: 'a rebase onto an upstream the branch is on writes nothing',
     prepare: (g) => g.git('checkout', '-q', 'certs-change'),
     command: 'git rebase main',
     writes: [],
-    verdict: 'allow',
+    verdict: 'warn',
   },
   {
     name: "a rebase replays the branch's own changes",
@@ -127,13 +127,13 @@ const cases: {
     },
     command: 'git rebase main',
     writes: ['certs/server.pem'],
-    verdict: 'deny',
+    verdict: 'warn',
   },
   {
     name: 'a rebase of a named branch checks it out first',
     command: 'git rebase main certs-change',
     writes: ['certs/server.pem'],
-    verdict: 'deny',
+    verdict: 'warn',
   },
   {
     name: 'a rebase onto an older commit drops what came after it',
@@ -144,14 +144,14 @@ const cases: {
     },
     command: 'git rebase --onto HEAD~2 HEAD~1',
     writes: ['certs/server.pem'],
-    verdict: 'deny',
+    verdict: 'warn',
   },
   {
     name: 'a rebase without an upstream named goes to the upstream',
     prepare: (g) => g.git('branch', '-q', '--set-upstream-to=certs-change'),
     command: 'git rebase',
     writes: ['certs/server.pem'],
-    verdict: 'deny',
+    verdict: 'warn',
   },
   {
     name: '`git merge -` merges the branch before',
@@ -161,7 +161,7 @@ const cases: {
     },
     command: 'git merge -',
     writes: ['certs/server.pem'],
-    verdict: 'deny',
+    verdict: 'warn',
   },
   {
     name: 'a merge of a fetched branch that touches nothing covered',
@@ -171,7 +171,7 @@ const cases: {
     },
     command: 'git merge --no-edit origin/feature',
     writes: [],
-    verdict: 'allow',
+    verdict: 'warn',
   },
   {
     name: 'an amend alone writes nothing',
@@ -180,7 +180,7 @@ const cases: {
     writes: [],
     verdict: 'allow',
   },
-  // Lines: after a command that may change what git would answer, a warning.
+  // Lines: the same, whatever came before.
   {
     name: 'a stash with nothing to save, then a pop',
     prepare: (g) => {
@@ -354,6 +354,59 @@ const cases: {
     writes: ['certs/server.pem'],
     verdict: 'warn',
   },
+  // Writes named apart from the tree: blocked.
+  {
+    name: '`git diff --output` writes the file it is given',
+    prepare: (g) => file(g.dir, 'src/a.ts', 'dirty\n'),
+    command: 'git diff --output=certs/server.pem',
+    writes: ['certs/server.pem'],
+    verdict: 'deny',
+  },
+  {
+    name: 'a rebase runs its `--exec` commands',
+    prepare: (g) => g.git('checkout', '-q', 'feature'),
+    command: "git rebase -q -x 'echo z > certs/server.pem' HEAD~1",
+    writes: ['certs/server.pem'],
+    verdict: 'deny',
+  },
+  // Whatever an earlier command did to git itself: still a warning.
+  {
+    name: 'HEAD written from inside .git, then a reset',
+    command:
+      "cd .git && echo 'ref: refs/heads/certs-change' > HEAD && cd .. && git reset -q --hard",
+    writes: ['certs/server.pem'],
+    verdict: 'warn',
+  },
+  {
+    name: '.gitignore emptied, then a stash of untracked files',
+    prepare: (g) => {
+      file(g.dir, '.gitignore', 'certs/dev.pem\n');
+      g.git('add', '.gitignore');
+      g.git('commit', '-qm', 'ignore');
+      file(g.dir, 'certs/dev.pem', 'dev\n');
+    },
+    command: ': > .gitignore && git stash -q -u',
+    writes: ['certs/dev.pem'],
+    verdict: 'warn',
+  },
+  {
+    name: 'GIT_EDITOR=true merge touching nothing covered',
+    command: 'GIT_EDITOR=true git merge -q feature',
+    writes: [],
+    verdict: 'warn',
+  },
+  {
+    name: 'an upstream set, then a bare rebase',
+    command: 'git branch --set-upstream-to=certs-change && git rebase',
+    writes: ['certs/server.pem'],
+    verdict: 'warn',
+  },
+  {
+    name: 'an annotated tag, then a checkout of it',
+    command: 'git tag -a v1 -m release certs-change && git checkout -q v1',
+    writes: ['certs/server.pem'],
+    verdict: 'warn',
+  },
 ];
 
 describe('git commands and lines, checked against what they write', () => {
@@ -381,6 +434,28 @@ describe('git commands and lines, checked against what they write', () => {
         'warn',
         'git -C . stash drop && git stash pop',
       );
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('a GIT_DIR exported earlier, then a checkout of everything', async () => {
+    const g = setUp();
+    try {
+      g.git('clone', '-q', '-b', 'certs-change', g.dir, `${g.dir}-clone`);
+      const command = `export GIT_DIR=${g.dir}-clone/.git && git checkout -- .`;
+      await check(g, command, ['certs/server.pem'], 'warn');
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it("a clone's .git copied over ours, then a reset", async () => {
+    const g = setUp();
+    try {
+      g.git('clone', '-q', '-b', 'certs-change', g.dir, `${g.dir}-clone2`);
+      const command = `cp -r ${g.dir}-clone2/.git . && git reset -q --hard`;
+      await check(g, command, ['certs/server.pem'], 'warn');
     } finally {
       g.mindly.close();
     }
