@@ -1,5 +1,5 @@
 import { statSync } from 'node:fs';
-import { sha256, type MemoryEvidence, type Session } from '@mindly/core';
+import { REDACTED, sha256, type MemoryEvidence, type Session } from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
 import { stripManagedSection } from '../memory/managed-section.js';
@@ -37,17 +37,28 @@ export interface SweepResult {
   restored: number;
 }
 
+/** Starts and ends tried when looking for the original text of a redacted excerpt. */
+const MAX_REDACTED_ANCHORS = 24;
+/** The longest original a stored excerpt can stand for (excerpts are capped at 2000 characters). */
+const MAX_ORIGINAL_CHARS = 4000;
+
 /**
  * Decides whether an evidence excerpt is still present in `content`. Matches the normalised
- * stored excerpt as a substring, or (because stored excerpts are redacted/sanitised and may differ
- * from the original) any run of normalised lines whose hash equals the stored content hash.
+ * stored excerpt as a substring, the way it was accepted when the memory was stored. A stored
+ * excerpt that was redacted or sanitised differs from the original, so it is looked for through
+ * the stored content hash: any run of whole normalised lines, or the text between what stands
+ * before and after a redaction, whose hash equals it.
  */
 export function excerptPresent(
   content: string,
   excerpt: string,
   contentHash: string | null,
 ): boolean {
-  const normContent = normalizeBlock(content);
+  return excerptIn(normalizeBlock(content), excerpt, contentHash);
+}
+
+/** `excerptPresent` for content that is already normalised (a file is normalised once). */
+function excerptIn(normContent: string, excerpt: string, contentHash: string | null): boolean {
   const normExcerpt = normalizeBlock(excerpt);
   if (normExcerpt.length > 0 && normContent.includes(normExcerpt)) return true;
   if (!contentHash) return false;
@@ -59,6 +70,44 @@ export function excerptPresent(
   const lines = normContent.split('\n').slice(0, MAX_WINDOW_LINES);
   for (let i = 0; i + n <= lines.length; i++) {
     if (sha256(lines.slice(i, i + n).join('\n')) === contentHash) return true;
+  }
+  return redactedPresent(normContent, normExcerpt, contentHash);
+}
+
+/**
+ * Looks for the original of a redacted excerpt that is not a run of whole lines (a part of a
+ * line, or text whose redaction removed lines). The text before the first redaction and after
+ * the last one is as it was: the original starts at an occurrence of the first and ends at an
+ * occurrence of the second, and the hash says which. When a redaction opens or closes the
+ * excerpt there is no such start or end; the excerpt then holds while its remaining parts are
+ * still there, in order.
+ */
+function redactedPresent(normContent: string, normExcerpt: string, contentHash: string): boolean {
+  const parts = normExcerpt.split(REDACTED);
+  if (parts.length < 2) return false;
+  const first = parts[0] as string;
+  const last = parts[parts.length - 1] as string;
+  if (first === '' || last === '') {
+    let at = 0;
+    for (const part of parts) {
+      if (part === '') continue;
+      const found = normContent.indexOf(part, at);
+      if (found === -1) return false;
+      at = found + part.length;
+    }
+    // When nothing but a redaction is left of the excerpt, it cannot be shown to have changed.
+    return true;
+  }
+  let start = normContent.indexOf(first);
+  for (let i = 0; start !== -1 && i < MAX_REDACTED_ANCHORS; i++) {
+    let end = normContent.indexOf(last, start + first.length);
+    for (let j = 0; end !== -1 && j < MAX_REDACTED_ANCHORS; j++) {
+      const stop = end + last.length;
+      if (stop - start > MAX_ORIGINAL_CHARS) break;
+      if (sha256(normContent.slice(start, stop)) === contentHash) return true;
+      end = normContent.indexOf(last, end + 1);
+    }
+    start = normContent.indexOf(first, start + 1);
   }
   return false;
 }
@@ -143,7 +192,7 @@ export class SelfHealingService {
     // Rules Mindly wrote into an instruction file are not evidence for those same rules.
     return content === null
       ? { kind: 'unreadable' }
-      : { kind: 'present', content: stripManagedSection(content) };
+      : { kind: 'present', content: normalizeBlock(stripManagedSection(content)) };
   }
 
   private check(
@@ -159,7 +208,7 @@ export class SelfHealingService {
     }
     const valid =
       file.kind === 'present' &&
-      (e.excerpt === null || excerptPresent(file.content, e.excerpt, e.contentHash));
+      (e.excerpt === null || excerptIn(file.content, e.excerpt, e.contentHash));
     this.k.store.memories.markEvidence(e.id, valid);
     if (valid) {
       return { ...base, state: 'valid', markedStale: false, restored: !e.valid };
@@ -191,6 +240,7 @@ export class SelfHealingService {
   }
 }
 
+/** `content` is normalised (`normalizeBlock`) once, for every evidence row of the file. */
 type FileState =
   { kind: 'present'; content: string } | { kind: 'missing' } | { kind: 'unreadable' };
 
