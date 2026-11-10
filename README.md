@@ -211,10 +211,13 @@ since stops it.
 An abort never moves, rewrites or deletes git data inside a part's worktree, short of `--yes
 --discard`: a nested repository (a new one, one in an ignored folder such as a dependency
 checkout in `deps/` or `node_modules`, one made in a folder the part tracks), a submodule, a
-`.git` file, folder or link, a git directory among untracked or ignored files (a
-`--separate-git-dir`, a bare repository), or the git directories of the part's submodules,
-initialised or not. A part holding any of it keeps its worktree and branch, the abort stays
-unfinished, and it says, naming each path:
+`.git` file, folder or link in any folder that holds a file (even one git does not accept as a
+repository), a git directory among untracked or ignored files (a `--separate-git-dir`, a bare
+repository: `HEAD`, `objects/` and `refs/` all there), files written into the folder of an
+uninitialised submodule (git lists nothing there), or the git directories of the part's
+submodules, initialised or not. A part holding any of it keeps its worktree and branch, the
+abort stays unfinished, and it says, naming each path (the worktree itself as "the worktree's
+own folder"):
 
 ```text
 it holds git data that abort never deletes: <paths>. Move it out of the worktree (or delete it
@@ -223,8 +226,11 @@ with mindly split abort --yes --discard
 ```
 
 The other parts are removed as usual. A new nested repository, an edit in a folder holding a
-`.git`, or a submodule moved to another commit also counts as work not on the part branch:
-`mindly split merge` stops and names it, and `--force` merges without it and says so.
+`.git`, a submodule moved to another commit, or a file in the folder of an uninitialised
+submodule also counts as work not on the part branch: `mindly split merge` stops and names it,
+and `--force` merges without it and says so. One gap remains: a folder whose only content is a
+`.git` that git does not accept as a repository is not seen (git lists nothing in it), and goes
+with the worktree.
 
 Then worktrees are removed the way `git worktree remove` does without `--force`: git refuses one
 with modified or untracked files (an edited file flagged skip-worktree or assume-unchanged

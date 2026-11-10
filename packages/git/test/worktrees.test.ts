@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError } from '@mindly/core';
@@ -11,6 +11,7 @@ import {
   flaggedChanges,
   ignoredDeniedFiles,
   gitDataPaths,
+  worktreeScan,
   listFiles,
   listWorktrees,
   mergeIntoNewBranch,
@@ -363,12 +364,17 @@ describe('worktrees', () => {
     git(path, 'update-index', '--skip-worktree', 'config/local.json', '.env.local');
     git(path, 'update-index', '--assume-unchanged', 'b.txt');
     expect(git(path, 'status', '--porcelain')).toBe('');
-    expect(await flaggedChanges(path)).toEqual({ changed: ['.env.local'], denied: ['.env.local'] });
+    expect(await flaggedChanges(path)).toEqual({
+      changed: ['.env.local'],
+      denied: ['.env.local'],
+      uninitialised: [],
+    });
     write(path, 'config/local.json', '{"db":"postgres://me:pw@host/db"}\n');
     write(path, 'b.txt', 'edited\n');
     expect(await flaggedChanges(path)).toEqual({
       changed: ['.env.local', 'b.txt', 'config/local.json'],
       denied: ['.env.local'],
+      uninitialised: [],
     });
     // git's own check sees them too (here, the skip-worktree one alone), and a refusal leaves the
     // flags as they were.
@@ -444,6 +450,39 @@ describe('worktrees', () => {
       'tools/empty',
       'tools/patched-dep',
     ]);
+  });
+
+  it('finds what git does not list: a rejected .git, files in an uninitialised submodule', async () => {
+    const sub = makeRepo({ 'x.ts': 'x\n' });
+    const root = makeRepo({
+      '.gitignore': 'build/\n',
+      'objects/a.txt': 'a\n',
+      'refs/b.txt': 'b\n',
+    });
+    git(root, ...FILE, 'submodule', '-q', 'add', sub, 'mods/sub');
+    commitAll(root, 'sub');
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    // An empty submodule folder holds nothing; one with a file written into it does.
+    expect((await worktreeScan(path)).gitData).toEqual([]);
+    write(path, 'mods/sub/patch.ts', 'p\n');
+    // A repository with a truncated HEAD, deep in an ignored folder.
+    write(path, 'build/r/src/f.ts', 'f\n');
+    git(join(path, 'build/r'), 'init', '-q');
+    writeFileSync(join(path, 'build/r/.git/HEAD'), '');
+    // A HEAD at the top beside tracked objects/ and refs/ is not a git directory; a folder with
+    // all three untracked is.
+    write(path, 'HEAD', 'not a repository\n');
+    write(path, 'gd/HEAD', 'ref: refs/heads/main\n');
+    write(path, 'gd/objects/ab/cdef', 'x');
+    write(path, 'gd/refs/heads/main', '0000\n');
+    const scan = await worktreeScan(path);
+    expect(scan.gitData).toEqual([
+      'build/r',
+      'gd',
+      'files in the uninitialised submodule folder mods/sub',
+    ]);
+    expect((await flaggedChanges(path)).uninitialised).toEqual(['mods/sub/patch.ts']);
   });
 
   it('finds git directories kept apart from their work tree, in ignored folders', async () => {

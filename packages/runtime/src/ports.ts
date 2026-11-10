@@ -145,6 +145,8 @@ export function createSplitGitPort(): SplitGitPort {
         // New nested repositories, left out of the capture: not on the branch either.
         ...captured.nested,
         ...flagged.changed,
+        // Written into the folder of an uninitialised submodule: git lists nothing there.
+        ...flagged.uninitialised,
       ]);
       // The same look at the worktree, against another commit (status asks for both).
       const changed =

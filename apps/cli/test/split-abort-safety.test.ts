@@ -7,6 +7,7 @@ import {
   existsSync,
   readFileSync,
   renameSync,
+  rmSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -440,6 +441,67 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     git(lib, 'commit', '-q', '-m', 'only here');
     await keptFor(sb, '.cache/lib.git, lib');
     expect(git(lib, 'log', '--format=%s')).toBe('only here\n');
+  });
+
+  it('keeps files written into an uninitialised submodule folder, and a merge stops at them', async () => {
+    const sub = tempDir('r10-sub-');
+    repoAt(sub, { 'lib.ts': 'export const lib = 1;\n' });
+    const sb = await splitSandbox((s) => {
+      git(
+        s.repo,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        '-q',
+        'add',
+        sub,
+        'src/app/vendor',
+      );
+    });
+    const page = partDir(sb, 'page');
+    // `git worktree add` leaves the submodule folder empty; the agent writes into it.
+    write(page, 'src/app/vendor/patch.ts', 'export const fix = 1; // hours of work\n');
+    // git lists nothing under a gitlink, nor does its own check before removing a worktree.
+    expect(git(page, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+    const st = JSON.parse((await cli(sb, ['split', 'status', '--json'])).stdout) as {
+      parts: { uncommitted: string[] }[];
+    };
+    expect(st.parts.map((p) => p.uncommitted)).toEqual([[], ['src/app/vendor/patch.ts']]);
+    await allDone(sb);
+    const merged = await cli(sb, ['split', 'merge']);
+    expect(merged.code).not.toBe(0);
+    expect(merged.stderr).toContain('src/app/vendor/patch.ts');
+    // --force merges without them, and says so.
+    const forced = await cli(sb, ['split', 'merge', '--force']);
+    expect(forced.code).toBe(0);
+    expect(forced.stdout).toContain('src/app/vendor/patch.ts');
+    await keptFor(sb, 'files in the uninitialised submodule folder src/app/vendor');
+    expect(readFileSync(join(page, 'src/app/vendor/patch.ts'), 'utf8')).toContain('hours of work');
+  });
+
+  it('keeps a repository git does not accept, in an ignored folder', async () => {
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', 'build/\n'));
+    const page = partDir(sb, 'page');
+    const r0 = join(page, 'build/r');
+    repoAt(r0, { 'f.ts': 'f\n' });
+    // HEAD a symlink: git no longer takes it for a repository, and never lists `.git` itself.
+    writeFileSync(join(r0, '.git/HEAD.real'), 'ref: refs/heads/main\n');
+    rmSync(join(r0, '.git/HEAD'));
+    symlinkSync('HEAD.real', join(r0, '.git/HEAD'));
+    await keptFor(sb, 'build/r');
+    expect(existsSync(join(r0, '.git/objects'))).toBe(true);
+  });
+
+  it('does not take the worktree for a git directory: a HEAD beside tracked objects/ and refs/', async () => {
+    const sb = await splitSandbox((s) => {
+      write(s.repo, 'objects/a.txt', 'a\n');
+      write(s.repo, 'refs/b.txt', 'b\n');
+      write(s.repo, '.gitignore', 'HEAD\n');
+    });
+    write(partDir(sb, 'page'), 'HEAD', 'build output\n');
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    expect(r.stdout + r.stderr).not.toContain('git data');
+    expect(r.code).toBe(0);
   });
 
   it('keeps a repository whose .git is a link into an ignored folder', async () => {
