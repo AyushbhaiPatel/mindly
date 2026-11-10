@@ -110,9 +110,13 @@ describe('human output on a real project', () => {
     );
     expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code - [a-z]+-[a-z]+-\d+ changed/);
     const flat = r.stdout.replace(/[\s|]+/g, ' ');
-    // The sentence wraps inside its cell, so the Name cell may sit between its words.
-    expect(flat).toContain('changed the exports of');
-    expect(flat).toContain("src/auth.ts; Codex's src/dash.ts uses them");
+    // The sentence wraps inside its cell, so the Name cell may sit between any two of its words.
+    const name = '(?:[a-z]+-[a-z]+-\\d+ )?';
+    const sentence = "changed the exports of src/auth.ts; Codex's src/dash.ts uses them"
+      .split(' ')
+      .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join(` ${name}`);
+    expect(flat).toMatch(new RegExp(sentence));
     expect(flat).toMatch(/Conflict Claude Code - [a-z]+-[a-z]+-\d+ changed .* [a-z]+-[a-z]+-\d+ /);
     expect(flat).toContain('- Rule "Don\'t use default exports" - suggested by you');
     expect(flat).toContain('- Handoff Waiting for Cursor:');
