@@ -16,7 +16,6 @@ import { describe, expect, it } from 'vitest';
 import { codename, shortId } from '@mindly/core';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary, runHook, styleFor } from '../src/index.js';
-import { stableNode } from '../src/runner-copy.js';
 import { cli, fixture, sandbox, tempDir, testIo, write, type Sandbox } from './helpers.js';
 
 function json<T = Record<string, unknown>>(text: string): T {
@@ -53,7 +52,9 @@ describe('init / uninstall', () => {
 
     const settings = readFileSync(join(sb.home, '.claude', 'settings.json'), 'utf8');
     expect(settings).toContain('hook claude-code SessionStart');
-    expect(settings).toContain(stableNode(sb.env));
+    // Node is recorded by a path that survives upgrades when one leads to the running binary.
+    const node = /"command":\s*"(\S+) /.exec(settings)?.[1] ?? '';
+    expect(statSync(node).ino).toBe(statSync(process.execPath).ino);
     const mcp = json<{ mcpServers: Record<string, { args: string[] }> }>(
       readFileSync(join(sb.home, '.claude.json'), 'utf8'),
     );
