@@ -78,51 +78,18 @@ const AUTH_SCHEME =
 /** Schemes whose credentials are `name=value` parameters: Digest, AWS Signature Version 4. */
 const PARAM_SCHEMES = new Set(['digest', 'aws4-hmac-sha256']);
 
-/** The name of one `name=value` parameter of such a scheme, with its `=`. */
-const AUTH_PARAM_NAME = /([A-Za-z][\w-]{0,40})=/y;
+/**
+ * A `Digest` or `AWS4-HMAC-SHA256` `Authorization` header (or JSON key), whose credentials are
+ * `name=value` parameters.
+ */
+const PARAM_HEADER = /authorization["']?[ \t]*[:=][ \t]*["'\\]*(?:digest|aws4-hmac-sha256)\b/i;
 
 /**
- * The value of a parameter that starts at `at`: `from`..`to` without its quotes, and where reading
- * goes on. A value in quotes (`"..."`, or `\"...\"` inside a quoted argument) runs to the same
- * quote, escaped as it was opened, spaces and commas included; any other runs to a space, comma,
- * quote or backslash. `unclosed` holds, per kind of quote, the end of a line on which a search for
- * its closing quote already failed: a later one on that line fails too, so a line is searched at
- * most once per kind.
+ * The name of a parameter whose value is a secret or proves one, and its `=`: read anywhere on a
+ * line that holds a `PARAM_HEADER` (the rest, `username` or `uri`, are kept).
  */
-function paramValue(
-  text: string,
-  at: number,
-  lineEnd: number,
-  unclosed: Map<string, number>,
-): { from: number; to: number; next: number } {
-  let open = at;
-  while (open < lineEnd && text[open] === '\\') open++;
-  const q = text[open] ?? '';
-  if (q === '"' || q === "'") {
-    const escaped = open > at;
-    const kind = escaped ? `\\${q}` : q;
-    if (unclosed.get(kind) !== lineEnd) {
-      for (let p = open + 1; p < lineEnd; p++) {
-        if (text[p] !== q || (escaped && text[p - 1] !== '\\')) continue;
-        let to = p;
-        while (escaped && to > open + 1 && text[to - 1] === '\\') to--;
-        return { from: open + 1, to, next: p + 1 };
-      }
-      unclosed.set(kind, lineEnd);
-    }
-    at = open + 1;
-  }
-  let to = at;
-  while (to < lineEnd) {
-    const c = text[to] ?? '';
-    if (isSpace(c) || c === ',' || isQuoting(c)) break;
-    to++;
-  }
-  return { from: at, to, next: to };
-}
-
-/** Parameters whose values are secrets or prove one: the rest (`username`, `uri`) are kept. */
-const SECRET_PARAMS = new Set(['response', 'nonce', 'cnonce', 'opaque', 'signature', 'password']);
+const SECRET_PARAM =
+  /(?<![A-Za-z0-9_-])(?:response|cnonce|nonce|opaque|signature|password)[ \t]*=[ \t]*/gi;
 
 /** A credential after a scheme is one token of at least this many characters, no spaces. */
 const MIN_SCHEME_TOKEN = 8;
@@ -340,10 +307,6 @@ function closingQuote(text: string, at: number, lineEnd: number): number {
 /** Collects the parts of a text to redact. */
 class Finder {
   readonly edits: { from: number; to: number }[] = [];
-  /** Where the last list of Digest or AWS Signature parameters read ended. */
-  private paramsEnd = -1;
-  /** Per kind of quote, the end of a line where a parameter's quote was found not to close. */
-  private readonly unclosed = new Map<string, number>();
 
   constructor(
     private readonly text: string,
@@ -413,12 +376,7 @@ class Finder {
     if (from > at && (text[from] === ']' || text[from] === ',' || text[from] === ')')) return;
     AUTH_SCHEME.lastIndex = from;
     const scheme = AUTH_SCHEME.exec(text);
-    if (scheme !== null) {
-      from += scheme[0].length;
-      if (PARAM_SCHEMES.has((scheme[1] ?? '').toLowerCase()) && this.params(from, lineEnd)) {
-        return;
-      }
-    }
+    if (scheme !== null) from += scheme[0].length;
     while (from < lineEnd && (text[from] === '"' || text[from] === "'" || text[from] === '\\')) {
       from++;
     }
@@ -429,50 +387,49 @@ class Finder {
       to++;
     }
     if (to - from < (scheme !== null ? MIN_SCHEME_TOKEN : MIN_BARE_TOKEN)) return;
+    // Digest and AWS Signature parameters (`username="u"`) are read by `params`, on the line.
+    const params = PARAM_SCHEMES.has((scheme?.[1] ?? '').toLowerCase());
+    if (params && text.slice(from, to).includes('=')) return;
     this.push(from, to);
   }
 
   /**
-   * Digest and AWS Signature parameters from `at`: the values of the secret ones. A quoted value
-   * runs to its closing quote, spaces included (`realm="Restricted Area"`), and a run that is no
-   * parameter is passed over. The list ends at the end of the line, at a quote that closes the
-   * argument the header is in, or at an option. False when there are no parameters, so the value
-   * is read as a token.
+   * On a line (`start`..`end`) that holds a Digest or AWS Signature header, the value of every
+   * parameter named in `SECRET_PARAM`, wherever it is on the line: the same name elsewhere on the
+   * line is redacted too, which garbles that value and nothing else. A value in quotes (`"..."`,
+   * `\"...\"`) runs to the next same quote on the line, or to the end of the line when it never
+   * closes; any other runs to a space, comma, quote or backslash.
    *
-   * A header inside a list already read (`x=-HAuthorization:Digest ...`) was read with it, so no
-   * stretch of a line is read twice and the work stays linear.
+   * Names are looked for again just inside a quoted value (`username="John, response="..."`),
+   * which costs nothing more: a quoted value ends at the next same quote, so the values of one
+   * kind of quote do not overlap, and the line is read once per kind.
    */
-  private params(at: number, lineEnd: number): boolean {
-    if (at < this.paramsEnd) return true;
+  private params(start: number, end: number): void {
     const text = this.text;
-    let k = at;
-    let found = false;
-    while (k < lineEnd) {
-      while (k < lineEnd && (isSpace(text[k] ?? '') || text[k] === ',')) k++;
-      const c = text[k] ?? '';
-      if (k >= lineEnd || isQuoting(c) || c === '`' || c === '-') break;
-      AUTH_PARAM_NAME.lastIndex = k;
-      const name = AUTH_PARAM_NAME.exec(text);
-      if (name === null || k + name[0].length > lineEnd) {
-        // Not a parameter: passed over to the next space or comma, or to a quote, which may
-        // close the argument the header is in.
-        while (
-          k < lineEnd &&
-          !isSpace(text[k] ?? '') &&
-          text[k] !== ',' &&
-          !isQuoting(text[k] ?? '')
-        ) {
-          k++;
-        }
+    const line = text.slice(start, end);
+    SECRET_PARAM.lastIndex = 0;
+    for (let m = SECRET_PARAM.exec(line); m !== null; m = SECRET_PARAM.exec(line)) {
+      let open = start + m.index + m[0].length;
+      while (open < end && text[open] === '\\') open++;
+      const q = text[open];
+      if (q === '"' || q === "'") {
+        let close = open + 1;
+        while (close < end && text[close] !== q) close++;
+        let to = close;
+        while (to > open + 1 && text[to - 1] === '\\') to--;
+        this.push(open + 1, to);
+        SECRET_PARAM.lastIndex = open + 1 - start;
         continue;
       }
-      found = true;
-      const { from, to, next } = paramValue(text, k + name[0].length, lineEnd, this.unclosed);
-      if (SECRET_PARAMS.has((name[1] ?? '').toLowerCase())) this.push(from, to);
-      k = next;
+      let to = start + m.index + m[0].length;
+      while (to < end) {
+        const c = text[to] ?? '';
+        if (isSpace(c) || c === ',' || isQuoting(c)) break;
+        to++;
+      }
+      this.push(start + m.index + m[0].length, to);
+      SECRET_PARAM.lastIndex = Math.max(SECRET_PARAM.lastIndex, to - start);
     }
-    if (found) this.paramsEnd = k;
-    return found;
   }
 
   /** Reads the value of an option at `runStart` whose value is `from`..`to`. */
@@ -496,6 +453,7 @@ class Finder {
     const bearer = /(?:^|\s)(?:-A|--auth-type)[\s=]*["']?(?:bearer|jwt)\b/i.test(lineText);
     // A line that is a JSON object may name its client after the options: `{"args":..,"tool":"curl"}`.
     const json = /^\s*\{/.test(lineText) && /\}\s*$/.test(lineText);
+    if (PARAM_HEADER.test(lineText)) this.params(start, end);
     const before = (at: number, client: number): number =>
       client !== -1 && (json || client < at) ? client : -1;
     // lftp takes `name,password` as well as `name:password`, as the client nearest before the

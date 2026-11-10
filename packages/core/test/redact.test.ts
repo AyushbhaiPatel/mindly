@@ -322,7 +322,13 @@ describe('redact', () => {
       'curl -H \'Authorization: Digest username="u", realm="r", nonce="PW", response="PW"\' x',
       'PW',
     ],
-    // A quoted value with spaces does not end the list: the secrets after it are still found.
+    // A quote that does not close where it should, in one header or another, hides nothing.
+    [
+      "curl -H 'Authorization: Digest realm=\"r' -H 'Authorization: Digest response=\"PW\"' x",
+      'PW',
+    ],
+    ['curl -H \'Authorization: Digest username="John, response="PW"\' x', 'PW'],
+    // A quoted value with spaces: the secrets after it are still found.
     [
       'curl -H \'Authorization: Digest username="u", realm="Restricted Area", response="PW"\' x',
       'PW',
@@ -625,6 +631,7 @@ describe('redact', () => {
       'Digest headers glued into parameter values',
       `curl ${'x=-HAuthorization:Digest '.repeat(10_001)}`,
     ],
+    ['Digest headers without parameters', `curl ${'Authorization:Digest x '.repeat(10_870)}`],
     [
       'Digest parameters with unclosed quotes',
       `curl ${'-HAuthorization:Digest a="x b=\'y '.repeat(7_500)}`,
