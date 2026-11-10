@@ -112,22 +112,34 @@ function memorySummary(m: Memory): Record<string, unknown> {
  * null when it was stored. The agent is told plainly, so it does not assume its text was saved.
  */
 function notStored(outcome: RememberOutcome, m: Memory): CallToolResult | null {
-  if (outcome !== 'kept_approved' && outcome !== 'kept_rejected') return null;
-  const approved = outcome === 'kept_approved';
-  const text = approved
-    ? 'Not stored: an approved memory with this title exists and was left unchanged (new ' +
-      'evidence, if any, was added to it). Propose the change under a different title or ask ' +
-      'the user to edit it.'
-    : 'Not stored: the user rejected a memory with this title. Do not propose it again; ask ' +
-      'the user if you think it should be reconsidered.';
-  return ok(
-    block(
-      [{ heading: approved ? 'Existing approved memory' : 'Rejected', lines: [memoryItem(m)] }],
-      text,
-      text,
-    ),
-    { stored: false, outcome, memory: memorySummary(m) },
-  );
+  if (outcome === 'created' || outcome === 'updated') return null;
+  const reply = {
+    kept_approved: {
+      heading: 'Existing approved memory',
+      text:
+        'Not stored: an approved memory with this title exists and was left unchanged (new ' +
+        'evidence, if any, was added to it). Propose the change under a different title or ask ' +
+        'the user to edit it.',
+    },
+    kept_rejected: {
+      heading: 'Rejected',
+      text:
+        'Not stored: the user rejected a memory with this title. Do not propose it again; ask ' +
+        'the user if you think it should be reconsidered.',
+    },
+    kept_other_author: {
+      heading: 'Existing memory of another agent',
+      text:
+        'Not stored: another agent already proposed a memory with this title, and it was left ' +
+        'in its own words (new evidence, if any, was added to it). If yours says something ' +
+        'different, propose it under a different title.',
+    },
+  }[outcome];
+  return ok(block([{ heading: reply.heading, lines: [memoryItem(m)] }], reply.text, reply.text), {
+    stored: false,
+    outcome,
+    memory: memorySummary(m),
+  });
 }
 
 function taskLine(mindly: Mindly, t: Task, now: number): string {
@@ -364,6 +376,10 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         { type: 'agent', sessionId: session.id, agentKind: session.agentKind },
         args.reason ? safeLine(args.reason, 300) : 'refined via MCP',
       );
+      // Never report an update that did not happen.
+      if (args.archive && m.status !== 'archived') {
+        throw new MindlyError('forbidden', 'the memory could not be archived and is still active');
+      }
       return ok(
         block(
           [

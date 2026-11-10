@@ -56,8 +56,16 @@ export interface RememberInput {
  * What {@link MemoryService.rememberResult} did. `kept_approved`: a memory the user approved has
  * this title, so its text, scope and trust were left as they are (new evidence and the occurrence
  * are recorded). `kept_rejected`: the user rejected a memory with this title; nothing was stored.
+ * `kept_other_author`: a different agent proposed a memory with this title; it keeps its text, and
+ * new evidence and the occurrence are recorded.
  */
-export type RememberOutcome = 'created' | 'updated' | 'kept_approved' | 'kept_rejected';
+export type RememberOutcome =
+  'created' | 'updated' | 'kept_approved' | 'kept_rejected' | 'kept_other_author';
+
+/** Whether two sources are the same author: the user, the system, or agents of one kind. */
+function sameAuthor(a: MemorySource, b: MemorySource): boolean {
+  return a.type === b.type && a.agentKind === b.agentKind;
+}
 
 export interface RememberResult {
   memory: Memory;
@@ -237,6 +245,12 @@ export class MemoryService {
       if (existing.trust === 'approved') {
         return { memory: this.restated(existing, input, evidence), outcome: 'kept_approved' };
       }
+      // A memory stays in the words of whoever it is attributed to: another agent saying the same
+      // thing corroborates it (its evidence and the occurrence are recorded) but cannot put its
+      // own text under the first agent's name. An agent may still refine what it proposed.
+      if (!sameAuthor(existing.source, input.source)) {
+        return { memory: this.restated(existing, input, evidence), outcome: 'kept_other_author' };
+      }
     }
     const memory = this.k.store.transaction(() => {
       let m: Memory;
@@ -368,7 +382,11 @@ export class MemoryService {
       throw new MindlyError('forbidden', 'evidence path is on the deny-list');
     }
     const excerpt = e.excerpt ? e.excerpt.slice(0, 2000) : null;
-    if (!excerpt) return { rel: resolved.rel, excerpt: null, hash: null, valid: true };
+    if (!excerpt) {
+      // Without an excerpt the file itself is the evidence, so it has to be there.
+      if (!isFile(resolved.abs)) throw invalidInput('evidence file does not exist in the project');
+      return { rel: resolved.rel, excerpt: null, hash: null, valid: true };
+    }
     const content = readBounded(resolved.abs);
     const normExcerpt = normalizeBlock(excerpt);
     const valid =
@@ -402,7 +420,15 @@ export class MemoryService {
       delete clean.trust;
       delete clean.enforce;
       delete clean.pinned;
-      if (patch.status === 'archived' && cur.source.sessionId !== by.sessionId) delete clean.status;
+      // An agent archives what its own kind proposed, from any of its sessions. Anything else is
+      // refused out loud: a dropped field would look like success to the caller.
+      if (
+        patch.status !== undefined &&
+        patch.status !== cur.status &&
+        !sameAuthor(cur.source, by)
+      ) {
+        throw new MindlyError('forbidden', 'agents can only archive memories they proposed');
+      }
     }
     if (clean.enforce && cur.kind !== 'rule') delete clean.enforce;
     const m = this.k.store.memories.update(id, clean, by, reason, record && by.type === 'user');
@@ -517,6 +543,14 @@ export function normalizeBlock(text: string): string {
     .map(normalizeLine)
     .filter((l) => l.length > 0)
     .join('\n');
+}
+
+function isFile(abs: string): boolean {
+  try {
+    return statSync(abs).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export function readBounded(abs: string, max = MAX_EVIDENCE_FILE_BYTES): string | null {

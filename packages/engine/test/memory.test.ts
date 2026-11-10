@@ -215,6 +215,115 @@ describe('trust layer', () => {
     expect(updates()).toBe(events);
   });
 
+  it('keeps a proposal in the words of the agent it is attributed to', () => {
+    const { root, mindly, pid } = project();
+    const claude = { type: 'agent' as const, sessionId: null, agentKind: 'claude-code' };
+    const base = { projectId: pid, projectRoot: root, kind: 'fact' as const };
+    const first = mindly.memory.remember({
+      ...base,
+      title: 'Plain proposed fact from A',
+      body: 'original',
+      source: claude,
+    });
+    const other = mindly.memory.rememberResult({
+      ...base,
+      title: 'plain proposed fact from A!',
+      body: 'REWRITTEN BY B',
+      scopePaths: ['**'],
+      evidence: [{ path: 'src/auth.ts', excerpt: 'export function login(user: string) {' }],
+      source: agent,
+    });
+    expect(other.outcome).toBe('kept_other_author');
+    expect(other.memory).toMatchObject({
+      id: first.id,
+      body: 'original',
+      version: 1,
+      trust: 'proposed',
+      scope: { paths: [] },
+      source: { agentKind: 'claude-code' },
+    });
+    // The other agent's evidence corroborates it without changing whose claim it is.
+    expect(mindly.store.memories.evidenceFor(first.id)).toHaveLength(1);
+    // The system does not rewrite an agent's memory either; the same agent kind still can.
+    expect(
+      mindly.memory.rememberResult({
+        ...base,
+        title: 'Plain proposed fact from A',
+        body: 'by the system',
+        source: { type: 'system', sessionId: null, agentKind: null },
+      }).outcome,
+    ).toBe('kept_other_author');
+    expect(
+      mindly.memory.rememberResult({
+        ...base,
+        title: 'Plain proposed fact from A',
+        body: 'refined',
+        source: { ...claude, sessionId: null },
+      }),
+    ).toMatchObject({ outcome: 'updated', memory: { id: first.id, body: 'refined', version: 2 } });
+  });
+
+  it('lets an agent archive what its kind proposed and refuses the rest out loud', () => {
+    const { root, mindly, pid } = project();
+    const session = (externalId: string, agentKind: string) =>
+      mindly.store.sessions.upsert({
+        projectId: pid,
+        agentKind,
+        externalId,
+        worktree: root,
+        branch: null,
+        transcriptPath: null,
+      }).session;
+    const s1 = session('cx-1', 'codex');
+    const s2 = session('cx-2', 'codex');
+    const cc = session('cc-1', 'claude-code');
+    const by = (s: { id: string; agentKind: string }) => ({
+      type: 'agent' as const,
+      sessionId: s.id,
+      agentKind: s.agentKind,
+    });
+    const note = mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'note',
+      title: 'Draft note',
+      body: 'x',
+      source: by(s1),
+    });
+    expect(() => mindly.memory.update(note.id, { status: 'archived' }, by(cc), null)).toThrow(
+      /only archive memories they proposed/,
+    );
+    expect(mindly.store.memories.get(note.id).status).toBe('active');
+    // A later session of the same agent kind may.
+    expect(mindly.memory.update(note.id, { status: 'archived' }, by(s2), null).status).toBe(
+      'archived',
+    );
+  });
+
+  it('requires a file named as evidence to exist', () => {
+    const { root, mindly, pid } = project();
+    const base = { projectId: pid, projectRoot: root, kind: 'fact' as const, source: agent };
+    for (const path of ['src/missing.ts', 'src', 'nowhere/at/all.md']) {
+      expect(() =>
+        mindly.memory.remember({
+          ...base,
+          title: `Fact about ${path}`,
+          body: '',
+          evidence: [{ path }],
+        }),
+      ).toThrow(/evidence file does not exist/);
+    }
+    expect(mindly.memory.list(pid, { kinds: ['fact'] })).toEqual([]);
+    const ok = mindly.memory.remember({
+      ...base,
+      title: 'Auth is one file',
+      body: '',
+      evidence: [{ path: 'src/auth.ts' }],
+    });
+    expect(ok.trust).toBe('proposed');
+    expect(mindly.store.memories.evidenceFor(ok.id).map((e) => e.ref)).toEqual(['src/auth.ts']);
+  });
+
   it('still records a command that fails again after its mistake was approved', () => {
     const { root, mindly, pid } = project();
     const { session } = mindly.store.sessions.upsert({

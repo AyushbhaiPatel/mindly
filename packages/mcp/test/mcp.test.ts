@@ -368,6 +368,24 @@ describe('mindly MCP server', () => {
     expect(missing.isError).toBe(true);
     expect(missing.text).toMatch(/^invalid_input:/);
     expect(missing.text).not.toMatch(/\bat\s+\S+\s+\(/);
+
+    // A file named as evidence has to exist, with or without an excerpt.
+    for (const path of ['src/no-such-file.ts', 'src']) {
+      const absent = await h.call('mindly_remember', {
+        kind: 'fact',
+        title: `Evidence at ${path}`,
+        evidence: [{ path }],
+      });
+      expect(absent.isError).toBe(true);
+      expect(absent.text).toMatch(/^invalid_input: evidence file does not exist/);
+    }
+    const present = await h.call('mindly_remember', {
+      kind: 'fact',
+      title: 'Auth lives in one file',
+      evidence: [{ path: 'src/auth.ts' }],
+    });
+    expect(present.isError).toBe(false);
+    expect((present.structured?.['memory'] as { trust: string }).trust).toBe('proposed');
   });
 
   it('lets agents refine only their own proposals', async () => {
@@ -395,6 +413,82 @@ describe('mindly MCP server', () => {
       body: 'x',
     });
     expect(unknown.text).toMatch(/^not_found:/);
+  });
+
+  it('archives a proposal of its own agent kind from a later session', async () => {
+    const h = await harness();
+    const seed = await h.call('mindly_remember', { kind: 'note', title: 'Seed note' });
+    const pid = pidOf(h, (seed.structured?.['memory'] as { id: string }).id);
+    // Proposed by the same agent kind in an earlier session.
+    const earlier = h.mindly.memory.remember({
+      projectId: pid,
+      projectRoot: h.root,
+      kind: 'note',
+      title: 'Note from an earlier session',
+      body: 'x',
+      source: { type: 'agent', sessionId: null, agentKind: 'claude-code' },
+    });
+    const out = await h.call('mindly_update_memory', { id: earlier.id, archive: true });
+    expect(out.isError).toBe(false);
+    expect(out.text).toContain('Archived memory');
+    expect(out.structured).toMatchObject({ memory: { id: earlier.id, status: 'archived' } });
+    expect(h.mindly.store.memories.get(earlier.id).status).toBe('archived');
+
+    const other = h.mindly.memory.remember({
+      projectId: pid,
+      projectRoot: h.root,
+      kind: 'note',
+      title: 'Note from another agent',
+      body: 'x',
+      source: { type: 'agent', sessionId: null, agentKind: 'codex' },
+    });
+    const denied = await h.call('mindly_update_memory', { id: other.id, archive: true });
+    expect(denied.isError).toBe(true);
+    expect(denied.text).toMatch(/^forbidden:/);
+    expect(h.mindly.store.memories.get(other.id).status).toBe('active');
+  });
+
+  it('leaves the proposal of another agent in its own words', async () => {
+    const h = await harness();
+    const first = await h.call('mindly_remember', {
+      kind: 'fact',
+      title: 'Plain proposed fact from A',
+      body: 'Written by the first agent.',
+    });
+    const id = (first.structured?.['memory'] as { id: string }).id;
+    const codex = await harness({ agentKind: 'codex' }, { root: h.root, mindly: h.mindly });
+    const second = await codex.call('mindly_remember', {
+      kind: 'fact',
+      title: 'Plain proposed fact from A!',
+      body: 'REWRITTEN BY B',
+      evidence: [{ path: 'src/auth.ts' }],
+    });
+    expect(second.isError).toBe(false);
+    expect(second.text).toMatch(/Not stored: another agent already proposed a memory/);
+    expect(second.text).not.toContain('REWRITTEN BY B');
+    expect(second.structured).toMatchObject({
+      stored: false,
+      outcome: 'kept_other_author',
+      memory: { id, version: 1 },
+    });
+    expect(h.mindly.store.memories.get(id)).toMatchObject({
+      body: 'Written by the first agent.',
+      version: 1,
+      source: { agentKind: 'claude-code' },
+    });
+    expect(h.mindly.store.memories.evidenceFor(id).map((e) => e.ref)).toEqual(['src/auth.ts']);
+
+    // The agent that proposed it can still refine it by saying it again.
+    const refined = await h.call('mindly_remember', {
+      kind: 'fact',
+      title: 'Plain proposed fact from A',
+      body: 'Refined by the first agent.',
+    });
+    expect(refined.structured).not.toHaveProperty('stored');
+    expect(h.mindly.store.memories.get(id)).toMatchObject({
+      body: 'Refined by the first agent.',
+      version: 2,
+    });
   });
 
   it('searches memory with kind and trust filters', async () => {
