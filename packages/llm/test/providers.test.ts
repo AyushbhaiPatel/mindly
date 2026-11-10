@@ -333,6 +333,16 @@ describe('OpenAI reasoning models', () => {
     }
   });
 
+  it('uses the default model when the configured name is blank', async () => {
+    for (const model of ['', '  ']) {
+      const { fetchImpl, calls } = recordingFetch([openaiOk]);
+      const p = new OpenAIProvider({ fetchImpl, env, model, ...fast });
+      await p.complete({ system: 's', prompt: 'x', maxTokens: 5 });
+      const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>;
+      expect(body.model).toBe('gpt-4.1-mini');
+    }
+  });
+
   it('keeps the temperature for other models', async () => {
     const { fetchImpl, calls } = recordingFetch([openaiOk]);
     const p = new OpenAIProvider({ fetchImpl, env, ...fast });
@@ -362,6 +372,18 @@ describe('Retry-After', () => {
       text: 'hello',
     });
     expect(calls).toHaveLength(2);
+  });
+
+  it('gives up at once when the pause would end after the caller stops waiting', async () => {
+    const { fetchImpl, calls } = recordingFetch([() => jsonResponse({}, 503), anthropicOk]);
+    const p = new AnthropicProvider({ fetchImpl, env, retryDelayMs: 400, random: () => 0 });
+    const started = Date.now();
+    const err = await rejection(
+      p.complete({ system: '', prompt: 'x', maxTokens: 5, deadline: Date.now() + 100 }),
+    );
+    expect(isMindlyError(err, 'unavailable')).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(Date.now() - started).toBeLessThan(100);
   });
 
   it('reads delay-seconds and HTTP dates', () => {

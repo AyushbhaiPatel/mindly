@@ -30,6 +30,8 @@ export interface PostJsonRequest {
   headers: Record<string, string>;
   body: unknown;
   signal?: AbortSignal | undefined;
+  /** When the caller stops waiting (ms since the epoch); a retry that cannot finish by then is not made. */
+  deadline?: number | undefined;
 }
 
 type Attempt =
@@ -164,7 +166,9 @@ export async function postJson(req: PostJsonRequest, http: HttpSettings): Promis
     const jitter = http.retryDelayMs * (1 + Math.min(1, Math.max(0, http.random())));
     const delay = outcome.retryAfterMs ?? jitter;
     const maxWait = http.maxRetryWaitMs ?? DEFAULT_MAX_RETRY_WAIT_MS;
-    if (isRetryable(outcome.status) && attempt < MAX_ATTEMPTS && delay <= maxWait) {
+    // A pause that would end after the caller stops waiting is not worth starting.
+    const inTime = req.deadline === undefined || Date.now() + delay < req.deadline;
+    if (isRetryable(outcome.status) && attempt < MAX_ATTEMPTS && delay <= maxWait && inTime) {
       await abortableSleep(delay, req.signal);
       continue;
     }

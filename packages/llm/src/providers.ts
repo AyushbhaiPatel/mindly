@@ -89,7 +89,8 @@ abstract class HttpProvider implements LlmProvider {
   readonly #redactPatterns: readonly string[];
 
   protected constructor(defaultModel: string, options: ProviderOptions) {
-    this.model = options.model ?? defaultModel;
+    // A blank model name (`llm.model ""`) means the provider's default.
+    this.model = options.model?.trim() || defaultModel;
     this.env = options.env ?? process.env;
     this.#redactPatterns = options.redactPatterns ?? [];
     this.http = {
@@ -226,6 +227,7 @@ export class OllamaProvider extends HttpProvider {
           options,
         },
         signal: req.signal,
+        deadline: req.deadline,
       },
       this.http,
     );
@@ -268,6 +270,7 @@ export class AnthropicProvider extends HttpProvider {
         },
         body,
         signal: req.signal,
+        deadline: req.deadline,
       },
       this.http,
     );
@@ -328,6 +331,7 @@ export class OpenAIProvider extends HttpProvider {
         headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
         body,
         signal: req.signal,
+        deadline: req.deadline,
       },
       this.http,
     );

@@ -73,7 +73,7 @@ export const UserConfigSchema = z.object({
         .string()
         .max(200)
         .optional()
-        .transform((m) => (m === undefined || m.trim() === '' ? undefined : m.trim())),
+        .transform((m) => m?.trim()),
       /** Only used by `ollama`; must point at localhost unless allowRemote is set. */
       baseUrl: z.url().optional(),
       allowRemote: z.boolean().default(false),

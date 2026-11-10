@@ -6,10 +6,11 @@ import { describe, expect, it } from 'vitest';
 import { loadProjectConfig, readRegularFileBounded, UserConfigSchema } from '../src/config.js';
 
 describe('llm settings', () => {
-  it('reads an empty or blank model name as the default model', () => {
+  it('keeps an empty or blank model name as an empty one (the provider then uses its default)', () => {
     for (const model of ['', '   ']) {
       const cfg = UserConfigSchema.parse({ llm: { provider: 'openai', model } });
-      expect(cfg.llm.model).toBeUndefined();
+      // Kept, not dropped: `mindly config set llm.model ""` must still find the setting.
+      expect(cfg.llm.model).toBe('');
     }
     expect(UserConfigSchema.parse({ llm: { model: ' gpt-4.1-mini ' } }).llm.model).toBe(
       'gpt-4.1-mini',

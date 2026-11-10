@@ -31,6 +31,8 @@ export interface ContradictionResult {
 export interface HelperOptions {
   /** Ends the call; the helper then returns `null`. */
   signal?: AbortSignal | undefined;
+  /** When the caller stops waiting (ms since the epoch); no retry is started past it. */
+  deadline?: number | undefined;
   /** Redaction patterns on top of the built-in ones (the user's `redaction.extraPatterns`). */
   redactPatterns?: readonly string[] | undefined;
   /**
@@ -86,6 +88,7 @@ async function runJson<T>(
       temperature: 0,
     };
     if (options.signal) req.signal = options.signal;
+    if (options.deadline !== undefined) req.deadline = options.deadline;
     if (options.redactPatterns?.length) req.redactPatterns = options.redactPatterns;
     const res = await provider.complete(req);
     const parsed = schema.safeParse(extractJsonObject(res.text));
@@ -263,8 +266,10 @@ function mergeOptions(bound: HelperOptions, call: HelperOptions | undefined): He
   const listeners = [bound.onFailure, call.onFailure].filter(
     (f): f is (reason: string) => void => f !== undefined,
   );
+  const deadlines = [bound.deadline, call.deadline].filter((d): d is number => d !== undefined);
   return {
     signal: signals.length > 1 ? AbortSignal.any(signals) : signals[0],
+    deadline: deadlines.length ? Math.min(...deadlines) : undefined,
     redactPatterns: patterns,
     onFailure: listeners.length
       ? (reason) => {

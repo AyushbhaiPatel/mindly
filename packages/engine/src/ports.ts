@@ -256,6 +256,8 @@ export interface SplitGitPort {
 export interface LlmCallOptions {
   /** Ends the call early; it then resolves `null`. */
   signal?: AbortSignal;
+  /** When the caller stops waiting (ms since the epoch); no retry is started that ends later. */
+  deadline?: number;
   /** The user's `redaction.extraPatterns`, applied to what is sent and to the reply. */
   redactPatterns?: readonly string[];
   /** Hears why the call gave no answer (a short reason with no key, prompt or reply). */
