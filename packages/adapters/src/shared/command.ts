@@ -89,14 +89,29 @@ export function shellWords(command: string): string[] | null {
 
 const baseName = (p: string): string => p.split(/[\\/]/).pop() ?? '';
 const MINDLY_BIN_RE = /^mindly(-cli)?(\.cmd|\.exe)?$/;
+/**
+ * The package a package runner is asked for: `mindly-cli`, optionally pinned to a version or a
+ * tag (`mindly-cli@0.5.0`, `mindly-cli@latest`), as `mindly init` records it when run with npx.
+ */
+const MINDLY_PACKAGE_RE = /^mindly(-cli)?(@[A-Za-z0-9][A-Za-z0-9._+-]*)?$/;
 const CLI_ENTRY_RE = /(^|[\\/])(mindly-cli|apps[\\/]cli)[\\/]dist[\\/]main\.js$/;
 const RUNTIME_RE = /^(node|bun|deno)(\.exe)?$/;
 const PACKAGE_RUNNER_RE = /^(npx|pnpm|pnpx|yarn|bunx)(\.cmd|\.exe)?$/;
 
 /**
+ * True when `launcher` runs Mindly through a package runner (`npx --yes mindly-cli@0.5.0`), whatever
+ * version it was pinned to: after an upgrade, what an older install wrote is still Mindly's.
+ */
+export function isPackageRunnerLauncher(launcher: readonly string[]): boolean {
+  const [first, ...rest] = launcher;
+  if (first === undefined || !PACKAGE_RUNNER_RE.test(baseName(first))) return false;
+  return rest.some((w) => MINDLY_PACKAGE_RE.test(w));
+}
+
+/**
  * True when `launcher` (the words before `hook`, `statusline` or `mcp`) starts Mindly: the
  * `mindly` executable, a JavaScript runtime running the CLI's `dist/main.js`, or a package runner
- * asked for `mindly`/`mindly-cli`. Options after the program are allowed.
+ * asked for `mindly`/`mindly-cli` (any pinned version). Options after the program are allowed.
  */
 export function isMindlyLauncher(launcher: readonly string[]): boolean {
   const [first, ...rest] = launcher;
@@ -104,8 +119,7 @@ export function isMindlyLauncher(launcher: readonly string[]): boolean {
   const bin = baseName(first);
   if (MINDLY_BIN_RE.test(bin)) return true;
   if (RUNTIME_RE.test(bin)) return rest.some((w) => CLI_ENTRY_RE.test(w));
-  if (PACKAGE_RUNNER_RE.test(bin)) return rest.some((w) => MINDLY_BIN_RE.test(w));
-  return false;
+  return isPackageRunnerLauncher(launcher);
 }
 
 /**

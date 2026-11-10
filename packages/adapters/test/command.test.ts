@@ -60,6 +60,10 @@ describe('shell quoting', () => {
       'node /src/mindly/apps/cli/dist/main.js hook codex Stop',
       'npx mindly-cli hook codex Stop',
       'npx -y mindly-cli hook codex Stop',
+      // Pinned by an install run through npx, then upgraded: still Mindly's.
+      'npx --yes mindly-cli@0.5.0 hook codex Stop',
+      'npx --yes mindly-cli@latest hook codex Stop',
+      'pnpm dlx mindly-cli@1.0.0-rc.1 hook codex Stop',
     ];
     for (const command of yes) expect(isMindlyHookCommand(command, 'codex'), command).toBe(true);
     // A launcher Mindly cannot know by name is its own only when it is the one in use.
@@ -83,6 +87,9 @@ describe('shell quoting', () => {
       'mindly hook codex',
       'hook codex Stop',
       'echo mindly; othertool hook codex Stop',
+      'npx --yes mindly-cli-extra@1.0.0 hook codex Stop',
+      'npx --yes other-cli@1.0.0 hook codex Stop',
+      'npx --yes mindly-cli@ hook codex Stop',
     ];
     for (const command of no) expect(isMindlyHookCommand(command, 'codex'), command).toBe(false);
   });

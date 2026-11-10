@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { z } from 'zod';
-import { shellJoin, shellWords } from '../shared/command.js';
+import { isPackageRunnerLauncher, shellJoin, shellWords } from '../shared/command.js';
 import { parseJsonConfig, readConfigText } from '../shared/config-files.js';
 import { isRecord, MAX_PATH_CHARS } from '../shared/payload.js';
 
@@ -25,7 +25,8 @@ export function statusLineSetting(command: readonly string[]): Record<string, un
 /**
  * True when a `statusLine` settings value is exactly one Mindly writes: `<launcher> statusline`
  * and nothing else, where the launcher is `command` (the current one) or one Mindly may have
- * written before: a `mindly` executable, or Node running the CLI's `dist/main.js`. A user's
+ * written before: a `mindly` executable, Node running the CLI's `dist/main.js`, or a package
+ * runner asked for `mindly-cli` at any version. A user's
  * own command that merely calls `mindly statusline` (in a pipe, a script, with extra arguments)
  * is not Mindly's.
  */
@@ -39,6 +40,7 @@ export function isMindlyStatusLine(value: unknown, command?: readonly string[]):
   if (words === null || words.at(-1) !== 'statusline') return false;
   const base = (p: string) => p.split(/[\\/]/).pop() ?? '';
   const launcher = words.slice(0, -1);
+  if (isPackageRunnerLauncher(launcher)) return true;
   if (launcher.length === 1) return /^mindly(\.cmd|\.exe)?$/.test(base(launcher[0] as string));
   return (
     launcher.length === 2 &&

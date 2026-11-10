@@ -171,6 +171,35 @@ describe('claude-code install', () => {
     expect(JSON.stringify(hooks['Stop'])).not.toContain('/old/bin/mindly');
   });
 
+  it('replaces and removes hooks pinned to an older npx version', async () => {
+    const home = tempDir();
+    const settings = join(home, '.claude', 'settings.json');
+    const old = { ...opts(home), command: ['npx', '--yes', 'mindly-cli@0.4.0'] };
+    const now = { ...opts(home), command: ['npx', '--yes', 'mindly-cli@0.5.0'] };
+    write(settings, JSON.stringify({ hooks: { PreToolUse: [USER_HOOK] } }));
+    await install(claude, old);
+    expect(readFileSync(settings, 'utf8')).toContain('mindly-cli@0.4.0 hook claude-code');
+    // The upgrade replaces every hook the older version wrote, and adds no second set.
+    await install(claude, now);
+    const text = readFileSync(settings, 'utf8');
+    expect(text).not.toContain('mindly-cli@0.4.0');
+    const hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(hooks['Stop']).toHaveLength(1);
+    expect(hooks['PreToolUse']).toHaveLength(2);
+    // An uninstall run from yet another version still finds them, and keeps the user's.
+    applyInstallSteps(
+      await claude.planUninstall({ ...opts(home), command: ['npx', '--yes', 'mindly-cli@latest'] }),
+    );
+    expect(readJson(settings)['hooks']).toEqual({ PreToolUse: [USER_HOOK] });
+    // The same for Codex.
+    const codexHooks = join(home, '.codex', 'hooks.json');
+    await install(codex, old);
+    await install(codex, now);
+    expect(readFileSync(codexHooks, 'utf8')).not.toContain('mindly-cli@0.4.0');
+    applyInstallSteps(await codex.planUninstall(now));
+    expect(readFileSync(codexHooks, 'utf8')).not.toContain('mindly-cli');
+  });
+
   it('keeps user hooks that share a matcher group with Mindly', async () => {
     const home = tempDir();
     const settings = join(home, '.claude', 'settings.json');
