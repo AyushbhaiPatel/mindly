@@ -348,7 +348,7 @@ describe('write targets of a shell command', () => {
     expect(readShellWrites("git rm -r --quiet 'certs/*'").questions).toEqual([
       expect.objectContaining({ pathspecs: ['certs/*'], tracked: true }),
     ]);
-    expect(read('git -c a=b rm -r prisma/migrations')).toEqual([
+    expect(read('git -c color.ui=never rm -r prisma/migrations')).toEqual([
       expect.objectContaining({
         path: 'prisma/migrations',
         tree: true,
@@ -359,12 +359,19 @@ describe('write targets of a shell command', () => {
     // Paths read from a file are not known: said, not guessed.
     for (const cmd of [
       'git rm --pathspec-from-file=list.txt',
-      'echo x | git checkout --pathspec-from-file=-',
+      'git checkout --pathspec-from-file=- < list.txt',
+      'git checkout-index -f --stdin < list.txt',
     ]) {
       const reading = readShellWrites(cmd);
       expect(reading.questions, cmd).toEqual([]);
+      expect(reading.targets, cmd).toEqual([]);
       expect(reading.limit, cmd).toContain('from a file');
     }
+    // Those an `echo` gives it are read.
+    expect(ask('echo certs/a.pem | git checkout --pathspec-from-file=-')).toEqual([
+      '. | (index) | certs/a.pem',
+    ]);
+    expect(targets('echo certs/a.pem | git checkout-index -f --stdin')).toEqual(['certs/a.pem']);
     // Without a path it cleans where it runs; it only touches files that exist, and ignored
     // ones only with -x, or when an exclude pattern takes them back from what is ignored.
     expect(targets('git clean -fd')).toEqual(['. (clean)']);
@@ -374,6 +381,119 @@ describe('write targets of a shell command', () => {
     expect(targets("git clean -fd --exclude='!.env'")).toEqual(['. (clean-ignored)']);
     expect(targets('git clean -fd -e build')).toEqual(['. (clean)']);
     expect(targets('git mv prisma db')).toEqual(['db/[prisma]/**', 'prisma', 'prisma/**']);
+  });
+
+  it('reads a git command as only looking only when each of its options keeps it so', () => {
+    const whole = (command: string) =>
+      read(command)
+        .filter((x) => !x.certain)
+        .map((x) => x.path);
+    for (const cmd of [
+      'git log -1',
+      'git fetch',
+      'git fetch --prune --tags origin',
+      'git push origin main',
+      'git push -u origin HEAD',
+      'git -c color.ui=always log',
+      'git -c core.pager=cat log -p',
+      'GIT_PAGER=cat git log',
+      'GIT_EDITOR=true git commit -qam x',
+      'GIT_AUTHOR_DATE=2020-01-01 git commit -m x',
+      'export GIT_PAGER=cat && git log',
+      'git -c user.name=x -c user.email=y commit -m z',
+      'git diff-tree -r HEAD',
+      'git rev-list --count HEAD',
+      'git shortlog -sn',
+      'git grep -n -e foo -- src',
+      'git grep -C 2 foo',
+      'git blame -L 1,2 -M -C x',
+      'git log -Gfoo -n5 --stat',
+      'git diff -M50% HEAD',
+      'git status -uno',
+      'git status --porcelain=v1',
+      'git config user.name x',
+      'git archive --format=tar HEAD',
+    ]) {
+      expect(read(cmd), cmd).toEqual([]);
+    }
+    // An option or a setting that runs a program or moves what git works on, an option not known
+    // here, an abbreviation that cannot be told, a push into a repository on this machine: any
+    // file in the tree may change.
+    for (const cmd of [
+      "git -c core.fsmonitor='touch x; false' status",
+      "git -c diff.external='touch x' diff v1",
+      "git -c core.sshCommand='touch x' fetch",
+      'git -c core.hooksPath=h commit -qam msg',
+      'git --git-dir=../other/.git log',
+      "GIT_EXTERNAL_DIFF='touch x' git diff",
+      "env GIT_SSH_COMMAND='touch x' git fetch",
+      'export GIT_DIR=../other/.git && git log',
+      'GIT_DIR=../other/.git; git status',
+      "git fetch --upload-pack='touch x; git-upload-pack' . main",
+      "git ls-remote --upload-pack='touch x' .",
+      "git push --receive-pack='touch x' . HEAD:refs/heads/x",
+      'git push . ahead:main',
+      'git push ../other main',
+      "git archive --remote=. --exec='touch x' -o out.tar HEAD",
+      'git grep --open-files-in-pager=rm k2',
+      'git grep -Orm k2',
+      'git log --some-new-option',
+      'git status --some-new-option',
+      'git config receive.denyCurrentBranch updateInstead',
+      'git config core.hooksPath h',
+      'git checkout --some-new-option main',
+    ]) {
+      expect(whole(cmd), cmd).toContain(TOP);
+    }
+    // Output to a file it is given is a write of that file, whatever its abbreviation.
+    for (const [cmd, file] of [
+      ['git diff-tree --output=certs/new.pem -p v1 v2', 'certs/new.pem'],
+      ['git diff-index --output=certs/new.pem -p v1', 'certs/new.pem'],
+      ['git rev-list --output=certs/new.pem HEAD', 'certs/new.pem'],
+      ['git shortlog --output=certs/new.pem HEAD', 'certs/new.pem'],
+      ['git blame --output=certs/new.pem src/a.ts', 'certs/new.pem'],
+      ['git diff --outp=certs/new.pem', 'certs/new.pem'],
+      ['git archive -o certs/new.pem HEAD', 'certs/new.pem'],
+      ['git -C sub log --output=new.pem', 'sub/new.pem'],
+    ] as const) {
+      expect(targets(cmd), cmd).toEqual([file]);
+      expect(whole(cmd), cmd).toEqual([]);
+    }
+    // Abbreviations git takes are made whole.
+    const asked = (command: string) =>
+      readShellWrites(command).questions.map((q) => `${q.against.join(' ')} | ${q.pathspecs}`);
+    expect(asked('git restore --staged --work --source=v1 certs/a.pem')).toEqual([
+      'v1 | certs/a.pem',
+    ]);
+    expect(read('git restore --sta certs/a.pem')).toEqual([]);
+    expect(asked('git reset --har v1')).toEqual(['v1 | ']);
+    expect(asked('git checkout --forc')).toEqual(['HEAD | ']);
+    // Patch files, told by a sample name with the suffix they get, where they go.
+    expect(targets('git format-patch -o patches HEAD~2')).toEqual(['patches/0001-patch.patch']);
+    expect(targets('git -C vendor format-patch -2')).toEqual(['vendor/0001-patch.patch']);
+    expect(targets('git format-patch --suffix=.pem -1')).toEqual(['0001-patch.pem']);
+    expect(targets('git format-patch --stdout -1')).toEqual([]);
+  });
+
+  it('reads the folders git fills as written as a whole', () => {
+    const lands = (command: string) =>
+      read(command)
+        .filter((x) => x.how === 'land')
+        .map((x) => x.path);
+    const whole = (command: string) => read(command).some((x) => !x.certain && x.path === TOP);
+    expect(lands('git clone -q . vendor/lib')).toEqual(['vendor/lib']);
+    expect(whole('git clone -q . vendor/lib')).toBe(true);
+    expect(lands('git clone https://example.com/team/tool.git')).toEqual(['tool']);
+    expect(whole('git clone https://example.com/team/tool.git')).toBe(false);
+    expect(lands('git worktree add vendor/wt v1')).toEqual(['vendor/wt']);
+    expect(lands('git worktree add -b x vendor/wt v1')).toEqual(['vendor/wt']);
+    expect(targets('git worktree remove vendor/wt')).toEqual(['vendor/wt', 'vendor/wt/**']);
+    expect(read('git worktree list')).toEqual([]);
+    expect(lands('git checkout-index -a --prefix=vendor/')).toEqual(['vendor']);
+    expect(whole('git checkout-index -a --prefix=vendor/')).toBe(false);
+    expect(lands('git read-tree --prefix=vendor/ -u v1')).toEqual(['vendor']);
+    expect(read('git read-tree --prefix=vendor/ v1')).toEqual([]);
+    expect(lands('git init vendor/repo')).toEqual(['vendor/repo']);
   });
 
   it('asks git only when nothing earlier on the line can have changed its answer', () => {

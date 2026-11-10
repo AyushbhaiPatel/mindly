@@ -137,7 +137,6 @@ const cases: {
   },
   {
     name: 'export GIT_DIR then checkout -- .',
-    known: true,
     prepare: (g) => {
       g.git('clone', '-q', '-b', 'certs-change', g.dir, `${g.dir}-clone`);
     },
