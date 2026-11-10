@@ -255,6 +255,11 @@ const LAUNCHERS: Readonly<
   pnpx: { values: ['-p', '--package'] },
   bunx: {},
   nohup: {},
+  coproc: {},
+  parallel: { values: ['-j', '--jobs', '-S', '--sshlogin', '-a', '--arg-file'] },
+  flock: { values: ['-w', '--timeout', '-E', '--conflict-exit-code'], skip: 1 },
+  unbuffer: {},
+  chroot: { values: ['--userspec', '--groups'], skip: 1 },
   command: {},
   builtin: {},
   exec: { values: ['-a'] },
@@ -334,7 +339,58 @@ const PACKAGE_MANAGER_VALUES = [
 /** Programs `classify` knows as writers, by the names a package manager may run them under. */
 const KNOWN_WRITERS = new Set(['rimraf', 'del', 'del-cli', 'trash', 'trash-put', 'rm', 'cp', 'mv']);
 
-const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+const SHELLS = new Set([
+  'sh',
+  'bash',
+  'rbash',
+  'dash',
+  'zsh',
+  'ksh',
+  'ksh93',
+  'mksh',
+  'pdksh',
+  'oksh',
+  'yash',
+  'ash',
+  'posh',
+  'fish',
+  'csh',
+  'tcsh',
+]);
+
+/**
+ * How a shell is told what to run: `-c` anywhere in a cluster of its options (`-ce`, `-xc`)
+ * makes the first word after its options the code; `--` or `-` ends them, and `-o` / `-O` (also
+ * `+o`, `+O`, `--rcfile`, `--init-file`) take the next word. `code` is null when `-c` is given
+ * without code the text shows; `dynamic` when an option is not plain text.
+ */
+function shellInvocation(words: readonly Word[]): {
+  c: boolean;
+  code: Word | null;
+  dynamic: boolean;
+} {
+  let c = false;
+  let i = 1;
+  for (; i < words.length; i++) {
+    const w = words[i] as Word;
+    if (w.dynamic) return { c, code: null, dynamic: true };
+    const t = w.text;
+    if (t === '--' || t === '-') {
+      i++;
+      break;
+    }
+    if (!/^[-+]./.test(t)) break;
+    if (t.startsWith('--')) {
+      if (t === '--rcfile' || t === '--init-file') i++;
+      continue;
+    }
+    if (t.startsWith('-') && t.includes('c')) c = true;
+    // Each `o` / `O` in the cluster takes a word of its own.
+    i += (t.match(/[oO]/g) ?? []).length;
+  }
+  const code = c ? (words[i] ?? null) : null;
+  return { c, code, dynamic: code?.dynamic ?? false };
+}
 const SCRIPT_RUNNERS = new Set(['python', 'python3', 'node', 'ruby', 'perl', 'php', 'deno', 'bun']);
 
 /** Programs that remove or rewrite what `find -exec` hands them. */
@@ -453,6 +509,11 @@ interface SimpleCommand {
   stdinExpands: boolean;
   /** Text of `(( … ))` and `$(( … ))` arithmetic written in this command. */
   arithmetic: string[];
+  /**
+   * It holds an expansion other than `$name`, `${name}`, a special parameter or a substitution
+   * (`${x:=…}`, `${a[…]}`, `$[…]`), or assigns an array: it may set a variable git reads.
+   */
+  taint: boolean;
   /** Not a command: where a `( … )` subshell starts or ends. */
   subshell?: 'open' | 'close';
 }
@@ -594,6 +655,7 @@ function parse(
     apart: piped,
     stdinExpands: false,
     arithmetic: [],
+    taint: false,
   });
   // Open `{ … }` groups; `true` for the body of a function, which runs only when it is called.
   const groups: boolean[] = [];
@@ -714,9 +776,18 @@ function parse(
     }
     const m = /^\$(?:\{(\w+)\}|(\w+))/.exec(src.slice(i, i + 80));
     if (!m && next === '{') {
-      // `${f%.ts}`, `${x:-y}`: a value that cannot be read from the text.
+      // `${f%.ts}`, `${x:-y}`: a value that cannot be read from the text. Any but a special
+      // parameter (`${@}`) may set a variable too (`${x:=y}`, `${a[i=1]}`, `${x:HOME=5}`).
       const end = src.indexOf('}', i + 2);
+      if (!/^\$\{[@*#?$!-]\}/.test(src.slice(i, i + 4))) current.taint = true;
       unknownValue();
+      return end === -1 ? src.length : end + 1;
+    }
+    if (next === '[') {
+      // `$[ … ]`: arithmetic, the old way.
+      current.taint = true;
+      unknownValue();
+      const end = src.indexOf(']', i + 2);
       return end === -1 ? src.length : end + 1;
     }
     if (!m) {
@@ -862,6 +933,15 @@ function parse(
       endWord();
       i++;
       continue;
+    }
+    const opened = open as Word | null;
+    if (
+      c === '(' &&
+      opened !== null &&
+      /^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=$/s.test(opened.text)
+    ) {
+      // `x=( … )`: an array, whose elements may be assigned by subscript (`[HOME=5]=1`).
+      current.taint = true;
     }
     if (c === '(' && /^\(\s*\)/.test(src.slice(i, i + 16)) && open !== null) {
       // `name() …`: a function definition. Its body is read, but as a shell of its own.
@@ -1071,7 +1151,7 @@ type Verdict =
       exec?: string[];
     }
   /** The command writes files the text cannot tell: said as a limit of the reading. */
-  | { kind: 'unread'; why: string };
+  | { kind: 'unread'; why: string; taints?: boolean };
 
 const READS: Verdict = { kind: 'reads' };
 const writes = (...items: Item[]): Verdict => ({ kind: 'writes', items });
@@ -1288,6 +1368,12 @@ function classify(
           .map((w) => w.text)
           .join(' '),
       };
+    case 'mapfile':
+    case 'readarray': {
+      // `-C code` runs in this shell every so many lines.
+      const callback = optionValue(words, ['-C']);
+      return callback ? { kind: 'inline', code: callback.text } : READS;
+    }
     case 'source':
     case '.':
       return { kind: 'unknown', args: withoutScript(words), bare: false };
@@ -1330,9 +1416,12 @@ function classify(
   }
 
   if (SHELLS.has(program)) {
-    const at = words.findIndex((w) => /^-[a-zA-Z]*c$/.test(w.text));
-    const code = at === -1 ? undefined : words[at + 1];
-    if (code) return { kind: 'inline', code: code.text };
+    const shell = shellInvocation(words);
+    if (shell.c || shell.dynamic) {
+      if (shell.code !== null && !shell.dynamic) return { kind: 'inline', code: shell.code.text };
+      // Code the text does not show may do anything, to this line's variables too.
+      return { kind: 'unread', why: 'a shell runs code the text does not show', taints: true };
+    }
     // No script file: the commands come from a here-document, here-string or pipe.
     if (stdin !== null && args.filter((w) => w.text !== '-' && w.text !== '-s').length === 0)
       return { kind: 'inline', code: stdin };
@@ -1579,6 +1668,9 @@ interface GitAsk {
   touches: FileKinds;
 }
 
+/** git's own options that only print something and run no subcommand. */
+const GIT_ONLY_SHOWS = /^(--version|-v|--help|-h|--exec-path|--html-path|--man-path|--info-path)$/;
+
 /** git's options before the subcommand that take a value as the next word. */
 const GIT_VALUED = [
   '-c',
@@ -1670,128 +1762,303 @@ function namedVariable(w: Word): { name: string | null; value: string | null } {
   return { name, value: given ? w.text.slice((m as RegExpExecArray)[0].length) : null };
 }
 
-/** Whether a word that names a variable to set names one git may read. */
-const setsGitName = (w: Word | undefined): boolean => {
-  if (w === undefined) return false;
-  const v = namedVariable(w);
-  return gitReads(v.name, v.value);
+/**
+ * The builtins and keywords of the shells a line may run in: bash 5.2's (`enable -a`, `compgen
+ * -k`), and those zsh, ksh and POSIX sh have besides. A program run as a process of its own cannot
+ * change this shell; these can: its variables and their attributes, its options, functions and
+ * aliases, what a name runs. Each is marked:
+ * - `safe`: changes nothing git runs with while its words are plain text (some only without the
+ *   options that set a variable or run a command, see {@link builtinTaints});
+ * - `prefix`: a keyword in front of the command it runs (`if`, `then`, `!`, `time`);
+ * - `taints`: may change what later commands, git among them, run with.
+ * Any builtin or keyword not marked safe, anywhere on the line, makes every git command on it a
+ * possible change of the whole tree.
+ */
+export const SHELL_BUILTINS: Readonly<Record<string, 'safe' | 'prefix' | 'taints'>> = {
+  // Safe while their words are plain text.
+  cd: 'safe',
+  pushd: 'safe',
+  popd: 'safe',
+  dirs: 'safe',
+  echo: 'safe',
+  printf: 'safe',
+  print: 'safe',
+  true: 'safe',
+  false: 'safe',
+  ':': 'safe',
+  test: 'safe',
+  '[': 'safe',
+  pwd: 'safe',
+  wait: 'safe',
+  exit: 'safe',
+  return: 'safe',
+  break: 'safe',
+  continue: 'safe',
+  type: 'safe',
+  help: 'safe',
+  jobs: 'safe',
+  times: 'safe',
+  umask: 'safe',
+  which: 'safe',
+  whence: 'safe',
+  where: 'safe',
+  for: 'safe',
+  fi: 'safe',
+  done: 'safe',
+  case: 'safe',
+  esac: 'safe',
+  in: 'safe',
+  '{': 'safe',
+  '}': 'safe',
+  function: 'safe',
+  // Keywords in front of the command they run.
+  if: 'prefix',
+  then: 'prefix',
+  elif: 'prefix',
+  else: 'prefix',
+  while: 'prefix',
+  until: 'prefix',
+  do: 'prefix',
+  '!': 'prefix',
+  time: 'prefix',
+  // bash's other builtins and keywords.
+  '.': 'taints',
+  '[[': 'taints',
+  ']]': 'taints',
+  alias: 'taints',
+  bg: 'taints',
+  bind: 'taints',
+  builtin: 'taints',
+  caller: 'taints',
+  command: 'taints',
+  compgen: 'taints',
+  complete: 'taints',
+  compopt: 'taints',
+  coproc: 'taints',
+  declare: 'taints',
+  disown: 'taints',
+  enable: 'taints',
+  eval: 'taints',
+  exec: 'taints',
+  export: 'taints',
+  fc: 'taints',
+  fg: 'taints',
+  getopts: 'taints',
+  hash: 'taints',
+  history: 'taints',
+  kill: 'taints',
+  let: 'taints',
+  local: 'taints',
+  logout: 'taints',
+  mapfile: 'taints',
+  read: 'taints',
+  readarray: 'taints',
+  readonly: 'taints',
+  select: 'taints',
+  set: 'taints',
+  shift: 'taints',
+  shopt: 'taints',
+  source: 'taints',
+  suspend: 'taints',
+  trap: 'taints',
+  typeset: 'taints',
+  ulimit: 'taints',
+  unalias: 'taints',
+  unset: 'taints',
+  // zsh's and ksh's besides.
+  autoload: 'taints',
+  bindkey: 'taints',
+  bye: 'taints',
+  chdir: 'taints',
+  compound: 'taints',
+  disable: 'taints',
+  emulate: 'taints',
+  end: 'taints',
+  float: 'taints',
+  foreach: 'taints',
+  functions: 'taints',
+  getln: 'taints',
+  integer: 'taints',
+  limit: 'taints',
+  nameref: 'taints',
+  nocorrect: 'taints',
+  noglob: 'taints',
+  private: 'taints',
+  pushln: 'taints',
+  r: 'taints',
+  rehash: 'taints',
+  repeat: 'taints',
+  sched: 'taints',
+  setopt: 'taints',
+  unfunction: 'taints',
+  unhash: 'taints',
+  unlimit: 'taints',
+  unsetopt: 'taints',
+  vared: 'taints',
+  zcompile: 'taints',
+  zformat: 'taints',
+  zle: 'taints',
+  zmodload: 'taints',
+  zparseopts: 'taints',
+  zregexparse: 'taints',
+  zstyle: 'taints',
 };
 
-/** Whether a word names a variable to export that is not a harmless one, whatever its case. */
-const exportsName = (w: Word): boolean => {
-  const v = namedVariable(w);
-  return v.name === null || !harmlessVariable(v.name, v.value ?? '', v.value === null);
-};
-
-/**
- * The words of a builtin's options that hold a value, by letter (`read -p prompt`, `-pprompt`),
- * and the names it sets given as such a value (`read -a NAME`, `printf -v NAME`). The rest are
- * its operands. Reading stops at `--`.
- */
-function builtinOperands(
-  args: readonly Word[],
-  valued: string,
-  naming: string,
-): { operands: Word[]; named: Word[] } {
-  const operands: Word[] = [];
-  const named: Word[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const w = args[i] as Word;
-    if (w.text === '--') {
-      operands.push(...args.slice(i + 1));
-      break;
-    }
-    if (!/^-./.test(w.text)) {
-      operands.push(w);
-      continue;
-    }
-    for (let k = 1; k < w.text.length; k++) {
-      const letter = w.text[k] as string;
-      if (!valued.includes(letter) && !naming.includes(letter)) continue;
-      const value = k + 1 < w.text.length ? sliceWord(w, k + 1) : args[++i];
-      if (value && naming.includes(letter)) named.push(value);
-      break;
-    }
-  }
-  return { operands, named };
-}
-
-/** Whether arithmetic (`let`, `(( … ))`, `$(( … ))`) assigns to a variable git may read. */
-function arithmeticSets(text: string): boolean {
-  const assigns =
-    /(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*(?:<<|>>|[-+*/%&|^])?=(?!=)|(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\+|--)|(?:\+\+|--)\s*([A-Za-z_][A-Za-z0-9_]*)/g;
-  for (const m of text.matchAll(assigns)) {
-    if (gitReads((m[1] ?? m[2] ?? m[3]) as string, null)) return true;
-  }
-  return false;
-}
-
-/**
- * Whether a simple command may set a variable git reads, for any git command on the line,
- * wherever it stands and in whatever shell: an assignment, export, declaration, loop variable,
- * `read`, `printf -v`, `mapfile`, `getopts` or arithmetic naming one; any `export`, `declare -x`,
- * nameref or `set -a`; a file read with `source`; `eval` or `trap` code not known here.
- */
-function setsGitVariable(cmd: SimpleCommand, words: readonly Word[], program: string): boolean {
-  if (cmd.arithmetic.some(arithmeticSets)) return true;
-  // Assignments before the program, or alone: `HOME=x`, `X+=1`, `X[0]=1`, `env GIT_DIR=x git`.
-  // One to an element (`X[0]=1`) is read here as the program's name.
-  const lead = words[0] ? cmd.words.slice(0, cmd.words.indexOf(words[0]) + 1) : cmd.words;
-  for (const w of lead) {
-    if (w.mask.startsWith('u') && /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/.test(w.text)) {
-      if (setsGitName(w)) return true;
-    }
-  }
-  const args = words.slice(1);
-  const operands = (): Word[] => args.filter((w) => !/^[-+]./.test(w.text));
-  switch (program) {
-    case 'source':
-    case '.':
-      return true;
-    case 'export':
-      return operands().some(exportsName);
-    case 'declare':
-    case 'typeset':
-    case 'local':
-    case 'readonly': {
-      // A name for another variable (`-n`), which setting it then sets, whatever it is called.
-      if (args.some((w) => /^-[A-Za-z]*n/.test(w.text))) return operands().length > 0;
-      // Exported (`-x`), whatever it is called.
-      if (args.some((w) => /^-[A-Za-z]*x/.test(w.text))) return operands().some(exportsName);
-      return operands().some(setsGitName);
-    }
-    case 'set': {
-      const end = args.findIndex((w) => w.text === '--');
-      const opts = end === -1 ? args : args.slice(0, end);
-      return opts.some(
-        (w, i) =>
-          /^-[A-Za-z]*a/.test(w.text) || (w.text === '-o' && opts[i + 1]?.text === 'allexport'),
-      );
-    }
-    case 'for':
-    case 'select':
-      return setsGitName(args[0]);
-    case 'read': {
-      const { operands: names, named } = builtinOperands(args, 'dinNptu', 'a');
-      return [...names, ...named].some(setsGitName);
-    }
+/** Whether a builtin marked safe is given an option that sets a variable or runs a command. */
+function builtinTaints(name: string, args: readonly Word[]): boolean {
+  switch (name) {
     case 'printf':
-      return builtinOperands(args, '', 'v').named.some(setsGitName);
-    case 'mapfile':
-    case 'readarray':
-      return setsGitName(builtinOperands(args, 'dnOsuCc', '').operands[0]);
-    case 'getopts':
-      return setsGitName(args[1]);
-    case 'let':
-      // A name not known here (`let "$n=1"`) may be any.
-      return args.some((w) => (w.dynamic && !w.dynamicAt) || arithmeticSets(w.text));
-    case 'eval':
-      return args.some((w) => w.dynamic);
-    case 'trap':
-      return (args[0]?.text === '--' ? args[1] : args[0])?.dynamic ?? false;
+    case 'print':
+      // `printf -v name`: the output goes into a variable.
+      return args.some((w) => /^-[^-]*v/.test(w.text));
+    case 'wait':
+      // `wait -p name` sets a variable.
+      return args.some((w) => /^-[^-]*p/.test(w.text));
+    case 'jobs':
+      // `jobs -x command` runs one.
+      return args.some((w) => /^-[^-]*x/.test(w.text));
+    case 'umask':
+      // Only the one that prints the mask.
+      return args.some((w) => !/^-[Sp]+$/.test(w.text));
+    case 'for':
+      // A lower-case loop variable over plain words: anything else may be one git reads.
+      return !/^[a-z_][a-z0-9_]*$/.test(args[0]?.text ?? '') || (args[0]?.dynamic ?? true);
     default:
       return false;
   }
+}
+
+/**
+ * Programs that run the program after them, with the environment and words they are given: their
+ * words decide what that program runs with. `xargs` and `parallel` give it words read from their
+ * input.
+ */
+const PASSES_ENVIRONMENT = new Set([
+  'env',
+  'sudo',
+  'doas',
+  'nice',
+  'ionice',
+  'nohup',
+  'timeout',
+  'stdbuf',
+  'setsid',
+  'chroot',
+  'xargs',
+  'parallel',
+  'flock',
+  'unbuffer',
+  'watch',
+  'chronic',
+  'busybox',
+  'toybox',
+]);
+
+/** A text the shell expands that holds an expansion other than `$name`, `${name}` or `$(…)`. */
+const COMPLEX_EXPANSION = /\$\(\(|\$\[|\$\{(?!\w+\}|[@*#?$!-]\})/;
+
+/**
+ * What a simple command means for the line: `taints`, it may change what git commands on the
+ * line run with, wherever they stand; `gitAt`, `xargs` or `parallel` run git with words read
+ * from their input, from this word on.
+ *
+ * Only plain words keep a line clean: text, `$name`, `${name}`, special parameters, and
+ * substitutions (whose code is read as a line of its own). A builtin or keyword not known to be
+ * harmless, any other expansion (`${x:=…}`, `${a[…]}`, `$((…))`), arithmetic, an assignment to
+ * an element or to an upper-case variable, a program whose name is not plain text, or a word that
+ * is not plain text given to a program that runs another (`env "$v" git`) taints it.
+ */
+function commandTaints(cmd: SimpleCommand): { taints: boolean; gitAt: number | null } {
+  const words = cmd.words;
+  const tainted = { taints: true, gitAt: null };
+  /**
+   * Tainted from word `i` on, which hides what runs or with what (`env "$v" git …`): a git
+   * that follows is read as git, given settings.
+   */
+  const taintedAt = (i: number): { taints: true; gitAt: number | null } => {
+    const git = words.findIndex((x, k) => k > i && !x.dynamic && programName(x) === 'git');
+    return { taints: true, gitAt: git === -1 ? null : git };
+  };
+  if (cmd.taint || cmd.arithmetic.length > 0) return tainted;
+  // A here-document the shell expands runs what is in it.
+  if (cmd.stdin !== null && cmd.stdinExpands && COMPLEX_EXPANSION.test(cmd.stdin)) return tainted;
+  let at = 0;
+  let launched = false;
+  let fromInput = false;
+  while (at < words.length) {
+    // Assignments: to an element (`a[i]=…`), or to a variable git may read.
+    const w = words[at] as Word;
+    if (w.mask.startsWith('u') && /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/.test(w.text)) {
+      if (/^[A-Za-z_][A-Za-z0-9_]*\[/.test(w.text)) return tainted;
+      const v = namedVariable(w);
+      if (gitReads(v.name, v.value)) return tainted;
+      if (launched && w.dynamic) return taintedAt(at);
+      at++;
+      continue;
+    }
+    // The program: one whose name is not plain text may be anything.
+    if (w.dynamic) return taintedAt(at);
+    if (/^[A-Za-z_][A-Za-z0-9_]*\[/.test(w.text) && w.text.includes('=')) return tainted;
+    const builtin = w.text.includes('/') ? undefined : SHELL_BUILTINS[w.text];
+    if (builtin !== undefined && Object.hasOwn(SHELL_BUILTINS, w.text)) {
+      if (builtin === 'prefix') {
+        at++;
+        continue;
+      }
+      if (builtin === 'taints' || builtinTaints(w.text, words.slice(at + 1))) return tainted;
+      return { taints: false, gitAt: null };
+    }
+    const name = programName(w);
+    const launcher = Object.hasOwn(LAUNCHERS, name) ? LAUNCHERS[name] : undefined;
+    if (launcher === undefined || !PASSES_ENVIRONMENT.has(name)) {
+      if (!fromInput) return { taints: false, gitAt: null };
+      // `xargs git …`, `xargs -I{} env {} git …`: git is given words from the input.
+      const git = words.findIndex((x, i) => i >= at && !x.dynamic && programName(x) === 'git');
+      return git === -1 ? { taints: false, gitAt: null } : { taints: true, gitAt: git };
+    }
+    launched = true;
+    if (name === 'xargs' || name === 'parallel') fromInput = true;
+    // Its options, as `programWords` reads them; none may hide what runs or with what.
+    at++;
+    while (at < words.length) {
+      const o = words[at] as Word;
+      if (o.dynamic) return taintedAt(at);
+      if (o.text === '--') {
+        at++;
+        break;
+      }
+      if (!o.text.startsWith('-') || o.text === '-') break;
+      // `env -S 'X=1 git …'` splits a string of its own into the words it runs.
+      if (name === 'env' && /^(-[^-]*S|--split-string)/.test(o.text)) return tainted;
+      const eq = o.text.indexOf('=');
+      const flag = eq === -1 ? o.text : o.text.slice(0, eq);
+      const takesValue = eq === -1 && (launcher.values ?? []).includes(flag);
+      if (takesValue && (words[at + 1]?.dynamic ?? false)) return taintedAt(at + 1);
+      at += takesValue ? 2 : 1;
+    }
+    for (let k = 0; k < (launcher.skip ?? 0) && at < words.length; k++, at++) {
+      if ((words[at] as Word).dynamic) return taintedAt(at);
+    }
+  }
+  return { taints: false, gitAt: null };
+}
+
+/** The words `env -S` / `--split-string` is given to split, with what follows, as a line. */
+function envSplitString(words: readonly Word[]): string | null {
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] as Word;
+    if (programName(w) !== 'env' || w.dynamic) continue;
+    for (let j = i + 1; j < words.length; j++) {
+      const o = (words[j] as Word).text;
+      if (o === '--' || !o.startsWith('-')) break;
+      const m = /^(?:-[^-]*S|--split-string=?)(.*)$/s.exec(o);
+      if (!m) continue;
+      const own = m[1] !== '' ? m[1] : (words[j + 1]?.text ?? '');
+      const after = words.slice(m[1] !== '' ? j + 1 : j + 2).map((x) => quoted(x.text));
+      return [own, ...after].join(' ');
+    }
+  }
+  return null;
 }
 
 const TRACKED_FILES: FileKinds = { tracked: true, untracked: false, ignored: false };
@@ -2578,7 +2845,20 @@ function readGit(
   const late: Verdict = { kind: 'unread', why: 'no time was left to read all of it' };
   if (cut) return late;
   const sub = rest[0]?.text;
-  if (sub === undefined) return READS;
+  if (sub === undefined) {
+    // No subcommand in the text: `git --version` only prints; anything else (`xargs git`, where
+    // the subcommand comes from the input) may be any, and cannot be asked.
+    const shows = words.length > 1 && words.slice(1).every((w) => GIT_ONLY_SHOWS.test(w.text));
+    if (shows && !settings && !unsafe) return READS;
+    return {
+      kind: 'git',
+      dir,
+      asks: [{ against: [], pathspecs: [], unasked: true, possible: true, touches: ANY_FILE }],
+      trusted,
+      nocase,
+      workTree,
+    };
+  }
   const command = [word('git'), ...rest.slice(1)];
   const table = GIT_OPTIONS[sub] ?? {};
   // Each subcommand's options are read with its own table: a value is never a flag or a path.
@@ -3438,9 +3718,19 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
   };
   collectTargets(command, '', 0, reading);
   if (reading.gitEnv) {
-    // A variable git reads is set somewhere on the line: what git would answer now is not what
-    // the commands will do, so it is asked nothing, and what each question stands for counts as
-    // written. The git commands read before it was known may change the whole tree too.
+    // A line that may set what git runs with may also evaluate text as code where the shell
+    // does arithmetic (`printf -v 'a[$(…)]'`, `x='a[$(…)]'; $((x))`): every substitution in it,
+    // quoted or not, is read as code too.
+    for (const code of substitutions(command.slice(0, MAX_COMMAND_CHARS), Infinity)) {
+      if (reading.timeUp() || reading.commands > MAX_COMMANDS) {
+        reading.limit ??= 'no time was left to read all of it';
+        break;
+      }
+      collectTargets(code, '', 1, reading);
+    }
+    // What git would answer now is not what the commands will do: it is asked nothing, and what
+    // each question stands for counts as written. The git commands read before the line was
+    // known to be so may change the whole tree too.
     reading.questions.length = 0;
     for (const t of reading.out.values()) t.fallback = null;
     for (const then of reading.later) then();
@@ -3834,9 +4124,20 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     if (cmd.stdin !== null && cmd.stdinExpands) {
       for (const inner of substitutions(cmd.stdin)) collectTargets(inner, at, depth + 1, r);
     }
-    const { words, chdir } = programWords(cmd.words);
+    const runs = programWords(cmd.words);
+    const { chdir } = runs;
+    let { words } = runs;
     const here = chdir ? enter(chdir, at) : at;
     for (const red of cmd.redirects) if (red.op.startsWith('>')) add({ word: red.target }, here);
+    // A builtin, an expansion or a word that may set what git runs with, anywhere on the line,
+    // counts for every git command on it (see `commandTaints`).
+    const taint = commandTaints(cmd);
+    if (taint.taints) r.gitEnv = true;
+    // `xargs git …`: git, given words from the input, is read from its name on.
+    if (taint.gitAt !== null) words = cmd.words.slice(taint.gitAt);
+    // `env -S '…'` splits a string into the words it runs: read as a line of its own.
+    const split = envSplitString(cmd.words);
+    if (split !== null) collectTargets(split, here, depth + 1, r);
     // What the program reads on standard input, when the text shows it: its own here-document,
     // or what an `echo` / `printf` / `cat <<EOF` before the pipe prints.
     let stdin = cmd.stdin;
@@ -3859,14 +4160,11 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       } else if (name === 'cat' && feeder.length === 1) stdin = before.stdin;
     }
     before = cmd;
-    // A variable set for git, or anywhere on the line in any shell (before or after it, in a
-    // function, a subshell, code run by `eval`), may make it do anything to the tree. Which shell
-    // gets it, and when, is not followed: that is the line's, not each command's.
-    const program = words[0] && !words[0].dynamic ? programName(words[0]) : '';
+    // A variable set for git, or a line that may set what it runs with (above), may make it do
+    // anything to the tree.
     const assigned = cmd.words
       .slice(0, words[0] ? cmd.words.indexOf(words[0]) : cmd.words.length)
       .some((w) => isAssignment(w) && unsafeVariable(w));
-    if (!r.gitEnv && setsGitVariable(cmd, words, program)) r.gitEnv = true;
     const settings = assigned || r.gitEnv;
     const verdict = classify(words, stdin, 0, { settings, timeUp: r.timeUp });
     const runsGit = !settings && words.some((w) => !w.dynamic && programName(w) === 'git');
@@ -3929,6 +4227,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         break;
       case 'unread':
         r.limit ??= verdict.why;
+        if (verdict.taints) r.gitEnv = true;
         break;
       case 'git': {
         // Files and folders it names as such: an output file, a folder a clone is put in.
@@ -4010,11 +4309,14 @@ function collectTargets(command: string, startDir: string | null, depth: number,
 }
 
 /** The commands of `$(…)` and backtick substitutions in a text the shell expands. */
-function substitutions(text: string): string[] {
+function substitutions(text: string, most = 20): string[] {
   const out: string[] = [];
-  for (let i = 0; i < text.length && out.length < 20; i++) {
+  for (let i = 0; i < text.length && out.length < most; i++) {
     if (text[i] === '\\') {
       i++;
+    } else if (text[i] === '$' && text[i + 1] === '(' && text[i + 2] === '(') {
+      // Arithmetic, not a command: what it holds is read on.
+      i += 2;
     } else if (text[i] === '$' && text[i + 1] === '(') {
       let depth = 1;
       let j = i + 2;

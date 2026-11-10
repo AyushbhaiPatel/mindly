@@ -47,27 +47,47 @@ memory, which is then injected into every other agent.
   index, when its subcommand is known to do so and every option and setting it is given keeps it
   so. Anything else is taken as a possible change of the whole working tree, which gets a warning
   when a covered file is there: an alias, a subcommand or option not known here, a `-c` setting
-  not known to be harmless, a variable git may read set anywhere on the line, a push into a
-  repository on this machine, and a config write that changes what later commands do. Variables
-  are read line-wide: one set anywhere on the line, before or after the git command, in a
-  function, a group, a subshell, `$( … )`, code run by `eval`, a `trap`, `bash -c` or git
-  itself, counts for every git command on it, whatever shell it ends up in. It counts when the
-  line assigns, exports, declares, loops over (`for X in`), reads (`read`, `mapfile`, `printf
--v`, `getopts`) or computes (`let`, `(( … ))`) an upper-case or `GIT_*` variable other than
-  locale, time zone, terminal, prompt, author and harmless pager or editor ones; when it exports
-  any variable (`export`, `declare -x`) or turns on `set -a`; when it makes a nameref
-  (`declare -n`); when it reads a file with `source` or `.`; when `eval` or `trap` is given code
-  that is not plain text (`eval "$(…)"`); and when a variable's own name is not plain text. A
-  lower-case variable that is not exported (`msg=fix`) stays the shell's. So a line that exports
-  anything, or sets an upper-case variable for any program (`CI=1 npm test && git commit`), gets
-  a warning for each of its git commands when a covered file is there. The folders git fills (a
-  clone, a new repository or working tree, a submodule) are checked as written as a whole, and the code it runs (`rebase --exec`, `bisect run`,
-  `difftool --extcmd`, `submodule foreach`, a `!` alias) is read like any other command. What
-  git runs on its own, from settings already in place, is not seen: hooks in `.git/hooks` or
-  under a `core.hooksPath` set earlier (husky, lint-staged and the like running on commit),
-  filters, diff drivers and `core.fsmonitor` in the repository's config, variables exported before
-  the session, a remote whose URL is a path on this machine, and the files a clone from elsewhere
-  brings.
+  not known to be harmless, a line that may change what git runs with, a push into a repository
+  on this machine, and a config write that changes what later commands do. The folders git fills
+  (a clone, a new repository or working tree, a submodule) are checked as written as a whole, and
+  the code it runs (`rebase --exec`, `bisect run`, `difftool --extcmd`, `submodule foreach`, a
+  `!` alias) is read like any other command. What git runs on its own, from settings already in
+  place, is not seen: hooks in `.git/hooks` or under a `core.hooksPath` set earlier (husky,
+  lint-staged and the like running on commit), filters, diff drivers and `core.fsmonitor` in the
+  repository's config, variables exported before the session, a remote whose URL is a path on
+  this machine, and the files a clone from elsewhere brings.
+- What git runs with is read for the whole line by an allowlist, not by following variables: a
+  program run as its own process cannot change this shell; only builtins, keywords and
+  expansions can, and those are a known set. Anything on the line not known to be harmless,
+  anywhere on it and in any shell (before or after the git command, in a function, a group, a
+  subshell, `$( … )`, code run by `eval`, a `trap`, `bash -c` or git itself), makes every git
+  command on it a possible change of the whole tree:
+  - any builtin or keyword but `cd`, `pushd`, `popd`, `dirs`, `echo`, `printf` and `print`
+    without `-v`, `true`, `false`, `:`, `test`, `[`, `pwd`, `wait`, `exit`, `return`, `break`,
+    `continue`, `type`, `which`, `help`, `jobs`, `times`, `umask` without a mask, `for` over a
+    lower-case variable, and `if`, `then`, `elif`, `else`, `fi`, `while`, `until`, `do`, `done`,
+    `case`, `esac`, `{`, `}`, `!`, `time` and `function`. So `export`, `shopt`, `setopt`,
+    `source` and `.`, `eval`, `trap`, `read`, `mapfile`, `let`, `[[`, `alias`, `hash`, `local`,
+    `unset`, `command`, `exec` and the rest count, and so does `set`, strict options included;
+  - a word that holds anything but text, `$name`, `${name}`, a special parameter (`$?`, `$@`)
+    or a substitution (whose code is read as part of the line): `${x:=y}`, `${a[i]}`, `${x:1}`,
+    `$(( … ))`, `$[ … ]`, and `(( … ))`;
+  - an assignment to an element (`a[i]=1`), an array (`x=( … )`), or an upper-case or `GIT_*`
+    variable other than locale, time zone, terminal, prompt, author and harmless pager or editor
+    ones, wherever it is given; a lower-case variable with a plain value (`msg=fix`) stays the
+    shell's;
+  - a program whose name is not plain text (`$f x`), a word that is not plain text given to a
+    program that runs another (`env "$v" git …`), `env -S`, and `xargs` or `parallel` running
+    git, which is then read as git given a setting;
+  - a shell given code the text does not show (`bash -c "$cmd"`), which is also said as not
+    read.
+
+  On such a line every substitution in its text, quoted or not, is read as code too
+  (`printf -v 'a[$(…)]'` runs it). So a line that exports anything, turns on shell options,
+  reads input into a variable, tests with `[[`, or sets an upper-case variable for any program
+  (`CI=1 npm test && git commit`) gets a warning for each of its git commands when a covered file
+  is there.
+
 - Rendered memory text is sanitised: control characters stripped, fence/delimiter sequences
   neutralised, length capped.
 
