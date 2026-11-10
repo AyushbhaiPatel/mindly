@@ -14,6 +14,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError, type Severity } from '@mindly/core';
 import {
+  confirmSchemaVersion,
   MIGRATIONS,
   openDatabaseReadOnly,
   peekSchemaVersion,
@@ -292,5 +293,27 @@ describe('peekSchemaVersion', () => {
     } finally {
       live.close();
     }
+  });
+
+  it('confirmSchemaVersion has SQLite read the database, where the header alone can lie', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-peek-')));
+    const path = join(dir, 'mindly.db');
+    Store.open(path).close();
+    expect(confirmSchemaVersion(path)).toBe(MIGRATIONS.length);
+
+    // Cut short: the header is intact and still names a version.
+    const cut = join(dir, 'cut.db');
+    writeFileSync(cut, readFileSync(path).subarray(0, 5000));
+    expect(peekSchemaVersion(cut)).toBe(MIGRATIONS.length);
+    expect(() => confirmSchemaVersion(cut)).toThrow();
+
+    // The first bytes of a database followed by anything.
+    const junk = join(dir, 'junk.db');
+    writeFileSync(
+      junk,
+      Buffer.concat([Buffer.from('SQLite format 3\0'), Buffer.alloc(4096, 0x41)]),
+    );
+    expect(peekSchemaVersion(junk)).toBe(0x41414141);
+    expect(() => confirmSchemaVersion(junk)).toThrow();
   });
 });

@@ -111,6 +111,30 @@ export function peekSchemaVersion(
   }
 }
 
+/**
+ * The schema version of the database at `path` as SQLite reads it, after SQLite has also read the
+ * schema itself. Throws when the file is not a database SQLite can read (cut short, overwritten,
+ * not a database at all). `peekSchemaVersion` is the cheap first look and trusts 100 bytes; this
+ * is what confirms an answer before it is acted on. It never migrates. For a database in WAL mode
+ * the read-only connection may leave the `-shm` file (and an empty `-wal`) it needs.
+ */
+export function confirmSchemaVersion(
+  path: string,
+  options: { busyTimeoutMs?: number } = {},
+): number {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.trunc(options.busyTimeoutMs ?? 200)}`);
+    db.exec('PRAGMA trusted_schema = OFF');
+    const version = schemaVersion(db);
+    // Reading the schema makes SQLite check the header against the file and parse every entry.
+    db.prepare('SELECT count(*) AS n FROM sqlite_master').get();
+    return version;
+  } finally {
+    db.close();
+  }
+}
+
 /** The project whose root is `dir` or its nearest ancestor, or null when Mindly does not know it. */
 function findProject(db: Db, dir: string): { id: string; name: string } | null {
   const stmt = db.prepare('SELECT id, name FROM projects WHERE root = ?');
