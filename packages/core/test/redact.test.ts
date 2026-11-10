@@ -212,8 +212,23 @@ describe('redact', () => {
     ['curl --user "PW:" https://x.test', 'PW'],
     ['curl -u "admin:my secret pass PW" https://x.test', 'my secret pass'],
     ["curl -u 'admin:my secret pass PW' https://x.test", 'my secret pass'],
+    // A curl cluster is credentials even when the user is an email or the password a path.
+    ['curl -su me@company.example:PW https://jira.example/rest/api/2/myself', 'PW'],
+    ['curl -sSu me@company.example:PW https://x.test', 'PW'],
+    ['curl -ku admin:/PW https://x.test', '/PW'],
+    ['curl -sU proxyuser@corp.example:PW -x proxy.test:3128 x.test', 'PW'],
+    // Variables named after a client.
+    ['$CURL_BIN -u admin:PW https://x.test', 'PW'],
+    ['$MY_WGET --user admin:PW https://x.test', 'PW'],
+    ['WGET_ARGS="--user admin:PW" ./fetch.sh', 'PW'],
+    // A quote that goes on across an escaped newline.
+    ["curl https://x.test -d 'line1 \\\nx; y' -u admin:PW", 'PW'],
+    ['curl https://x.test -d "line1 \\\nx && y" -u admin:PW', 'PW'],
+    // A wrapped command after a prompt, and after an option line.
+    ['$ curl https://x.test\n    -u admin:PW', 'PW'],
+    ['curl https://x.test\n  --data a=1\n  --header "X: y"\n  -u admin:PW', 'PW'],
   ])('redacts a secret passed as a command-line argument: %s', (template, placeholder) => {
-    const secret = placeholder === 'PW' ? 'hunter2SecretValue9' : placeholder;
+    const secret = placeholder.replace('PW', 'hunter2SecretValue9');
     const command = template.replace('PW', 'hunter2SecretValue9');
     const out = redact(command);
     expect(out.text).not.toContain(secret);
@@ -265,9 +280,8 @@ describe('redact', () => {
     'curl https://x.test & docker run -u app:staff image',
     'curl https://x.test || docker run -u app:staff image',
     'wget -qO- https://x.test && rsync -avzu user@host:/data/ .',
-    // A cluster that is not curl's, or an rsync-style target.
+    // A cluster that is not curl's.
     'curl https://x.test then rsync -avzu user@host:/data/ .',
-    'curl https://x.test then rsync -avu user@host:/data/ .',
     // A variable for a proxy is not a client.
     'docker run -e HTTPS_PROXY=$HTTP_PROXY -u app:staff image',
     // Lines that only end in a backtick or caret are not continued.
@@ -276,6 +290,22 @@ describe('redact', () => {
     // Only an indented option continues a wrapped command, not a list item or another command.
     'curl https://x.test\n  - docker run -u app:staff image',
     'curl https://x.test\n  docker run -u app:staff image',
+    // A sentence above an indented option is not a command.
+    'use curl here\n    -u 1000:1000 is the uid:gid',
+    'Check it with curl first.\n  -u app:staff runs it as the app user',
+    // An rsync, scp or ssh after the client owns its cluster and target.
+    'curl https://x.test then rsync -avu user@host:/data/ .',
+    'curl -O https://x.test/f && scp -ru deploy@host:/srv/app .',
+    // A variable that only mentions http or curl is not a client.
+    'docker run -p $HTTP_PORT:80 -u 1000:1000 image',
+    'docker run -p ${HTTPS_PORT}:443 -u app:staff image',
+    'docker run -e HTTP=$HTTP_PROXY -u app:staff image',
+    'use_curl=1 docker run -u app:staff image',
+    'HAS_CURL=$CURL_PROXY docker run -u app:staff image',
+    // A certificate given as a URI has no password.
+    "curl --cert 'pkcs11:object=my-key;type=cert' https://x.test",
+    'curl --cert pkcs11:object=my-key https://x.test',
+    'curl --cert file:client.pem https://x.test',
     // The client is named after the flag, or on another line.
     'docker run -u app:staff image curl https://x.test',
     'curl https://x.test\ndocker run -u app:staff image',

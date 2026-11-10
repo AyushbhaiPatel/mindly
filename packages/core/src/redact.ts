@@ -167,25 +167,36 @@ function startsDisplayText(prefix: string, value: string, at: MatchContext): boo
   );
 }
 
+/** HTTP clients by program name. */
+const CLIENT_NAMES = 'curlie|aria2c|lftp|hurl|httpstat|httpie';
+
 /**
  * An HTTP client, for which `-u name:value` means credentials. Named as a word after any
  * non-word character, with or without a directory or `.exe` (`!curl`, `C:\me>curl`,
  * `/usr/bin/curl`, `CURL.EXE`), including builds such as `curl_chrome116` or
- * `curl-impersonate`; or a variable that holds one: `$CURL`, `${WGET}`, `CURL_OPTS=...`. A
- * client behind a shell function or alias defined elsewhere is not recognised.
+ * `curl-impersonate`; or a variable that holds one. A variable counts when its name is a client
+ * name, alone or with a short affix (`$CURL`, `${CURL_BIN}`, `$MY_WGET`), never a setting that
+ * only mentions one (`$HTTP_PORT`, `$HTTP_PROXY`); an assignment counts when its name starts
+ * with one (`CURL_OPTS="..."`, not `use_curl=1`). A client behind a shell function or alias
+ * defined elsewhere is not recognised.
  */
-const HTTP_CLIENT = new RegExp(
-  [
-    '(?<![\\p{L}\\p{N}_])(?:',
-    '(?:curl(?:[-_][A-Za-z0-9_-]{1,40}|\\d{1,4})?|wget2?|curlie|aria2c|ab|lftp|hurl|httpstat)',
-    '(?:\\.exe)?(?![\\p{L}\\p{N}_])',
-    // `$CURL`, `${HTTP_CLIENT}`; proxy settings such as `$HTTP_PROXY` are not clients.
-    '|\\$\\{?(?![A-Za-z0-9_]{0,40}proxy(?![A-Za-z0-9_]))[A-Za-z0-9_]{0,40}(?:curl|wget|http)[A-Za-z0-9_]{0,40}',
-    '|[A-Za-z0-9_]{0,40}(?:curl|wget)[A-Za-z0-9_]{0,40}=',
-    ')',
-  ].join(''),
-  'iu',
-);
+const HTTP_CLIENT_SOURCE = [
+  '(?<![\\p{L}\\p{N}_])(?:',
+  // A program name; after `$` or `${` it is a variable, judged by the next alternative.
+  `(?<![$\\{])(?:curl(?:[-_][A-Za-z0-9_-]{1,40}|\\d{1,4})?|wget2?|ab|${CLIENT_NAMES})`,
+  '(?:\\.exe)?(?![\\p{L}\\p{N}_])',
+  `|\\$\\{?(?:[A-Za-z0-9]{1,8}_)?(?:curl|wget|${CLIENT_NAMES})(?:_(?!proxy\\b)[A-Za-z0-9]{1,8})?\\}?(?![A-Za-z0-9_])`,
+  '|(?:curl|wget)(?:_[A-Za-z0-9]{1,12})?=',
+  ')',
+].join('');
+
+const HTTP_CLIENT = new RegExp(HTTP_CLIENT_SOURCE, 'iu');
+
+/**
+ * A line whose first word is an HTTP client, after an optional shell prompt (`$ curl ...`): the
+ * start of a command that may be wrapped over indented option lines.
+ */
+const CLIENT_LINE = new RegExp(`[ \\t]*(?:[$>%#][ \\t]+)?${HTTP_CLIENT_SOURCE}`, 'iuy');
 
 /** curl's short options that take no value, so they can come before `u` in one cluster. */
 const CURL_FLAG_CLUSTER = '[0-6aBfGgIijJkLlMNnOpqRsSvVZ#]{0,10}';
@@ -194,15 +205,20 @@ const CURL_FLAG_CLUSTER = '[0-6aBfGgIijJkLlMNnOpqRsSvVZ#]{0,10}';
 const USER_FLAG = `-${CURL_FLAG_CLUSTER}[uU]|--(?:proxy-)?user`;
 
 /**
- * A line that begins with whitespace and an option (`  -u admin:pw`, `  --header ...`): a
- * command wrapped over several lines without continuation characters, read as one line. A list
- * item (`  - item`) has a space after its dash and is not an option.
+ * A line that begins with whitespace and an option (`  -u admin:pw`, `  --header ...`): part of
+ * a command wrapped over several lines without continuation characters. A list item
+ * (`  - item`) has a space after its dash and is not an option.
  */
 const WRAPPED_FLAG_LINE = /[ \t]+--?[A-Za-z0-9#]/y;
 
+/** A line that begins with an option, indented or not: a wrapped command goes on through it. */
+const OPTION_LINE = /[ \t]*--?[A-Za-z0-9#]/y;
+
 /**
  * True when the newline at `i` does not end the command: it is escaped (a backslash, or after a
- * space a cmd `^` or a PowerShell backtick), or the next line is an indented option.
+ * space a cmd `^` or a PowerShell backtick), or the next line is an indented option and the line
+ * before it is a command, not a sentence: it starts with an HTTP client or is an option line
+ * itself.
  */
 function joinsNextLine(text: string, i: number): boolean {
   const before = text[i - 1] === '\r' ? i - 2 : i - 1;
@@ -212,7 +228,12 @@ function joinsNextLine(text: string, i: number): boolean {
     return true;
   }
   WRAPPED_FLAG_LINE.lastIndex = i + 1;
-  return WRAPPED_FLAG_LINE.test(text);
+  if (!WRAPPED_FLAG_LINE.test(text)) return false;
+  const above = text.lastIndexOf('\n', i - 1) + 1;
+  OPTION_LINE.lastIndex = above;
+  if (OPTION_LINE.test(text)) return true;
+  CLIENT_LINE.lastIndex = above;
+  return CLIENT_LINE.test(text);
 }
 
 function isBlank(code: number): boolean {
@@ -221,8 +242,9 @@ function isBlank(code: number): boolean {
 
 /**
  * Splits a line into commands at unquoted `|`, `||`, `&&`, `;` and a standalone `&` (an `&`
- * inside a word, as in `?a=1&b=2`, is part of a URL). Quotes are followed within each physical
- * line only; an unbalanced quote runs to the end of that line, which keeps more in one command.
+ * inside a word, as in `?a=1&b=2`, is part of a URL). Quotes are followed across the joined
+ * line, so a quoted value that goes on over an escaped newline stays one argument; an unbalanced
+ * quote runs to the end of the line, which keeps more in one command.
  */
 function splitCommands(text: string, start: number, end: number): number[] {
   const out: number[] = [];
@@ -235,9 +257,7 @@ function splitCommands(text: string, start: number, end: number): number[] {
   };
   for (let i = start; i < end; i++) {
     const c = text.charCodeAt(i);
-    if (c === 10) {
-      quote = 0;
-    } else if (quote !== 0) {
+    if (quote !== 0) {
       if (c === quote) quote = 0;
       else if (c === 92 && quote === 34) i++;
     } else if (c === 92) {
@@ -265,13 +285,13 @@ function splitCommands(text: string, start: number, end: number): number[] {
 }
 
 /**
- * True when an HTTP client is named earlier in the command `pos` is in. A line is a physical
- * line, joined with the next across an escaped newline or an indented option. Within it, the
+ * Where an HTTP client is named earlier in the command `pos` is in, or -1. A line is a physical
+ * line, joined with the next across an escaped newline or a wrapped option line. Within it, the
  * client must come after the last command separator before `pos`: `curl ... && docker run -u
  * app:staff` leaves docker's user alone, while a client inside `sh -c "..."`, after `#` or in a
  * sentence still counts. Any other program's `-u` (a user, a group, a URL) is never touched.
  */
-function httpClientBefore(at: MatchContext, pos: number): boolean {
+function httpClientBefore(at: MatchContext, pos: number): number {
   const { text, line } = at;
   if (pos < line.start || pos >= line.end) {
     let start = text.lastIndexOf('\n', pos - 1);
@@ -291,18 +311,26 @@ function httpClientBefore(at: MatchContext, pos: number): boolean {
     else hi = mid - 1;
   }
   const client = cmds[lo * 3 + 2] ?? -1;
-  return client !== -1 && client < pos;
+  return client !== -1 && client < pos ? client : -1;
+}
+
+/** Where the flag that starts `flagGroup` is. */
+function flagStart(flagGroup: string, at: MatchContext): number {
+  return at.start + Math.max(0, flagGroup.search(/\S/));
 }
 
 /** True when the flag that starts `flagGroup` sits in a command that names an HTTP client. */
 function clientBeforeFlag(flagGroup: string, at: MatchContext): boolean {
-  return httpClientBefore(at, at.start + Math.max(0, flagGroup.search(/\S/)));
+  return httpClientBefore(at, flagStart(flagGroup, at)) !== -1;
 }
+
+/** Programs whose short-flag clusters take a `user@host:/path` target, not credentials. */
+const REMOTE_COPY = /(?<![\p{L}\p{N}_-])(?:rsync|scp|sftp|ssh|rclone)(?![\p{L}\p{N}_-])/iu;
 
 /**
  * Skip for the `-u name:value` rules: not in an HTTP client's command, or not a literal secret.
- * A cluster of short flags (`-avu user@host:/data`) is rsync's or scp's, never curl's, when the
- * name holds an `@` or the value is a path.
+ * A valid curl cluster ending in u is credentials (`curl -su me@example.com:token`), unless an
+ * rsync, scp or ssh named after the client owns it: `-avu user@host:/data` is a remote path.
  */
 function isNotHttpCredentials(groups: readonly string[], at: MatchContext): boolean {
   const flag = groups[1] ?? '';
@@ -310,10 +338,14 @@ function isNotHttpCredentials(groups: readonly string[], at: MatchContext): bool
   const value = groups[3] ?? '';
   if (value.startsWith('$') || value.startsWith('//')) return true;
   if (value === '' && name.startsWith('$')) return true;
-  if (/^\s?-[^-\s"'=]{2,}/.test(flag) && (name.includes('@') || value.startsWith('/'))) {
-    return true;
+  const pos = flagStart(flag, at);
+  const client = httpClientBefore(at, pos);
+  if (client === -1) return true;
+  const cluster = /^[\s"']?-[^-\s"'=]{2,}/.test(flag);
+  if (cluster && (name.includes('@') || value.startsWith('/'))) {
+    return REMOTE_COPY.test(at.text.slice(client, pos));
   }
-  return !clientBeforeFlag(flag, at);
+  return false;
 }
 
 const RULES: Rule[] = [
@@ -386,7 +418,7 @@ const RULES: Rule[] = [
     // `--proxy-user`, and a curl cluster ending in u (`-su`). Only in a command that names an
     // HTTP client first. `-u :token` has no user and is redacted all the same.
     re: new RegExp(
-      `((?:^|\\s)(?:${USER_FLAG})(?:\\s{1,5}|=)["']?)([^\\s:"'\`]{0,200}):([^\\s"'\`]{1,200})`,
+      `((?:^|[\\s"'])(?:${USER_FLAG})(?:\\s{1,5}|=)["']?)([^\\s:"'\`]{0,200}):([^\\s"'\`]{1,200})`,
       'g',
     ),
     replace: `$1$2:${REDACTED}`,
@@ -396,7 +428,7 @@ const RULES: Rule[] = [
     kind: 'cli_credentials',
     // `curl -u apikey:`: a key given as the user name, with an empty password.
     re: new RegExp(
-      `((?:^|\\s)(?:${USER_FLAG})(?:\\s{1,5}|=)["']?)([^\\s:"'\`]{1,200})():(?=$|[\\s"'\`])`,
+      `((?:^|[\\s"'])(?:${USER_FLAG})(?:\\s{1,5}|=)["']?)([^\\s:"'\`]{1,200})():(?=$|[\\s"'\`])`,
       'g',
     ),
     replace: `$1${REDACTED}:`,
@@ -418,6 +450,8 @@ const RULES: Rule[] = [
       (g[3] ?? '').startsWith('$') ||
       // `C:\certs\client.pem` with no password: the colon is the drive letter's.
       (/^[A-Za-z]$/.test(g[2] ?? '') && /^[\\/]/.test(g[3] ?? '')) ||
+      // `pkcs11:object=key;type=cert` or `file:...` is a URI, not `file:password`.
+      /^(?:pkcs11|file)$/i.test(g[2] ?? '') ||
       !clientBeforeFlag(g[1] ?? '', at),
   },
   {
