@@ -1,9 +1,9 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { MINDLY_VERSION } from '@mindly/core';
 import { describe, expect, it } from 'vitest';
-import { inRunnerCache, installCommand } from '../src/commands/setup.js';
 import {
   SUPPORTED_NODE,
   failsOpen,
@@ -11,7 +11,6 @@ import {
   nodeProblem,
   nodeVersionSupported,
 } from '../src/node-check.js';
-import { tempDir } from './helpers.js';
 
 const loads = (): Promise<unknown> => Promise.resolve({});
 const missing = (): Promise<unknown> => Promise.reject(new Error('No such built-in module'));
@@ -102,49 +101,6 @@ describe('supported Node versions', () => {
   });
 });
 
-describe('the launcher recorded by init', () => {
-  it('knows the caches of package runners', () => {
-    expect(inRunnerCache('/home/a/.npm/_npx/826d5fe126bc685d/node_modules/.bin/mindly')).toBe(true);
-    expect(
-      inRunnerCache('C:\\Users\\a\\AppData\\Local\\npm-cache\\_npx\\1f\\node_modules\\x'),
-    ).toBe(true);
-    expect(inRunnerCache('/home/a/.cache/pnpm/dlx/abc123/node_modules/.bin/mindly')).toBe(true);
-    expect(inRunnerCache('/home/a/.bun/install/cache/mindly-cli@0.5.0/dist/main.js')).toBe(true);
-    expect(inRunnerCache('/usr/local/lib/node_modules/mindly-cli/dist/main.js')).toBe(false);
-    expect(inRunnerCache('/home/a/project/node_modules/mindly-cli/dist/main.js')).toBe(false);
-    expect(inRunnerCache('/home/a/src/dlxtools/apps/cli/dist/main.js')).toBe(false);
-  });
-
-  it('asks npx for this exact version when Mindly runs from the npx cache', async () => {
-    const root = tempDir('mindly-npx-');
-    const modules = join(root, '_npx', '826d5fe126bc685d', 'node_modules');
-    const bin = join(modules, '.bin');
-    const dist = join(modules, 'mindly-cli', 'dist');
-    mkdirSync(bin, { recursive: true });
-    mkdirSync(dist, { recursive: true });
-    const target = join(dist, 'main.js');
-    writeFileSync(target, '', { mode: 0o755 });
-    symlinkSync(target, join(bin, 'mindly'));
-    const argv1 = process.argv[1];
-    process.argv[1] = join(bin, 'mindly');
-    try {
-      expect(await installCommand({ PATH: bin })).toEqual([
-        'npx',
-        '--yes',
-        `mindly-cli@${MINDLY_VERSION}`,
-      ]);
-    } finally {
-      if (argv1 !== undefined) process.argv[1] = argv1;
-    }
-  });
-
-  it('keeps an installed launcher as it is', async () => {
-    const command = await installCommand({ PATH: '' });
-    expect(command[0]).toBe(process.execPath);
-    expect(inRunnerCache(command[1] as string)).toBe(false);
-  });
-});
-
 const BUILT_MAIN = join(import.meta.dirname, '..', 'dist', 'main.js');
 
 describe.skipIf(!existsSync(BUILT_MAIN))('built binary', () => {
@@ -158,6 +114,22 @@ describe.skipIf(!existsSync(BUILT_MAIN))('built binary', () => {
     const code = await new Promise<number | null>((done) => child.on('close', done));
     expect(code).toBe(0);
     expect(stderr).not.toMatch(/EPIPE|Error/);
+  });
+
+  it('keeps a failing exit status when its reader goes away', async () => {
+    const closedPipe = join(import.meta.dirname, '..', 'dist', 'closed-pipe.js');
+    const script = `import(${JSON.stringify(pathToFileURL(closedPipe).href)}).then((m) => {
+      m.quietOnClosedPipe();
+      process.exitCode = 3;
+      setInterval(() => process.stdout.write('x'.repeat(65536)), 1);
+    });`;
+    const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.destroy();
+    let stderr = '';
+    child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+    const code = await new Promise<number | null>((done) => child.on('close', done));
+    expect(code).toBe(3);
+    expect(stderr).toBe('');
   });
 
   it('prints one line and fails on a Node without node:sqlite; hooks stay quiet', () => {

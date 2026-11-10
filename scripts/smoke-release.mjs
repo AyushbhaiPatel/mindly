@@ -191,6 +191,63 @@ try {
     fallback,
   );
 
+  // 4c. `npx mindly-cli init`: hooks must run a copy in MINDLY_HOME, not npx or the npx cache,
+  // and keep working with the npx cache gone and no registry.
+  const repo3 = join(root, 'repo3');
+  mkdirSync(repo3);
+  run('git', ['init', '-q', '-b', 'main'], { cwd: repo3 });
+  const viaNpx = spawnSync(
+    'npm',
+    [
+      'exec',
+      '--yes',
+      `--package=${tarball}`,
+      '--',
+      'mindly',
+      'init',
+      '--project',
+      '--yes',
+      '--agents',
+      'claude-code',
+    ],
+    {
+      cwd: repo3,
+      env: { ...env, PATH: process.env.PATH ?? '' },
+      encoding: 'utf8',
+      timeout: 600_000,
+    },
+  );
+  const settings3File = join(repo3, '.claude', 'settings.json');
+  const settings3 = existsSync(settings3File) ? readFileSync(settings3File, 'utf8') : '';
+  const npxCommands = [...settings3.matchAll(/"command":\s*"([^"]+)"/g)].map((m) => m[1]);
+  const copyMain = join(dirs.mindlyHome, 'lib', expected, 'node_modules', 'mindly-cli', 'dist');
+  check(
+    viaNpx.status === 0 &&
+      npxCommands.length > 0 &&
+      npxCommands.every((c) => c.includes(join(copyMain, 'main.js')) && !/\bnpx\b|_npx/.test(c)),
+    `init through npx records a copy in MINDLY_HOME (${npxCommands.length} hooks)`,
+    viaNpx.status === 0 ? (npxCommands[0] ?? '') : `${viaNpx.stdout}\n${viaNpx.stderr}`,
+  );
+  rmSync(join(env.npm_config_cache, '_npx'), { recursive: true, force: true });
+  const started = Date.now();
+  const offline = spawnSync(
+    process.execPath,
+    [join(copyMain, 'main.js'), 'hook', 'claude-code', 'Stop'],
+    {
+      cwd: repo3,
+      env: { ...env, PATH: process.env.PATH ?? '', npm_config_registry: 'http://127.0.0.1:9/' },
+      input: '{}',
+      encoding: 'utf8',
+      timeout: 30_000,
+    },
+  );
+  const took = Date.now() - started;
+  check(
+    offline.status === 0 && offline.stderr === '' && took < 5_000,
+    `copied hook runs without the npx cache or a registry (exit ${offline.status}, ${took} ms)`,
+    offline.stderr,
+  );
+
   // 5. A SessionStart hook payload; with one rule in memory the hook must inject it.
   const add = run('mindly', ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm, never npm'], {
     cwd: dirs.repo,

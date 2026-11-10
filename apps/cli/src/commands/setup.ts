@@ -1,4 +1,4 @@
-import { constants, existsSync, realpathSync } from 'node:fs';
+import { constants, existsSync, realpathSync, rmSync } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
@@ -32,6 +32,13 @@ import { findRepoRoot } from '@mindly/git';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary } from '../diff.js';
 import { confirm, type CliIo } from '../io.js';
+import {
+  copiedEntry,
+  ensureCopy,
+  inRunnerCache,
+  runnerTree,
+  type RunnerTree,
+} from '../runner-copy.js';
 import { clean, splitList, UsageError, type Out } from '../util.js';
 import { renderInitSummary } from '../views/setup.js';
 import { offerRuleImport } from './import.js';
@@ -167,43 +174,64 @@ export function cliEntry(): string {
   return resolveLayout(import.meta.url).cliMain;
 }
 
-/**
- * The argv agents run to reach Mindly: the global `mindly` when this process was started through
- * it, otherwise `node <absolute path to dist/main.js>` so hooks work without a global install.
- */
-export async function installCommand(env: NodeJS.ProcessEnv): Promise<string[]> {
-  const running = process.argv[1];
-  const global = await onPath('mindly', env);
-  const command =
-    global && running && sameFile(global, running) ? [global] : [process.execPath, cliEntry()];
-  // `npx mindly-cli init` runs from a package runner's cache. That cache is disposable: clearing
-  // it would break every hook and MCP entry pointing into it. Ask the runner for this exact
-  // version instead; it reuses its cache while the cache is there and fetches the package again
-  // when it is not.
-  if (inRunnerCache(command[command.length - 1] as string)) {
-    return ['npx', '--yes', `mindly-cli@${MINDLY_VERSION}`];
+/** The runner's package tree this process runs from, when it runs from a runner's cache. */
+function currentRunnerTree(
+  env: NodeJS.ProcessEnv,
+  entry: string = cliEntry(),
+): { home: string; tree: RunnerTree } | null {
+  const tree = runnerTree(entry);
+  if (tree === null) return null;
+  try {
+    return { home: mindlyHome(env), tree };
+  } catch {
+    return null; // invalid MINDLY_HOME: init reports it when it creates the home
   }
-  return command;
 }
 
 /**
- * True when `path` lies in the temporary cache of a package runner (`npx`, `pnpm dlx`,
- * `yarn dlx`, `bunx`) rather than in an installed package.
+ * The argv agents run to reach Mindly: the global `mindly` when this process was started through
+ * it, otherwise `node <absolute path to dist/main.js>` so hooks work without a global install.
+ * From a package runner's cache (`npx mindly-cli init`) that path is the copy `init` keeps under
+ * `$MINDLY_HOME/lib` (see runner-copy.ts), which may not exist yet.
  */
-export function inRunnerCache(path: string): boolean {
-  let real = path;
-  try {
-    real = realpathSync(path);
-  } catch {
-    // keep the path as given
+export async function installCommand(
+  env: NodeJS.ProcessEnv,
+  entry: string = cliEntry(),
+): Promise<string[]> {
+  // Checked first: npx puts its cache's `.bin` on PATH, so the `mindly` found there is the cache.
+  const runner = currentRunnerTree(env, entry);
+  if (runner !== null) {
+    return [process.execPath, copiedEntry(runner.home, MINDLY_VERSION, runner.tree)];
   }
-  const p = real.replace(/\\/g, '/');
-  return (
-    /\/_npx\//.test(p) ||
-    /\/dlx[-/]/.test(p) ||
-    /\/\.bun\/install\/cache\//.test(p) ||
-    /\/bunx-[^/]+\//.test(p)
-  );
+  const running = process.argv[1];
+  const global = await onPath('mindly', env);
+  if (global && running && sameFile(global, running)) return [global];
+  return [process.execPath, entry];
+}
+
+/** `$MINDLY_HOME/lib`, where init keeps copies of Mindly, when it exists. */
+function runnerCopies(env: NodeJS.ProcessEnv): string | null {
+  try {
+    const lib = join(mindlyHome(env), 'lib');
+    return existsSync(lib) ? lib : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Copies this process's package tree out of the runner's cache when {@link installCommand}
+ * points there. Null when done or not needed, else why it failed.
+ */
+async function keepRunnerCopy(env: NodeJS.ProcessEnv): Promise<string | null> {
+  const runner = currentRunnerTree(env);
+  if (runner === null) return null;
+  try {
+    await ensureCopy(runner.home, MINDLY_VERSION, runner.tree);
+    return null;
+  } catch (err) {
+    return clean(err instanceof Error ? err.message : String(err), 200);
+  }
 }
 
 async function projectRootOf(cwd: string): Promise<string> {
@@ -331,10 +359,12 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
       `Agents will reach Mindly by running: ${command.join(' ')}${projectRoot ? ` (for the project ${projectRoot} only)` : ' (for all your projects)'}`,
     ),
   );
-  if (command[0] === 'npx') {
+  if (inRunnerCache(cliEntry())) {
     out.line(
       out.style.dim(
-        'Mindly is running from a temporary package, so agents will start it through npx. Hooks start faster after a global install (npm i -g mindly-cli) and running mindly init again.',
+        inRunnerCache(command[command.length - 1] as string)
+          ? "Mindly is running from a package runner's cache, which may be cleared at any time. Install it with npm i -g mindly-cli and run mindly init again so agents keep reaching it."
+          : `Mindly is running from a package runner's cache, so it keeps its own copy in ${join(mindlyHome(env), 'lib')} for the agents. To update it later, run the newer version's init, or install it with npm i -g mindly-cli.`,
       ),
     );
   }
@@ -365,6 +395,16 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
       out.line('Nothing changed.');
       return 1;
     }
+  }
+  // Also when nothing changes: the configs may already point at a copy that was deleted since.
+  const copyFailed = await keepRunnerCopy(env);
+  if (copyFailed !== null) {
+    out.warn(
+      `Mindly could not copy itself out of the package runner's cache (${copyFailed}), so the agents were not connected. Install it with npm i -g mindly-cli and run mindly init again.`,
+    );
+    return 1;
+  }
+  if (total > 0) {
     for (const p of plans) {
       for (const applied of applyInstallSteps(p.steps, { projectRoot })) {
         out.line(describeApplied(applied));
@@ -505,6 +545,13 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
     );
     total += 1;
   }
+  // The copy `npx mindly-cli init` keeps for the agents goes when Mindly is removed user-wide.
+  const copies = explicit === null && projectRoot === null ? runnerCopies(env) : null;
+  if (copies !== null) {
+    out.line(out.style.bold("Mindly's own copy"));
+    out.line(`  Delete ${copies}, the copy of Mindly that init made for your agents`);
+    total += 1;
+  }
   if (o.dryRun) {
     out.line();
     out.line('Dry run: nothing was written.');
@@ -539,6 +586,16 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
       ? await checkpointRows(out.io, projectRoot, 'remove')
       : { rows: 0, left: [] as string[] };
   const removed = removal.rows;
+  let copiesRemoved = false;
+  if (copies !== null) {
+    try {
+      rmSync(copies, { recursive: true, force: true });
+      copiesRemoved = true;
+    } catch (err) {
+      const why = clean(err instanceof Error ? err.message : String(err), 200);
+      out.warn(`${copies} could not be removed (${why}). Delete that folder by hand.`);
+    }
+  }
   const sc = out.screen();
   const names = plans.filter((p) => p.steps.length > 0).map((p) => p.adapter.displayName);
   sc.blank();
@@ -549,6 +606,9 @@ export async function uninstall(out: Out, o: SetupOptions): Promise<number> {
   }
   if (rulesFile !== null) {
     sc.text(`${sc.mark('ok')} Removed Mindly's rules section from your agent instruction files.`);
+  }
+  if (copiesRemoved) {
+    sc.text(`${sc.mark('ok')} Removed Mindly's own copy from ${copies}.`);
   }
   if (removed > 0) {
     sc.text(
