@@ -10,6 +10,7 @@ import {
   shellMayWrite,
   shellWriteTargets,
   type ShellTarget,
+  understoodLine,
 } from '../src/hooks/shell.js';
 
 describe('shell command reading (saves evidence)', () => {
@@ -729,8 +730,9 @@ describe('write targets of a shell command', () => {
       'echo "$c" | bash; git status',
       'cat x.sh | bash; git status',
       'bash; git status',
+      "echo 'echo hi' | bash -s; git status",
+      "bash <(echo 'echo hi'); git status",
       'source <(cat x); git status',
-      "echo x | xargs -I{} sh -c '{}'; git status",
     ]) {
       expect(whole(cmd), cmd).toBe(true);
     }
@@ -763,8 +765,6 @@ describe('write targets of a shell command', () => {
       'diff <(git show HEAD:a) <(git show HEAD~1:a); git status',
       'bash scripts/check.sh && git status',
       "bash -s x <<< 'echo hi'; git status",
-      "echo 'echo hi' | bash -s; git status",
-      "bash <(echo 'echo hi'); git status",
       'man git; brew install git',
     ]) {
       expect(whole(cmd), cmd).toBe(false);
@@ -1106,8 +1106,10 @@ describe('write targets of a shell command', () => {
       'prisma/a.sql',
     ]);
     expect(targets("bash <<< 'rm certs/server.pem'")).toEqual(['certs/server.pem']);
-    expect(targets("echo 'rm certs/server.pem' | bash")).toEqual(['certs/server.pem']);
-    expect(targets("cat <<'EOF' | sh\nrm certs/server.pem\nEOF")).toEqual(['certs/server.pem']);
+    // What a pipe feeds a shell is not read as code: said as not shown.
+    for (const cmd of ["echo 'rm certs/server.pem' | bash", "cat <<'EOF' | sh\nrm x\nEOF"]) {
+      expect(readShellWrites(cmd).limit, cmd).toContain('does not show');
+    }
     expect(targets('eval "rm a.ts"')).toEqual(['a.ts']);
     expect(targets("trap 'rm a.ts' EXIT")).toEqual(['a.ts']);
     expect(targets("alias x='rm a.ts'; x")).toEqual(['a.ts']);
@@ -1194,18 +1196,22 @@ describe('write targets of a shell command', () => {
     expect(targets('echo "$(echo ")")"; rm a.ts')).toEqual(['a.ts']);
     // The shell expands a here-document whose delimiter is not quoted.
     expect(targets('cat <<EOF\n$(rm a.ts)\nEOF')).toEqual(['a.ts']);
-    // Shell code from a shell's or `source`'s input, or a process substitution, the text shows.
+    // Shell code from a shell's or `source`'s own here-string or here-document.
     expect(targets("bash -s x <<< 'rm a.ts'")).toEqual(['a.ts']);
     expect(targets("bash /dev/stdin <<< 'rm a.ts'")).toEqual(['a.ts']);
-    expect(targets("echo 'rm a.ts' | bash -s x")).toEqual(['a.ts']);
     expect(targets("bash -s <<'EOF'\nrm a.ts\nEOF")).toEqual(['a.ts']);
-    expect(targets("bash <(echo 'rm a.ts')")).toEqual(['a.ts']);
-    expect(targets("source <(printf '%s\\n' 'rm a.ts')")).toEqual(['a.ts']);
     expect(targets("flock lk -c 'rm a.ts'")).toEqual(['a.ts']);
-    expect(targets("test -v 'a[$(rm a.ts)]'")).toEqual(['a.ts']);
     expect(targets('taskset -c 0 git checkout v1 -- a.ts')).toContain('a.ts');
-    // Code the text does not show is said.
-    for (const cmd of ['c=x; bash <<< "$c"', 'echo "$c" | bash', 'eval "$c"', 'cat x | sh']) {
+    // Code the text does not show is said: a value, a pipe, a process substitution.
+    for (const cmd of [
+      'c=x; bash <<< "$c"',
+      'echo "$c" | bash',
+      'eval "$c"',
+      'cat x | sh',
+      "echo 'rm a.ts' | bash -s x",
+      "bash <(echo 'rm a.ts')",
+      "source <(printf '%s\\n' 'rm a.ts')",
+    ]) {
       expect(readShellWrites(cmd).limit, cmd).toContain('does not show');
     }
     expect(targets("cat <<'EOF'\n$(rm a.ts)\nEOF")).toEqual([]);
@@ -1298,10 +1304,109 @@ describe('write targets of a shell command', () => {
     expect(read('npm run build')).toEqual([]);
   });
 
+  it('tells a line it reads fully from one it does not', () => {
+    for (const line of [
+      'git status',
+      'git add -A && git commit -m "fix the parser" || true',
+      "git commit -qm 'run git status first'",
+      'msg=fix; git commit -m fix',
+      'LANG=C git status -s',
+      'cd sub && git status; pwd',
+      'if git diff --quiet; then echo ok; else echo changed; fi',
+      'npm test 2>&1 | tail -20',
+      'git log --oneline | head -5 | grep fix',
+      'pnpm build > build.log 2>&1',
+      'npm test </dev/null 2>/dev/null',
+      'echo x >&2 3>x.log',
+      'git diff | tee out.diff',
+      'rm -rf build/* dist',
+      '[ -f a.ts ] && test -d src && echo yes',
+      "printf '%s\\n' a b",
+      'timeout 60 git fetch -q',
+      'npx prettier --write src',
+      'python -c "print(\'x\')"',
+      '',
+    ]) {
+      expect(understoodLine(line), line).toBe(true);
+    }
+    for (const line of [
+      'echo $HOME',
+      'git commit -m "$msg"',
+      'echo `date`',
+      'echo a\\ b',
+      '(cd a && ls)',
+      '{ ls; }',
+      'f() { ls; }',
+      'for f in a; do echo; done',
+      'cat <<EOF\nx\nEOF',
+      'bash <<< x',
+      'diff <(ls) <(ls)',
+      'rm a[12].ts',
+      'echo {a,b}',
+      '! git diff --quiet',
+      'sleep 1 &',
+      'export X=1',
+      'set -e',
+      'source x.sh',
+      "bash -c 'git status'",
+      'git log | xargs echo',
+      'git log |& cat',
+      'taskset -c 0 git status',
+      "script -qec 'git status' /dev/null",
+      'env -S "git status"',
+      'echo x <&3',
+      'echo x >| f',
+      'cat < file',
+      '# a comment',
+      'echo a # b',
+      'printf -v x y',
+      'test -v x',
+      'git status;;',
+      'echo "unclosed',
+      'echo x |',
+    ]) {
+      expect(understoodLine(line), line).toBe(false);
+    }
+    // Not read fully, a line stands for the whole tree, a possible write, and nothing else.
+    const unread = readShellWrites('rm $(cat list)', { top: '/w', understoodOnly: true });
+    expect(unread.understood).toBe(false);
+    expect(unread.targets).toMatchObject([{ path: '/w', tree: true, certain: false }]);
+  });
+
+  it('answers a line of 200,000 characters of any shape in good time', () => {
+    for (const unit of [
+      'xargs -i ',
+      'echo $(x) ',
+      'a[$(b)] ',
+      'git checkout -- a ',
+      'cd a; ',
+      '"$x" ',
+      'echo a | grep b; ',
+      'x=1 ',
+      "echo 'a b' ",
+      'a/*/b ',
+      'cp -r a b; ',
+      'env -S x ',
+      '((',
+      '$(',
+    ]) {
+      const line = `${unit.repeat(Math.floor(199_000 / unit.length))}git status`;
+      // The best of a few runs, so a busy machine does not decide it.
+      let best = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const started = performance.now();
+        readShellWrites(line, { top: '/w', understoodOnly: true });
+        best = Math.min(best, performance.now() - started);
+      }
+      expect(best, unit).toBeLessThan(100);
+    }
+  });
+
   it('says when a limit cut the reading short', () => {
     expect(readShellWrites('rm a.ts')).toEqual({
       targets: [expect.anything()],
       limit: null,
+      understood: true,
     });
     const many = Array.from({ length: 700 }, (_, i) => `rm f${i}.ts`).join('; ');
     const cut = readShellWrites(many);

@@ -413,9 +413,10 @@ describe('linked worktrees', () => {
       // From the linked worktree into the main checkout, by an absolute path and from its root.
       expect((await shell(wt, `rm ${dir}/auth.ts`)).decision).toBe('deny');
       expect((await shell(wt, `cd ${dir} && rm -rf .`)).decision).toBe('deny');
-      expect((await shell(join(dir), `rm $(git rev-parse --show-toplevel)/auth.ts`)).decision).toBe(
-        'deny',
-      );
+      // A substitution is not read fully: a warning, never a block.
+      const top = await shell(join(dir), `rm $(git rev-parse --show-toplevel)/auth.ts`);
+      expect(top.decision).toBeNull();
+      expect(top.context).toContain('could not read this command fully');
       // Twenty places that are not the project: no limit is hit, nothing is refused.
       const elsewhere = Array.from({ length: 20 }, (_, i) => {
         const d = mkdtempSync(join(tmpdir(), `mindly-else-${i}-`));

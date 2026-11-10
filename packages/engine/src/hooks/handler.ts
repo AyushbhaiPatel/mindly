@@ -463,7 +463,8 @@ export class HookHandler {
     command: string,
     ownTreeOnly = false,
     timeUp: () => boolean = () => false,
-  ): Promise<{ certain: Writes; possible: Writes; limit: string | null }> {
+    understoodOnly = false,
+  ): Promise<{ certain: Writes; possible: Writes; limit: string | null; understood: boolean }> {
     const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
@@ -486,6 +487,7 @@ export class HookHandler {
       top: toPosix(treeRoot),
       timeUp,
       linked,
+      understoodOnly,
     });
     let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
@@ -639,7 +641,7 @@ export class HookHandler {
     // What the text shows as written is not also reported as a mere possibility.
     const sure = new Set(certain.paths.map((p) => p.abs));
     possible.paths = possible.paths.filter((p) => !sure.has(p.abs));
-    return { certain, possible, limit };
+    return { certain, possible, limit, understood: reading.understood };
   }
 
   /** The rules the user marked as enforced that have a scope. */
@@ -823,12 +825,16 @@ export class HookHandler {
       // searched when it runs out is said in a warning.
       const budget = Math.min(PRE_TOOL_BUDGET_MS, this.k.config.hooks.timeoutMs * PRE_TOOL_SHARE);
       const until = performance.now() + budget;
-      const { certain, possible, limit } = await this.shellWrites(
+      // Only a line Mindly reads fully is checked exactly, and only such a line is ever blocked.
+      // Any other stands for a possible write of the whole tree: a warning when a file an
+      // enforced rule covers is there.
+      const { certain, possible, limit, understood } = await this.shellWrites(
         project,
         evt.cwd,
         tool.command,
         false,
         () => performance.now() > until - budget / 2,
+        true,
       );
       if (certain.unsafe > 0) return unsafeDenial();
       if (certain.unchecked > 0) return uncheckedDenial(certain.unchecked, false);
@@ -850,7 +856,11 @@ export class HookHandler {
       const guard = await guarded(certain, written);
       // What may only be read, and where files of unknown names land (an archive unpacked, a
       // copy whose sources cannot be seen), is never a block here: a warning at most.
-      const soft = await guarded(possible, named);
+      // A line not read fully stands for the whole tree only for the project's enforced rules,
+      // checked below; other guards are asked about what a line read fully writes.
+      const soft: WriteGuardResult = understood
+        ? await guarded(possible, named)
+        : { warnings: [], deny: null };
       const landed = await this.consultGuards(
         project,
         session,
@@ -900,7 +910,9 @@ export class HookHandler {
         warnings.push(
           hit.unfinished
             ? `Mindly could not search all of ${names(hit)} for files covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
-            : `This command names ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change it without asking the user.`,
+            : !understood
+              ? `Mindly could not read this command fully; it may write ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
+              : `This command names ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change it without asking the user.`,
         );
       }
       if (possible.unchecked > 0) {
