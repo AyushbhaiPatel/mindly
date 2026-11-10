@@ -195,21 +195,30 @@ function surfaceNow(k: Kernel, file: ChangedFile): Map<string, string> | null {
 interface CommitDelta {
   then: ReadonlyMap<string, string>;
   now: ReadonlyMap<string, string>;
+  /** Whether the file's content differs between the two commits. */
+  fileChanged: boolean;
 }
 
 /**
  * The baseline to compare `after` with once HEAD moved from `then` to `now` since `surface` was
- * stored. A commit, pull, checkout, reset or stash is not an agent edit, so nothing it did is
- * reported; what is still the agents' own is compared as usual. Per export:
+ * stored. A commit, pull, checkout, reset or stash is not an agent edit, so nothing it did to the
+ * file is reported; what is still the agents' own is compared as usual.
  *
+ * When the file is the same at both commits (HEAD moved for another file), git did nothing to it
+ * and the surface is the baseline as it is. Otherwise, per export:
+ *
+ * - Absent at both commits: git has nothing to say about it; it is compared as usual.
  * - The file holds it as `now` does: the git operation explains it (a pull brought it, a
  *   checkout or `git stash` put the committed version back over an uncommitted change), so it
- *   reads as unchanged. An agent edit that itself undid an uncommitted change to the export since
- *   the move is missed with it; that cannot be told apart.
+ *   reads as unchanged.
  * - The surface holds it as `then` did: the surface predates what the commits did to it, so it
  *   takes the value at `now`.
  * - Otherwise the surface shows an uncommitted change still in the working tree (or one the
  *   surface already saw after the commit) and is kept, so the file is compared with it.
+ *
+ * What cannot be told apart: an agent edit made after such a move that puts an export of this file
+ * back to its committed value reads as the git operation and is missed; a checkout between commits
+ * where the file is identical that discards an uncommitted change reads as an agent edit.
  */
 function applyCommitDelta(
   surface: ReadonlyMap<string, string>,
@@ -217,11 +226,11 @@ function applyCommitDelta(
   after: ReadonlyMap<string, string>,
 ): Map<string, string> {
   const out = new Map(surface);
-  const names = new Set([...surface.keys(), ...delta.then.keys(), ...delta.now.keys()]);
-  for (const name of names) {
+  if (!delta.fileChanged) return out;
+  for (const name of new Set([...delta.then.keys(), ...delta.now.keys()])) {
     const was = delta.then.get(name);
     const is = delta.now.get(name);
-    const explained = after.get(name) === is;
+    const explained = is !== undefined && after.get(name) === is;
     if (!explained && out.get(name) !== was) continue;
     if (is === undefined) out.delete(name);
     else out.set(name, is);
@@ -450,14 +459,19 @@ export class ImpactService {
     newHead: string,
   ): Promise<CommitDelta | null> {
     const git = this.k.ports.git;
-    const surfaceAt = async (ref: string): Promise<Map<string, string> | null> => {
+    const at = async (
+      ref: string,
+    ): Promise<{ content: string | null; surface: Map<string, string> } | null> => {
       if (!git.fileStateAtRef) return null;
-      const at = await git.fileStateAtRef(tree, ref, path, MAX_BASELINE_BYTES);
-      if (at?.state === 'absent') return new Map();
-      return at?.state === 'file' ? git.exportSurface(at.content, path) : null;
+      const state = await git.fileStateAtRef(tree, ref, path, MAX_BASELINE_BYTES);
+      if (state?.state === 'absent') return { content: null, surface: new Map() };
+      if (state?.state !== 'file') return null;
+      const surface = git.exportSurface(state.content, path);
+      return surface ? { content: state.content, surface } : null;
     };
-    const [then, now] = [await surfaceAt(oldHead), await surfaceAt(newHead)];
-    return then && now ? { then, now } : null;
+    const [then, now] = [await at(oldHead), await at(newHead)];
+    if (!then || !now) return null;
+    return { then: then.surface, now: now.surface, fileChanged: then.content !== now.content };
   }
 
   /**

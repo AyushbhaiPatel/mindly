@@ -773,15 +773,79 @@ describe('impact radar', () => {
 
     it('does not blame the next agent when a checkout leaves the exports as committed', async () => {
       const { root, mindly, pid, cc, cx, write } = await featureSetup();
-      const git = withCommits(mindly, { h0: AUTH_V1, h1: AUTH_V1 });
+      // The file differs between the commits, though not in its exports.
+      const git = withCommits(mindly, { h0: AUTH_V1, h1: AUTH_V1.replace('"admin"', '"root"') });
       write('src/auth.ts', AUTH_V1.replace('login(user: string)', OTP));
       await impactOf(mindly).analyze(pid, root, cc, authFile(root));
 
-      // `git checkout -f other`, whose file has the same exports as before.
+      // `git checkout -f other` puts the committed `login` back.
       git.headCommit = async () => 'h1';
-      write('src/auth.ts', AUTH_V1 + 'export function extra() {}\n');
+      write('src/auth.ts', AUTH_V1.replace('"admin"', '"root"') + 'export function extra() {}\n');
       expect(await impactOf(mindly).analyze(pid, root, cx, authFile(root))).toBeNull();
     });
+
+    // What a commit of another file (the file is the same at both HEADs) or a commit of this one
+    // does to the comparison of the next edit, for each kind of uncommitted change.
+    const LOGOUT = 'export function logout() {}\n';
+    const cases: {
+      name: string;
+      commits: Record<string, string>;
+      uncommitted: string;
+      next: string;
+      expected: { added: string[]; removed: string[]; changed: string[] } | null;
+    }[] = [
+      {
+        name: 'unrelated commit, uncommitted export removed again',
+        commits: { h0: AUTH_V1, h1: AUTH_V1 },
+        uncommitted: AUTH_V1 + LOGOUT,
+        next: AUTH_V1,
+        expected: { added: [], removed: ['logout'], changed: [] },
+      },
+      {
+        name: 'unrelated commit, uncommitted signature change undone',
+        commits: { h0: AUTH_V1, h1: AUTH_V1 },
+        uncommitted: AUTH_V1.replace('login(user: string)', OTP),
+        next: AUTH_V1,
+        expected: { added: [], removed: [], changed: ['login'] },
+      },
+      {
+        name: 'unrelated commit, uncommitted removal kept',
+        commits: { h0: AUTH_V1, h1: AUTH_V1 },
+        uncommitted: AUTH_V1.replace('export const VERSION = 1;\n', ''),
+        next: AUTH_V1.replace('export const VERSION = 1;\n', '') + LOGOUT,
+        expected: null,
+      },
+      {
+        name: 'commit of this file, uncommitted export removed again',
+        commits: { h0: AUTH_V1, h1: PULLED.replace(LOGOUT, 'export function other() {}\n') },
+        uncommitted: AUTH_V1 + LOGOUT,
+        next: AUTH_V1 + 'export function other() {}\n',
+        // `other` came with the commit: not an agent's change.
+        expected: { added: [], removed: ['logout'], changed: [] },
+      },
+      {
+        name: 'commit of this file, uncommitted signature change kept, body edited',
+        commits: { h0: AUTH_V1, h1: PULLED },
+        uncommitted: AUTH_V1.replace('login(user: string)', OTP),
+        next: PULLED.replace('login(user: string)', OTP).replace('"admin"', '"root"'),
+        expected: null,
+      },
+    ];
+    for (const c of cases) {
+      it(c.name, async () => {
+        const { root, mindly, pid, cc, cx, write } = await featureSetup();
+        await mindly.hooks.handle(
+          event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+        );
+        const git = withCommits(mindly, c.commits);
+        write('src/auth.ts', c.uncommitted);
+        await impactOf(mindly).analyze(pid, root, cx, authFile(root));
+        git.headCommit = async () => 'h1';
+        write('src/auth.ts', c.next);
+        const report = await impactOf(mindly).analyze(pid, root, cc, authFile(root));
+        expect(report?.diff ?? null).toEqual(c.expected);
+      });
+    }
 
     it('still compares an uncommitted change that survived the pull', async () => {
       const { root, mindly, pid, cc, cx, write } = await featureSetup();
