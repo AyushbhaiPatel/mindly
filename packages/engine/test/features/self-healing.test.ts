@@ -6,6 +6,7 @@ import {
   EARLIER_FORM_WORK,
   EVIDENCE_SCAN_WORK,
   excerptPresent,
+  excerptsPresent,
   excerptState,
   excerptWork,
   normalizeBlock,
@@ -924,6 +925,11 @@ describe('self-healing memory', () => {
       expect(states.map((c) => c.state)).not.toContain('invalid');
     }
     expect(hashOf(placeable)).toMatch(/^span:/);
+    // One row of an earlier form is left: no turns to keep.
+    const turn = `self-healing:turn:${pid}:src/config.txt`;
+    expect(mindly.store.kv.get<number>(turn)).not.toBeNull();
+    selfHealingOf(mindly).recheckFile(pid, root, 'src/config.txt', null);
+    expect(mindly.store.kv.get<number>(turn)).toBeNull();
   });
 
   it('builds the file made safe only when the work allowed for earlier evidence pays for it', () => {
@@ -950,6 +956,107 @@ describe('self-healing memory', () => {
     // built: it would cost more than the work allowed).
     const [, normalising] = timed(() => normalizeBlock(content));
     expect(ms).toBeLessThan(4 * normalising + 50);
+  });
+
+  it('looks up the excerpts of many rows exactly, as a search for each would', () => {
+    let seed = 7;
+    const rnd = (n: number) => {
+      seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+      return seed % n;
+    };
+    const alphabet = ['a', 'b', 'ab', '\u{1F600}', '\uD800', ' ', '\n', 'é', 'x', 'aaaa', 'ba'];
+    for (let trial = 0; trial < 300; trial++) {
+      let content = '';
+      const length = 50 + rnd(600);
+      while (content.length < length) content += alphabet[rnd(alphabet.length)];
+      const norm = normalizeBlock(content);
+      // Pieces of the file, pieces with one unit changed, and short and long ones alike.
+      const excerpts = Array.from({ length: 1 + rnd(40) }, () => {
+        const from = rnd(Math.max(1, norm.length));
+        const piece = norm.slice(from, from + 1 + rnd(80));
+        if (rnd(2) === 0 || piece.length === 0) return piece;
+        const at = rnd(piece.length);
+        return (
+          piece.slice(0, at) + (alphabet[rnd(alphabet.length)] as string) + piece.slice(at + 1)
+        );
+      });
+      const want = excerpts.map((e) => {
+        const n = normalizeBlock(e);
+        return n.length > 0 && norm.includes(n);
+      });
+      expect(excerptsPresent(content, excerpts), JSON.stringify([content, excerpts])).toEqual(want);
+    }
+  });
+
+  it('looks up the excerpts of many rows of a large file in a fraction of a pass each', async () => {
+    /** The best of three runs: the time of the work, not of compiling it. */
+    const timed = <T>(f: () => T): [T, number] => {
+      let best = Infinity;
+      let r = f();
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now();
+        r = f();
+        best = Math.min(best, performance.now() - t);
+      }
+      return [r, best];
+    };
+    // About 500 KB of code-like lines, and excerpts of about 2,000 characters from it.
+    const lines = Array.from(
+      { length: 7000 },
+      (_, i) => `  const item${i} = await service.load${i % 97}({ id: ${i}, tag: "t${i % 13}" });`,
+    );
+    const content = lines.join('\n');
+    const pick = (rows: number) =>
+      Array.from({ length: rows }, (_, i) => {
+        const at = Math.floor(((i + 1) * (lines.length - 27)) / (rows + 1));
+        const excerpt = lines
+          .slice(at, at + 27)
+          .join('\n')
+          .slice(0, 2000);
+        // Every third one changed in its middle, so it is not there.
+        return i % 3 === 0 ? `${excerpt.slice(0, 1000)}#${excerpt.slice(1001)}` : excerpt;
+      });
+    const [, normalising] = timed(() => normalizeBlock(content));
+    // As many rows as one file has in a re-check, and as many as a sweep takes.
+    for (const rows of [500, 2000]) {
+      const excerpts = pick(rows);
+      const [present, ms] = timed(() => excerptsPresent(content, excerpts));
+      expect(present).toEqual(excerpts.map((_, i) => i % 3 !== 0));
+      // A few times normalising the file here; a search per row is a hundred times that.
+      expect(ms).toBeLessThan(40 * normalising + 50);
+    }
+    // A run of one character, with excerpts that nearly match everywhere.
+    const run = 'a'.repeat(500_000);
+    const near = Array.from(
+      { length: 500 },
+      (_, i) => `${'a'.repeat(200 + i)}b${'a'.repeat(1799 - i)}`,
+    );
+    const [none, nearMs] = timed(() => excerptsPresent(run, near));
+    expect(none.some(Boolean)).toBe(false);
+    // (Normalising a run of one character is almost free: measured against the code above.)
+    expect(nearMs).toBeLessThan(40 * normalising + 50);
+
+    // Through the hook path: the 500 rows of one file in one re-check.
+    const { root, mindly, pid, cx, write } = await featureSetup();
+    write('src/big.ts', content);
+    for (const [i, excerpt] of pick(500).entries()) {
+      if (i % 3 === 0) continue;
+      mindly.memory.remember({
+        projectId: pid,
+        projectRoot: root,
+        kind: 'fact',
+        title: `fact ${i}`,
+        body: `fact ${i}`,
+        source: agentSource(cx),
+        evidence: [{ path: 'src/big.ts', excerpt }],
+      });
+    }
+    const [checks, all] = timed(() =>
+      selfHealingOf(mindly).recheckFile(pid, root, 'src/big.ts', null),
+    );
+    expect(checks.length).toBeGreaterThan(300);
+    expect(checks.every((c) => c.state === 'valid')).toBe(true);
+    expect(all).toBeLessThan(40 * normalising + 50);
   });
 
   it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {

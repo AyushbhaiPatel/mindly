@@ -67,6 +67,13 @@ const HASH_COST = 256;
  * not yet made answers `unknown` and the evidence keeps its validity.
  */
 const MAX_SCAN_WORK = 24_000_000;
+/** Units an excerpt is anchored on (see `occurringIn`), and the base of the hashes used. */
+const ANCHOR = 32;
+const HASH_BASE = 0x01000193;
+/** Checks of excerpts against windows of the text, per unit of the text, before an automaton. */
+const MAX_ANCHOR_CHECKS_PER_UNIT = 2;
+/** Characters of excerpts looked for in one pass over a file (see `occurringIn`). */
+const MAX_PATTERNS_PER_PASS = 1_000_000;
 /** Lines that making safe changes, up to which the made-safe file is built line by line. */
 const MAX_LINES_MADE_SAFE_ONE_BY_ONE = 512;
 /** Characters an excerpt lost just before its start that are tried as part of it, at most. */
@@ -462,51 +469,158 @@ function eachPlace(
 }
 
 /**
- * Which of `patterns` occur in `text` (its code units), in one pass (Aho-Corasick): linear in
- * the text and in the patterns together, whatever they hold, however many there are.
+ * Which of `patterns` occur in `text` (its code units). Excerpts of at least `ANCHOR` units are
+ * found by their first `ANCHOR` units: one rolling hash over the text, each window looked up in
+ * a table of those anchors, each excerpt with that anchor checked by the hash of the whole of
+ * it (from the text's prefix hashes, in constant time) and compared character by character only
+ * when that hash matches. A real occurrence always matches, so nothing that is there is missed,
+ * and only a comparison can say an excerpt is there. When the checks run past a bound (many
+ * excerpts sharing an anchor, in a text full of it), and for shorter excerpts, an automaton
+ * decides instead, which is linear whatever the text holds.
  */
 function occurringIn(text: Uint16Array, patterns: readonly string[]): string[] {
-  const goTo = new Map<number, number>();
-  const key = (node: number, unit: number): number => node * 0x10000 + unit;
-  const kids: number[][] = [[]];
-  const ends: number[] = [];
+  const long = patterns.filter((p) => p.length >= ANCHOR);
+  const short = patterns.filter((p) => p.length < ANCHOR);
+  const found = new Set<string>(short.length > 0 ? automatonFinds(text, short) : []);
+  if (long.length > 0) {
+    for (const p of anchoredFinds(text, long) ?? automatonFinds(text, long)) found.add(p);
+  }
+  return patterns.filter((p) => found.has(p));
+}
+
+/** See `occurringIn`; null when the checks would go past their bound. */
+function anchoredFinds(text: Uint16Array, patterns: readonly string[]): string[] | null {
+  const n = text.length;
+  let longest = ANCHOR;
+  for (const p of patterns) longest = Math.max(longest, p.length);
+  // Powers of the base, and the prefix hashes of the text (all modulo 2^32).
+  const pow = new Int32Array(longest + 1);
+  pow[0] = 1;
+  for (let i = 1; i <= longest; i++) pow[i] = Math.imul(pow[i - 1] as number, HASH_BASE);
+  const prefix = new Int32Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    prefix[i + 1] = (Math.imul(prefix[i] as number, HASH_BASE) + (text[i] as number)) | 0;
+  }
+  const windowHash = (at: number, length: number): number =>
+    ((prefix[at + length] as number) - Math.imul(prefix[at] as number, pow[length] as number)) | 0;
+  // The anchors, in an open-addressing table; excerpts with one anchor are chained.
+  let size = 1;
+  while (size < patterns.length * 4) size <<= 1;
+  const slotKey = new Int32Array(size);
+  const slotHead = new Int32Array(size).fill(-1);
+  const sameAnchor = new Int32Array(patterns.length).fill(-1);
+  const whole = new Int32Array(patterns.length);
+  for (let id = 0; id < patterns.length; id++) {
+    const p = patterns[id] as string;
+    let anchor = 0;
+    let h = 0;
+    for (let i = 0; i < p.length; i++) {
+      h = (Math.imul(h, HASH_BASE) + p.charCodeAt(i)) | 0;
+      if (i === ANCHOR - 1) anchor = h;
+    }
+    whole[id] = h;
+    let slot = (Math.imul(anchor, 0x9e3779b1) >>> 0) & (size - 1);
+    while (slotHead[slot] !== -1 && slotKey[slot] !== anchor) slot = (slot + 1) & (size - 1);
+    slotKey[slot] = anchor;
+    sameAnchor[id] = slotHead[slot] as number;
+    slotHead[slot] = id;
+  }
+  const hit = new Uint8Array(patterns.length);
+  let left = patterns.length;
+  let checks = 0;
+  const maxChecks = MAX_ANCHOR_CHECKS_PER_UNIT * n + patterns.length;
+  for (let at = 0; at + ANCHOR <= n && left > 0; at++) {
+    const anchor = windowHash(at, ANCHOR);
+    let slot = (Math.imul(anchor, 0x9e3779b1) >>> 0) & (size - 1);
+    while (slotHead[slot] !== -1 && slotKey[slot] !== anchor) slot = (slot + 1) & (size - 1);
+    for (let id = slotHead[slot] as number; id !== -1; id = sameAnchor[id] as number) {
+      if (hit[id]) continue;
+      if (++checks > maxChecks) return null;
+      const p = patterns[id] as string;
+      const length = p.length;
+      if (at + length > n || windowHash(at, length) !== whole[id]) continue;
+      // The hashes match: the excerpt is there only if every character is.
+      checks += length >> 4;
+      let same = true;
+      for (let i = 0; i < length; i++) {
+        if (text[at + i] !== p.charCodeAt(i)) {
+          same = false;
+          break;
+        }
+      }
+      if (same) {
+        hit[id] = 1;
+        left--;
+      }
+    }
+  }
+  return patterns.filter((_, id) => hit[id] === 1);
+}
+
+/**
+ * The automaton for `occurringIn` (Aho-Corasick): linear in the text and in the patterns
+ * together, whatever they hold, however many there are. It is kept in typed arrays: a node's
+ * children are a list (`child`, then `sibling`), except the root's, which are a table by unit.
+ */
+function automatonFinds(text: Uint16Array, patterns: readonly string[]): string[] {
+  let total = 1;
+  for (const p of patterns) total += p.length;
+  const label = new Uint16Array(total);
+  const child = new Int32Array(total).fill(-1);
+  const sibling = new Int32Array(total).fill(-1);
+  const top = new Int32Array(0x10000).fill(-1);
+  const topKids: number[] = [];
+  const next = (v: number, c: number): number => {
+    if (v === 0) return top[c] as number;
+    for (let w = child[v] as number; w !== -1; w = sibling[w] as number) {
+      if (label[w] === c) return w;
+    }
+    return -1;
+  };
   let nodes = 1;
-  for (const p of patterns) {
+  const ends = new Int32Array(patterns.length);
+  for (let id = 0; id < patterns.length; id++) {
+    const p = patterns[id] as string;
     let v = 0;
     for (let i = 0; i < p.length; i++) {
       const c = p.charCodeAt(i);
-      let w = goTo.get(key(v, c));
-      if (w === undefined) {
+      let w = next(v, c);
+      if (w === -1) {
         w = nodes++;
-        goTo.set(key(v, c), w);
-        kids.push([]);
-        (kids[v] as number[]).push(c, w);
+        label[w] = c;
+        if (v === 0) {
+          top[c] = w;
+          topKids.push(w);
+        } else {
+          sibling[w] = child[v] as number;
+          child[v] = w;
+        }
       }
       v = w;
     }
-    ends.push(v);
+    ends[id] = v;
   }
   const isEnd = new Uint8Array(nodes);
-  for (const v of ends) isEnd[v] = 1;
+  for (let id = 0; id < ends.length; id++) isEnd[ends[id] as number] = 1;
   // Failure links, and the nearest node down them that ends a pattern, breadth first.
   const fail = new Int32Array(nodes);
   const output = new Int32Array(nodes).fill(-1);
   const queue = new Int32Array(nodes);
   let head = 0;
   let tail = 0;
-  const top = kids[0] as number[];
-  for (let i = 1; i < top.length; i += 2) queue[tail++] = top[i] as number;
+  for (const w of topKids) queue[tail++] = w;
   while (head < tail) {
     const u = queue[head++] as number;
-    const us = kids[u] as number[];
-    for (let i = 0; i < us.length; i += 2) {
-      const c = us[i] as number;
-      const w = us[i + 1] as number;
+    for (let w = child[u] as number; w !== -1; w = sibling[w] as number) {
+      const c = label[w] as number;
       let f = fail[u] as number;
-      while (f !== 0 && !goTo.has(key(f, c))) f = fail[f] as number;
-      const g = u === 0 ? 0 : (goTo.get(key(f, c)) ?? 0);
-      fail[w] = g === w ? 0 : g;
-      const fw = fail[w] as number;
+      let g = next(f, c);
+      while (g === -1 && f !== 0) {
+        f = fail[f] as number;
+        g = next(f, c);
+      }
+      const fw = g === -1 ? 0 : g;
+      fail[w] = fw;
       output[w] = isEnd[fw] ? fw : (output[fw] as number);
       queue[tail++] = w;
     }
@@ -516,17 +630,17 @@ function occurringIn(text: Uint16Array, patterns: readonly string[]): string[] {
   let v = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text[i] as number;
-    let w = goTo.get(key(v, c));
-    while (w === undefined && v !== 0) {
+    let g = next(v, c);
+    while (g === -1 && v !== 0) {
       v = fail[v] as number;
-      w = goTo.get(key(v, c));
+      g = next(v, c);
     }
-    v = w ?? 0;
+    v = g === -1 ? 0 : g;
     for (let u = isEnd[v] ? v : (output[v] as number); u > 0 && !hit[u]; u = output[u] as number) {
       hit[u] = 1;
     }
   }
-  return patterns.filter((_, i) => hit[ends[i] as number] === 1);
+  return patterns.filter((_, id) => hit[ends[id] as number] === 1);
 }
 
 /** Where each line of `text` starts. */
@@ -560,9 +674,16 @@ function normFile(raw: string): NormFile {
     },
     prepare(normExcerpts) {
       const wanted = [...new Set(normExcerpts.filter((e) => e.length > 0 && !found.has(e)))];
-      if (wanted.length === 0) return;
-      for (const e of occurringIn(file.units(normContent), wanted)) found.set(e, true);
-      for (const e of wanted) if (!found.has(e)) found.set(e, false);
+      // In batches, so the automaton of one pass stays small whatever the number of rows.
+      for (let at = 0; at < wanted.length;) {
+        const batch: string[] = [];
+        for (let size = 0; at < wanted.length && size < MAX_PATTERNS_PER_PASS; at++) {
+          batch.push(wanted[at] as string);
+          size += (wanted[at] as string).length;
+        }
+        for (const e of occurringIn(file.units(normContent), batch)) found.set(e, true);
+        for (const e of batch) if (!found.has(e)) found.set(e, false);
+      }
     },
     contains(normExcerpt) {
       let hit = found.get(normExcerpt);
@@ -685,6 +806,17 @@ export function excerptWork(
   const file = normFile(content);
   const state = excerptIn(file, excerpt, contentHash).state;
   return { state, work: file.spent(), scanned: file.scanned() };
+}
+
+/**
+ * Whether each of `excerpts` is in `content`, looked up for all of them together as the evidence
+ * of one file is (see `NormFile.prepare`). For tests.
+ */
+export function excerptsPresent(content: string, excerpts: readonly string[]): boolean[] {
+  const file = normFile(content);
+  const norms = excerpts.map((e) => normalizeBlock(e));
+  file.prepare(norms);
+  return norms.map((e) => e.length > 0 && file.contains(e));
 }
 
 /** What a look found, and, for evidence of the earliest form found in place, where. */
@@ -1044,17 +1176,27 @@ export class SelfHealingService {
         .prepare(rows.flatMap((e) => (e.excerpt === null ? [] : [normalizeBlock(e.excerpt)])));
     }
     const earlier = rows.filter((e) => isEarlierForm(e));
+    const key = `self-healing:turn:${projectId}:${first.ref}`;
     let order = rows;
+    let turn = 0;
     if (earlier.length > 1) {
-      const key = `self-healing:turn:${projectId}:${first.ref}`;
-      const turn = this.k.store.kv.get<number>(key) ?? 0;
-      this.k.store.kv.set(key, turn + 1);
+      turn = this.k.store.kv.get<number>(key) ?? 0;
       const shift = turn % earlier.length;
       const rotated = [...earlier.slice(shift), ...earlier.slice(0, shift)];
       order = [...rows.filter((e) => !isEarlierForm(e)), ...rotated];
+    } else if (this.k.store.kv.get<number>(key) !== null) {
+      // No rows left to take turns.
+      this.k.store.kv.delete(key);
     }
     const out = new Map<string, EvidenceCheck>();
     for (const e of order) out.set(e.id, this.check(projectId, e, read, actor));
+    if (earlier.length > 1) {
+      // The next turn starts with the next row, once this one had work to share.
+      const worked =
+        (file.kind === 'present' && file.file().spent() > 0) ||
+        earlier.some((e) => out.get(e.id)?.state !== 'unknown');
+      if (worked) this.k.store.kv.set(key, turn + 1);
+    }
     return rows.map((e) => out.get(e.id) as EvidenceCheck);
   }
 
