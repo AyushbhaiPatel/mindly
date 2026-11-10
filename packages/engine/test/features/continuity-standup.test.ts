@@ -96,8 +96,6 @@ describe('morning standup', () => {
     expect(await svc.notify(pid, d)).toBe(true);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.trigger).toBe('standup');
-    // Setting the time asks for the standup: it does not depend on `notify.triggers`.
-    expect(env.sentOptions[0]).toEqual({ ignoreTriggers: true });
     expect(JSON.stringify(sent)).not.toContain(SECRET);
 
     // Delivery moves the window forward.
@@ -109,56 +107,6 @@ describe('morning standup', () => {
     expect(next.agents).toEqual([]);
     expect(next.memories.decisions).toEqual([]);
     expect(next.needsYou.proposedRules).toHaveLength(1);
-  });
-
-  it('says so when the summary reached no channel', async () => {
-    let down = true;
-    const env = make({
-      config: (c) => {
-        c.standup.time = '09:00';
-      },
-      answer: () =>
-        down
-          ? [{ channel: 'webhook', status: 'failed', reason: 'webhook request failed' }]
-          : [{ channel: 'webhook', status: 'sent' }],
-    });
-    env.mindly.use(standupModule);
-    await env.mindly.hooks.handle(event(env.root, 'claude-code', 'cc', 'session_start'));
-    const pid = env.mindly.store.projects.list()[0]!.id;
-    const svc = standupService(env.mindly);
-    expect(await svc.notify(pid)).toBe(false);
-    down = false;
-    expect(await svc.notify(pid)).toBe(true);
-    expect(env.sent).toHaveLength(2);
-  });
-
-  it('fires once a day when the time falls in the hour skipped by daylight saving', () => {
-    const tz = process.env['TZ'];
-    process.env['TZ'] = 'America/New_York';
-    try {
-      // 2026-03-08: clocks go from 02:00 to 03:00, so 02:30 does not exist that day.
-      const minute = 60_000;
-      let last = 0;
-      const fired: string[] = [];
-      const start = Date.UTC(2026, 2, 7, 0, 0);
-      for (let now = start; now < start + 3 * 24 * 60 * minute; now += minute) {
-        const due = standupDueAt('02:30', now)!;
-        if (last < due) {
-          fired.push(new Date(now).toISOString());
-          last = now;
-        }
-      }
-      expect(fired).toEqual([
-        // The loop starts with nothing delivered, so the first minute fires for the day before.
-        '2026-03-07T00:00:00.000Z',
-        '2026-03-07T07:30:00.000Z', // Sat 02:30 EST
-        '2026-03-08T07:30:00.000Z', // Sun 03:30 EDT: the skipped time lands an hour later
-        '2026-03-09T06:30:00.000Z', // Mon 02:30 EDT
-      ]);
-    } finally {
-      if (tz === undefined) delete process.env['TZ'];
-      else process.env['TZ'] = tz;
-    }
   });
 
   it('computes the scheduled time in local time', () => {

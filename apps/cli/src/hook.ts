@@ -35,10 +35,7 @@ export const HOOK_PAGER_BUDGET_MS = 1200;
 
 const defaultDeps: HookDeps = {
   open: openMindly,
-  afterAnswer: async (mindly, budgetMs) => {
-    const outbox = notifyOutbox(mindly as Mindly);
-    if (outbox.hasDue()) await outbox.flush({ budgetMs });
-  },
+  afterAnswer: (mindly, budgetMs) => notifyOutbox(mindly as Mindly).drain(budgetMs),
 };
 
 export { readStdin };

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createFailoverModule,
   notifyOutbox,
   OUTBOX_MAX_AGE_MS,
   OUTBOX_MAX_ATTEMPTS,
   type NotifyResult,
 } from '../../src/index.js';
+import { event } from '../helpers.js';
 import { make, type Sent } from './continuity-helpers.js';
 
 const page: Sent = {
@@ -111,5 +113,79 @@ describe('pager outbox', () => {
     expect(await outbox.flush()).toEqual({ delivered: 1, waiting: 0, dropped: 0 });
     expect(env.sent[0]!.title).not.toContain('\n');
     expect(env.sent[0]!.title.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('the usage-limit page', () => {
+  const limit = 'Claude usage limit reached. Your limit will reset at 3pm.';
+
+  async function limitedTurn(env: ReturnType<typeof make>): Promise<number> {
+    env.mindly.use(createFailoverModule());
+    await env.mindly.hooks.handle(event(env.root, 'claude-code', 'cc', 'session_start'));
+    await env.mindly.hooks.handle(
+      event(env.root, 'claude-code', 'cc', 'prompt', { prompt: 'Add a discount field' }),
+    );
+    const started = Date.now();
+    await env.mindly.hooks.handle(
+      event(env.root, 'claude-code', 'cc', 'stop', { lastMessage: limit }),
+    );
+    return Date.now() - started;
+  }
+
+  it('is started from the hook and leaves the outbox once a channel took it', async () => {
+    const env = make({ answer: () => sentOk });
+    await limitedTurn(env);
+    await notifyOutbox(env.mindly).drain(1000);
+    expect(env.sent.map((n) => n.trigger)).toEqual(['rate_limited']);
+    env.clock.advance(60 * 60_000);
+    expect(await notifyOutbox(env.mindly).flush()).toEqual({
+      delivered: 0,
+      waiting: 0,
+      dropped: 0,
+    });
+    expect(env.sent).toHaveLength(1);
+  });
+
+  it('does not hold the hook up when the pager is slow, and is sent again later', async () => {
+    let hang = true;
+    const env = make();
+    env.mindly.kernel.ports.notifier = {
+      send: (n) => {
+        env.sent.push(n);
+        return hang ? new Promise(() => undefined) : Promise.resolve(sentOk);
+      },
+    };
+    // The hook returns without waiting for the pager.
+    expect(await limitedTurn(env)).toBeLessThan(700);
+    expect(env.sent).toHaveLength(1);
+
+    // The process gives the attempt what time it has, and no more.
+    const started = Date.now();
+    await notifyOutbox(env.mindly).drain(120);
+    expect(Date.now() - started).toBeLessThan(1000);
+
+    // Still written down: the daemon or the next hook sends it.
+    hang = false;
+    env.clock.advance(31_000);
+    expect(await notifyOutbox(env.mindly).flush()).toEqual({
+      delivered: 1,
+      waiting: 0,
+      dropped: 0,
+    });
+    expect(env.sent).toHaveLength(2);
+    expect(env.sent[1]!.trigger).toBe('rate_limited');
+  });
+
+  it('survives a pager that fails outright', async () => {
+    let down = true;
+    const env = make({ answer: () => (down ? failed : sentOk) });
+    await limitedTurn(env);
+    await notifyOutbox(env.mindly).drain(1000);
+    expect(env.sent).toHaveLength(1);
+    down = false;
+    env.clock.advance(31_000);
+    await notifyOutbox(env.mindly).drain(1000);
+    expect(env.sent).toHaveLength(2);
+    expect(notifyOutbox(env.mindly).hasDue(env.clock.t + 24 * 60 * 60_000)).toBe(false);
   });
 });

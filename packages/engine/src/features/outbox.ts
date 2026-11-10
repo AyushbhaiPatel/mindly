@@ -8,10 +8,11 @@ import { serviceOf } from './shared.js';
  * The pager outbox: notifications that are written down first and sent by whoever has the time.
  *
  * A hook has to answer its agent within a fraction of a second, and a request to a pager can take
- * longer than that. A notification raised in a hook is therefore not sent there: it is put here,
- * and delivered by the daemon's tick or, when no daemon runs, at the end of a hook once the agent
- * has its answer. The same goes for a notification whose channels all failed: it waits here for
- * another attempt instead of being lost.
+ * longer than that. A notification raised in a hook is therefore not awaited there: it is put
+ * here and its first attempt is started without waiting for it (`kick`). The hook process gives
+ * that attempt the time it has left once the agent has its answer (`drain`); what is not out by
+ * then stays here for the daemon's tick or the next hook. The same goes for a notification
+ * whose channels all failed: it waits here for another attempt instead of being lost.
  *
  * Entries live in the kv store (no table of their own). Each attempt is claimed before it is
  * made, so two processes do not send the same entry, and an entry is given up after
@@ -62,8 +63,40 @@ export interface OutboxFlush {
   dropped: number;
 }
 
+/** Attempts under way in this process, by kernel: `drain` waits for them. */
+const underway = new WeakMap<Kernel, Set<Promise<unknown>>>();
+
 export class NotifyOutbox {
   constructor(private readonly k: Kernel) {}
+
+  /**
+   * Starts sending what is due without waiting for it. For callers that must return at once (a
+   * hook); `drain` gives the attempt time later. Never throws.
+   */
+  kick(): void {
+    let set = underway.get(this.k);
+    if (!set) {
+      set = new Set();
+      underway.set(this.k, set);
+    }
+    const running = set;
+    const attempt: Promise<unknown> = this.flush()
+      .catch(() => undefined)
+      .finally(() => running.delete(attempt));
+    running.add(attempt);
+  }
+
+  /**
+   * Waits up to `budgetMs` for the attempts `kick` started, then sends what else is due in the
+   * time that is left. Returns at once when there is nothing to wait for. Never throws.
+   */
+  async drain(budgetMs: number): Promise<void> {
+    const started = Date.now();
+    const running = [...(underway.get(this.k) ?? [])];
+    if (running.length > 0) await withTimeout(Promise.all(running), Math.max(1, budgetMs));
+    const left = budgetMs - (Date.now() - started);
+    if (left > 50 && this.hasDue()) await this.flush({ budgetMs: left });
+  }
 
   /** Writes a notification down for delivery. Never throws. */
   enqueue(n: PagerNotification): void {
