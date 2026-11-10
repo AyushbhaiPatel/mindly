@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +33,29 @@ vi.mock('node:fs', async (importOriginal) => {
 const lockFile = (): string => join(fs.mkdtempSync(join(tmpdir(), 'mindly-lock-race-')), 'lock');
 const lockOf = (pid: number, id: string): string =>
   [pid, id, 'boot-1:100', 'pid:[4026532001]', 'host-1'].join('\n');
+/** Blocks for `ms`. */
+const block = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+const waitFor = (path: string): void => {
+  const end = Date.now() + 10_000;
+  while (!fs.existsSync(path)) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${path}`);
+    block(5);
+  }
+};
+/** Stands in for another process: it does not share this one's memory of released locks. */
+const asAnotherProcess = <T>(id: string, fn: () => T): T => {
+  const released = ((globalThis as Record<symbol, Set<string> | undefined>)[
+    Symbol.for('mindly.sentinel.released')
+  ] ??= new Set<string>());
+  const had = released.delete(id);
+  try {
+    return fn();
+  } finally {
+    if (had) released.add(id);
+  }
+};
 const noLinks = (): never => {
   throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
 };
@@ -137,7 +161,10 @@ describe('sentinel lock races', () => {
       hook.fn = null;
     }
     expect(fs.readFileSync(file, 'utf8')).toBe(theirs);
-    expect(fs.readdirSync(join(file, '..'))).toEqual(['lock']);
+    // A's note of its release stays: its own lock may still be aside with someone.
+    expect(fs.readdirSync(join(file, '..')).filter((f) => !f.startsWith('lock.released-'))).toEqual(
+      ['lock'],
+    );
   });
 
   it('never deletes a newer lock when it cannot put one back', () => {
@@ -168,7 +195,9 @@ describe('sentinel lock races', () => {
       }
       // C's lock stands; B's, moved aside, is gone (B finds out at its next heartbeat).
       expect(fs.readFileSync(file, 'utf8')).toBe(newer);
-      expect(fs.readdirSync(join(file, '..'))).toEqual(['lock']);
+      expect(
+        fs.readdirSync(join(file, '..')).filter((f) => !f.startsWith('lock.released-')),
+      ).toEqual(['lock']);
       fs.unlinkSync(file);
     }
   });
@@ -342,12 +371,172 @@ describe('sentinel lock races', () => {
     lock!.release();
   });
 
-  it('removes notes of releases left behind when the lock is next taken', () => {
+  it('keeps a release note an acquirer in between would have removed', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const file = lockFile();
+      const r = tryProcessLock(file, {
+        namespace: () => 'pid:[4026532001]',
+        host: () => 'host-1',
+      })!;
+      const rId = fs.readFileSync(file, 'utf8').split('\n')[1] as string;
+      // T, in another namespace, saw R's lock unchanged for the window; R touches it while T
+      // judges it, so T would put it back.
+      let mono = 0;
+      const observer = {
+        namespace: () => 'pid:[4026532002]',
+        host: () => 'host-1',
+        monotonic: () => mono,
+      };
+      expect(tryProcessLock(file, observer)).toBeNull();
+      mono += 6 * SENTINEL_LOCK_HEARTBEAT_MS + 1000;
+      let reads = 0;
+      let noteAfterN = false;
+      hook.fn = (op, path) => {
+        if (op !== 'read' || !path.startsWith(`${file}.stale-`)) return;
+        hook.fn = null;
+        // While T has R's lock aside: R lets go (a one-shot, it exits), and N takes the free
+        // lock and lets go of it again.
+        r.release();
+        asAnotherProcess(rId, () => {
+          const n = tryProcessLock(file, {
+            namespace: () => 'pid:[4026532003]',
+            host: () => 'host-1',
+          })!;
+          noteAfterN = fs.existsSync(`${file}.released-${rId}`);
+          n.release();
+        });
+      };
+      let t: ReturnType<typeof tryProcessLock>;
+      try {
+        t = asAnotherProcess(rId, () =>
+          tryProcessLock(file, {
+            ...observer,
+            monotonic: () => {
+              if (++reads === 2) {
+                const d = new Date(Date.now() + 1000);
+                fs.utimesSync(file, d, d);
+              }
+              return mono;
+            },
+          }),
+        );
+      } finally {
+        hook.fn = null;
+      }
+      // R's note outlived N, so T found it: R's lock was not put back, and T took the lock.
+      expect(noteAfterN).toBe(true);
+      expect(t).not.toBeNull();
+      expect(fs.readFileSync(file, 'utf8').split('\n')[1]).not.toBe(rId);
+      t!.release();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never leaves a live holder that let go holding its lock', () => {
     const file = lockFile();
-    // A release that never found its lock again (it stayed away for longer than it looked).
-    fs.writeFileSync(`${file}.released-abababababababababababab`, '');
+    const dir = join(file, '..');
+    const src = new URL('../../src/features/sentinel-lock.ts', import.meta.url).pathname;
+    // R: a daemon in its own process, of this machine and namespace. It takes the lock, lets
+    // go of it when told, and lives on.
+    const holder = `
+      import { existsSync, writeFileSync } from 'node:fs';
+      import { tryProcessLock } from ${JSON.stringify(src)};
+      const [file, dir] = process.argv.slice(-2);
+      const lock = tryProcessLock(file);
+      writeFileSync(dir + '/acquired', '');
+      const poll = setInterval(() => {
+        if (!existsSync(dir + '/go')) return;
+        clearInterval(poll);
+        lock.release();
+        writeFileSync(dir + '/released', '');
+      }, 5);
+      setTimeout(() => {}, 60_000);
+    `;
+    const child = spawn(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        '--no-warnings',
+        '--input-type=module',
+        '-e',
+        holder,
+        file,
+        dir,
+      ],
+      { stdio: 'inherit' },
+    );
+    try {
+      waitFor(join(dir, 'acquired'));
+      const rId = fs.readFileSync(file, 'utf8').split('\n')[1] as string;
+      let mono = 0;
+      const observer = {
+        namespace: () => 'pid:[4026532002]',
+        host: () => 'host-1',
+        monotonic: () => mono,
+      };
+      expect(tryProcessLock(file, observer)).toBeNull();
+      mono += 6 * SENTINEL_LOCK_HEARTBEAT_MS + 1000;
+      let reads = 0;
+      hook.fn = (op, path) => {
+        if (op !== 'read' || !path.startsWith(`${file}.stale-`)) return;
+        hook.fn = null;
+        // T has R's lock aside and stalls. R lets go and finds the lock away; N takes the free
+        // lock, holds it while R looks again (and sees N's lock), and lets go.
+        fs.writeFileSync(join(dir, 'go'), '');
+        waitFor(join(dir, 'released'));
+        const n = tryProcessLock(file)!;
+        expect(n).not.toBeNull();
+        block(2500);
+        n.release();
+      };
+      let t: ReturnType<typeof tryProcessLock>;
+      try {
+        t = tryProcessLock(file, {
+          ...observer,
+          monotonic: () => {
+            if (++reads === 2) {
+              const d = new Date(Date.now() + 1000);
+              fs.utimesSync(file, d, d);
+            }
+            return mono;
+          },
+        });
+      } finally {
+        hook.fn = null;
+      }
+      // R's note was still there: T did not put R's lock back. R is alive, and holds nothing.
+      expect(child.exitCode).toBeNull();
+      expect(t).not.toBeNull();
+      expect(fs.readFileSync(file, 'utf8').split('\n')[1]).not.toBe(rId);
+      t!.release();
+      const next = tryProcessLock(file)!;
+      expect(next).not.toBeNull();
+      next.release();
+    } finally {
+      child.kill('SIGKILL');
+    }
+  }, 30_000);
+
+  it('removes notes of releases once no takeover can need them', () => {
+    const file = lockFile();
+    // Releases that never found their lock again: one long ago, one just now (a takeover may
+    // still have that lock aside), one dated in the future (a clock that stepped).
+    const old = `${file}.released-abababababababababababab`;
+    const fresh = `${file}.released-cdcdcdcdcdcdcdcdcdcdcdcd`;
+    const future = `${file}.released-efefefefefefefefefefefef`;
+    for (const f of [old, fresh, future]) fs.writeFileSync(f, '');
+    const at = (f: string, ms: number): void => {
+      const t = new Date(Date.now() - ms);
+      fs.utimesSync(f, t, t);
+    };
+    at(old, 11 * 60_000);
+    at(future, -11 * 60_000);
     const lock = tryProcessLock(file)!;
-    expect(fs.readdirSync(join(file, '..'))).toEqual(['lock']);
+    expect(fs.readdirSync(join(file, '..')).sort()).toEqual(
+      ['lock', 'lock.released-cdcdcdcdcdcdcdcdcdcdcdcd'].sort(),
+    );
     lock.release();
   });
 

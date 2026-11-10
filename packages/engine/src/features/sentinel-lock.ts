@@ -65,6 +65,11 @@ const HELD_RETRY_MS = 5;
 /** A holder that let go of a lock it found away looks for it again this often, this far apart. */
 const RELEASE_LATER_TRIES = 30;
 const RELEASE_LATER_MS = 1000;
+/**
+ * A release note is kept this long: longer than any takeover keeps a lock aside (a takeover
+ * holds it microseconds, or as long as its process is suspended in between).
+ */
+const RELEASE_NOTE_KEEP_MS = 10 * 60_000;
 /** Acquisitions let go of, remembered per process. */
 const MAX_RELEASED_IDS = 1000;
 /** A note of what was seen of a lock is not believed past this age, nor when dated in the future. */
@@ -471,15 +476,25 @@ function sweepTemp(file: string, now: () => number): void {
   }
 }
 
-/** Removes every note of a release next to the lock (bounded). */
-function sweepReleaseNotes(file: string): void {
+/**
+ * Removes notes of releases next to the lock once no takeover can still need them: older than
+ * `RELEASE_NOTE_KEEP_MS` (either way, for a clock that stepped). A fresh one may belong to a
+ * lock a takeover still has aside. Bounded.
+ */
+function sweepReleaseNotes(file: string, now: () => number): void {
   try {
     const prefix = `${basename(file)}.released-`;
     let removed = 0;
     for (const name of readdirSync(dirname(file)).slice(0, SWEEP_MAX_ENTRIES)) {
       if (!name.startsWith(prefix)) continue;
-      unlinkQuiet(join(dirname(file), name));
-      if (++removed >= SWEEP_MAX_REMOVED) return;
+      const path = join(dirname(file), name);
+      try {
+        if (Math.abs(now() - statSync(path).mtimeMs) <= RELEASE_NOTE_KEEP_MS) continue;
+        unlinkSync(path);
+        if (++removed >= SWEEP_MAX_REMOVED) return;
+      } catch {
+        // gone meanwhile
+      }
     }
   } catch {
     // the lock works without the cleanup
@@ -650,9 +665,8 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
       ].join('\n');
       if (create(file, content, link)) {
         sweepTemp(file, now);
-        // Notes of releases are of no use once the lock is ours: a lock put back now could not
-        // replace it.
-        sweepReleaseNotes(file);
+        // Notes of releases no takeover can still need.
+        sweepReleaseNotes(file, now);
         // What this observer noted about the lock that was here is of no use any more.
         try {
           unlinkQuiet(notePath());
@@ -734,7 +748,9 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
             if (lost) return;
             // Noted next to the lock before it is touched: a takeover that has it aside, or
             // moves it aside from here on, finds the note when it would put it back, and drops
-            // it instead. Removed again once the lock is gone.
+            // it instead. Removed at once only when this holder removed its lock itself; else
+            // it stays as long as a takeover could still have the lock aside (it is swept once
+            // `RELEASE_NOTE_KEEP_MS` old).
             const mark = releasedMark(file, id);
             try {
               if (mark) writeFileSync(mark, '', { mode: 0o600 });
@@ -752,13 +768,13 @@ export function tryProcessLock(file: string, opts: ProcessLockOptions = {}): Pro
               pause(HELD_RETRY_MS);
               state = look();
             }
-            if (state === 'other' || (state === 'mine' && dropOwn() !== 'away')) return done();
-            // Away, or moved away between the look and the move: it may be put back. Looked for
-            // again for a while to remove it; the note stays while it is away.
+            if (state === 'mine' && dropOwn() === 'dropped') return done();
+            // Away, moved away between the look and the move, or another holder's lock is there
+            // now (ours may still be aside with a takeover that puts it back later): looked for
+            // again for the whole window, whatever is found meanwhile.
             let tries = 0;
             const later = setInterval(() => {
-              const now = look();
-              if (now === 'other' || (now === 'mine' && dropOwn() !== 'away')) {
+              if (look() === 'mine' && dropOwn() === 'dropped') {
                 clearInterval(later);
                 return done();
               }
