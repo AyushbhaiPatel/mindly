@@ -384,6 +384,10 @@ describe('safe regex subset', () => {
     '\\w+\\s+=',
     '\\d{2}\\d?',
     '^\\s*(?:export\\s)?function',
+    'assert\\s*\\(?isinstance',
+    'if\\s+\\(?item\\s*=',
+    '\\xg?y+',
+    '\\c?d+',
   ])('accepts %s', (p) => expect(checkSafePattern(p)).toBeNull());
 
   it.each([
@@ -437,7 +441,15 @@ describe('safe regex subset', () => {
     ['a+(?:[ab]*[ab])x', 'same characters'],
     ['[a-f]?[^g]+x', 'same characters'],
     ['[', 'compile'],
+    ['\\(?ia?a?a+', 'same characters'],
     ['[^](a+)+x', 'nested'],
+    ['(?:a+|\\xg)+b', 'nested'],
+    ['(?:a+|\\ug)+b', 'nested'],
+    ['(?:a+|\\c1)+b', 'nested'],
+    ['(?:a+|\\0)+b', 'nested'],
+    // `\x` and `\u` without their digits are a plain `x` and `u`.
+    ['\\x?x+=', 'same characters'],
+    ['\\u?u+=', 'same characters'],
     ['[](a|aa)*x', 'nested'],
     ['x[^]*\\s*y', 'same characters'],
   ])('rejects %s', (p, why) => expect(checkSafePattern(p)).toMatch(why));
@@ -491,6 +503,68 @@ describe('overlap of character classes', () => {
         // `x?y+=`: refused exactly when x and y share a character (`=` is in neither... or both,
         // which does not matter: only x then y is judged).
         const pattern = `${x}?${y}+=`;
+        const verdict = checkSafePattern(pattern);
+        const shared = sets[i]!.some((bit, c) => bit === 1 && sets[j]![c] === 1);
+        const refused = verdict !== null && verdict.includes('same characters');
+        if (shared !== refused) wrong.push(`${pattern}: shared ${shared}, verdict ${verdict}`);
+      }),
+    );
+    expect(wrong).toEqual([]);
+  });
+});
+
+describe('inline modifiers', () => {
+  let modifiers = true;
+  try {
+    new RegExp('(?i:a)');
+  } catch {
+    modifiers = false;
+  }
+
+  it
+    .runIf(modifiers)
+    .each([
+      '(?i:select)\\s+\\w+',
+      '(?i:const)\\s+[A-Z_]+ =',
+      '(?i:todo)\\s*\\d+',
+      '(?-i:x)?[ab]+=',
+      '(?i:[^a])?A+=',
+    ])('accepts %s', (p) => expect(checkSafePattern(p)).toBeNull());
+
+  it.runIf(modifiers).each([
+    ['(?i:a)?A+=', 'same characters'],
+    ['(?i:[a-f])?[D-Z]+=', 'same characters'],
+    ['(?s:.)?\\n+=', 'same characters'],
+    ['(?i:\\u00e9)?\\u00c9+=', 'same characters'],
+  ])('refuses %s', (p, why) => expect(checkSafePattern(p)).toMatch(why));
+
+  it.runIf(modifiers)('agrees with case-insensitive matching for each pair of atoms', () => {
+    const atoms = [
+      'a',
+      'A',
+      'k',
+      '\\u212a',
+      's',
+      '\\u017f',
+      '\\u00e9',
+      '\\u00c9',
+      '[a-f]',
+      '[G-Z]',
+      '\\w',
+      '\\W',
+      '[^a]',
+      'ß',
+    ];
+    const sets = atoms.map((atom) => {
+      const re = new RegExp(`^(?:${atom})$`, 'i');
+      const bits = new Uint8Array(0x10000);
+      for (let c = 0; c <= 0xffff; c++) bits[c] = re.test(String.fromCharCode(c)) ? 1 : 0;
+      return bits;
+    });
+    const wrong: string[] = [];
+    atoms.forEach((x, i) =>
+      atoms.forEach((y, j) => {
+        const pattern = `(?i:${x})?(?i:${y})+=`;
         const verdict = checkSafePattern(pattern);
         const shared = sets[i]!.some((bit, c) => bit === 1 && sets[j]![c] === 1);
         const refused = verdict !== null && verdict.includes('same characters');
@@ -578,25 +652,49 @@ describe('regex budget', () => {
 
   it('a slow file does not switch a contract off: the next break is still reported', async () => {
     const { root, mindly, pid, write, memory, contracts } = await withDecision();
-    write('src/fmt.ts', 'export const a = 1;\n');
-    const spec = { path: 'src/fmt.ts', pattern: '\\s+$' };
+    write('src/fmt.ts', 'export const b = 1;\n');
+    // Cubic per window: hundreds of millions of steps over this file, on any machine.
+    const spec = { path: 'src/fmt.ts', pattern: '.*a.*x' };
     const c = contracts.create(memory.id, 'pattern_absent', spec, USER);
     expect(c.state).toBe('passing');
 
-    write('src/fmt.ts', ' '.repeat(400_000) + 'x\n');
+    write('src/fmt.ts', 'a'.repeat(400 * 1024));
     await mindly.hooks.handle(
-      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/fmt.ts', 'x') }),
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/fmt.ts', 'a') }),
     );
     expect(mindly.store.contracts.get(c.id).state).toBe('error');
 
-    write('src/fmt.ts', 'export const a = 1;   \n');
+    write('src/fmt.ts', 'export const a = x;\n');
     await mindly.hooks.handle(
-      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/fmt.ts', '   ') }),
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/fmt.ts', 'x') }),
     );
     expect(mindly.store.contracts.get(c.id).state).toBe('failing');
     expect(
       mindly.store.conflicts.list(pid).filter((x) => x.kind === 'contract_broken'),
     ).toHaveLength(1);
+  });
+
+  it('keeps verdicts only for patterns stored contracts use', async () => {
+    const { mindly, memory, contracts } = await withDecision();
+    const verdicts = () =>
+      (
+        mindly.store.db
+          .prepare("SELECT key FROM kv WHERE key LIKE 'contract:pattern-verdict:%'")
+          .all() as { key: string }[]
+      ).map((r) => r.key);
+    mindly.store.kv.set('contract:pattern-verdict:2:old', { verdict: null });
+    const a = contracts.create(
+      memory.id,
+      'pattern_absent',
+      { path: 'src/auth.ts', pattern: 'aaa' },
+      USER,
+    );
+    contracts.create(memory.id, 'pattern_absent', { path: 'src/auth.ts', pattern: 'bbb' }, USER);
+    expect(verdicts()).toHaveLength(2);
+    expect(verdicts().every((k) => k.includes(process.versions.v8))).toBe(true);
+    mindly.store.contracts.delete(a.id);
+    contracts.create(memory.id, 'file_exists', { path: 'src/auth.ts' }, USER);
+    expect(verdicts()).toHaveLength(1);
   });
 
   it('judges a stored pattern once, not in every hook', async () => {

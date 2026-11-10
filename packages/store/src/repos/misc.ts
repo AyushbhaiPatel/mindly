@@ -411,6 +411,32 @@ export class ContractRepo {
     for (const prefix of KV_PREFIXES) prune.run(`${prefix}%`, prefix.length + 1);
   }
 
+  /** The distinct patterns of all stored pattern contracts. */
+  patterns(): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT json_extract(spec, '$.pattern') AS pattern FROM contracts
+           WHERE json_extract(spec, '$.pattern') IS NOT NULL`,
+        )
+        .all() as Row[]
+    ).map((r) => str(r, 'pattern'));
+  }
+
+  /** Deletes kv entries under `prefix` other than the keys in `keep`. */
+  pruneKeys(prefix: string, keep: readonly string[]): void {
+    const kept = new Set(keep);
+    const rows = this.db
+      .prepare('SELECT key FROM kv WHERE key LIKE ?')
+      // `%` and `_` in the prefix only widen the match; the check below is exact.
+      .all(`${prefix}%`) as Row[];
+    const drop = this.db.prepare('DELETE FROM kv WHERE key = ?');
+    for (const r of rows) {
+      const key = str(r, 'key');
+      if (key.startsWith(prefix) && !kept.has(key)) drop.run(key);
+    }
+  }
+
   approve(id: string, hash: string | null): void {
     this.db.prepare('UPDATE contracts SET approved_hash = ? WHERE id = ?').run(hash, id);
   }

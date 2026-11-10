@@ -61,8 +61,13 @@ const MATCH_WINDOW_CHARS = 200;
 /** How far consecutive windows of a long line overlap: a match up to about this long is found. */
 const MATCH_WINDOW_OVERLAP = 100;
 const PATTERN_BUDGET_MS = 100;
-/** Where a pattern's verdict is kept; the version changes whenever the rules do. */
-const PATTERN_VERDICT_PREFIX = 'contract:pattern-verdict:2:';
+/** Where patterns' verdicts are kept. */
+const PATTERN_VERDICT_BASE = 'contract:pattern-verdict:';
+/**
+ * Verdicts are kept per version of these rules and of the regex engine, since what compiles (and
+ * so what is judged) differs between engines: a verdict made under another one is judged again.
+ */
+const PATTERN_VERDICT_PREFIX = `${PATTERN_VERDICT_BASE}3:${process.versions.v8}:`;
 /** Recent contract results read, once, for a contract whose last pass/fail was never kept. */
 const LEGACY_LOOKBACK = 2000;
 const MAX_UNBOUNDED_QUANTIFIERS = 2;
@@ -126,8 +131,10 @@ function judgePattern(pattern: string): string | null {
   } catch {
     return 'pattern does not compile';
   }
-  const ignoreCase = pattern.includes('(?i');
   interface Frame {
+    /** Inline modifiers in force in this group: `(?i:` and `(?s:` (and `(?-i:`, `(?-s:`). */
+    ignoreCase: boolean;
+    dotAll: boolean;
     quantified: boolean;
     alternation: boolean;
     /** Match paths through the finished branches, the current branch, and its last atom. */
@@ -148,7 +155,9 @@ function judgePattern(pattern: string): string | null {
     last: CharSet;
     nullable: boolean;
   }
-  const frame = (branchStart: number): Frame => ({
+  const frame = (branchStart: number, ignoreCase = false, dotAll = false): Frame => ({
+    ignoreCase,
+    dotAll,
     quantified: false,
     alternation: false,
     finished: 0,
@@ -177,7 +186,7 @@ function judgePattern(pattern: string): string | null {
     // A repeated part right after a variable-length one that can take the same characters gives
     // the matcher a choice at every such character: `a?a?a{16}`, `.*\s*`, `\d?\d{2}`,
     // `a+(?:b*a)`.
-    if ((quantified || a.variable) && charsOverlap(f.open, a.first, ignoreCase, work)) {
+    if ((quantified || a.variable) && charsOverlap(f.open, a.first, work)) {
       ambiguous = true;
     }
     if (a.min !== a.max || a.variable) {
@@ -209,6 +218,8 @@ function judgePattern(pattern: string): string | null {
   let unbounded = 0;
   let quantifiers = 0;
   let lastClosed: Frame | null = null;
+  /** Capturing groups seen, checked against the engine's own count once the scan is done. */
+  let capturing = 0;
   let i = 0;
   const top = (): Frame => stack[stack.length - 1] as Frame;
   const atom = (cost: number, next: Omit<Atom, 'min' | 'max'>): void => {
@@ -219,7 +230,9 @@ function judgePattern(pattern: string): string | null {
     f.pending = { ...next, min: 1, max: 1 };
   };
   const char = (source: string): Omit<Atom, 'min' | 'max'> => {
-    const chars = atomChars(source);
+    const f = top();
+    const fold = (set: CharSet): CharSet => (f.ignoreCase ? foldCase(set, work) : set);
+    const chars = atomChars(source, f.dotAll, fold);
     return { first: chars, last: chars, consumes: true, anchor: false, variable: false };
   };
   const ANCHOR = { first: [], last: [], consumes: false, anchor: true, variable: false };
@@ -228,8 +241,9 @@ function judgePattern(pattern: string): string | null {
     if (ch === '\\') {
       const next = pattern[i + 1] ?? '';
       if (/[1-9]/.test(next) || next === 'k') return 'backreferences are not allowed';
-      const length = next === 'x' ? 4 : next === 'u' ? 6 : next === 'c' ? 3 : 2;
-      const source = pattern.slice(i, i + length);
+      const length = escapeLength(pattern, i, false);
+      // A `\c` that is not a control escape is a plain backslash; the `c` is read next.
+      const source = length === 1 ? '\\\\' : pattern.slice(i, i + length);
       atom(1, next === 'b' || next === 'B' ? ANCHOR : char(source));
       i += length;
       lastClosed = null;
@@ -254,10 +268,27 @@ function judgePattern(pattern: string): string | null {
       if (pattern.startsWith('(?<=', i) || pattern.startsWith('(?<!', i)) {
         return 'lookbehind is not allowed';
       }
-      // Skip group syntax such as `(?:`, `(?<name>` or `(?i:` so its `?` is not a quantifier.
-      if (pattern[i + 1] === '?') i = pattern.indexOf(pattern[i + 2] === '<' ? '>' : ':', i);
+      // Skip group syntax such as `(?:`, `(?<name>` or `(?i:` so its `?` is not a quantifier, and
+      // apply inline modifiers to the group.
+      let { ignoreCase, dotAll } = top();
+      if (pattern[i + 1] !== '?') capturing++;
+      else if (pattern[i + 2] === '<') {
+        capturing++;
+        i = pattern.indexOf('>', i);
+        if (i === -1) return UNREADABLE;
+      } else {
+        const mod = /^\(\?([a-z]*)(?:-([a-z]*))?:/.exec(pattern.slice(i));
+        if (!mod) return UNREADABLE;
+        const on = mod[1] ?? '';
+        const off = mod[2] ?? '';
+        if (on.includes('i')) ignoreCase = true;
+        if (off.includes('i')) ignoreCase = false;
+        if (on.includes('s')) dotAll = true;
+        if (off.includes('s')) dotAll = false;
+        i += mod[0].length - 1;
+      }
       i++;
-      stack.push(frame(i));
+      stack.push(frame(i, ignoreCase, dotAll));
       lastClosed = null;
       continue;
     }
@@ -335,6 +366,9 @@ function judgePattern(pattern: string): string | null {
   if (unbounded > MAX_UNBOUNDED_QUANTIFIERS) {
     return `at most ${MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers are allowed`;
   }
+  // Anything this scan read differently from the engine (an escape, a group) would show as an
+  // unclosed group or a different number of capturing groups: refuse rather than guess.
+  if (stack.length !== 1 || capturing !== captureCount(pattern)) return UNREADABLE;
   endBranch(top(), pattern.length);
   if (work.left <= 0) {
     return 'pattern is too complex to check; use fewer character classes or alternatives';
@@ -406,11 +440,69 @@ function complementChars(a: CharSet): CharSet {
   return out;
 }
 
+const verdictKey = (pattern: string): string => `${PATTERN_VERDICT_PREFIX}${sha256(pattern)}`;
+
+const UNREADABLE = 'pattern could not be read reliably; use a simpler pattern';
+
+/** The number of capturing groups the engine finds in `pattern`. */
+function captureCount(pattern: string): number {
+  try {
+    return (new RegExp(`(?:${pattern})|`).exec('')?.length ?? 1) - 1;
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * Case-insensitive matching (without the `u` flag) treats two code units as the same when they
+ * canonicalise alike: upper case, unless that takes more than one unit or turns a non-ASCII unit
+ * into an ASCII one. These are the classes of more than one unit, built when first needed.
+ */
+let caseClasses: readonly (readonly number[])[] | null = null;
+
+function canonical(c: number): number {
+  const upper = String.fromCharCode(c).toUpperCase();
+  if (upper.length !== 1) return c;
+  const u = upper.charCodeAt(0);
+  return c >= 128 && u < 128 ? c : u;
+}
+
+/** `set` with every unit that matches one of its units case-insensitively. */
+function foldCase(set: CharSet, work: JudgeWork): CharSet {
+  if (caseClasses === null) {
+    const byCanonical = new Map<number, number[]>();
+    for (let c = 0; c <= 0xffff; c++) {
+      const k = canonical(c);
+      const members = byCanonical.get(k);
+      if (members) members.push(c);
+      else byCanonical.set(k, [c]);
+    }
+    caseClasses = [...byCanonical.values()].filter((m) => m.length > 1);
+  }
+  const added: [number, number][] = [];
+  for (const members of caseClasses) {
+    work.left--;
+    if (members.some((c) => inChars(set, c))) for (const c of members) added.push([c, c]);
+  }
+  return unionChars(set, added, work);
+}
+
+function inChars(set: CharSet, c: number): boolean {
+  let lo = 0;
+  let hi = set.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const [a, b] = set[mid] as readonly [number, number];
+    if (c < a) hi = mid - 1;
+    else if (c > b) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+
 /** Whether some character is in both sets, walking both range lists once. */
-function charsOverlap(a: CharSet, b: CharSet, ignoreCase: boolean, work: JudgeWork): boolean {
+function charsOverlap(a: CharSet, b: CharSet, work: JudgeWork): boolean {
   if (a.length === 0 || b.length === 0) return false;
-  // Case folding is not modelled: with it, any two non-empty sets may share a character.
-  if (ignoreCase) return true;
   let i = 0;
   let j = 0;
   while (i < a.length && j < b.length) {
@@ -428,9 +520,14 @@ function charsOverlap(a: CharSet, b: CharSet, ignoreCase: boolean, work: JudgeWo
  * The characters a single-character atom matches: a character, an escape, a class or `.`.
  * Anything it cannot read counts as every character.
  */
-function atomChars(source: string): CharSet {
-  if (source === '.') return complementChars(LINE_END);
-  if (source.startsWith('[')) return classChars(source) ?? ANY_CHAR;
+function atomChars(source: string, dotAll: boolean, fold: (set: CharSet) => CharSet): CharSet {
+  // A negated class leaves out every case of what it lists, so it is folded before negating.
+  if (source.startsWith('[')) return classChars(source, fold) ?? ANY_CHAR;
+  return fold(plainAtomChars(source, dotAll));
+}
+
+function plainAtomChars(source: string, dotAll: boolean): CharSet {
+  if (source === '.') return dotAll ? ANY_CHAR : complementChars(LINE_END);
   if (source.startsWith('\\')) {
     const set = escapeSet(source[1] ?? '');
     if (set) return set;
@@ -461,21 +558,41 @@ function escapeSet(letter: string): CharSet | null {
   }
 }
 
+/**
+ * How many characters the escape at `i` (a backslash) takes, read as a pattern without the `u`
+ * flag reads it: `\x` and `\u` without their hex digits are a plain `x` or `u`, and a `\c` that
+ * is not a control escape is a plain backslash (1: the `c` is read next).
+ */
+function escapeLength(pattern: string, i: number, inClass: boolean): number {
+  const next = pattern[i + 1] ?? '';
+  if (next === 'x') return /^[0-9a-fA-F]{2}/.test(pattern.slice(i + 2)) ? 4 : 2;
+  if (next === 'u') return /^[0-9a-fA-F]{4}/.test(pattern.slice(i + 2)) ? 6 : 2;
+  if (next === 'c')
+    return (inClass ? /^[A-Za-z0-9_]/ : /^[A-Za-z]/).test(pattern.slice(i + 2)) ? 3 : 1;
+  if (next === '0' && /^[0-7]/.test(pattern.slice(i + 2))) {
+    return /^[0-7]{2}/.test(pattern.slice(i + 2)) ? 4 : 3;
+  }
+  return 2;
+}
+
 /** The code unit an escape (without its backslash) stands for, or null if it cannot tell. */
 function escapeCode(body: string, inClass: boolean): number | null {
   const letter = body[0] ?? '';
-  const simple: Record<string, number> = { n: 10, r: 13, t: 9, v: 11, f: 12, '0': 0 };
-  if (letter in simple && !(letter === '0' && /^0\d/.test(body))) return simple[letter] as number;
+  const simple: Record<string, number> = { n: 10, r: 13, t: 9, v: 11, f: 12 };
+  if (letter in simple) return simple[letter] as number;
+  if (letter === '0') return parseInt(body, 8);
   if (letter === 'b') return inClass ? 8 : null;
-  if (letter === 'x') return /^x[0-9a-fA-F]{2}$/.test(body) ? parseInt(body.slice(1), 16) : null;
-  if (letter === 'u') return /^u[0-9a-fA-F]{4}$/.test(body) ? parseInt(body.slice(1), 16) : null;
-  if (letter === 'c') return /^c[A-Za-z]$/.test(body) ? body.charCodeAt(1) % 32 : null;
-  if (letter === '' || /[0-9A-Za-z]/.test(letter)) return null;
-  return letter.charCodeAt(0);
+  if (letter === 'x') return body.length === 3 ? parseInt(body.slice(1), 16) : 0x78;
+  if (letter === 'u') return body.length === 5 ? parseInt(body.slice(1), 16) : 0x75;
+  if (letter === 'c') return body.length === 2 ? body.charCodeAt(1) % 32 : null;
+  if (letter === '\\' || (letter !== '' && !/[0-9A-Za-z]/.test(letter))) {
+    return letter.charCodeAt(0);
+  }
+  return null;
 }
 
 /** The characters of a class such as `[^a-z_\d]`, or null when it cannot be read. */
-function classChars(source: string): CharSet | null {
+function classChars(source: string, fold: (set: CharSet) => CharSet): CharSet | null {
   if (!source.endsWith(']')) return null;
   let i = 1;
   const negated = source[i] === '^';
@@ -497,7 +614,11 @@ function classChars(source: string): CharSet | null {
       i += 2;
       return asSet;
     }
-    const length = letter === 'x' ? 4 : letter === 'u' ? 6 : letter === 'c' ? 3 : 2;
+    const length = escapeLength(source, i, true);
+    if (length === 1) {
+      i += 1;
+      return 0x5c;
+    }
     const code = escapeCode(source.slice(i + 1, i + length), true);
     i += length;
     return code;
@@ -524,7 +645,7 @@ function classChars(source: string): CharSet | null {
     }
     set = unionChars(set, [[lo, lo]]);
   }
-  return negated ? complementChars(set) : set;
+  return negated ? complementChars(fold(set)) : fold(set);
 }
 
 /**
@@ -622,6 +743,7 @@ export class ContractService {
       clean.path = resolved.rel;
     }
     this.k.store.contracts.pruneConclusive();
+    this.pruneVerdicts();
     const contract = this.k.store.contracts.create({
       projectId: memory.projectId,
       memoryId,
@@ -726,12 +848,21 @@ export class ContractService {
    * fresh process each time) does not judge the same pattern again.
    */
   private patternVerdict(pattern: string): string | null {
-    const key = `${PATTERN_VERDICT_PREFIX}${sha256(pattern)}`;
+    const key = verdictKey(pattern);
     const kept = this.k.store.kv.get<{ verdict: string | null }>(key);
     if (kept && (kept.verdict === null || typeof kept.verdict === 'string')) return kept.verdict;
     const verdict = checkSafePattern(pattern);
     this.k.store.kv.set(key, { verdict });
     return verdict;
+  }
+
+  /**
+   * Drops kept verdicts no stored contract uses any more, and those of other rule or engine
+   * versions.
+   */
+  private pruneVerdicts(): void {
+    const contracts = this.k.store.contracts;
+    contracts.pruneKeys(PATTERN_VERDICT_BASE, contracts.patterns().map(verdictKey));
   }
 
   /**

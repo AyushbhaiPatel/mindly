@@ -221,9 +221,11 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   stops even a single runaway match, so no pattern holds a hook for longer. A pattern that runs
   out of time reports an error and is not run again on that same file content; any change to the
   file runs it again. Overlaps between character classes are worked out on their code-point
-  ranges, the work of judging one pattern is capped (a pattern past the cap is refused as too
-  complex), and the verdict is kept by pattern hash, so a hook does not judge a stored pattern
-  again. A stored contract whose pattern fails these checks is not run either: it reports an
+  ranges, with case folding inside `(?i:…)` groups, the work of judging one pattern is capped (a
+  pattern past the cap is refused as too complex), and the verdict is kept by pattern hash and
+  regex engine version, so a hook does not judge a stored pattern again. Escapes and groups are
+  read as the engine reads them, and a pattern whose groups the check counts differently from
+  the engine is refused. A stored contract whose pattern fails these checks is not run either: it reports an
   error explaining why, and `mindly doctor` lists it.
 
 ## Data retention and deletion
