@@ -240,7 +240,7 @@ export function renderSentinelPass(sc: Screen, r: SentinelPassResult, current: s
     case 'cancelled':
       if (r.reason === 'lock_lost') {
         sc.summary(
-          `${sc.mark('warn')} Stopped: another process took over this checkout while this one was paused. Nothing was saved; run it again.`,
+          `${sc.mark('warn')} Stopped: another process took over this checkout while this one was paused. Checks that finished before that were saved; the rest were not run or not saved. Run it again.`,
         );
         return;
       }

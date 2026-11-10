@@ -148,8 +148,10 @@ describe('mindly sentinel', () => {
       setupFailed: false,
     };
     renderSentinelPass(sc, { ...pass, reason: 'lock_lost' }, '/repo');
-    expect(lines.join('\n')).toContain('another process took over this checkout');
-    expect(lines.join('\n')).toContain('Nothing was saved');
+    const text = lines.join(' ').replace(/\s+/g, ' ');
+    expect(text).toContain('another process took over this checkout');
+    expect(text).toContain('Checks that finished before that were saved');
+    expect(text).not.toContain('Nothing was saved');
     lines.length = 0;
     renderSentinelPass(sc, { ...pass, reason: null }, '/repo');
     expect(lines.join('\n')).toContain('Cancelled.');
