@@ -1,6 +1,7 @@
 import { sanitizeLine } from '@mindly/core';
 import type { Kernel } from '../kernel.js';
 import { notifySettled } from '../ports.js';
+import { withNotificationId } from './outbox.js';
 import type { Mindly, MindlyModule } from '../mindly.js';
 
 /*
@@ -345,15 +346,16 @@ export class StandupService {
       const turns = digest.agents.reduce((n, a) => n + a.turns, 0);
       const files = digest.agents.reduce((n, a) => n + a.filesChanged, 0);
       const waiting = needsYouCount(digest);
+      // The id comes from the day's dedupe key: every retry of one standup carries the same one.
       const results = await this.k.ports.notifier.send(
-        {
+        withNotificationId({
           trigger: 'standup',
           title: `Mindly standup: ${name}`,
           body: `${plural(sessions, 'session')}, ${plural(turns, 'turn')}, ${plural(files, 'file')} changed; ${waiting} item${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} you.`,
           projectName: name,
           priority: waiting > 0 ? 'default' : 'low',
           dedupeKey: `standup:${projectId}:${new Date(digest.until).toISOString().slice(0, 10)}`,
-        },
+        }),
         { ignoreTriggers: true },
       );
       return notifySettled(results);

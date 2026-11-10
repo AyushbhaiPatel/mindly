@@ -8,7 +8,13 @@ import {
   type Run,
   type RunStatus,
 } from '@mindly/core';
-import { notifyOutbox, notifySettled, type Mindly, type NotifyTrigger } from '@mindly/engine';
+import {
+  notifyOutbox,
+  notifySettled,
+  withNotificationId,
+  type Mindly,
+  type NotifyTrigger,
+} from '@mindly/engine';
 import type { ConflictReport } from '@mindly/store';
 import type { RunnerPort } from '@mindly/runners';
 import type { Scheduler } from './scheduler.js';
@@ -105,8 +111,10 @@ export async function notify(
   },
 ): Promise<void> {
   try {
-    const results = await ctx.mindly.kernel.ports.notifier.send(n);
-    if (!notifySettled(results)) notifyOutbox(ctx.mindly).enqueue(n);
+    // One id for every attempt, the first one included, so a receiver sees one id per alert.
+    const once = withNotificationId(n);
+    const results = await ctx.mindly.kernel.ports.notifier.send(once);
+    if (!notifySettled(results)) notifyOutbox(ctx.mindly).enqueue(once);
   } catch (err) {
     ctx.logger.warn('notification failed', { trigger: n.trigger, error: describeError(err) });
   }

@@ -524,6 +524,10 @@ describe('pager delivery', () => {
         trigger: 'check_failed',
         project: 'proj-[REDACTED]',
       });
+      // The first attempt and the retry from the outbox carry one id.
+      const ids = hook.bodies.map((b) => (JSON.parse(b) as { id: string }).id);
+      expect(ids[0]).toBeTruthy();
+      expect(ids[1]).toBe(ids[0]);
 
       // A notification that was delivered is not queued.
       await notify(d.jobs, { trigger: 'check_failed', title: 'Another', body: 'b' });

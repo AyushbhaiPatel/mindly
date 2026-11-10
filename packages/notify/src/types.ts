@@ -21,8 +21,8 @@ export interface Notification {
   dedupeKey?: string;
   /**
    * Stays the same on every attempt to deliver this notification (`[A-Za-z0-9_-]`, at most 64
-   * characters). Sent to webhooks as `id`, so a receiver can drop a repeat. One is made up when
-   * missing or malformed.
+   * characters). Sent to webhooks as `id`, so a receiver can drop a repeat. When missing or
+   * malformed it is derived from `dedupeKey`, or made up when there is none.
    */
   id?: string;
 }
