@@ -693,4 +693,48 @@ describe('impact radar', () => {
     const told = mindly.store.deliveries.list(pid).filter((d) => d.kind === 'impact');
     expect(told).toHaveLength(0);
   });
+
+  it('applies only what a pull changed while another edit is being analysed', async () => {
+    const { root, mindly, pid, cc, cx, write } = await featureSetup();
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+    );
+    const git = mindly.kernel.ports.git;
+    const PULLED = AUTH_V1 + 'export function logout() {}\n';
+    const commits: Record<string, string> = { h0: AUTH_V1, h1: PULLED };
+    git.fileStateAtRef = async (_cwd, ref, path) =>
+      path === 'src/auth.ts' && commits[ref] !== undefined
+        ? { state: 'file', content: commits[ref] }
+        : { state: 'no_ref' };
+    git.isAncestor = async (_cwd, a, d) => a === d || (a === 'h0' && d === 'h1');
+    git.headCommit = async () => 'h0';
+    await impactOf(mindly).analyze(pid, root, cc, authFile(root));
+
+    // A pull brings `logout`; Claude then stops exporting `login` and its analysis is held at HEAD.
+    write('src/auth.ts', PULLED);
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    git.headCommit = async () => {
+      await gate;
+      return 'h1';
+    };
+    write('src/auth.ts', PULLED.replace('export function login', 'function login'));
+    const claude = impactOf(mindly).analyze(pid, root, cc, authFile(root));
+    // Codex adds an export and its analysis runs to the end.
+    git.headCommit = async () => 'h1';
+    write(
+      'src/auth.ts',
+      PULLED.replace('export function login', 'function login') + 'export function extra() {}\n',
+    );
+    const codex = await impactOf(mindly).analyze(pid, root, cx, authFile(root));
+    release();
+    const claudeReport = await claude;
+
+    expect(codex).toBeNull();
+    expect(claudeReport?.diff.removed).toEqual(['login']);
+    const impact = impactConflicts(mindly, pid);
+    expect(impact).toHaveLength(1);
+    expect(impact[0]!.title).toMatch(/^claude-code #[0-9a-f]{8} changed the exports/);
+    expect(mindly.store.kv.get(`surface-state:${pid}:src/auth.ts`)).toMatchObject({ head: 'h1' });
+  });
 });

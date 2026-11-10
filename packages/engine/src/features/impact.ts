@@ -191,6 +191,34 @@ function surfaceNow(k: Kernel, file: ChangedFile): Map<string, string> | null {
   return content === null ? null : k.ports.git.exportSurface(content, file.path);
 }
 
+/** A file's exports at two commits. */
+interface CommitDelta {
+  then: ReadonlyMap<string, string>;
+  now: ReadonlyMap<string, string>;
+}
+
+/**
+ * Applies what commits changed about a file's exports to a surface taken before them. Only the
+ * exports the surface still holds as they were at the old commit take the new commit's value (or
+ * go, when the commits removed them): a surface that already shows the new value, or an agent's
+ * own change to the export, is left alone, so the delta is never counted twice and an agent's
+ * edit is never overwritten by it.
+ */
+function applyCommitDelta(
+  surface: ReadonlyMap<string, string>,
+  delta: CommitDelta,
+): Map<string, string> {
+  const out = new Map(surface);
+  for (const name of new Set([...delta.then.keys(), ...delta.now.keys()])) {
+    const was = delta.then.get(name);
+    const is = delta.now.get(name);
+    if (was === is || out.get(name) !== was) continue;
+    if (is === undefined) out.delete(name);
+    else out.set(name, is);
+  }
+  return out;
+}
+
 /** Root of the checkout `file` lives in: the actor's worktree, which may not be the project root. */
 function treeRootOf(file: ChangedFile, projectRoot: string): string {
   const suffix = `/${file.path}`;
@@ -260,6 +288,11 @@ export class ImpactService {
     // process) are then compared in the order the file was read, which is the order the edits were
     // made: each one sees the surface the edit before it left, and a change is reported once,
     // against the agent that made it.
+    //
+    // What this cannot fix: two hooks may reach this point out of edit order, the hook of the
+    // later edit reading the file first. Its agent is then credited with both changes and the
+    // earlier one finds nothing left. Telling them apart needs the content each edit produced,
+    // which the hooks do not reliably give (partial edit text, several edits in one call).
     const seen = this.k.store.transaction(() => {
       const after = surfaceNow(this.k, file);
       if (!after) return null;
@@ -285,7 +318,9 @@ export class ImpactService {
     this.closeRestored(projectId, session, file.path, seen.restored);
     this.closeOutdated(projectId, session, file.path, seen.outdated, after);
 
-    // Then what has to be waited for: the HEAD the comparison is made against.
+    // Then what has to be waited for: the HEAD the comparison is made against. `priorHead` is the
+    // HEAD recorded when this analysis read the stored surface, so a move is judged against what
+    // that surface was taken at.
     const head = await git.headCommit(tree);
     let before = seen.baseline;
     if (!before) {
@@ -293,7 +328,8 @@ export class ImpactService {
       const content = await git.fileAtRef(tree, 'HEAD', file.path);
       before = content === null ? null : git.exportSurface(content, file.path);
     } else if (head !== null && seen.priorHead !== null && head !== seen.priorHead) {
-      before = (await this.committedSurface(tree, file.path, seen.priorHead, head)) ?? before;
+      const moved = await this.commitDelta(tree, file.path, seen.priorHead, head);
+      if (moved) before = applyCommitDelta(before, moved);
     }
     await this.recordHead(tree, key, seen.priorHead, head);
     if (!before) return null;
@@ -393,17 +429,16 @@ export class ImpactService {
   }
 
   /**
-   * The surface to compare against after HEAD moved since the stored one was taken. A commit,
-   * checkout or pull that changed the file's exports happened outside any agent edit, so the
-   * stored surface no longer describes what the agent started from: the committed file does.
-   * Null when the commits left the exports alone (or cannot be read), and the stored surface holds.
+   * The file's exports at `oldHead` and `newHead` when the commits between them changed them, or
+   * null when they did not (or cannot be read). A commit, checkout or pull happens outside any
+   * agent edit; what it changed must not be reported as the next agent's change.
    */
-  private async committedSurface(
+  private async commitDelta(
     tree: string,
     path: string,
     oldHead: string,
     newHead: string,
-  ): Promise<Map<string, string> | null> {
+  ): Promise<CommitDelta | null> {
     const git = this.k.ports.git;
     const surfaceAt = async (ref: string): Promise<Map<string, string> | null> => {
       if (!git.fileStateAtRef) return null;
@@ -415,7 +450,7 @@ export class ImpactService {
     if (!then || !now) return null;
     const moved = git.diffExportSurface(then, now);
     const same = moved.added.length + moved.removed.length + moved.changed.length === 0;
-    return same ? null : now;
+    return same ? null : { then, now };
   }
 
   /**
@@ -454,7 +489,8 @@ export class ImpactService {
 
   /**
    * Records the HEAD the stored surface was compared against. A HEAD read before one another
-   * analysis already recorded is older, and is never written over it.
+   * analysis already recorded is older, and is never written over it; the transaction checks that
+   * nothing was recorded while that was being found out.
    */
   private async recordHead(
     tree: string,
