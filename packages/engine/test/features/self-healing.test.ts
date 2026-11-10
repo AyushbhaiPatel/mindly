@@ -1098,6 +1098,68 @@ describe('self-healing memory', () => {
     }
   });
 
+  it('takes each step of the automaton in bounded time, whatever the excerpts were chosen to be', () => {
+    /** The best of three runs: the time of the work, not of compiling it. */
+    const timed = <T>(f: () => T): [T, number] => {
+      let best = Infinity;
+      let r = f();
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now();
+        r = f();
+        best = Math.min(best, performance.now() - t);
+      }
+      return [r, best];
+    };
+    const code = Array.from(
+      { length: 7000 },
+      (_, i) => `  const item${i} = await service.load${i % 97}({ id: ${i}, tag: "t${i % 13}" });`,
+    ).join('\n');
+    const [, normalising] = timed(() => normalizeBlock(code));
+    // Units that are kept as they are, one each.
+    const letters: number[] = [];
+    for (let u = 0x80; u < 0xd800; u++) {
+      const ch = String.fromCharCode(u);
+      if (normalizeBlock(ch) === ch) letters.push(u);
+    }
+    // 4,000 states with five children each, the children chosen so that keys of a table of
+    // transitions hashed the plain way (as an earlier build did) all fall into one run of it,
+    // and a text that comes back to every state with a unit that is not one of its children but
+    // probes that run.
+    const hubCount = 4000;
+    const hubUnits = letters.slice(0, hubCount);
+    const pool = letters.slice(hubCount);
+    const keys = hubCount * 5;
+    let size = 16;
+    while (size < 2 * (1 + 2 * keys)) size <<= 1;
+    const mask = size - 1;
+    const slot = (state: number, unit: number): number =>
+      (Math.imul(state, 0x9e3779b1) ^ Math.imul(unit + 1, 0x85ebca6b)) & mask;
+    const excerpts: string[] = [];
+    const hubs: { hub: number; state: number; kids: number[] }[] = [];
+    for (let i = 0, state = 1; i < hubCount; i++, state += 6) {
+      const kids: number[] = [];
+      for (const u of pool) {
+        if (slot(state, u) < keys) kids.push(u);
+        if (kids.length === 5) break;
+      }
+      const hub = hubUnits[i] as number;
+      for (const u of kids) excerpts.push(String.fromCharCode(hub, u));
+      hubs.push({ hub, state, kids });
+    }
+    const visits = hubs.map(({ hub, state, kids }) => {
+      const other = pool.find((u) => !kids.includes(u) && slot(state, u) < keys / 4) as number;
+      return String.fromCharCode(hub, other);
+    });
+    let text = '';
+    for (let i = 0; text.length < 500_000; i++) text += visits[i % visits.length];
+    text = text.slice(0, 500_000);
+    const [found, ms] = timed(() => excerptsWork(text, excerpts));
+    expect(found.present.some(Boolean)).toBe(false);
+    // A few steps per unit of the text and of the excerpts.
+    expect(found.steps).toBeLessThan(8 * (text.length + 2 * excerpts.length));
+    expect(ms).toBeLessThan(40 * normalising + 50);
+  });
+
   it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {
     // Nothing but redactions was kept, on 40 lines: only every run of 40 whole lines could place
     // it, and in a 500 KB file that is more hashing than one check may do.

@@ -72,7 +72,7 @@ const ANCHOR = 32;
 const HASH_BASE = 0x01000193;
 /** Checks of excerpts against windows of the text, per unit of the text, before an automaton. */
 const MAX_ANCHOR_CHECKS_PER_UNIT = 2;
-/** Children a state of an automaton has looked through; more are looked up in a table. */
+/** Children a state of an automaton has looked through; more are found by binary search. */
 const FEW_CHILDREN = 4;
 /** Characters of excerpts looked for in one pass over a file (see `occurringIn`). */
 const MAX_PATTERNS_PER_PASS = 1_000_000;
@@ -561,7 +561,12 @@ function anchoredFinds(
   for (let at = 0; at + ANCHOR <= n && left > 0; at++) {
     const anchor = windowHash(at, ANCHOR);
     let slot = (Math.imul(anchor, 0x9e3779b1) >>> 0) & (size - 1);
-    while (slotHead[slot] !== -1 && slotKey[slot] !== anchor) slot = (slot + 1) & (size - 1);
+    // Every slot looked at is a check: anchors chosen to crowd the table cost their bound,
+    // after which the automaton decides.
+    while (slotHead[slot] !== -1 && slotKey[slot] !== anchor) {
+      if (++checks > maxChecks) return null;
+      slot = (slot + 1) & (size - 1);
+    }
     for (let id = slotHead[slot] as number; id !== -1; id = sameAnchor[id] as number) {
       if (hit[id]) continue;
       if (++checks > maxChecks) return null;
@@ -588,115 +593,90 @@ function anchoredFinds(
 }
 
 /**
- * Transitions of an automaton, by state and code unit, in one open-addressing table: constant
- * time whatever the number of transitions out of a state. Holds at most half its capacity.
- */
-class Transitions {
-  private readonly from: Int32Array;
-  private readonly unit: Uint16Array;
-  private readonly to: Int32Array;
-  private readonly mask: number;
-  private count = 0;
-
-  constructor(capacity: number) {
-    let size = 16;
-    while (size < 2 * capacity) size <<= 1;
-    this.from = new Int32Array(size).fill(-1);
-    this.unit = new Uint16Array(size);
-    this.to = new Int32Array(size);
-    this.mask = size - 1;
-  }
-
-  private slot(state: number, unit: number): number {
-    let i = (Math.imul(state, 0x9e3779b1) ^ Math.imul(unit + 1, 0x85ebca6b)) & this.mask;
-    while (this.from[i] !== -1 && (this.from[i] !== state || this.unit[i] !== unit)) {
-      i = (i + 1) & this.mask;
-    }
-    return i;
-  }
-
-  /** The state after `unit` from `state`; -1 when there is none. */
-  get(state: number, unit: number): number {
-    const i = this.slot(state, unit);
-    return this.from[i] === -1 ? -1 : (this.to[i] as number);
-  }
-
-  /** Records a transition; false (nothing recorded) when the table is half full. */
-  set(state: number, unit: number, to: number): boolean {
-    const i = this.slot(state, unit);
-    if (this.from[i] === -1) {
-      if (2 * (this.count + 1) > this.mask + 1) return false;
-      this.count++;
-      this.from[i] = state;
-      this.unit[i] = unit;
-    }
-    this.to[i] = to;
-    return true;
-  }
-}
-
-/**
  * The automaton for `occurringIn` (Aho-Corasick): linear in the text and in the patterns
- * together, whatever they hold, however many there are. Its edges are in one table (constant
- * time per step, however many edges leave a state); a state's children are also listed
- * (`child`, then `sibling`) to build the failure links. A step that has to follow failure links
- * is remembered, so the same step later takes constant time.
+ * together, whatever they hold, however many there are, with no hashing. It is built from the
+ * patterns in sorted order, so each pattern only adds the states past what it shares with the
+ * one before it, and every state's children come out sorted by unit. They are then laid out as
+ * one sorted run per state: a state with a few children has them looked through, one with more
+ * has them found by binary search, and the root has a table by unit. Failure links are followed
+ * as usual (their total along the text is at most its length).
  */
 function automatonFinds(
   text: Uint16Array,
   patterns: readonly string[],
   work: SearchWork = { steps: 0 },
 ): string[] {
+  // Sorted by code units (the default order of strings), each once.
+  const sorted = [...new Set(patterns)].sort();
   let total = 1;
-  for (const p of patterns) total += p.length;
-  const label = new Uint16Array(total);
-  const child = new Int32Array(total).fill(-1);
-  const sibling = new Int32Array(total).fill(-1);
-  const children = new Int32Array(total);
-  const top = new Int32Array(0x10000).fill(-1);
-  // A state with a few children has them looked through; one with more, looked up in a table.
-  const hashed = new Transitions(total);
-  const edges = {
-    get(v: number, c: number): number {
-      work.steps++;
-      if (v === 0) return top[c] as number;
-      if ((children[v] as number) > FEW_CHILDREN) return hashed.get(v, c);
-      for (let w = child[v] as number; w !== -1; w = sibling[w] as number) {
-        work.steps++;
-        if (label[w] === c) return w;
-      }
-      return -1;
-    },
-    add(v: number, c: number, w: number): void {
-      label[w] = c;
-      sibling[w] = child[v] as number;
-      child[v] = w;
-      const n = (children[v] as number) + 1;
-      children[v] = n;
-      if (v === 0) top[c] = w;
-      else if (n === FEW_CHILDREN + 1) {
-        for (let k = child[v] as number; k !== -1; k = sibling[k] as number) {
-          hashed.set(v, label[k] as number, k);
-        }
-      } else if (n > FEW_CHILDREN + 1) hashed.set(v, c, w);
-    },
-  };
-  let nodes = 1;
-  const ends = new Int32Array(patterns.length);
-  for (let id = 0; id < patterns.length; id++) {
-    const p = patterns[id] as string;
-    let v = 0;
-    for (let i = 0; i < p.length; i++) {
-      const c = p.charCodeAt(i);
-      let w = edges.get(v, c);
-      if (w === -1) {
-        w = nodes++;
-        edges.add(v, c, w);
-      }
-      v = w;
-    }
-    ends[id] = v;
+  let longest = 0;
+  for (const p of patterns) {
+    total += p.length;
+    longest = Math.max(longest, p.length);
   }
+  const label = new Uint16Array(total);
+  const firstChild = new Int32Array(total).fill(-1);
+  const lastChild = new Int32Array(total).fill(-1);
+  const nextSibling = new Int32Array(total).fill(-1);
+  const childCount = new Int32Array(total);
+  const path = new Int32Array(longest + 1);
+  const endOf = new Map<string, number>();
+  let nodes = 1;
+  let previous = '';
+  for (const p of sorted) {
+    let shared = 0;
+    const most = Math.min(p.length, previous.length);
+    while (shared < most && p.charCodeAt(shared) === previous.charCodeAt(shared)) shared++;
+    for (let d = shared; d < p.length; d++) {
+      const v = path[d] as number;
+      const w = nodes++;
+      label[w] = p.charCodeAt(d);
+      if (lastChild[v] === -1) firstChild[v] = w;
+      else nextSibling[lastChild[v] as number] = w;
+      lastChild[v] = w;
+      childCount[v] = (childCount[v] as number) + 1;
+      path[d + 1] = w;
+    }
+    endOf.set(p, path[p.length] as number);
+    previous = p;
+  }
+  const ends = Int32Array.from(patterns, (p) => endOf.get(p) as number);
+  // Children laid out as one sorted run per state.
+  const runStart = new Int32Array(nodes);
+  const runUnit = new Uint16Array(nodes);
+  const runTarget = new Int32Array(nodes);
+  for (let v = 0, at = 0; v < nodes; v++) {
+    runStart[v] = at;
+    for (let w = firstChild[v] as number; w !== -1; w = nextSibling[w] as number) {
+      runUnit[at] = label[w] as number;
+      runTarget[at++] = w;
+    }
+  }
+  const top = new Int32Array(0x10000).fill(-1);
+  for (let w = firstChild[0] as number; w !== -1; w = nextSibling[w] as number) {
+    top[label[w] as number] = w;
+  }
+  const next = (v: number, c: number): number => {
+    work.steps++;
+    if (v === 0) return top[c] as number;
+    let lo = runStart[v] as number;
+    let hi = lo + (childCount[v] as number);
+    // Outside the units of the run (sorted): no child, whatever their number.
+    if (lo === hi || c < (runUnit[lo] as number) || c > (runUnit[hi - 1] as number)) return -1;
+    if (hi - lo <= FEW_CHILDREN) {
+      for (; lo < hi; lo++) if (runUnit[lo] === c) return runTarget[lo] as number;
+      return -1;
+    }
+    while (lo < hi) {
+      work.steps++;
+      const mid = (lo + hi) >>> 1;
+      const u = runUnit[mid] as number;
+      if (u === c) return runTarget[mid] as number;
+      if (u < c) lo = mid + 1;
+      else hi = mid;
+    }
+    return -1;
+  };
   const isEnd = new Uint8Array(nodes);
   for (let id = 0; id < ends.length; id++) isEnd[ends[id] as number] = 1;
   // Failure links, and the nearest state down them that ends a pattern, breadth first.
@@ -705,16 +685,16 @@ function automatonFinds(
   const queue = new Int32Array(nodes);
   let head = 0;
   let tail = 0;
-  for (let w = child[0] as number; w !== -1; w = sibling[w] as number) queue[tail++] = w;
+  for (let w = firstChild[0] as number; w !== -1; w = nextSibling[w] as number) queue[tail++] = w;
   while (head < tail) {
     const u = queue[head++] as number;
-    for (let w = child[u] as number; w !== -1; w = sibling[w] as number) {
+    for (let w = firstChild[u] as number; w !== -1; w = nextSibling[w] as number) {
       const c = label[w] as number;
       let f = fail[u] as number;
-      let g = edges.get(f, c);
+      let g = next(f, c);
       while (g === -1 && f !== 0) {
         f = fail[f] as number;
-        g = edges.get(f, c);
+        g = next(f, c);
       }
       const fw = g === -1 ? 0 : g;
       fail[w] = fw;
@@ -723,24 +703,14 @@ function automatonFinds(
     }
   }
   // One pass; every state ending a pattern is marked once, so the marking is linear too.
-  const resolved = new Transitions(Math.min(text.length, 4 * nodes));
   const hit = new Uint8Array(nodes);
   let v = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text[i] as number;
-    let g = edges.get(v, c);
-    if (g === -1 && v !== 0) {
-      g = resolved.get(v, c);
-      if (g === -1) {
-        let f = fail[v] as number;
-        let h = edges.get(f, c);
-        while (h === -1 && f !== 0) {
-          f = fail[f] as number;
-          h = edges.get(f, c);
-        }
-        g = h === -1 ? 0 : h;
-        resolved.set(v, c, g);
-      }
+    let g = next(v, c);
+    while (g === -1 && v !== 0) {
+      v = fail[v] as number;
+      g = next(v, c);
     }
     v = g === -1 ? 0 : g;
     for (let u = isEnd[v] ? v : (output[v] as number); u > 0 && !hit[u]; u = output[u] as number) {
