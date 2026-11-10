@@ -7,6 +7,7 @@ import {
   readlinkSync,
   realpathSync,
   statSync,
+  type Dirent,
   type Stats,
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -376,35 +377,94 @@ export const elsewhereGitDirLabel = (path: string): string =>
 /** Files that tell a git directory keeps (some of) its storage elsewhere, by path from it. */
 const ELSEWHERE_FILES = ['/commondir', '/gitdir', '/objects/info/alternates'];
 
-/** Adds to `into` the folder `path` shows to keep its git storage elsewhere, if it does. */
-function noteElsewhere(path: string, into: Set<string>): void {
+/** Notes in `into` the folder `path` shows to keep its git storage elsewhere, with the file. */
+function noteElsewhere(path: string, into: Map<string, Set<string>>): void {
   for (const tail of ELSEWHERE_FILES) {
-    if (path.endsWith(tail) && path.length > tail.length) into.add(path.slice(0, -tail.length));
+    if (!path.endsWith(tail) || path.length <= tail.length) continue;
+    const dir = path.slice(0, -tail.length);
+    const tails = into.get(dir) ?? new Set<string>();
+    tails.add(tail);
+    into.set(dir, tails);
   }
+}
+
+/** The most of a `commondir`, `gitdir` or `alternates` file that is read. */
+const ELSEWHERE_FILE_MAX = 4096;
+
+/**
+ * True when the `tail` file of git directory `dir` points only where nothing is stored outside
+ * a commit: outside the worktree (removing it does not touch that), or into a folder of it with
+ * nothing changed, staged, untracked or ignored under it (`newUnder`). False when the file cannot
+ * be read or makes no sense, or points at the worktree's own folder. Reads that small file only.
+ */
+function pointsOnlyToCommitted(
+  root: string,
+  dir: string,
+  tail: string,
+  newUnder: ReadonlySet<string>,
+): boolean {
+  const file = join(root, dir, tail.slice(1));
+  let text: string;
+  try {
+    const st = lstatSync(file);
+    if (!st.isFile() || st.size > ELSEWHERE_FILE_MAX) return false;
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return false;
+  }
+  const lines = text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '' && !l.startsWith('#'));
+  // `commondir` and `gitdir` hold one path; `alternates` one per line, from `objects/`.
+  const targets = tail === '/objects/info/alternates' ? lines : lines.slice(0, 1);
+  if (targets.length === 0 || lines.some((l) => l.includes('\0'))) return false;
+  const base = tail === '/objects/info/alternates' ? join(root, dir, 'objects') : join(root, dir);
+  for (const t of targets) {
+    const target = resolve(base, t);
+    if (target === root) return false;
+    if (!target.startsWith(`${root}/`)) continue;
+    const rel = target.slice(root.length + 1);
+    const slash = rel.lastIndexOf('/');
+    // A folder with anything new under it, or a file beside something new (it may be the one).
+    if (newUnder.has(rel) || (slash > 0 && newUnder.has(rel.slice(0, slash)))) return false;
+  }
+  return true;
 }
 
 /**
  * What `dir` (not the top level), which holds an entry named `HEAD` (tracked, untracked or
  * ignored), is. `elsewhere` when it also holds a `commondir`, a `gitdir` or an
- * `objects/info/alternates` (`elsewhereStorage`, any status): its storage, or part of it, is in
- * another folder, which is not read to find which (a linked worktree's git directory has no
- * `objects` of its own). Otherwise only with an `objects` that is a folder on disk (through a
- * link too): `linked` when its `objects` or `refs` is a link, or holds a tracked one, or its
- * `packed-refs` is one (`linkedStorage`): what it stores may then be anywhere, and no link is
- * followed to look; `changed` when something in it other than that `HEAD` is not as in the last
- * commit (`newUnder`: staged, modified, deleted, untracked or ignored; a link elsewhere in it
- * counts only by changing itself). Otherwise null: a fully tracked, unchanged one holds nothing
- * that is not in a commit. Nothing is read.
+ * `objects/info/alternates` (`elsewhereStorage`, any status) that, with its `HEAD`, is on disk
+ * now, and either something in it is not as in the last commit (`newUnder`) or one of those
+ * files points where something is (see `pointsOnlyToCommitted`): its storage, or part of it, is
+ * in another folder (a linked worktree's git directory has no `objects` of its own). A committed
+ * fixture of that shape, unchanged and pointing at committed folders, is not. Otherwise only
+ * with an `objects` that is a folder on disk (through a link too): `linked` when its `objects`
+ * or `refs` is a link, or holds a tracked one, or its `packed-refs` is one (`linkedStorage`):
+ * what it stores may then be anywhere, and no link is followed to look; `changed` when something
+ * in it other than that `HEAD` is not as in the last commit (`newUnder`: staged, modified,
+ * deleted, untracked or ignored; a link elsewhere in it counts only by changing itself).
+ * Otherwise null: a fully tracked, unchanged one holds nothing that is not in a commit. Nothing
+ * is read but those small files.
  */
 function gitDirKind(
   root: string,
   dir: string,
   newUnder: ReadonlySet<string>,
   linkedStorage: ReadonlySet<string>,
-  elsewhereStorage: ReadonlySet<string>,
+  elsewhereStorage: ReadonlyMap<string, ReadonlySet<string>>,
 ): 'elsewhere' | 'linked' | 'changed' | null {
   if (dir === '') return null;
-  if (elsewhereStorage.has(dir)) return 'elsewhere';
+  const tails = elsewhereStorage.get(dir);
+  if (tails && existsOrLink(join(root, dir, 'HEAD'))) {
+    for (const tail of tails) {
+      if (!existsOrLink(join(root, dir, tail.slice(1)))) continue;
+      if (newUnder.has(dir) || !pointsOnlyToCommitted(root, dir, tail, newUnder)) {
+        return 'elsewhere';
+      }
+    }
+  }
   const objects = join(root, dir, 'objects');
   try {
     if (!statSync(objects).isDirectory()) return null;
@@ -520,7 +580,7 @@ export async function worktreeScan(
   const heads = new Set<string>();
   const newUnder = new Set<string>();
   // Folders holding a `commondir`, a `gitdir` or an `objects/info/alternates`.
-  const elsewhereStorage = new Set<string>();
+  const elsewhereStorage = new Map<string, Set<string>>();
   // Untracked (`??`) and ignored (`!!`) files one by one, repositories as folders, in one listing
   // read as it comes (every ignored file is in it), keeping only what counts.
   const untracked: string[] = [];
@@ -597,8 +657,32 @@ export async function worktreeScan(
     if (kind === 'linked') labelled.set(dir, linkedGitDirLabel(dir));
     if (kind === 'elsewhere') labelled.set(dir, elsewhereGitDirLabel(dir));
   }
-  // One `lstat` per folder named: a `.git` there, whatever git makes of it.
-  for (const dir of listedIn) if (existsOrLink(join(root, dir, '.git'))) found.add(dir);
+  // One `readdir` per folder named, and per folder below one that git names nothing in (only
+  // empty folders, or ones holding nothing but a `.git` git does not accept): a `.git` in any of
+  // them, whatever git makes of it. Repositories git named and submodules are not gone into.
+  const notInto = new Set<string>([...found, ...gitlinks]);
+  const seen = new Set<string>(['', ...listedIn]);
+  const stack = ['', ...listedIn];
+  while (stack.length > 0) {
+    const dir = stack.pop() as string;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir === '' ? root : join(root, dir), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (e.name === '.git') {
+        if (dir !== '') found.add(dir);
+        continue;
+      }
+      if (!e.isDirectory()) continue;
+      const sub = dir === '' ? e.name : `${dir}/${e.name}`;
+      if (seen.has(sub) || notInto.has(sub)) continue;
+      seen.add(sub);
+      stack.push(sub);
+    }
+  }
   for (const path of gitlinks) if (existsOrLink(join(root, path, '.git'))) found.add(path);
   found.delete('');
   const gitData = outermostPaths(found).map((p) => labelled.get(p) ?? p);

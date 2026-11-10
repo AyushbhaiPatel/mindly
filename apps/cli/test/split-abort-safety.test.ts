@@ -718,15 +718,52 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     renameSync(join(common, 'HEAD'), join(page, '.cache/HEAD.orig'));
     commitThrough(join(page, 'wt'), 'hours of work\n', 'refs/heads/feature');
     expect(gd(join(page, 'wt'), ['log', '--format=%s', 'feature'])).toBe('only here');
-    // Every part holds that git directory (it is committed): every part is kept.
+    // Where the common dir holds something: kept. The other part has the same committed folder,
+    // pointing at nothing there: it goes.
     const r = await cli(sb, ['split', 'abort', '--yes', '--json']);
     expect(r.code).toBe(1);
     const a = jsonOf<Aborted>(r);
-    expect(a.keptWorktrees).toEqual([partDir(sb, 'api'), page]);
+    expect(a.keptWorktrees).toEqual([page]);
     expect(a.keptBecause[page]).toBe(
       HELD('wt, whose git storage is reached elsewhere and cannot be checked'),
     );
     expect(gd(join(page, 'wt'), ['log', '--format=%s', 'feature'])).toBe('only here');
+  });
+
+  it('does not hold for a committed fixture shaped like a linked worktree, as it is or deleted', async () => {
+    const fixture = (s: Sandbox): void => {
+      const g = join(s.repo, 'tests/resources/testrepo/.gitted');
+      git(s.repo, 'init', '-q', '--bare', g);
+      commitThrough(g, 'fixture\n');
+      write(g, 'worktrees/testrepo-worktree/HEAD', 'ref: refs/heads/main\n');
+      write(g, 'worktrees/testrepo-worktree/commondir', '../..\n');
+      write(g, 'worktrees/testrepo-worktree/gitdir', '../../../../testrepo-worktree/.gitted\n');
+    };
+    // Unchanged, pointing at committed folders and at nothing: nothing outside a commit.
+    const sb = await splitSandbox(fixture);
+    expect((await cli(sb, ['split', 'abort', '--yes'])).code).toBe(0);
+    // Deleted in a part: the deletion is the part's work, listed as such, not git data.
+    const sb2 = await splitSandbox(fixture);
+    rmSync(join(partDir(sb2, 'page'), 'tests/resources/testrepo'), { recursive: true });
+    const r = await cli(sb2, ['split', 'abort', '--yes']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).not.toContain('git data');
+    expect(r.stderr).toContain('tests/resources/testrepo/.gitted');
+    expect((await cli(sb2, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
+  });
+
+  it('keeps a folder holding nothing but a .git git does not accept', async () => {
+    const sb = await splitSandbox();
+    const page = partDir(sb, 'page');
+    const g = join(page, 'keep/.git');
+    git(page, 'init', '-q', '--bare', g);
+    commitThrough(g, 'hours of work\n');
+    gd(g, ['pack-refs', '--all']);
+    rmSync(join(g, 'refs'), { recursive: true });
+    // git lists nothing there: not the folder, not what is in its `.git`.
+    expect(git(page, 'status', '--porcelain', '-uall', '--ignored')).toBe('');
+    await keptFor(sb, 'keep');
+    expect(existsSync(join(g, 'objects'))).toBe(true);
   });
 
   it('keeps a bare clone git accepts, whatever its HEAD looks like', async () => {

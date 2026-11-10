@@ -468,7 +468,7 @@ describe('worktrees', () => {
     repo('node_modules/dep');
     repo('lib/python3.12/site-packages/pkg');
     repo('tools/empty', false);
-    // Not a repository (a stale gitfile in an ignored folder): nothing of git's to keep.
+    // A `.git` git does not accept (a stale gitfile), alone in a folder git lists nothing in.
     write(root, 'src/vendor/lib/.git', 'gitdir: /elsewhere\n');
     repo('src/newrepo');
     // Made in folders the repository tracks files in, which git looks past; one inside another
@@ -487,6 +487,7 @@ describe('worktrees', () => {
       'node_modules/dep',
       'src/app',
       'src/newrepo',
+      'src/vendor/lib',
       'tools/empty',
       'tools/patched-dep',
     ]);
@@ -710,6 +711,38 @@ describe('worktrees', () => {
       linkedGitDirLabel('pr.git'),
       elsewhereGitDirLabel('wt'),
     ]);
+  });
+
+  it('does not count a committed linked-worktree fixture, as it is or deleted', async () => {
+    const root = makeRepo({ 'README.md': 'x\n' });
+    const g = join(root, 'fx/.gitted');
+    git(root, 'init', '-q', '--bare', g);
+    commitThrough(g, 'fixture\n');
+    write(g, 'worktrees/wt/HEAD', 'ref: refs/heads/main\n');
+    write(g, 'worktrees/wt/commondir', '../..\n');
+    write(g, 'worktrees/wt/gitdir', '/nowhere/.git\n');
+    commitAll(root, 'fixture');
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    expect((await worktreeScan(path)).gitData).toEqual([]);
+    // Its common dir changed: now it counts (as a changed git directory, holding the other).
+    write(path, 'fx/.gitted/refs/heads/topic', `${'0'.repeat(40)}\n`);
+    expect((await worktreeScan(path)).gitData).toEqual(['fx/.gitted']);
+    rmSync(join(path, 'fx'), { recursive: true });
+    expect((await worktreeScan(path)).gitData).toEqual([]);
+  });
+
+  it('finds a .git git does not accept, alone in a folder git lists nothing in', async () => {
+    const root = makeRepo({ 'README.md': 'x\n' });
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    const g = join(path, 'deep/er/keep/.git');
+    git(path, 'init', '-q', '--bare', g);
+    commitThrough(g, 'only copy\n');
+    gd(g, ['pack-refs', '--all']);
+    rmSync(join(g, 'refs'), { recursive: true });
+    expect(git(path, 'status', '--porcelain', '-uall', '--ignored')).toBe('');
+    expect((await worktreeScan(path)).gitData).toEqual(['deep/er/keep']);
   });
 
   it('looks at many tracked links in git directories in linear time', async () => {

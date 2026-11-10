@@ -215,8 +215,11 @@ checkout in `deps/` or `node_modules`, one made in a folder the part tracks), a 
 repository), a git directory among untracked or ignored files (a `--separate-git-dir`, a bare
 clone: a folder with a `HEAD` and an `objects` folder, holding anything not as in the last
 commit, staged, changed or new; or one whose `objects`, `refs` or `packed-refs` is a link or
-holds one, or that has a `commondir`, a `gitdir` or an `objects/info/alternates`, since what it
-stores may then be anywhere and neither links nor those files are followed to check), files
+holds one, since what it stores may then be anywhere and no link is followed to check; or one
+with a `commondir`, a `gitdir` or an `objects/info/alternates` that points where something is
+not as committed, or that has changed itself; a committed fixture of that shape, such as a
+linked worktree's git directory kept in a test suite, does not block an abort while it and what
+it points at are unchanged), files
 written into the folder of an uninitialised submodule (git lists nothing there; empty folders
 do not count), or the git directories of the part's submodules, initialised or not. A part holding any of it keeps its worktree and branch, the
 abort stays unfinished, and it says, naming each path (the worktree itself as "the worktree's
@@ -236,9 +239,8 @@ folder of your own with a `HEAD` entry and an `objects` folder, holding anything
 (unusual outside git itself), is taken for one, and the abort asks you to move it out. So is a
 git directory with a link in its `objects` or `refs`, even fully committed: such layouts are rare,
 and moving the repository out (or `--yes --discard`) is the way past. One fully
-tracked and unchanged holds nothing outside a commit and does not count. One gap remains: a folder whose only content is a
-`.git` that git does not accept as a repository is not seen (git lists nothing in it), and goes
-with the worktree.
+tracked and unchanged holds nothing outside a commit and does not count. A `.git` git does not
+accept is found too, even alone in a folder git lists nothing in.
 
 Then worktrees are removed the way `git worktree remove` does without `--force`: git refuses one
 with modified or untracked files (an edited file flagged skip-worktree or assume-unchanged
