@@ -2,7 +2,14 @@ import { copyFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { normalizeLine, redactText, sanitizeForContext, sha256 } from '@mindly/core';
 import { describe, expect, it, vi } from 'vitest';
-import { excerptPresent, excerptState, normalizeBlock, selfHealingOf } from '../../src/index.js';
+import {
+  EARLIER_FORM_WORK,
+  excerptPresent,
+  excerptState,
+  excerptWork,
+  normalizeBlock,
+  selfHealingOf,
+} from '../../src/index.js';
 import { evidenceHash } from '../../src/memory/evidence-hash.js';
 import { event, writeTool } from '../helpers.js';
 import { agentSource, AUTH_V1, featureSetup } from './fixtures.js';
@@ -717,16 +724,23 @@ describe('self-healing memory', () => {
     // One line of only an invisible character, and one lone carriage return, in 500 KB.
     for (const stray of ['\u200B', 'a\rb']) {
       const file = [...rows.slice(0, mid), stray, ...rows.slice(mid)].join('\n');
-      // The block is not in the file; what it kept is everywhere: not decided, and quickly.
-      const [gone, goneMs] = timed(() => excerptState(file, stored, hash));
-      expect(gone).toBe('unknown');
+      // The block is not in the file; what it kept is everywhere: not decided.
+      const gone = excerptWork(file, stored, hash);
+      expect(gone.state).toBe('unknown');
       // The block is there, ending in a line of only an invisible character.
       const withBlock = `${block}\n\u200B\n${file}`;
       const blockHash = `lines:31:${sha256(normalizeBlock(`${block}\n\u200B`))}`;
-      const [there, thereMs] = timed(() => excerptState(withBlock, stored, blockHash));
-      expect(there).not.toBe('absent');
-      // Tens of milliseconds on an idle machine.
-      expect(Math.max(goneMs, thereMs)).toBeLessThan(100);
+      const there = excerptWork(withBlock, stored, blockHash);
+      expect(there.state).not.toBe('absent');
+      // The hashing it does is bounded by the allowance for one file, whatever the machine.
+      expect(gone.work).toBeLessThanOrEqual(EARLIER_FORM_WORK);
+      expect(there.work).toBeLessThanOrEqual(EARLIER_FORM_WORK);
+      // And the rest is a few passes over the file: measured against normalising that file once
+      // on the same machine (tens of milliseconds here, about five times normalising).
+      const [, normalising] = timed(() => normalizeBlock(withBlock));
+      const [, goneMs] = timed(() => excerptState(file, stored, hash));
+      const [, thereMs] = timed(() => excerptState(withBlock, stored, blockHash));
+      expect(Math.max(goneMs, thereMs)).toBeLessThan(20 * normalising + 5);
     }
   });
 

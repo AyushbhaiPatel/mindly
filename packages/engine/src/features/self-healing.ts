@@ -54,14 +54,23 @@ const MAX_EXCERPT_CHARS = 2000;
  * Characters hashed in one file for evidence stored in an earlier form, all of it together; past
  * it such evidence is not decided and keeps the validity it had.
  */
-const MAX_LEGACY_WORK = 8_000_000;
+const MAX_LEGACY_WORK = 1_000_000;
+/** The allowance of `MAX_LEGACY_WORK`, for tests that check the work stays within it. */
+export const EARLIER_FORM_WORK = MAX_LEGACY_WORK;
 
+/** A character other than whitespace: a line with one is a line of the normalised file. */
+const NON_SPACE_RE = /\S/;
 /** Neutralised when an excerpt is made safe: its `<` becomes `‹`. */
 const DELIMITER_RE = /<\s*\/?\s*mindly[-_a-z]*/gi;
 /** Characters an excerpt made safe no longer has, or has as a line break (a lone `\r`). */
 const SAFE_CHANGES_RE =
   // eslint-disable-next-line no-control-regex
   /\r(?!\n)|[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
+
+/** Whitespace, line breaks and the characters making safe removes: what `skeleton` leaves out. */
+const SKELETON_DROP_RE =
+  // eslint-disable-next-line no-control-regex
+  /[\s\u0000-\u0008\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]+/g;
 
 /** Removed when an excerpt is made safe (`sanitizeForContext`, which this follows). */
 function isUnsafe(c: number): boolean {
@@ -169,40 +178,78 @@ type SafeView = Mapped;
 
 function safeView(raw: string, norm: string): SafeView {
   const neutral = (t: string): string => t.replace(DELIMITER_RE, (m) => m.replace('<', '‹'));
+  const at = new Int32Array(norm.length);
   if (!SAFE_CHANGES_RE.test(raw)) {
     // Nothing is removed or turned into a line break (the usual case): the normalised file, every
     // character where it is.
-    const at = new Int32Array(norm.length);
     for (let i = 0; i < at.length; i++) at[i] = i;
     return { text: neutral(norm), at };
   }
-  const identity = new Int32Array(raw.length);
-  const codes = new Uint16Array(raw.length);
-  for (let i = 0; i < raw.length; i++) {
-    identity[i] = i;
-    codes[i] = raw.charCodeAt(i);
-  }
-  // Where each character of the file is in the normalised file.
-  const normed = normalizeMapped(codes, raw.length, identity);
-  if (normed.text !== norm) {
-    // Not expected: compare with the normalised file as it is rather than misplace anything.
-    const at = new Int32Array(norm.length);
-    for (let i = 0; i < at.length; i++) at[i] = i;
-    return { text: neutral(norm), at };
-  }
-  const toNorm = new Int32Array(raw.length).fill(-1);
-  for (let i = 0; i < normed.at.length; i++) {
-    const r = normed.at[i] as number;
-    if (r >= 0) toNorm[r] = i;
-  }
-  // Made safe as an excerpt is: a line break for every `\r`, unsafe characters removed.
-  const safeCodes = new Uint16Array(raw.length);
-  const safeFrom = new Int32Array(raw.length);
+  // Line by line, as the file is normalised: a line that making safe leaves as it is keeps its
+  // place; only a line it changes is mapped character by character.
+  const parts: string[] = [];
   let n = 0;
-  for (let i = 0; i < raw.length; i++) {
+  let p = 0;
+  for (let start = 0; start <= raw.length;) {
+    const nl = raw.indexOf('\n', start);
+    const end = nl === -1 ? raw.length : nl;
+    const line = raw.slice(start, end);
+    // A line of only whitespace is not a line of the normalised file; any other one is the next.
+    if (NON_SPACE_RE.test(line)) {
+      const normEnd = norm.indexOf('\n', p);
+      const lineEnd = normEnd === -1 ? norm.length : normEnd;
+      const normed = norm.slice(p, lineEnd);
+      const mapped = SAFE_CHANGES_RE.test(line) ? safeLine(line, normed) : null;
+      const text = mapped ? mapped.text : normed;
+      if (text.length > 0) {
+        if (n > 0) {
+          // The line break before this line: the one before its line of the normalised file.
+          parts.push('\n');
+          at[n++] = p - 1;
+        }
+        parts.push(text);
+        if (mapped) {
+          for (let i = 0; i < text.length; i++) {
+            const r = mapped.at[i] as number;
+            at[n++] = r < 0 ? -1 : p + r;
+          }
+        } else {
+          for (let i = 0; i < text.length; i++) at[n++] = p + i;
+        }
+      }
+      p = lineEnd + 1;
+    }
+    if (nl === -1) break;
+    start = nl + 1;
+  }
+  const text = parts.join('');
+  return { text: neutral(text), at: at.slice(0, n) };
+}
+
+/**
+ * One line of the file as it is when made safe (a line break for a lone `\r`, unsafe characters
+ * removed) and normalised, with where each character is in the line normalised (`normed`); null
+ * when the line does not normalise to `normed` (not expected).
+ */
+function safeLine(line: string, normed: string): Mapped | null {
+  const codes = new Uint16Array(line.length);
+  const identity = new Int32Array(line.length);
+  for (let i = 0; i < line.length; i++) {
+    codes[i] = line.charCodeAt(i);
+    identity[i] = i;
+  }
+  const own = normalizeMapped(codes, line.length, identity);
+  if (own.text !== normed) return null;
+  const toNormed = new Int32Array(line.length).fill(-1);
+  for (let i = 0; i < own.at.length; i++) toNormed[own.at[i] as number] = i;
+  const safeCodes = new Uint16Array(line.length);
+  const safeFrom = new Int32Array(line.length);
+  let n = 0;
+  for (let i = 0; i < line.length; i++) {
     const c = codes[i] as number;
     if (c === 0x0d) {
-      if (codes[i + 1] === 0x0a) continue;
+      // A `\r` ending the line ends it with the line feed; another is a line break of its own.
+      if (i === line.length - 1) continue;
       safeCodes[n] = 0x0a;
       safeFrom[n++] = i;
       continue;
@@ -215,9 +262,9 @@ function safeView(raw: string, norm: string): SafeView {
   const at = new Int32Array(safe.at.length);
   for (let i = 0; i < at.length; i++) {
     const r = safe.at[i] as number;
-    at[i] = r >= 0 ? (toNorm[r] as number) : -1;
+    at[i] = r >= 0 ? (toNormed[r] as number) : -1;
   }
-  return { text: neutral(safe.text), at };
+  return { text: safe.text, at };
 }
 
 /** A file as evidence is compared against it: normalised once, the rest worked out on demand. */
@@ -239,6 +286,8 @@ interface NormFile {
    * false (and nothing taken) when it would go past it.
    */
   spend(chars: number): boolean;
+  /** Characters taken so far (see `spend`). */
+  spent(): number;
   /**
    * The first line of a run of `n` whole lines of the file with this hash; -1 when there is none,
    * null when finding out would go past the work allowed (see `spend`).
@@ -254,18 +303,7 @@ interface NormFile {
  * skeleton of any piece of what it kept, however the excerpt was quoted.
  */
 function skeleton(text: string): string {
-  const out = new Uint16Array(text.length);
-  let n = 0;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    if (c === 0x0a || isSpace(c) || isUnsafe(c)) continue;
-    out[n++] = c === 0x2039 ? 0x3c : c;
-  }
-  let result = '';
-  for (let i = 0; i < n; i += 8192) {
-    result += String.fromCharCode(...out.subarray(i, Math.min(n, i + 8192)));
-  }
-  return result;
+  return text.replace(SKELETON_DROP_RE, '').replaceAll('‹', '<');
 }
 
 /** Where each line of `text` starts. */
@@ -299,6 +337,7 @@ function normFile(raw: string): NormFile {
       work += chars;
       return true;
     },
+    spent: () => work,
     linesWith(n, hash) {
       let byHash = runs.get(n);
       if (!byHash) {
@@ -342,6 +381,21 @@ export function excerptState(
   contentHash: string | null,
 ): ExcerptState {
   return excerptIn(normFile(content), excerpt, contentHash).state;
+}
+
+/**
+ * `excerptState` with the work it took from the allowance for evidence of earlier forms
+ * (characters hashed or set aside for hashing): a measure of the cost that does not depend on
+ * how fast the machine is. For tests.
+ */
+export function excerptWork(
+  content: string,
+  excerpt: string,
+  contentHash: string | null,
+): { state: ExcerptState; work: number } {
+  const file = normFile(content);
+  const state = excerptIn(file, excerpt, contentHash).state;
+  return { state, work: file.spent() };
 }
 
 /** What a look found, and, for evidence of the earliest form found in place, where. */
