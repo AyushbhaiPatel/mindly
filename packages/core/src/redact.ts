@@ -36,10 +36,15 @@ interface LineMemo {
   start: number;
   end: number;
   /**
-   * The line's commands, as triples: where one starts, where it ends, and where the first HTTP
-   * client is named in it (-1 for none).
+   * The line's commands, four numbers each: where one starts, where it ends, and where the first
+   * client of each kind (curl and the like, httpie and xh) is named in it (-1 for none).
    */
   commands: number[];
+  /**
+   * Whether each newline looked at joins the next line, for as long as the text is the same:
+   * every credential rule asks about the same lines.
+   */
+  joins: { text: string; byNewline: Map<number, boolean> };
 }
 
 /** Type names that follow `password:` in code (TypeScript, Python, Go, …), never secrets. */
@@ -176,10 +181,10 @@ const CLIENT_NAMES = 'curlie|aria2c|lftp|hurl|httpstat|httpie';
  * `/usr/bin/curl`, `CURL.EXE`), including builds such as `curl_chrome116` or
  * `curl-impersonate`; or a variable that holds one. A variable counts when its name is a client
  * name, alone or with an affix (`$CURL`, `${CURL_BIN}`, `$CURL_IMPERSONATE`, `$MY_WGET`), or
- * names an HTTP client or command (`$HTTP_CLIENT`, `$HTTP_CMD`), never a setting or address that
- * only mentions one (`$HTTP_PORT`, `$HTTP_PROXY`, `$HTTPBIN`); an assignment counts when its name starts with one
- * (`CURL_OPTS="..."`, not `use_curl=1`). A client behind a shell function or alias defined
- * elsewhere is not recognised.
+ * names an HTTP client or command (`$HTTP_CLIENT`, `$HTTP_BIN`), never a setting or address that
+ * only mentions one (`$HTTP_PORT`, `$HTTP_PROXY`, `$HTTPBIN`); an assignment counts when its name
+ * starts with one (`CURL_OPTS="..."`, not `use_curl=1`). A client behind a shell function or
+ * alias defined elsewhere is not recognised.
  */
 const HTTP_CLIENT_SOURCE = [
   '(?<![\\p{L}\\p{N}_])(?:',
@@ -187,7 +192,7 @@ const HTTP_CLIENT_SOURCE = [
   `(?<![$\\{])(?:curl(?:[-_][A-Za-z0-9_-]{1,40}|\\d{1,4})?|wget2?|ab|${CLIENT_NAMES})`,
   '(?:\\.exe)?(?![\\p{L}\\p{N}_])',
   `|\\$\\{?(?:[A-Za-z0-9]{1,16}_)?(?:curl|wget|${CLIENT_NAMES})(?:_(?!proxy\\b)[A-Za-z0-9]{1,16})?\\}?(?![A-Za-z0-9_])`,
-  '|\\$\\{?(?:[A-Za-z0-9]{1,16}_)?https?_(?:client|cmd|command|tool)\\}?(?![A-Za-z0-9_])',
+  '|\\$\\{?(?:[A-Za-z0-9]{1,16}_)?https?_(?:client|cmd|command|tool|bin)\\}?(?![A-Za-z0-9_])',
   '|(?:curl|wget)(?:_[A-Za-z0-9]{1,12})?=',
   ')',
 ].join('');
@@ -195,51 +200,190 @@ const HTTP_CLIENT_SOURCE = [
 const HTTP_CLIENT = new RegExp(HTTP_CLIENT_SOURCE, 'iu');
 
 /**
- * Commands that run another command, and the short and long options of each that take a value
- * (`sudo -u deploy`, `timeout -s KILL`). Knowing which options take one keeps the match
- * deterministic: every word after the runner is either an option, an option's value or a number.
+ * httpie and xh, whose `-a` / `--auth` takes `user:password` the way curl's `-u` does. `http` in
+ * a URL (`http://`) or a module name (`http.server`) is not the program.
  */
-const RUNNERS: readonly (readonly [string, string, string])[] = [
-  ['sudo', 'ugCDhprtU', 'user|group|chroot|chdir|close-from|host|prompt|role|type|other-user'],
-  ['doas', 'uC', ''],
-  ['timeout', 'sk', 'signal|kill-after'],
-  ['env', 'uCS', 'unset|chdir|split-string'],
-  ['nice', 'n', 'adjustment'],
-  ['ionice', 'cnp', 'class|classdata|pid'],
-  ['stdbuf', 'ioe', 'input|output|error'],
-  ['time', 'fo', 'format|output'],
-  ['exec', 'a', ''],
-  ['nohup|command|caffeinate|chronic', '', ''],
-];
+const HTTPIE_CLIENT =
+  /(?<![\p{L}\p{N}_${.-])(?:https?|xhs?)(?:\.exe)?(?![\p{L}\p{N}_:/.-])|\$\{?(?:[A-Za-z0-9]{1,16}_)?(?:httpie|xh)(?:_[A-Za-z0-9]{1,16})?\}?(?![A-Za-z0-9_])/iu;
 
-/** One runner with its options, values and numbers (`timeout -s KILL 30`), and a space after. */
-function runnerSource([names, short, long]: readonly [string, string, string]): string {
-  const valued: string[] = [];
-  if (short !== '') valued.push(`-[A-Za-z]{0,8}[${short}]`);
-  if (long !== '') valued.push(`--(?:${long})`);
-  const takesValue = valued.length > 0 ? `(?:${valued.join('|')})` : '';
-  const token =
-    takesValue === ''
-      ? '-\\S{1,40}'
-      : `${takesValue}[ \\t]+\\S{1,64}|-(?!${takesValue}(?:[ \\t]|$))\\S{1,40}`;
-  return `(?:${names})(?:[ \\t]+(?:${token}|\\d{1,6}(?:\\.\\d{1,3})?[smhd]?)){0,8}[ \\t]+`;
-}
+/** The kinds of client: curl and the like for `-u`, httpie and xh for `-a`. */
+type ClientKind = 0 | 1;
 
-/** A variable assignment before a command, its value quoted or not: `A=1`, `NOTE="two words"`. */
-const ASSIGNMENT_PREFIX = `[A-Za-z_][A-Za-z0-9_]{0,40}=(?:"[^"\\n]{0,200}"|'[^'\\n]{0,200}'|[^\\s"']{0,200})[ \\t]+`;
+const CLIENTS: readonly RegExp[] = [HTTP_CLIENT, HTTPIE_CLIENT];
 
-/** Any number of runners and assignments in front of a command: `sudo -u deploy env A=1 curl`. */
-const RUNNER_PREFIX = `(?:${RUNNERS.map(runnerSource).join('|')}|${ASSIGNMENT_PREFIX}){0,6}`;
+/** A substring every client word contains; a word without one is not a client. */
+const CLIENT_HINT = /curl|wget|ab|aria2c|lftp|hurl|http|xh/i;
 
 /**
- * A line whose command is an HTTP client, after an optional shell prompt and runner (`$ curl`,
- * `sudo curl`, `env A=1 curl`): the start of a command that may be wrapped over indented option
- * lines.
+ * Commands that run another command, with the short options (letters) and long options of each
+ * that take a value as the next word (`sudo -u deploy`, `timeout -s KILL`).
  */
-const CLIENT_LINE = new RegExp(
-  `[ \\t]*(?:[$>%#][ \\t]+)?${RUNNER_PREFIX}${HTTP_CLIENT_SOURCE}`,
-  'iuy',
-);
+const RUNNERS = new Map<string, { short: string; long: readonly string[] }>([
+  [
+    'sudo',
+    {
+      short: 'ugCDhprtU',
+      long: ['user', 'group', 'chroot', 'chdir', 'close-from', 'host', 'prompt', 'role', 'type'],
+    },
+  ],
+  ['doas', { short: 'uC', long: [] }],
+  ['timeout', { short: 'sk', long: ['signal', 'kill-after'] }],
+  ['env', { short: 'uCS', long: ['unset', 'chdir', 'split-string'] }],
+  ['nice', { short: 'n', long: ['adjustment'] }],
+  ['ionice', { short: 'cnp', long: ['class', 'classdata', 'pid'] }],
+  ['stdbuf', { short: 'ioe', long: ['input', 'output', 'error'] }],
+  ['time', { short: 'fo', long: ['format', 'output'] }],
+  ['exec', { short: 'a', long: [] }],
+  ['nohup', { short: '', long: [] }],
+  ['command', { short: '', long: [] }],
+  ['caffeinate', { short: '', long: [] }],
+  ['chronic', { short: '', long: [] }],
+]);
+
+/** How many words of a line are read to find its command. */
+const MAX_LINE_WORDS = 200;
+
+/** How many characters of a line are read to find its command. */
+const MAX_LINE_CHARS = 4000;
+
+/** A shell word, with quotes removed, or a command separator (`;`, `|`, `&`, `(`, `)`). */
+interface ShellWord {
+  text: string;
+  quoted: boolean;
+  sep: boolean;
+}
+
+/**
+ * The words of `text` from `from` to `to`, read once from left to right. A quoted part is kept
+ * whole (`-f "%e %M"` is two words); a backslash escapes only a space or a quote, so a Windows
+ * path keeps its backslashes. Reading stops at a newline when `oneLine` is set.
+ */
+function shellWords(text: string, from: number, to: number, oneLine: boolean): ShellWord[] {
+  const out: ShellWord[] = [];
+  const end = Math.min(to, from + MAX_LINE_CHARS);
+  let cur = '';
+  let has = false;
+  let quoted = false;
+  const flush = (): void => {
+    if (has) out.push({ text: cur, quoted, sep: false });
+    cur = '';
+    has = false;
+    quoted = false;
+  };
+  for (let i = from; i < end && out.length < MAX_LINE_WORDS; i++) {
+    const ch = text[i] ?? '';
+    if (ch === '\n' && oneLine) break;
+    if (ch === '"' || ch === "'") {
+      const close = text.indexOf(ch, i + 1);
+      const stop = close === -1 || close > end ? end : close;
+      cur += text.slice(i + 1, stop);
+      has = true;
+      quoted = true;
+      i = stop;
+    } else if (ch === '\\' && /[\s"']/.test(text[i + 1] ?? '')) {
+      i++;
+      if (text[i] !== '\n') {
+        cur += text[i] ?? '';
+        has = true;
+      }
+    } else if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') {
+      flush();
+    } else if (ch === ';' || ch === '|' || ch === '&' || ch === '(' || ch === ')') {
+      flush();
+      out.push({ text: ch, quoted: false, sep: true });
+    } else {
+      cur += ch;
+      has = true;
+    }
+  }
+  flush();
+  return out;
+}
+
+/** `/usr/bin/Sudo.exe` -> `sudo`. */
+function programBase(word: string): string {
+  return word
+    .slice(Math.max(word.lastIndexOf('/'), word.lastIndexOf('\\')) + 1)
+    .replace(/\.exe$/i, '')
+    .toLowerCase();
+}
+
+/** True when `word` names a client of the given kind, by itself or by its path. */
+function isClientWord(word: string, kind: ClientKind): boolean {
+  // Most words name no client at all; one cheap test skips the full patterns for them.
+  if (!CLIENT_HINT.test(word)) return false;
+  const re = CLIENTS[kind] ?? HTTP_CLIENT;
+  for (const candidate of [word, programBase(word)]) {
+    const found = re.exec(candidate);
+    if (found !== null && found.index === 0) return true;
+  }
+  return false;
+}
+
+/** True when an option word of a runner takes the next word as its value, as getopt reads it. */
+function runnerOptionTakesValue(runner: { short: string; long: readonly string[] }, word: string) {
+  if (word.startsWith('--')) return !word.includes('=') && runner.long.includes(word.slice(2));
+  const letters = word.slice(1);
+  for (let k = 0; k < letters.length; k++) {
+    const letter = letters[k] ?? '';
+    if (!/[A-Za-z]/.test(letter)) return false;
+    // The first letter that takes a value takes the rest of the word, or else the next word.
+    if (runner.short.includes(letter)) return k === letters.length - 1;
+  }
+  return false;
+}
+
+/**
+ * The index of the word that is run, after any variable assignments and runners with their
+ * options, values and numbers (`sudo -u deploy env A=1 nice -n 5 curl`). Every word is looked at
+ * once, so the cost is linear in the number of words.
+ */
+function skipRunners(words: readonly ShellWord[], i: number): number {
+  while (i < words.length) {
+    const word = words[i];
+    if (word === undefined || word.sep) return i;
+    const runner = RUNNERS.get(programBase(word.text));
+    if (runner === undefined) {
+      // An assignment is skipped, unless it is the client itself (`CURL_OPTS="..."`).
+      if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(word.text) || isClientWord(word.text, 0)) return i;
+      i++;
+      continue;
+    }
+    i++;
+    while (i < words.length) {
+      const option = words[i];
+      if (option === undefined || option.sep) return i;
+      if (option.text === '--') {
+        i++;
+        break;
+      }
+      if (option.text.startsWith('-') && option.text.length > 1) {
+        i += runnerOptionTakesValue(runner, option.text) ? 2 : 1;
+      } else if (/^\d{1,6}(?:\.\d{1,3})?[smhd]?$/.test(option.text)) {
+        i++;
+      } else {
+        break;
+      }
+    }
+  }
+  return i;
+}
+
+/**
+ * True when the line starting at `start` runs an HTTP client, after an optional shell prompt
+ * and any runners (`$ curl`, `sudo -u deploy curl`, `time -f "%e" /usr/bin/curl`): the start of
+ * a command that may be wrapped over indented option lines.
+ */
+function lineRunsClient(text: string, start: number): boolean {
+  const words = shellWords(text, start, text.length, true);
+  let i = 0;
+  if (/^[$>%#]$/.test(words[0]?.text ?? '')) i = 1;
+  i = skipRunners(words, i);
+  const word = words[i];
+  return (
+    word !== undefined && !word.sep && (isClientWord(word.text, 0) || isClientWord(word.text, 1))
+  );
+}
 
 /** curl's short options that take no value, so they can come before `u` in one cluster. */
 const CURL_FLAG_CLUSTER = '[0-6aBfGgIijJkLlMNnOpqRsSvVZ#]{0,10}';
@@ -263,6 +407,16 @@ const OPTION_LINE = /[ \t]*--?[A-Za-z0-9#]/y;
  * before it is a command, not a sentence: it starts with an HTTP client or is an option line
  * itself.
  */
+function joinsCached(line: LineMemo, text: string, i: number): boolean {
+  if (line.joins.text !== text) line.joins = { text, byNewline: new Map() };
+  let joins = line.joins.byNewline.get(i);
+  if (joins === undefined) {
+    joins = joinsNextLine(text, i);
+    line.joins.byNewline.set(i, joins);
+  }
+  return joins;
+}
+
 function joinsNextLine(text: string, i: number): boolean {
   const before = text[i - 1] === '\r' ? i - 2 : i - 1;
   const ch = text[before];
@@ -275,8 +429,7 @@ function joinsNextLine(text: string, i: number): boolean {
   const above = text.lastIndexOf('\n', i - 1) + 1;
   OPTION_LINE.lastIndex = above;
   if (OPTION_LINE.test(text)) return true;
-  CLIENT_LINE.lastIndex = above;
-  return CLIENT_LINE.test(text);
+  return lineRunsClient(text, above);
 }
 
 function isBlank(code: number): boolean {
@@ -294,9 +447,12 @@ function splitCommands(text: string, start: number, end: number): number[] {
   let from = start;
   let quote = 0;
   const push = (to: number): void => {
-    HTTP_CLIENT.lastIndex = 0;
-    const found = HTTP_CLIENT.exec(text.slice(from, to));
-    out.push(from, to, found === null ? -1 : from + found.index);
+    const command = text.slice(from, to);
+    out.push(from, to);
+    for (const re of CLIENTS) {
+      const found = re.exec(command);
+      out.push(found === null ? -1 : from + found.index);
+    }
   };
   for (let i = start; i < end; i++) {
     const c = text.charCodeAt(i);
@@ -334,26 +490,28 @@ function splitCommands(text: string, start: number, end: number): number[] {
  * app:staff` leaves docker's user alone, while a client inside `sh -c "..."`, after `#` or in a
  * sentence still counts. Any other program's `-u` (a user, a group, a URL) is never touched.
  */
-function httpClientBefore(at: MatchContext, pos: number): number {
+function httpClientBefore(at: MatchContext, pos: number, kind: ClientKind = 0): number {
   const { text, line } = at;
   if (pos < line.start || pos >= line.end) {
     let start = text.lastIndexOf('\n', pos - 1);
-    while (start > 0 && joinsNextLine(text, start)) start = text.lastIndexOf('\n', start - 1);
+    while (start > 0 && joinsCached(line, text, start)) {
+      start = text.lastIndexOf('\n', start - 1);
+    }
     let end = text.indexOf('\n', pos);
-    while (end !== -1 && joinsNextLine(text, end)) end = text.indexOf('\n', end + 1);
+    while (end !== -1 && joinsCached(line, text, end)) end = text.indexOf('\n', end + 1);
     line.start = start + 1;
     line.end = end === -1 ? text.length : end;
     line.commands = splitCommands(text, line.start, line.end);
   }
   const cmds = line.commands;
   let lo = 0;
-  let hi = cmds.length / 3 - 1;
+  let hi = cmds.length / 4 - 1;
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
-    if ((cmds[mid * 3] ?? 0) <= pos) lo = mid;
+    if ((cmds[mid * 4] ?? 0) <= pos) lo = mid;
     else hi = mid - 1;
   }
-  const client = cmds[lo * 3 + 2] ?? -1;
+  const client = cmds[lo * 4 + 2 + kind] ?? -1;
   return client !== -1 && client < pos ? client : -1;
 }
 
@@ -370,15 +528,30 @@ function clientBeforeFlag(flagGroup: string, at: MatchContext): boolean {
 /** Programs whose short-flag clusters take a `user@host:/path` target, not credentials. */
 const REMOTE_COPY = /^(?:(?:\/|\.{1,2}\/|~\/)[\w./-]{0,200}\/)?(?:rsync|scp|sftp|ssh|rclone)$/i;
 
+/** How far back from a flag the words are read to find a remote-copy command. */
+const REMOTE_COPY_SCAN_CHARS = 2000;
+
 /**
- * True when a remote-copy program is run as a command word in `words`: a whole, unquoted
- * argument, alone or as an executable path (`/usr/bin/rsync`), that is not the value of the
- * option before it. A URL or path that only mentions one (`https://ssh.example.com/api`), a
- * quoted string (`-d 'ssh'`) or an option's value (`--proto-default sftp`) does not count.
+ * True when a remote-copy program is run as a command between `from` and `to`: an unquoted
+ * word, alone or as an executable path (`/usr/bin/rsync`), at the start of a command, after a
+ * runner and its options (`ionice -c3 rsync`), or after an ordinary word (`then rsync`), but not
+ * as the value of an option (`--proto-default sftp`). A URL or path that only mentions one
+ * (`https://ssh.example.com/api`) or a quoted string (`-d 'ssh'`) does not count.
  */
-function namesRemoteCopy(words: string): boolean {
-  const list = words.split(/[\s;&|()]+/);
-  return list.some((w, i) => REMOTE_COPY.test(w) && !(list[i - 1] ?? '').startsWith('-'));
+function namesRemoteCopy(text: string, from: number, to: number): boolean {
+  const words = shellWords(text, Math.max(from, to - REMOTE_COPY_SCAN_CHARS), to, false);
+  for (let i = 0; i < words.length; i++) {
+    const at = skipRunners(words, i);
+    const word = words[at];
+    if (word === undefined) return false;
+    if (!word.sep && !word.quoted && REMOTE_COPY.test(word.text)) {
+      const prev = at === i ? words[at - 1] : undefined;
+      const takesValue = prev !== undefined && !prev.sep && /^-[^=]*$/.test(prev.text);
+      if (!takesValue || /^-[A-Za-z]+\d/.test(prev?.text ?? '')) return true;
+    }
+    i = at;
+  }
+  return false;
 }
 
 /**
@@ -387,19 +560,79 @@ function namesRemoteCopy(words: string): boolean {
  * rsync, scp or ssh named after the client owns it: `-avu user@host:/data` is a remote path.
  */
 function isNotHttpCredentials(groups: readonly string[], at: MatchContext): boolean {
+  return isNotCredentials(groups, at, 0);
+}
+
+/** The same, for httpie's and xh's `-a` / `--auth`. */
+function isNotHttpieCredentials(groups: readonly string[], at: MatchContext): boolean {
+  return isNotCredentials(groups, at, 1);
+}
+
+function isNotCredentials(groups: readonly string[], at: MatchContext, kind: ClientKind): boolean {
   const flag = groups[1] ?? '';
   const name = groups[2] ?? '';
   const value = groups[3] ?? '';
   if (value.startsWith('$') || value.startsWith('//')) return true;
   if (value === '' && name.startsWith('$')) return true;
   const pos = flagStart(flag, at);
-  const client = httpClientBefore(at, pos);
+  const client = httpClientBefore(at, pos, kind);
   if (client === -1) return true;
   const cluster = /^[\s"']?-[^-\s"'=]{2,}/.test(flag);
-  if (cluster && (name.includes('@') || value.startsWith('/'))) {
-    return namesRemoteCopy(at.text.slice(client, pos));
+  if (kind === 0 && cluster && (name.includes('@') || value.startsWith('/'))) {
+    return namesRemoteCopy(at.text, client, pos);
   }
   return false;
+}
+
+/**
+ * The rules for one kind of credential flag (`-u` for curl, `-a` for httpie): `-u user:pass`,
+ * `--user=user:pass`, a quoted value taken whole (`-u "user:a pass phrase"`), a key given as the
+ * user with an empty password (`-u apikey:`) or as the password with no user (`-u :token`), and
+ * the value glued to a short flag (`-uuser:pass`). `skip` keeps them to a client's command.
+ */
+function credentialRules(flag: string, glued: string, skip: NonNullable<Rule['skip']>): Rule[] {
+  const start = `(?:^|[\\s"'])(?:${flag})(?:\\s{1,5}|=)`;
+  return [
+    {
+      kind: 'cli_credentials',
+      re: new RegExp(
+        `((?:^|\\s)(?:${flag})(?:\\s{1,5}|=)")([^"\\n:]{0,200}):([^"\\n]{1,400})(?=")`,
+        'g',
+      ),
+      replace: `$1$2:${REDACTED}`,
+      skip,
+    },
+    {
+      kind: 'cli_credentials',
+      re: new RegExp(
+        `((?:^|\\s)(?:${flag})(?:\\s{1,5}|=)')([^'\\n:]{0,200}):([^'\\n]{1,400})(?=')`,
+        'g',
+      ),
+      replace: `$1$2:${REDACTED}`,
+      skip,
+    },
+    {
+      kind: 'cli_credentials',
+      re: new RegExp(`(${start}["']?)([^\\s:"'\`]{0,200}):([^\\s"'\`]{1,200})`, 'g'),
+      replace: `$1$2:${REDACTED}`,
+      skip,
+    },
+    {
+      kind: 'cli_credentials',
+      re: new RegExp(`(${start}["']?)([^\\s:"'\`]{1,200})():(?=$|[\\s"'\`])`, 'g'),
+      replace: `$1${REDACTED}:`,
+      skip,
+    },
+    {
+      kind: 'cli_credentials',
+      re: new RegExp(
+        `((?:^|\\s)-${glued}["']?)([^\\s:"'\`=-][^\\s:"'\`]{0,200}):([^\\s"'\`]{1,200})`,
+        'g',
+      ),
+      replace: `$1$2:${REDACTED}`,
+      skip,
+    },
+  ];
 }
 
 const RULES: Rule[] = [
@@ -447,54 +680,8 @@ const RULES: Rule[] = [
     re: /\b([a-z][a-z0-9+.-]{1,20}:\/\/[^\s:/@]{1,200}:)[^\s@/]{1,200}@/gi,
     replace: `$1${REDACTED}@`,
   },
-  {
-    kind: 'cli_credentials',
-    // `curl -u "user:a pass phrase"`: a quoted value is taken whole.
-    re: new RegExp(
-      `((?:^|\\s)(?:${USER_FLAG})(?:\\s{1,5}|=)")([^"\\n:]{0,200}):([^"\\n]{1,400})(?=")`,
-      'g',
-    ),
-    replace: `$1$2:${REDACTED}`,
-    skip: isNotHttpCredentials,
-  },
-  {
-    kind: 'cli_credentials',
-    re: new RegExp(
-      `((?:^|\\s)(?:${USER_FLAG})(?:\\s{1,5}|=)')([^'\\n:]{0,200}):([^'\\n]{1,400})(?=')`,
-      'g',
-    ),
-    replace: `$1$2:${REDACTED}`,
-    skip: isNotHttpCredentials,
-  },
-  {
-    kind: 'cli_credentials',
-    // `curl -u user:password`, `--user user:password`, `--user=user:password`, `-U` and
-    // `--proxy-user`, and a curl cluster ending in u (`-su`). Only in a command that names an
-    // HTTP client first. `-u :token` has no user and is redacted all the same.
-    re: new RegExp(
-      `((?:^|[\\s"'])(?:${USER_FLAG})(?:\\s{1,5}|=)["']?)([^\\s:"'\`]{0,200}):([^\\s"'\`]{1,200})`,
-      'g',
-    ),
-    replace: `$1$2:${REDACTED}`,
-    skip: isNotHttpCredentials,
-  },
-  {
-    kind: 'cli_credentials',
-    // `curl -u apikey:`: a key given as the user name, with an empty password.
-    re: new RegExp(
-      `((?:^|[\\s"'])(?:${USER_FLAG})(?:\\s{1,5}|=)["']?)([^\\s:"'\`]{1,200})():(?=$|[\\s"'\`])`,
-      'g',
-    ),
-    replace: `$1${REDACTED}:`,
-    skip: isNotHttpCredentials,
-  },
-  {
-    kind: 'cli_credentials',
-    // `curl -uuser:password`, with no space after the flag.
-    re: /((?:^|\s)-[uU]["']?)([^\s:"'`=-][^\s:"'`]{0,200}):([^\s"'`]{1,200})/g,
-    replace: `$1$2:${REDACTED}`,
-    skip: isNotHttpCredentials,
-  },
+  ...credentialRules(USER_FLAG, '[uU]', isNotHttpCredentials),
+  ...credentialRules('-a|--auth', 'a', isNotHttpieCredentials),
   {
     kind: 'cli_credentials',
     // `curl --cert client.pem:password`. A Windows drive letter is part of the file name.
@@ -591,10 +778,11 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
   let text = input.length > MAX_REDACT_INPUT ? input.slice(0, MAX_REDACT_INPUT) : input;
   let count = 0;
   const kinds = new Set<string>();
+  let joins: LineMemo['joins'] = { text: '', byNewline: new Map() };
 
   const apply = (kind: string, re: RegExp, replace: string, skip?: Rule['skip']): void => {
     re.lastIndex = 0;
-    const line: LineMemo = { start: 0, end: 0, commands: [] };
+    const line: LineMemo = { start: 0, end: 0, commands: [], joins };
     text = text.replace(re, (...args: unknown[]) => {
       const match = String(args[0]);
       const groups = args.map((a) => (typeof a === 'string' ? a : ''));
@@ -615,6 +803,8 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
       kinds.add(kind);
       return replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? ''));
     });
+    // Kept for the next rule; it is dropped there if this one changed the text.
+    joins = line.joins;
   };
 
   for (const rule of RULES) apply(rule.kind, rule.re, rule.replace, rule.skip);

@@ -57,20 +57,21 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   stored or sent: private keys, common provider tokens (AWS, GitHub, Slack, Stripe, OpenAI,
   Anthropic, Google, npm, JWTs), credentials in URLs, and values next to secret-like names:
   `.env`-style assignments (a quoted value is removed whole), command-line flags such as
-  `--token <value>` and `--password <value>`, `docker login -p <value>`, and curl-style
+  `--token <value>` and `--password <value>`, `docker login -p <value>`, curl-style
   credentials (`-u user:<value>`, `--user`, `-U` / `--proxy-user`, `--cert file:<value>`,
   `--pass`, `--tlspassword`, `--oauth2-bearer`) in a command that names an HTTP client (curl and
   its builds, wget, curlie, aria2c, ab, lftp, hurl, httpstat, or a variable named after one such
-  as `$CURL`, `${CURL_BIN}` or `$HTTP_CLIENT`, but not `$HTTP_PORT`) before the flag. A command
-  ends at an unquoted `|`, `&&`, `||`, `;` or standalone `&`; quotes carry across joined lines. A
-  line goes on across `\`, `^` or a PowerShell backtick, and into an indented option line below a
-  line that runs a client (also under `sudo -u deploy`, `time`, `env A=1`, `timeout -s KILL 10` and the like) or
-  is an option line itself. A short-flag cluster such as `-su` is credentials even for an email
-  user name, unless an rsync, scp or ssh run as a command after the client owns it. Any other
-  program's
-  `-u` is a user, a group or a URL and is left as written, so stored commands stay runnable. A
-  client behind a shell alias or function is not recognised, and a sentence that names curl
-  before another command (`use curl, then run docker run -u 1000:1000`) is redacted.
+  as `$CURL`, `${CURL_BIN}` or `$HTTP_CLIENT`, but not `$HTTP_PORT` or `$HTTPBIN`) before the
+  flag, and httpie's and xh's `-a` / `--auth user:<value>` the same way. A command ends at an
+  unquoted `|`, `&&`, `||`, `;` or standalone `&`; quotes carry across joined lines. A line goes
+  on across `\`, `^` or a PowerShell backtick, and into an indented option line below a line that
+  runs a client, also through runners and their options (`sudo -u deploy`, `time -f "%e"`,
+  `env A=1`, `timeout -s KILL 10`, `/usr/bin/time`), or below another option line. A short-flag
+  cluster such as `-su` is credentials even for an email user name, unless an rsync, scp or ssh
+  run as a command after the client owns it. Any other program's `-u` is a user, a group or a
+  URL and is left as written, so stored commands stay runnable. A client behind a shell alias or
+  function is not recognised, and a sentence that names curl before another command
+  (`use curl, then run docker run -u 1000:1000`) is redacted.
   Task titles, plan steps and blockers go through the same pass. Type annotations and references
   such as `process.env.X` or `$TOKEN` are left alone, since they hold no secret. So is quoted UI
   text, but only when both the name says so (it ends in `placeholder`, `label`, `hint`, `help`,

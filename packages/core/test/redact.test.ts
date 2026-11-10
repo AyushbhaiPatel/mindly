@@ -244,6 +244,23 @@ describe('redact', () => {
     ['env -u HTTP_PROXY curl https://api.example.com\n    -u admin:PW', 'PW'],
     ['ionice -c 3 nice -n 10 curl https://x.test\n    -u admin:PW', 'PW'],
     ['AUTH_NOTE="two words" curl https://api.example.com\n    -u admin:PW', 'PW'],
+    // A runner option whose value is quoted, a value glued to its option, a runner by path.
+    ['time -f "%e %M" curl https://api.example.com/v1\n  -u admin:PW', 'PW'],
+    ['/usr/bin/time -v curl https://x.test\n  -u admin:PW', 'PW'],
+    ['/usr/bin/sudo -u deploy curl https://x.test\n  -u admin:PW', 'PW'],
+    ['sudo -udeploy curl https://x.test\n  -u admin:PW', 'PW'],
+    ['$HTTP_BIN -u admin:PW https://api.example.com/v1', 'PW'],
+    // httpie and xh take credentials with -a / --auth.
+    ['http -a admin:PW https://api.example.com/v1', 'PW'],
+    ['http --auth=admin:PW POST https://api.example.com/v1', 'PW'],
+    ['https --auth admin:PW api.example.com/v1', 'PW'],
+    ['http -a "admin:my secret pass PW" x.test', 'my secret pass'],
+    ['http -a PW: x.test', 'PW'],
+    ['/usr/local/bin/http -aadmin:PW x.test', 'PW'],
+    ['xh -a admin:PW x.test', 'PW'],
+    ['$HTTPIE -a admin:PW x.test', 'PW'],
+    ['http POST https://x.test\n  -a admin:PW', 'PW'],
+    ['sudo -u deploy http POST https://x.test\n  --auth admin:PW', 'PW'],
     // An ssh or sftp that is a quoted string or an option's value is not a command.
     ["curl -d 'ssh' -su me@example.com:PW https://x.test", 'PW'],
     ['curl --proto-default sftp -su me@example.com:PW example.com/file', 'PW'],
@@ -332,6 +349,14 @@ describe('redact', () => {
     // An HTTP setting is not a client.
     'docker run -e PORT=$HTTP_PORT_NUMBER -u app:staff image',
     'docker run --rm -e TARGET=$HTTPBIN -u 1000:1000 loadtest',
+    // A runner and its options before rsync leave rsync the program.
+    'bash -c "curl -fsS https://hc-ping.com/abc/start && ionice -c3 rsync -avu deploy@db:/var/backups/ /mnt/b/"',
+    'bash -c "curl https://x.test && sudo -u backup rsync -avu deploy@db:/srv/ ."',
+    'bash -c "curl https://x.test && nice -n 5 /usr/bin/rsync -avu deploy@db:/srv/ ."',
+    // -a is credentials for httpie and xh only.
+    'wget http://x.test -a logs:file.txt',
+    'curl http://x.test -a old:new',
+    'python3 -m http.server -a 0.0.0.0:8000',
     'docker run -e URL=$HTTP_TOOL_URL -u app:staff image',
     'sudo -u deploy docker run image\n    -u app:staff',
     'sudo -n docker run image\n    -u app:staff',
@@ -361,6 +386,29 @@ describe('redact', () => {
     expect(redact(text).text).toBe(
       `Use curl to check health, then run docker run -u 1000:${REDACTED} image`,
     );
+  });
+
+  it('reads runner options in one pass, however they repeat', () => {
+    // `-u` takes a value for sudo; a pattern that could also read it as a plain option split
+    // repeated `-u -u ...` in exponentially many ways (seconds for a few hundred bytes).
+    const fastest = (text: string): number => {
+      let best = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const started = performance.now();
+        redact(text);
+        best = Math.min(best, performance.now() - started);
+      }
+      return best;
+    };
+    const seg = `sudo ${'-u '.repeat(8)}`;
+    expect(fastest(`${seg.repeat(5)}X\n  -u admin:pw\n`)).toBeLessThan(20);
+    expect(fastest(`${seg.repeat(40)}X\n  -u admin:pw\n`)).toBeLessThan(20);
+    const block = `${seg.repeat(3)}X\n  -u admin:pw\n`;
+    const log = block.repeat(Math.ceil(250_000 / block.length));
+    expect(log.length).toBeGreaterThanOrEqual(250_000);
+    expect(fastest(log)).toBeLessThan(100);
+    const env = `env ${'-u X '.repeat(6)}timeout -s KILL 30 `;
+    expect(fastest(`${env.repeat(400)}curl x\n  -u admin:pw\n`)).toBeLessThan(50);
   });
 
   it('does not redact 2,500 user:group arguments any differently from the first', () => {
