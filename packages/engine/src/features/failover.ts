@@ -90,15 +90,28 @@ const CLAUSE =
 // The time in "Your limit will reset at 3pm (Europe/Berlin)": no other clause, no new sentence.
 const RESET_TIME = `(?:(?!${CLAUSE}|[.!?;]\\s)[^\\n]){0,60}`;
 
-// Every sentence of the tail of a notice says how to get going again.
-const TAIL_WORD =
-  /\b(?:upgrade|try again|retry|resets?|credits?|plan|billing|usage|quota|admin|docs|settings|pricing|subscribe|subscription|wait)\b/i;
-// ...and opens with what to do or when: "Try again at 5pm", "/upgrade to ...", "please check
-// your plan", "visit https://... to purchase more credits", "To continue now, upgrade to Max",
-// "For more information on this error, read the docs". A sentence that only mentions such a
-// word ("the banner now shows the plan name") is about something else.
-const TAIL_START =
-  /^(?:(?:please|or|and|then|to|you can|to (?:continue|keep going)(?: now)?,)\s*)*(?:upgrade|try again|retry|resets?|wait|subscribe|check (?:your|the|quota|plan|billing|usage)|contact|visit|go to|send a request|purchase|buy|add (?:more )?credits|switch to|learn more|read the docs|for (?:more )?(?:information|details)|your (?:limit|quota) will reset|(?:limits?|quota) resets?)\b/i;
+// Every sentence of the tail of a notice tells the user how to get going again, in the terms a
+// notice uses: when the limit resets, when to try again, where to upgrade or buy more, whom to
+// ask. A sentence that only mentions a plan, the docs or a settings page ("the banner now
+// shows the plan name", "Visit the settings page to see the new badge") is about something else.
+const TAIL_MARK = new RegExp(
+  [
+    '\\btry again\\b',
+    '\\bretry (?:later|after|in|at)\\b',
+    '\\bresets? (?:at|in|on|after|when|every|(?:\\w+ )?\\d)',
+    '\\bwill reset\\b',
+    '\\bupgrade (?:to|now|your)\\b',
+    '(?:^|\\s)/upgrade\\b',
+    '\\b(?:purchase|buy|add|get) (?:more )?credits\\b',
+    '\\byour admin(?:istrator)?\\b',
+    '\\byour (?:current )?(?:plan|subscription|billing)\\b',
+    '\\bbilling details\\b',
+    '\\bget (?:\\w+ )?(?:pro|plus|max|ultra|team|business)\\b',
+    '\\bfor more information\\b',
+    '\\bhttps?://\\S*(?:usage|pricing|billing|rate-?limits|plans?|upgrade)',
+  ].join('|'),
+  'i',
+);
 // Code in a sentence makes it a sentence about code: "Retry logic added in src/limit.ts".
 const CODE_REF =
   /`|\b[\w-]+\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|swift|php|cs|md|json|ya?ml|toml|sql|sh|css|html)\b/i;
@@ -118,10 +131,7 @@ function tailSentences(text: string): string[] {
 /** True when every sentence of `text` says how to get going again and none is about code. */
 function allTail(text: string): boolean {
   const sentences = tailSentences(text);
-  return (
-    sentences.length > 0 &&
-    sentences.every((t) => TAIL_WORD.test(t) && TAIL_START.test(t) && !CODE_REF.test(t))
-  );
+  return sentences.length > 0 && sentences.every((t) => TAIL_MARK.test(t) && !CODE_REF.test(t));
 }
 
 /**
@@ -171,7 +181,7 @@ function api(id: string, build: Build): RateLimitSignature {
 
 const HTTP = '(?:http(?:/\\d(?:\\.\\d)?)? )?';
 // "429" alone matches line numbers and ids, so it must open the line as a status.
-const HTTP_429: Build = (l) => `^${l}?${HTTP}(?:status(?: code)?\\s*:?\\s*)?429\\b`;
+const HTTP_429: Build = (l) => `^${l}?${HTTP}(?:(?:unexpected )?status(?: code)?\\s*:?\\s*)?429\\b`;
 const RATE_LIMITED = `(?:you are being |you${APOS}re being |requests? (?:was|were|is|are) )?rate[ -]?limited`;
 const HIT = `you${APOS}ve (?:hit|reached)`;
 const PLAN = '(?:session|weekly|daily|5-hour|opus|sonnet)';
@@ -234,7 +244,7 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
     account(
       'gemini.quota_exhausted',
       (l) =>
-        `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)(?: (?:on|for) (?:this|the) model| on (?:model )?[a-z][\\w.:-]*\\d(?:[\\w.:-]*[\\w-])?| for (?:today|this (?:month|week|period)))?`,
+        `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)(?: (?:on|for) (?:this|the) model| on (?:model )?(?=[\\w.:-]*[\\d-])[a-z][\\w.:-]*\\w| for (?:today|this (?:month|week|period)))?`,
     ),
     // "Resource has been exhausted (e.g. check quota)."
     api('gemini.resource_exhausted', opening('resource has been exhausted')),
@@ -304,19 +314,43 @@ const ACCOUNT_SIGNATURES: readonly RateLimitSignature[] = Object.values(RATE_LIM
   .flat()
   .filter((sig) => sig.account);
 
-// A rate limit of another service the agent called: a host that is not the model provider's,
-// or a named API ("for the GitHub API"). Only the provider's own limit stops the agent.
-const HOST = /\b(?:[a-z0-9-]+\.)+(?:com|io|org|net|dev|ai|co|app|cloud)\b/gi;
+// The client's own report of an error from its model API: its own prefix ("API Error",
+// "stream error", "unexpected status 429") or the provider's error body (`rate_limit_error`,
+// `RESOURCE_EXHAUSTED`, `"code": 429`). Such a report is the agent's limit, whatever pages it
+// links to.
+const OWN_ERROR =
+  /^\W*\[?(?:api error|stream error|unexpected status \d{3})\b|\brate_limit_error\b|"rate_limit_exceeded"|\bresource_exhausted\b|"code"\s*:\s*429\b/i;
+// Any other report counts unless the limit is someone else's: one hit calling another host,
+// or a named API that is not the model provider's ("for the GitHub API").
+const TARGET_HOST =
+  /\b(?:for|from|to|at|on|calling|contacting|requesting)\s+(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})\b/gi;
 const PROVIDER_HOST =
-  /(?:^|\.)(?:anthropic\.com|claude\.ai|openai\.com|chatgpt\.com|googleapis\.com|google\.com|cursor\.(?:com|sh))$/i;
-const OTHER_API =
-  /\b(?:for|from|by|calling|on|of)\s+(?:the\s+)?(?!(?:anthropic|openai|claude|gemini|google|cursor|codex)\b)[A-Z][\w.-]*\s+API\b/;
+  /(?:^|\.)(?:anthropic\.com|claude\.(?:com|ai)|openai\.com|openai\.azure\.com|chatgpt\.com|googleapis\.com|google\.com|google\.dev|ai\.dev|cursor\.(?:com|sh))$/i;
+const NAMED_API = /\b(?:for|from|by|calling|on|of|to)\s+(?:the\s+)?([A-Za-z][\w.-]*)\s+API\b/g;
+const PROVIDER_NAMES = new Set([
+  'anthropic',
+  'claude',
+  'openai',
+  'chatgpt',
+  'codex',
+  'gemini',
+  'google',
+  'vertex',
+  'cursor',
+  'model',
+]);
 
-/** True when `line` is about the rate limit of a service other than the model provider. */
+/** True when `line` reports the rate limit of a service other than the model provider. */
 function otherService(line: string): boolean {
-  if (OTHER_API.test(line)) return true;
-  const hosts = line.replace(/\bhttps?:\/\//gi, ' ').match(HOST) ?? [];
-  return hosts.some((h) => !PROVIDER_HOST.test(h));
+  if (OWN_ERROR.test(line)) return false;
+  for (const m of line.matchAll(NAMED_API)) {
+    const name = (m[1] ?? '').toLowerCase();
+    if (!PROVIDER_NAMES.has(name) && /^[A-Z]/.test(m[1] ?? '')) return true;
+  }
+  for (const m of line.matchAll(TARGET_HOST)) {
+    if (!PROVIDER_HOST.test(m[1] ?? '')) return true;
+  }
+  return false;
 }
 
 /** True when `line` is the notice of `sig` as the assistant would relay it: wording, then tail. */
@@ -334,16 +368,24 @@ function noticeShaped(line: string): boolean {
 interface MessageLine {
   raw: string;
   fenced: boolean;
+  /** True when a blank line comes right before this one. */
+  afterBlank: boolean;
 }
 
 function messageLines(text: string): MessageLine[] {
   const out: MessageLine[] = [];
   let fenced = false;
+  let blank = false;
   for (const raw of text.split(/\r?\n/)) {
     if (FENCE.test(raw)) {
       fenced = !fenced;
-      out.push({ raw, fenced: true });
-    } else if (raw.trim() !== '') out.push({ raw, fenced });
+      out.push({ raw, fenced: true, afterBlank: blank });
+      blank = false;
+    } else if (raw.trim() === '') blank = true;
+    else {
+      out.push({ raw, fenced, afterBlank: blank });
+      blank = false;
+    }
   }
   return out;
 }
@@ -365,8 +407,9 @@ function candidate(raw: string, source: NoticeSource): string | null {
  * is read, whatever came before it: a limit is the last thing said in a message. That end is
  * the last line, or the last two or three when each of them is shaped like a notice or its tail
  * ("You've hit your limit · resets 10pm" then "/upgrade to increase your usage limit."). It is
- * not a notice when it is written about something (a list item, a quotation, a test result) or
- * introduced by a line ending in a colon ("The banner now reads:").
+ * not a notice when it is written about something (a list item, a quotation, a test result), or
+ * when it does not stand apart from the prose before it: it must follow a blank line or a
+ * finished sentence, never a line ending in a colon ("The banner now reads:").
  */
 export function noticeLines(text: string, source: NoticeSource = 'assistant'): string[] {
   const lines = messageLines(text);
@@ -387,8 +430,15 @@ export function noticeLines(text: string, source: NoticeSource = 'assistant'): s
   if (run.length === 0) return [];
   // Only the last line is taken on its own; a longer run must be all notice and tail.
   if (run.length > 1 && !run.every(noticeShaped)) return run.slice(-1);
+  // A notice stands apart from the prose before it: after a blank line or a finished sentence.
+  // "The banner now reads:" or "...when the counter hits zero it shows" introduce a quotation.
   const before = lines[i];
-  if (before && !before.fenced && /:\s*$/.test(before.raw)) return [];
+  const first = lines[i + 1];
+  if (before) {
+    const end = before.raw.trimEnd();
+    if (/:$/.test(end)) return [];
+    if (!first?.afterBlank && !/[.!?)\]"'\u201d]$/.test(end)) return [];
+  }
   return run;
 }
 

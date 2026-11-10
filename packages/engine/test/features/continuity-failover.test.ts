@@ -625,17 +625,14 @@ describe('rate-limit failover', () => {
       'rate limit exceeded for the GitHub API',
       'HTTP 429 Too Many Requests from registry.npmjs.org',
       'Too many requests to https://api.stripe.com/v1/charges',
-      'API Error: 429 rate limit exceeded for api.github.com',
     ];
     for (const line of lines) {
       for (const kind of KINDS) {
         expect([kind, line, detectRateLimit(kind, [line], 'client')]).toEqual([kind, line, null]);
       }
     }
-    expect(
-      detectRateLimit('claude-code', ['API Error: 429 rate limit exceeded for api.github.com']),
-    ).toBeNull();
-    // The provider's own limit still counts, with or without its host.
+    // The provider's own limit still counts, with or without its host, and so does anything the
+    // client reports under its own "API Error" prefix: that is always its model API.
     expect(
       detectRateLimit(
         'claude-code',
