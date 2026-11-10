@@ -55,7 +55,7 @@ export const TRACK_EXPLAIN = {
   breakages:
     'Broke: the three above added up, out of the edits in the area. Agents are compared on this only, and only when the higher count comes from at least 2 sessions. Outcomes involving several sessions count for nobody; dismissed conflicts do not count.',
   ruleAttempts:
-    'Tried to break a rule: confirmed saves where an enforced rule blocked a write of this agent. A count of attempts, not damage, and not a rate: blocked writes are not edits.',
+    'Tried to break a rule: writes of this agent that an enforced rule blocked and that stayed blocked (a confirmed save), once per session and rule. A count of attempts, not damage, and not a rate: blocked writes are not edits.',
   kept: 'Kept: of the lines this agent added or changed at least 7 days ago (tracked lines, whole lines of the file), how many are still in the file on the branch it worked on. Later rewrites by anyone count as not kept; deny-listed files and files over 512 KB are skipped.',
   usageLimits:
     'Usage limits: sessions of this agent seen in the window that hit a usage limit or handed work off because of one. Per agent, not per area.',
@@ -224,6 +224,13 @@ export interface TrackReport {
   survival: { pending: number; checkedNow: number };
   /** True when a query hit its row limit, so some data was left out. */
   truncated: boolean;
+  /**
+   * Set when the window reaches back further than the kept event log (events are deleted after
+   * `retention.eventsDays`, edits are not): the time the kept events start. Broken decisions,
+   * failed merge checks, blocked writes and usage limits before it are not in the counts, so
+   * those counts and the rates built on them are too low for the window.
+   */
+  eventsSince: number | null;
 }
 
 /** An outcome pinned to one session of one agent, with the paths it is about. */
@@ -253,6 +260,7 @@ export interface TrackReportOptions {
   agent?: string | null;
   survivalPending?: number;
   checkedNow?: number;
+  eventsSince?: number | null;
 }
 
 interface Acc {
@@ -406,6 +414,7 @@ export function buildTrackReport(inputs: TrackInputs, o: TrackReportOptions): Tr
     ),
     survival: { pending: o.survivalPending ?? 0, checkedNow: o.checkedNow ?? 0 },
     truncated: inputs.truncated === true,
+    eventsSince: o.eventsSince ?? null,
   };
 }
 
@@ -646,6 +655,7 @@ export class TrackService {
             ? store.track.countPendingSurvival(projectId, survivedBefore, from)
             : 0,
         checkedNow: o.checkedNow ?? 0,
+        eventsSince: store.track.eventsStartAfter(projectId, from),
       },
     );
   }
@@ -760,19 +770,40 @@ export class TrackService {
     return out;
   }
 
-  /** Confirmed saves where an enforced rule blocked a write (the blocked session is the first). */
+  /**
+   * Writes an enforced rule blocked, where the rule held (a confirmed save): one per session that
+   * ran into it in the window. A save is recorded once per rule and files, however many agents
+   * are stopped by it later, so the sessions come from the denials themselves; the save says the
+   * rule held and which files it is about.
+   */
   private ruleAttempts(
     projectId: string,
     from: number,
     agentKinds: ReadonlyMap<string, string>,
   ): TrackOutcome[] & { truncated?: boolean } {
     const out: TrackOutcome[] & { truncated?: boolean } = [];
-    const saves = this.k.store.track.confirmedSaves(projectId, 'rule_enforced', from);
-    out.truncated = saves.length >= TRACK_MAX_ROWS;
+    // Every confirmed save, not only those of the window: an old one can be run into again.
+    const saves = this.k.store.track.confirmedSaves(projectId, 'rule_enforced', 0);
+    const denials = this.k.store.track.ruleDenials(projectId, from);
+    out.truncated = saves.length >= TRACK_MAX_ROWS || denials.length >= TRACK_MAX_ROWS;
+    const byRule = new Map<string, typeof denials>();
+    for (const d of denials) {
+      const list = byRule.get(d.ruleId);
+      if (list) list.push(d);
+      else byRule.set(d.ruleId, [d]);
+    }
     for (const s of saves) {
-      const sessionId = s.sessionIds[0] ?? '';
-      const agent = agentKinds.get(sessionId);
-      if (agent) out.push({ agent, sessionId, paths: s.paths, measure: 'ruleAttempts' });
+      const sessions = new Set<string>();
+      // The session the save was recorded for, also when its event is no longer kept.
+      if (s.createdAt >= from && s.sessionIds[0]) sessions.add(s.sessionIds[0]);
+      const about = new Set(s.paths);
+      for (const d of s.ruleId ? (byRule.get(s.ruleId) ?? []) : []) {
+        if (d.paths.some((p) => about.has(p))) sessions.add(d.sessionId);
+      }
+      for (const sessionId of sessions) {
+        const agent = agentKinds.get(sessionId);
+        if (agent) out.push({ agent, sessionId, paths: s.paths, measure: 'ruleAttempts' });
+      }
     }
     return out;
   }

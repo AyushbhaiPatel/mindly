@@ -587,6 +587,33 @@ describe('attribution', () => {
     expect(row(w, 'codex').contracts.count).toBe(1);
   });
 
+  it('says when the window is longer than the kept event log', async () => {
+    const { w } = await twoAgents();
+    await withContract(w);
+    await w.edit('claude-code', 'cc', 'src/api/auth.ts', 'export const ok = true;\n');
+    expect(row(w, 'claude-code').contracts.count).toBe(1);
+    expect(report(w).eventsSince).toBeNull();
+
+    // A week on, retention removes the events of that day; the edits stay.
+    w.clock.advance(7 * DAY);
+    const cutoff = w.clock.now();
+    await w.edit('codex', 'cx', 'src/api/b.ts', 'export const b = 2;\n');
+    w.mindly.store.events.deleteOlderThan(cutoff);
+    const r = report(w, { minEdits: 1 });
+    // The break is no longer known, although the edit behind it is still counted.
+    const cc = r.areas
+      .find((a) => a.area === 'src/api')!
+      .agents.find((a) => a.agent === 'claude-code')!;
+    expect(cc.edits).toBeGreaterThan(0);
+    expect(cc.contracts.count).toBe(0);
+    expect(r.eventsSince).toBeGreaterThanOrEqual(cutoff);
+    // A window inside the kept period is whole.
+    expect(
+      trackOf(w.mindly).report(w.pid, { windowMs: w.clock.now() - cutoff, since: '1h' })
+        .eventsSince,
+    ).toBeNull();
+  });
+
   it('does not pin a contract break on an edit made in another worktree', async () => {
     const { w } = await twoAgents();
     await withContract(w);
@@ -661,6 +688,52 @@ describe('attribution', () => {
     expect(a.ruleAttempts).toEqual({ count: 1, of: 1, rate: null, interval: null });
     // Attempts, not damage: not part of the breakages.
     expect(a.breakages.count).toBe(0);
+  });
+
+  it('counts a blocked write for every agent the rule stopped, not only the first', async () => {
+    const { w } = await twoAgents();
+    w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const blocked = async (agent: string, id: string) => {
+      const res = await w.mindly.hooks.handle(
+        event(w.root, agent, id, 'pre_tool', {
+          tool: tool(join(w.root, 'src/api/generated/client.ts'), 'x'),
+        }),
+      );
+      expect(res.decision).toBe('deny');
+      w.clock.advance(1000);
+    };
+    // Codex is stopped first and its turn ends: the rule held, the save is confirmed.
+    await blocked('codex', 'cx');
+    await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'stop'));
+    expect(row(w, 'codex').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(0);
+
+    // Claude Code runs into the same rule on the same file, twice in one session and once more
+    // in another: the same problem for saves, but its own attempts here, once per session.
+    await blocked('claude-code', 'cc');
+    await blocked('claude-code', 'cc');
+    await w.session('claude-code', 'cc2');
+    await blocked('claude-code', 'cc2');
+    expect(w.mindly.store.saves.list(w.pid, { kinds: ['rule_enforced'] })).toHaveLength(1);
+    expect(row(w, 'codex').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(2);
+
+    // Weeks later the save is out of the window; a new attempt still counts.
+    w.clock.advance(WINDOW + DAY);
+    await w.edit('claude-code', 'cc2', 'src/api/a.ts', 'export const a = 2;\n');
+    await w.edit('codex', 'cx', 'src/api/b.ts', 'export const b = 2;\n');
+    await blocked('claude-code', 'cc2');
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(1);
+    expect(row(w, 'codex').ruleAttempts.count).toBe(0);
   });
 
   it('counts usage limits per agent from rate-limit events and handoffs', async () => {

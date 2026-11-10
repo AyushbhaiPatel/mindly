@@ -2,14 +2,15 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sha256 } from '@mindly/core';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { USER, contractsOf } from '@mindly/engine';
+import { USER, buildTrackReport, contractsOf } from '@mindly/engine';
 import { openMindly } from '@mindly/runtime';
 import { Store } from '@mindly/store';
 import type { TrackReport } from '@mindly/engine';
 import { bisectRun } from '../src/commands/bisect.js';
 import { track } from '../src/commands/track.js';
 import { outFor } from '../src/util.js';
-import { areaArg } from '../src/views/track.js';
+import { screenFor } from '../src/present/index.js';
+import { areaArg, renderTrack } from '../src/views/track.js';
 import { cli, git, sandbox, testIo, write, type Sandbox } from './helpers.js';
 
 /*
@@ -300,8 +301,10 @@ describe('mindly track', () => {
       'usageLimits',
       'survival',
       'truncated',
+      'eventsSince',
     ]);
     expect(report.truncated).toBe(false);
+    expect(report.eventsSince).toBeNull();
     expect(Object.keys(report.window)).toEqual(['since', 'from', 'to']);
     expect(report.window.since).toBe('30d');
     expect(report.minimum).toEqual({ edits: 20, sessions: 3 });
@@ -460,6 +463,45 @@ describe('mindly track output safety', () => {
     } finally {
       store.close();
     }
+  });
+
+  it('says when what went wrong is known for less than the window', () => {
+    const to = Date.UTC(2026, 0, 31);
+    const text = (eventsSince: number | null): string => {
+      const report = buildTrackReport(
+        {
+          edits: [
+            {
+              path: 'src/api/a.ts',
+              sessionId: 's1',
+              agentKind: 'codex',
+              edits: 3,
+              addedLines: 3,
+              removedLines: 0,
+            },
+          ],
+          survival: [],
+          outcomes: [],
+          sessions: [{ id: 's1', agentKind: 'codex', status: 'ended' }],
+          limited: new Set(),
+        },
+        {
+          window: { since: '30d', from: to - 30 * DAY, to },
+          areaDepth: 2,
+          minEdits: 1,
+          minSessions: 1,
+          eventsSince,
+        },
+      );
+      const lines: string[] = [];
+      const sc = screenFor((l) => lines.push(l), { write: () => undefined, isTTY: false }, {}, to);
+      renderTrack(sc, report, { explain: false, windowMs: 30 * DAY });
+      return lines.join(' ').replace(/\s+/g, ' ');
+    };
+    expect(text(null)).not.toContain('retention.eventsDays');
+    const partial = text(to - 7 * DAY);
+    expect(partial).toContain('only known for the last 7 days');
+    expect(partial).toContain('retention.eventsDays');
   });
 
   it('says so when there is nothing yet', async () => {

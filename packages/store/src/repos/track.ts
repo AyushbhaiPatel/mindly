@@ -1,5 +1,5 @@
 import type { Clock, ConflictKind, SaveKind } from '@mindly/core';
-import { json, num, str, strOrNull, type Db, type Row } from '../db.js';
+import { json, num, numOrNull, str, strOrNull, type Db, type Row } from '../db.js';
 
 /*
  * Read models of `mindly track`: grouped edit counts, line survival and the stored outcomes an
@@ -67,7 +67,17 @@ export interface TrackConflictOpening {
 export interface TrackSave {
   sessionIds: string[];
   paths: string[];
+  /** The enforced rule of a `rule_enforced` save. */
+  ruleId: string | null;
   createdAt: number;
+}
+
+/** One write an enforced rule blocked, from the `tool.before` event of the denial. */
+export interface TrackRuleDenial {
+  sessionId: string;
+  ruleId: string;
+  paths: string[];
+  at: number;
 }
 
 /** A session seen in the window. */
@@ -280,15 +290,71 @@ export class TrackRepo {
   confirmedSaves(projectId: string, kind: SaveKind, from: number): TrackSave[] {
     const rows = this.db
       .prepare(
-        `SELECT session_ids, paths, created_at FROM saves
-         WHERE project_id = ? AND kind = ? AND status = 'confirmed' AND created_at >= ? LIMIT ?`,
+        `SELECT session_ids, paths, refs, created_at FROM saves
+         WHERE project_id = ? AND kind = ? AND status = 'confirmed' AND created_at >= ?
+         ORDER BY created_at DESC LIMIT ?`,
       )
       .all(projectId, kind, from, MAX_ROWS) as Row[];
-    return rows.map((r) => ({
-      sessionIds: json<string[]>(r, 'session_ids', []),
-      paths: json<string[]>(r, 'paths', []),
-      createdAt: num(r, 'created_at'),
-    }));
+    return rows.map((r) => {
+      const ruleId = json<Record<string, unknown>>(r, 'refs', {})['ruleId'];
+      return {
+        sessionIds: json<string[]>(r, 'session_ids', []),
+        paths: json<string[]>(r, 'paths', []),
+        ruleId: typeof ruleId === 'string' ? ruleId : null,
+        createdAt: num(r, 'created_at'),
+      };
+    });
+  }
+
+  /**
+   * The writes an enforced rule blocked at or after `from`, newest first: one per `tool.before`
+   * event that names the rule. A save is recorded once per problem, whoever runs into it again;
+   * these events are what says which sessions did.
+   */
+  ruleDenials(projectId: string, from: number): TrackRuleDenial[] {
+    const rows = this.db
+      .prepare(
+        `SELECT session_id, payload, created_at FROM events
+         WHERE project_id = ? AND type = 'tool.before' AND created_at >= ?
+           AND session_id IS NOT NULL
+           AND json_type(payload, '$.deniedBy') = 'text'
+         ORDER BY seq DESC LIMIT ?`,
+      )
+      .all(projectId, from, MAX_ROWS) as Row[];
+    const out: TrackRuleDenial[] = [];
+    for (const r of rows) {
+      const p = json<Record<string, unknown>>(r, 'payload', {});
+      const sessionId = strOrNull(r, 'session_id');
+      const ruleId = p['deniedBy'];
+      if (!sessionId || typeof ruleId !== 'string') continue;
+      const paths = Array.isArray(p['paths'])
+        ? p['paths'].filter((x): x is string => typeof x === 'string')
+        : [];
+      out.push({ sessionId, ruleId, paths, at: num(r, 'created_at') });
+    }
+    return out;
+  }
+
+  /**
+   * When the kept event log of a project starts, if that is later than its first recorded edit at
+   * or after `from`; otherwise null. Events are deleted after `retention.eventsDays` while edits
+   * are kept, so a window can reach back further than the events that outcomes are read from.
+   */
+  eventsStartAfter(projectId: string, from: number): number | null {
+    const edit = this.db
+      .prepare(
+        'SELECT MIN(created_at) AS at FROM file_changes WHERE project_id = ? AND created_at >= ?',
+      )
+      .get(projectId, from) as Row;
+    const firstEdit = numOrNull(edit, 'at');
+    if (firstEdit === null) return null;
+    // The oldest event by sequence (indexed); events are appended in time order.
+    const event = this.db
+      .prepare('SELECT created_at AS at FROM events WHERE project_id = ? ORDER BY seq ASC LIMIT 1')
+      .get(projectId) as Row | undefined;
+    const firstEvent = event ? numOrNull(event, 'at') : null;
+    if (firstEvent === null) return null;
+    return firstEvent > firstEdit ? firstEvent : null;
   }
 
   /** Agent kind of every session of a project, by session id. */
