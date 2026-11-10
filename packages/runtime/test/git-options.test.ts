@@ -49,6 +49,23 @@ const BASH_MAJOR = Number(
   }).trim(),
 );
 const NAMEREFS = BASH_MAJOR >= 43;
+/** `mapfile` came with bash 4.0. */
+const BASH4 = BASH_MAJOR >= 40;
+/** Whether a command runs here at all (`rbash` and `env -S` are not everywhere). */
+const works = (command: string): boolean => {
+  try {
+    execFileSync('bash', ['-c', command], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+};
+const RBASH = works('command -v rbash');
+const ENV_SPLIT = works("env -S 'true'");
+/** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
+const FIVE_HOME = `${HOOK} && mkdir -p 5 && printf '[core]\\n\\thooksPath = hk\\n' > 5/.gitconfig`;
+/** A program run instead of git once `git` is hashed to it. */
+const NOT_GIT = "printf '#!/bin/sh\\necho x > certs/server.pem\\n' > g.sh && chmod +x g.sh";
 
 const cases: {
   name: string;
@@ -59,6 +76,8 @@ const cases: {
   want: Verdict[];
   /** Uses bash namerefs: run for real only where bash has them; the hook is asked either way. */
   namerefs?: boolean;
+  /** False where the command cannot run (a newer bash, a program not there): only asked. */
+  runs?: boolean;
 }[] = [
   // Output written to a file it is given.
   {
@@ -423,6 +442,190 @@ const cases: {
     want: ['warn', 'deny'],
     namerefs: true,
   },
+  // Arithmetic sets variables wherever bash evaluates it: in a subscript, a test, a substring
+  // offset, an integer variable's value, or a value evaluated later. HOME=5 is a folder `5`.
+  {
+    name: 'arithmetic in an assigned subscript',
+    prep: FIVE_HOME,
+    command: `a[HOME=5]=1; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic in a subscript printf -v writes',
+    prep: FIVE_HOME,
+    command: `printf -v 'a[HOME=5]' x; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic in a subscript read writes',
+    prep: FIVE_HOME,
+    command: `read 'a[HOME=5]' <<< x; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic in an array element subscript',
+    prep: FIVE_HOME,
+    command: `x=( [HOME=5]=1 ); ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic in an expanded subscript',
+    prep: FIVE_HOME,
+    command: `: \${a[HOME=5]}; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic in a [[ -eq ]] test',
+    prep: FIVE_HOME,
+    command: `[[ 1 -eq HOME=5 ]]; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic in a substring offset',
+    prep: FIVE_HOME,
+    command: `x=a; : \${x:HOME=5}; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic in an integer variable',
+    prep: FIVE_HOME,
+    command: `typeset -i n=HOME=5; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic through a value, in (( ))',
+    prep: FIVE_HOME,
+    command: `v=HOME=5; ((v)); ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic through a value, in let',
+    prep: FIVE_HOME,
+    command: `v=HOME=5; let v; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic through a value, in $(( ))',
+    prep: FIVE_HOME,
+    command: `v=HOME=5; : $((v)); ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'arithmetic through a value, in a subscript',
+    prep: FIVE_HOME,
+    command: `v=HOME=5; arr[v]=1; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  // Options that put assignments after a program's name into its environment.
+  {
+    name: 'set -k',
+    prep: FAKE_HOME,
+    command: `set -k; ${COMMIT} HOME=fakehome`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'shopt -o -s keyword',
+    prep: FAKE_HOME,
+    command: `shopt -o -s keyword; ${COMMIT} HOME=fakehome`,
+    want: ['warn', 'deny'],
+  },
+  // A setting given to env, or a builtin run, through a word that is not plain text.
+  {
+    name: 'env given a variable',
+    prep: FAKE_HOME,
+    command: `v=HOME=fakehome; env "$v" ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'env given a substitution',
+    prep: FAKE_HOME,
+    command: `env $(echo HOME=fakehome) ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'env -S',
+    prep: FAKE_HOME,
+    command: `env -S 'HOME=fakehome ${COMMIT}'`,
+    want: ['warn', 'deny'],
+    runs: ENV_SPLIT,
+  },
+  {
+    name: 'export run through a variable',
+    prep: FAKE_HOME,
+    command: `f=export; $f HOME=fakehome; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'export run through a substitution',
+    prep: FAKE_HOME,
+    command: `$(echo export) HOME=fakehome; ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'xargs running env with its input',
+    prep: FAKE_HOME,
+    command: `echo HOME=fakehome | xargs -I{} env {} ${COMMIT}`,
+    want: ['warn', 'deny'],
+  },
+  // `xargs git`: the subcommand comes from the input.
+  {
+    name: 'xargs git, given a setting',
+    prep: FAKE_HOME,
+    command: 'echo commit -q --allow-empty -m x | HOME=fakehome xargs git',
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'xargs git',
+    command: "printf '%s\\n' checkout v1 -- certs/server.pem | xargs git",
+    want: ['warn', 'deny'],
+  },
+  // Shell code given to `-c` with other options around it, or to another shell.
+  {
+    name: 'bash -c --',
+    command: "bash -c -- 'git checkout -q v1 -- certs/server.pem'",
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'bash -ce',
+    command: "bash -ce 'git checkout -q v1 -- certs/server.pem'",
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'bash -c -e',
+    command: "bash -c -e 'git checkout -q v1 -- certs/server.pem'",
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'rbash -c',
+    command: "rbash -c 'git checkout -q v1 -- certs/server.pem'",
+    want: ['warn', 'deny'],
+    runs: RBASH,
+  },
+  // `mapfile -C` runs its callback in this shell.
+  {
+    name: 'mapfile -C',
+    prep: FAKE_HOME,
+    command: `mapfile -c1 -C 'HOME=fakehome; :' arr <<< x; ${COMMIT}`,
+    want: ['warn', 'deny'],
+    runs: BASH4,
+  },
+  // git run from a subscript's substitution, or `git` hashed to another program.
+  {
+    name: 'git in a subscript printf -v writes',
+    command: "printf -v 'a[$(git checkout -q v1 -- certs/server.pem)]' x",
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'git in a subscript evaluated later',
+    command: "x='a[$(git checkout -q v1 -- certs/server.pem)]'; : $((x))",
+    want: ['warn', 'deny'],
+  },
+  {
+    name: 'git hashed to another program',
+    prep: NOT_GIT,
+    command: 'hash -p ./g.sh git; git status',
+    want: ['warn', 'deny'],
+  },
 ];
 
 /** Commands that write no covered file: never blocked, and not warned about. */
@@ -469,14 +672,16 @@ const quiet: { name: string; prep?: string; command: string }[] = [
     prep: LOCAL_PEM,
     command: 'msg="fix"; git commit -qam "$msg"',
   },
-  {
-    name: 'a harmless export in a subshell or a pipeline',
-    command: '(export GIT_PAGER=cat); export LANG=C | true; git status',
-  },
   { name: 'a function that only prints', command: 'f() { echo hi; }; f; git status' },
   { name: 'a loop that adds files', command: 'for f in src/a.ts; do git add "$f"; done' },
-  { name: 'strict shell options', command: 'set -euo pipefail; git status' },
-  { name: 'a trap that removes a file', command: "trap 'rm -f x' EXIT; git status" },
+  {
+    name: 'a commit with a message holding a variable',
+    prep: LOCAL_PEM,
+    command: 'git add -A && git commit -qm "fix $thing"',
+  },
+  { name: 'tests, then a commit', command: 'npm test >/dev/null 2>&1 && git commit -qm x' },
+  { name: 'status in a folder', prep: 'mkdir -p sub', command: 'cd sub && git status' },
+  { name: 'a test of the diff', command: 'if git diff --quiet; then echo ok; fi' },
 ];
 
 describe('git commands that write a covered file through an option or a setting', () => {
@@ -485,7 +690,7 @@ describe('git commands that write a covered file through an option or a setting'
       const g = setUp(c.scopes ?? PEM, c.prep);
       try {
         const done = runInCopy(g.dir, c.command, covered);
-        if (!c.namerefs || NAMEREFS) {
+        if ((!c.namerefs || NAMEREFS) && (c.runs ?? true)) {
           expect(
             done.written.length,
             `\`${c.command}\` writes a covered file; ${done.output}`,
@@ -542,6 +747,22 @@ describe('git commands read without false warnings or slow reading', () => {
         const t0 = Date.now();
         await g.shell(command);
         expect(Date.now() - t0, `${head}${unit}`).toBeLessThan(1000);
+      }
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('arithmetic of 200,000 characters is read in good time', async () => {
+    const g = setUp(PEM);
+    try {
+      for (const command of [
+        `(( ${'a['.repeat(99_500)} )); git status`,
+        `let '${'a['.repeat(99_500)}'; git status`,
+      ]) {
+        const t0 = Date.now();
+        await g.shell(command);
+        expect(Date.now() - t0, command.slice(0, 12)).toBeLessThan(1000);
       }
     } finally {
       g.mindly.close();

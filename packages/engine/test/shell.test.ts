@@ -6,6 +6,7 @@ import {
   normalizeCommandLine,
   pathNamer,
   readShellWrites,
+  SHELL_BUILTINS,
   shellMayWrite,
   shellWriteTargets,
   type ShellTarget,
@@ -431,7 +432,6 @@ describe('write targets of a shell command', () => {
       'GIT_PAGER=cat git log',
       'GIT_EDITOR=true git commit -qam x',
       'GIT_AUTHOR_DATE=2020-01-01 GIT_COMMITTER_DATE=2020-01-01 git commit -m x',
-      'export GIT_PAGER=cat && git log',
       'git -c user.name=x -c user.email=y commit -m z',
       'git diff-tree -r HEAD',
       'git diff-index --cached HEAD',
@@ -554,6 +554,45 @@ describe('write targets of a shell command', () => {
     expect(lands('git init vendor/repo')).toEqual(['vendor/repo']);
   });
 
+  it('reads every builtin and keyword of the shells as harmless or as setting what git runs with', () => {
+    const whole = (command: string) => read(command).some((x) => !x.certain && x.path === TOP);
+    // The list is the test's data: a builtin or keyword added to it is checked here too. Each
+    // is given before a git command that names no path, with words that keep a harmless one
+    // harmless (a lower-case loop variable for `for`, no option for the others).
+    const names = Object.keys(SHELL_BUILTINS);
+    for (const name of [
+      // bash 5.2: `enable -a`.
+      ...'. : [ alias bg bind break builtin caller cd command compgen complete compopt'.split(' '),
+      ...'continue declare dirs disown echo enable eval exec exit export false fc fg'.split(' '),
+      ...'getopts hash help history jobs kill let local logout mapfile popd printf'.split(' '),
+      ...'pushd pwd read readarray readonly return set shift shopt source suspend test'.split(' '),
+      ...'times trap true type typeset ulimit umask unalias unset wait'.split(' '),
+      // bash 5.2: `compgen -k`.
+      ...'if then else elif fi case esac for select while until do done in function'.split(' '),
+      ...'time { } ! [[ ]] coproc'.split(' '),
+      // zsh and ksh besides.
+      ...'setopt unsetopt emulate autoload typeset integer float nameref print whence'.split(' '),
+    ]) {
+      expect(names, name).toContain(name);
+    }
+    for (const [name, kind] of Object.entries(SHELL_BUILTINS)) {
+      const line = `${name}${name === 'for' ? ' f in a b' : ''}; git status`;
+      expect(whole(line), line).toBe(kind === 'taints');
+    }
+    // The harmless ones, given what sets a variable or runs a command.
+    for (const line of [
+      'printf -v x y; git status',
+      'print -v x y; git status',
+      'wait -p x; git status',
+      'jobs -x true; git status',
+      'umask 022; git status',
+      'for HOME in a; do :; done; git status',
+      'for $x in a; do :; done; git status',
+    ]) {
+      expect(whole(line), line).toBe(true);
+    }
+  });
+
   it('reads what git is given besides its options: variables, files it reads, code it runs', () => {
     const whole = (command: string) => read(command).some((x) => !x.certain && x.path === TOP);
     const lands = (command: string) =>
@@ -568,7 +607,6 @@ describe('write targets of a shell command', () => {
       'NO_COLOR=1 TERM=dumb git diff',
       'EDITOR=true git commit -qm x',
       'VISUAL=: git commit -qm x',
-      'export LANG=C && git status',
       'git -c commit.gpgsign=false commit -qm x',
       'git log main --not v1',
       'git log --onel -3',
@@ -613,51 +651,98 @@ describe('write targets of a shell command', () => {
     expect(whole('git config -f tool.ini a.b c')).toBe(false);
     expect(whole('git config -f .git/config user.email x@example.invalid')).toBe(false);
     // A variable git reads, set anywhere on the line, counts for every git command on it: which
-    // shell gets it, and whether it comes before or after, is not followed.
+    // shell gets it, and whether it comes before or after, is not followed. Only builtins,
+    // keywords and expansions can set one in this shell: any not known to be harmless counts.
     for (const cmd of [
       "HOME=fakehome sh -c 'true'; git status",
       'git status; export GIT_DIR=../other/.git',
       'f() { export GIT_DIR=x; }; git status',
       '(HOME=fakehome); git status',
       'for HOME in x; do :; done; git status',
-      'read -r GIT_DIR < f; git status',
-      'read -a PATH < f; git status',
-      'printf -v HOME x; git status',
-      'mapfile -t PATH < f; git status',
-      'getopts ab GIT_DIR; git status',
-      'let HOME=1; git status',
-      '(( GIT_DIR = 1 )); git status',
-      'echo $(( HOME += 1 )); git status',
-      '(( PATH++ )); git status',
+      'read -r line < f; git status',
+      'printf -v x y; git status',
+      "printf -v 'a[HOME=5]' x; git status",
+      'mapfile -t lines < f; git status',
+      "mapfile -C 'HOME=x; :' -c1 a < f; git status",
+      'getopts ab opt; git status',
+      'let i=i+1; git status',
+      '(( n == 1 )); git status',
+      'echo $(( 1 + 1 )); git status',
+      'echo $[ 1 + 1 ]; git status',
+      '[[ -f x ]]; git status',
+      '[[ 1 -eq HOME=5 ]]; git status',
       'declare -n r=x; git status',
-      'local -n r; git status',
-      'declare -x msg=x; git status',
-      'export msg; git status',
+      'typeset -i n=HOME=5; git status',
+      'local x; git status',
+      'export LANG=C; git status',
       'set -a; git status',
-      'set -o allexport; git status',
+      'set -k; git status HOME=x',
+      'set -euo pipefail; git status',
+      'shopt -s expand_aliases; git status',
+      'setopt allexport; git status',
       '. ./env.sh; git status',
+      'source ./env.sh; git status',
       'eval "$cmd"; git status',
-      'trap "$cmd" EXIT; git status',
-      'declare "$name=x"; git status',
-      'export "$name"; git status',
+      "trap 'rm -f x' EXIT; git status",
+      'alias git=x; git status',
+      'hash -p ./g.sh git; git status',
+      'unset GIT_DIR; git status',
+      'command git status',
+      'builtin cd x; git status',
+      'exec 3>x; git status',
       'git status; GIT_PAGER=$p git log',
       'X[0]=1; git status',
+      'a[HOME=5]=1; git status',
+      'x=( [HOME=5]=1 ); git status',
+      'x=(a b); git status',
+      'echo ${a[HOME=5]}; git status',
+      'echo ${x:HOME=5}; git status',
+      'echo ${x:=y}; git status',
+      'echo ${!x}; git status',
+      'f=export; $f HOME=x; git status',
+      '$(echo export) HOME=x; git status',
+      'v=HOME=x; env "$v" git status',
+      'env $(echo HOME=x) git status',
+      "env -S 'HOME=x git status'",
+      'echo status | HOME=x xargs git',
+      'echo status | xargs git',
+      'echo x | xargs -I{} env {} git status',
+      "bash -c -- 'export GIT_DIR=x'; git status",
+      "bash -ce 'export GIT_DIR=x'; git status",
+      "bash -c -e 'export GIT_DIR=x'; git status",
+      "bash -o pipefail -c 'export GIT_DIR=x'; git status",
+      "rbash -c 'export GIT_DIR=x'; git status",
+      'bash -c "$cmd"; git status',
+      'bash -c; git status',
+      'cat <<EOF\n$((HOME=5))\nEOF\ngit status',
     ]) {
       expect(whole(cmd), cmd).toBe(true);
     }
-    // A lower-case variable that is not exported is the shell's own; harmless ones are harmless.
+    // A lower-case variable that is not exported is the shell's own; plain words and the
+    // builtins known to be harmless change nothing git runs with.
     for (const cmd of [
       'msg=fix; git status',
       'msg="fix"; git commit -qam "$msg"',
+      'git add -A && git commit -m "fix $thing"',
+      'npm test && git commit -m x',
+      'cd sub && git status',
+      'if git diff --quiet; then echo ok; fi',
       'for f in a b; do git add "$f"; done',
-      'while read -r line; do git add "$line"; done < list',
-      'local out=$(git status); git status',
-      'let i=i+1; git status',
-      '(( n == 1 )); git status',
-      'export LANG=C GIT_PAGER=cat; git status',
-      'set -euo pipefail; git status',
-      "trap 'rm -f x' EXIT; git status",
       'f() { echo hi; }; f; git status',
+      'echo "$?" "$1" "${1}" "$@" "${@}" "$#"; git status',
+      'test -f x && [ -d y ] && git status',
+      'pushd x && popd && pwd && git status',
+      'git log | head -1; true; false; :; git status',
+      'printf "%s\\n" x; git status',
+      'wait; type git; which git; git status',
+      'git --version',
+      'time git status',
+      '! git diff --quiet',
+      'out=$(git status); echo "$out"',
+      'cat <<EOF\n$HOME ${HOME} $(date)\nEOF\ngit status',
+      'case $x in a) git status;; esac',
+      'nice -n 5 git status',
+      'timeout 60 git fetch -q',
     ]) {
       expect(whole(cmd), cmd).toBe(false);
     }
