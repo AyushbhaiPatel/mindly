@@ -520,11 +520,9 @@ export class FailoverService {
     try {
       const project = sanitizeLine(this.k.store.projects.get(projectId).name, 80);
       // Titles and counts only: never prompt text or code (docs/security.md, T3). This runs
-      // inside a hook, which cannot wait for a pager: the page is written down, its first
-      // attempt is started without waiting, and what is not out when the hook process ends is
-      // sent by the daemon or the next hook (see outbox.ts).
-      const outbox = new NotifyOutbox(this.k);
-      outbox.enqueue({
+      // inside a hook, which never waits for a pager: the page is written to the outbox and sent
+      // by a separate process (see outbox.ts).
+      new NotifyOutbox(this.k).enqueue({
         trigger: 'rate_limited',
         title: `${session.agentKind} hit its usage limit`,
         body: `${session.agentKind} hit its usage limit in ${project}; handoff ready for ${to ?? 'the next agent'}`,
@@ -532,7 +530,6 @@ export class FailoverService {
         priority: 'high',
         dedupeKey: `rate_limited:${handoffId}`,
       });
-      outbox.kick();
     } catch (err) {
       this.k.logger.warn('rate-limit notification failed', {
         error: err instanceof Error ? err.message : String(err),

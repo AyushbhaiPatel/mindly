@@ -16,6 +16,7 @@ import { getAdapter } from '@mindly/adapters';
 import type { Mindly } from '@mindly/engine';
 import { openMindly, type RuntimeOptions } from '@mindly/runtime';
 import { readStdin, StdinTooLarge, type CliIo } from './io.js';
+import { startPagerSender } from './pager.js';
 
 /** Largest hook payload read from stdin. */
 export const MAX_HOOK_STDIN_BYTES = 2 * 1024 * 1024;
@@ -23,9 +24,11 @@ export const MAX_HOOK_STDIN_BYTES = 2 * 1024 * 1024;
 /** Injection points for tests. */
 export interface HookDeps {
   open: (options: RuntimeOptions) => Pick<Mindly, 'hooks' | 'close'>;
+  /** Runs once the agent has its answer; must not wait. Optional so a test double needs none. */
+  afterAnswer?: (mindly: Pick<Mindly, 'hooks' | 'close'>, env: NodeJS.ProcessEnv) => void;
 }
 
-const defaultDeps: HookDeps = { open: openMindly };
+const defaultDeps: HookDeps = { open: openMindly, afterAnswer: startPagerSender };
 
 export { readStdin };
 
@@ -132,6 +135,8 @@ export async function runHook(
   }
   logger.debug('hook handled', { agent, event: nativeEvent, ms: Date.now() - started });
   if (rendered.stdout !== '') io.stdout.write(rendered.stdout);
+  // A notification this hook raised is sent by a separate process: a hook never waits for a pager.
+  if (opened.mindly) deps.afterAnswer?.(opened.mindly, io.env);
   return rendered.exitCode;
 }
 

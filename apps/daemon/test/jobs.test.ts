@@ -450,6 +450,52 @@ describe('pager delivery', () => {
     }
   });
 
+  it('after an outage sends what waited, and new alerts are not held back', async () => {
+    const hook = await pagerEndpoint();
+    try {
+      const { d, clock } = await pagerDaemon(hook.url);
+      hook.status.code = 503;
+      // Three alerts during the outage, retried by the outbox tick for twelve minutes.
+      for (let k = 0; k < 3; k++) {
+        await notify(d.jobs, {
+          trigger: 'check_failed',
+          title: `Alert ${k}`,
+          body: 'b',
+          dedupeKey: `a${k}`,
+        });
+      }
+      for (let minute = 0; minute < 12; minute++) {
+        clock.t += 60_000;
+        await notifyOutboxTick(d.jobs);
+      }
+      const duringOutage = hook.bodies.length;
+      expect(duringOutage).toBeGreaterThan(3);
+
+      // Back at minute 12; a fresh alert at minute 15 goes straight out.
+      hook.status.code = 200;
+      clock.t += 3 * 60_000;
+      await notify(d.jobs, {
+        trigger: 'check_failed',
+        title: 'Fresh',
+        body: 'b',
+        dedupeKey: 'fresh',
+      });
+      const fresh = hook.bodies.slice(duringOutage).map((b) => JSON.parse(b) as { title: string });
+      expect(fresh.map((b) => b.title)).toEqual(['Fresh']);
+
+      // The three that waited go out once their next attempt is due.
+      clock.t += 30 * 60_000;
+      await notifyOutboxTick(d.jobs);
+      const titles = hook.bodies
+        .slice(duringOutage)
+        .map((b) => (JSON.parse(b) as { title: string }).title);
+      expect(titles.sort()).toEqual(['Alert 0', 'Alert 1', 'Alert 2', 'Fresh']);
+      expect(notifyOutbox(d.mindly).nextDueAt()).toBeNull();
+    } finally {
+      await hook.close();
+    }
+  });
+
   it('keeps a notification that reached no channel and sends it from the outbox', async () => {
     const hook = await pagerEndpoint();
     try {

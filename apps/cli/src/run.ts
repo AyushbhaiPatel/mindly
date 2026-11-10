@@ -343,6 +343,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .action(
       act((o: object) => async (out) => (await import('./commands/notify.js')).notifyTest(out, o)),
     );
+  notify
+    .command('flush', { hidden: true })
+    .description('Send what waits in the pager outbox (started by hooks)')
+    .action(act(() => async (out) => (await import('./commands/notify.js')).notifyFlush(out)));
 
   program
     .command('track')

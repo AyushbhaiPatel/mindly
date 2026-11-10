@@ -1,7 +1,10 @@
+import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { cli, sandbox, type Sandbox } from './helpers.js';
 
@@ -137,44 +140,80 @@ describe('a notification raised in a hook', () => {
       ...extra,
     });
 
-  it('is sent after the agent has its answer, although the pager takes longer than a hook waits', async () => {
+  /** Runs `mindly hook` as its own process from the build, as an agent does. */
+  const CLI_MAIN = fileURLToPath(new URL('../dist/main.js', import.meta.url));
+  function hookProcess(
+    sb: Sandbox,
+    event: string,
+    extra: Record<string, unknown>,
+  ): Promise<{ code: number | null; ms: number }> {
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const p = spawn(process.execPath, [CLI_MAIN, 'hook', 'claude-code', event], {
+        cwd: sb.repo,
+        env: sb.env,
+        stdio: ['pipe', 'ignore', 'ignore'],
+      });
+      p.on('close', (code) => resolve({ code, ms: Date.now() - started }));
+      p.stdin.end(payload(sb, event, extra));
+    });
+  }
+  const outboxSize = (sb: Sandbox): number => {
+    const db = new DatabaseSync(join(sb.mindlyHome, 'mindly.db'), { readOnly: true });
+    try {
+      const row = db
+        .prepare("SELECT count(*) AS n FROM kv WHERE key LIKE 'notify.outbox:%'")
+        .get() as { n: number };
+      return row.n;
+    } finally {
+      db.close();
+    }
+  };
+  const until = async (ok: () => boolean, ms: number): Promise<boolean> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (ok()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return ok();
+  };
+
+  it('is sent once by a process of its own, and no hook waits for the pager', async () => {
     const hook = await endpoint();
     try {
       const sb = sandbox();
       await setChannel(sb, hook.url);
-      // Slower than the 800 ms a hook gives the work it triggers, within the hook's own deadline.
-      expect((await cli(sb, ['config', 'set', 'hooks.timeoutMs', '5000'])).code).toBe(0);
-      hook.status.delayMs = 900;
+      // A pager slower than any hook should take.
+      hook.status.delayMs = 3000;
 
-      for (const [event, extra] of [
-        ['SessionStart', { source: 'startup' }],
-        ['UserPromptSubmit', { prompt: 'Add a discount field' }],
-      ] as const) {
-        const r = await cli(sb, ['hook', 'claude-code', event], {
-          stdin: payload(sb, event, extra),
-        });
-        expect(r.code).toBe(0);
-      }
-      expect(hook.bodies).toHaveLength(0);
-
-      const stop = await cli(sb, ['hook', 'claude-code', 'Stop'], {
-        stdin: payload(sb, 'Stop', {
-          stop_hook_active: false,
-          last_assistant_message: 'Claude usage limit reached. Your limit will reset at 3pm.',
-        }),
+      expect((await hookProcess(sb, 'SessionStart', { source: 'startup' })).code).toBe(0);
+      expect(
+        (await hookProcess(sb, 'UserPromptSubmit', { prompt: 'Add a discount field' })).code,
+      ).toBe(0);
+      const stop = await hookProcess(sb, 'Stop', {
+        stop_hook_active: false,
+        last_assistant_message: 'Claude usage limit reached. Your limit will reset at 3pm.',
       });
       expect(stop.code).toBe(0);
+      // The hook is done well before the pager answers.
+      expect(stop.ms).toBeLessThan(2500);
+
+      // The sender waits for the answer and records it.
+      expect(await until(() => outboxSize(sb) === 0, 15_000)).toBe(true);
       expect(hook.bodies).toHaveLength(1);
       expect(JSON.parse(hook.bodies[0]!)).toMatchObject({ trigger: 'rate_limited' });
+      expect(JSON.parse(hook.bodies[0]!).id).toBeTruthy();
 
-      // Delivered once: a later hook has nothing left to send.
-      const again = await cli(sb, ['hook', 'claude-code', 'Stop'], {
-        stdin: payload(sb, 'Stop', { stop_hook_active: false, last_assistant_message: 'Done.' }),
-      });
-      expect(again.code).toBe(0);
+      // Later hooks neither send it again nor wait for anything.
+      for (let i = 0; i < 3; i++) {
+        const r = await hookProcess(sb, 'UserPromptSubmit', { prompt: `next ${i}` });
+        expect(r.code).toBe(0);
+        expect(r.ms).toBeLessThan(2500);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
       expect(hook.bodies).toHaveLength(1);
     } finally {
       await hook.close();
     }
-  });
+  }, 40_000);
 });
