@@ -15,7 +15,7 @@
 [![node](https://img.shields.io/badge/node-%E2%89%A522.16-43853d)](#quickstart)
 
 ```bash
-npx mindly-cli init
+npm i -g mindly-cli && mindly init
 ```
 
 </div>
@@ -60,6 +60,10 @@ You need **Node.js 22.16 or newer, or 24 or newer** (Node 23 is not supported) a
 ```bash
 npm i -g mindly-cli
 ```
+
+`npx mindly-cli <command>` works for one-off commands such as `npx mindly-cli doctor`, but not for
+`init`: npx runs Mindly from a cache npm can clear at any time, so `init` refuses to point your
+agents' hooks there and asks for the global install instead.
 
 **2. Connect your agents** (run inside your repository)
 

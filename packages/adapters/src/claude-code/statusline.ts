@@ -70,9 +70,7 @@ export function isMindlyStatusLine(value: unknown, command?: readonly string[]):
   return (
     launcher.length === 2 &&
     /^node(\.exe)?$/.test(base(launcher[0] as string)) &&
-    /[\\/]((mindly-cli|apps[\\/]cli)[\\/]dist[\\/]main\.js|bin[\\/]mindly\.cjs)$/.test(
-      launcher[1] as string,
-    )
+    /[\\/](mindly-cli|apps[\\/]cli)[\\/]dist[\\/]main\.js$/.test(launcher[1] as string)
   );
 }
 

@@ -192,92 +192,89 @@ try {
     fallback,
   );
 
-  // 4c. `npx mindly-cli init`: hooks must run the launcher in MINDLY_HOME, not npx or the npx
-  // cache, keep working with the npx cache gone and no registry, and end quietly without the copy.
+  // 4c. `npx mindly-cli init` runs from npx's cache, which npm may clear: init must refuse and
+  // write nothing.
   const repo3 = join(root, 'repo3');
   mkdirSync(repo3);
   run('git', ['init', '-q', '-b', 'main'], { cwd: repo3 });
-  const npxInit = () =>
-    spawnSync(
-      'npm',
-      [
-        'exec',
-        '--yes',
-        `--package=${tarball}`,
-        '--',
-        'mindly',
-        'init',
-        '--project',
-        '--yes',
-        '--agents',
-        'claude-code',
-      ],
-      {
-        cwd: repo3,
-        env: { ...env, PATH: process.env.PATH ?? '' },
-        encoding: 'utf8',
-        timeout: 600_000,
-      },
-    );
-  const viaNpx = npxInit();
-  // A second run finds its copy intact and reuses it.
-  const again = npxInit();
-  const runtimeEntries = existsSync(join(dirs.mindlyHome, 'runtime'))
-    ? readdirSync(join(dirs.mindlyHome, 'runtime')).sort()
-    : [];
-  check(
-    again.status === 0 && runtimeEntries.join(' ') === `.mindly ${expected} current`,
-    'init through npx again reuses the copy',
-    runtimeEntries.join(' '),
-  );
-  const settings3File = join(repo3, '.claude', 'settings.json');
-  const settings3 = existsSync(settings3File) ? readFileSync(settings3File, 'utf8') : '';
-  const npxCommands = [...settings3.matchAll(/"command":\s*"([^"]+)"/g)].map((m) => m[1]);
-  const launcher = join(dirs.mindlyHome, 'bin', 'mindly.cjs');
-  const copyMain = join(dirs.mindlyHome, 'runtime', expected, 'node_modules', 'mindly-cli', 'dist');
-  check(
-    viaNpx.status === 0 &&
-      npxCommands.length > 0 &&
-      npxCommands.every((c) => c.includes(launcher) && !/\bnpx\b|_npx/.test(c)) &&
-      existsSync(join(copyMain, 'main.js')),
-    `init through npx records the launcher in MINDLY_HOME (${npxCommands.length} hooks)`,
-    viaNpx.status === 0 ? (npxCommands[0] ?? '') : `${viaNpx.stdout}\n${viaNpx.stderr}`,
-  );
-  // Run the recorded Stop hook as an agent does, through a shell.
-  const stopHook = npxCommands.find((c) => / hook claude-code Stop$/.test(c)) ?? 'false';
-  const runStop = () =>
-    spawnSync('/bin/sh', ['-c', stopHook], {
+  const homeBefore = readdirSync(dirs.mindlyHome).sort().join(' ');
+  const viaNpx = spawnSync(
+    'npm',
+    [
+      'exec',
+      '--yes',
+      `--package=${tarball}`,
+      '--',
+      'mindly',
+      'init',
+      '--project',
+      '--yes',
+      '--agents',
+      'claude-code',
+    ],
+    {
       cwd: repo3,
-      env: { ...env, PATH: process.env.PATH ?? '', npm_config_registry: 'http://127.0.0.1:9/' },
-      input: '{}',
+      env: { ...env, PATH: process.env.PATH ?? '' },
       encoding: 'utf8',
-      timeout: 30_000,
-    });
-  rmSync(join(env.npm_config_cache, '_npx'), { recursive: true, force: true });
+      timeout: 600_000,
+    },
+  );
+  check(
+    viaNpx.status === 1 &&
+      (viaNpx.stderr ?? '').includes('npm i -g mindly-cli && mindly init') &&
+      !existsSync(join(repo3, '.claude')) &&
+      readdirSync(dirs.mindlyHome).sort().join(' ') === homeBefore,
+    `init through npx refuses and writes nothing (exit ${viaNpx.status})`,
+    `${viaNpx.stdout ?? ''}${viaNpx.stderr ?? ''}`.trim(),
+  );
+
+  // 4d. A global install (npm i -g, into a temp prefix): init records the global `mindly`, and the
+  // hook runs with no registry to reach.
+  const prefix = join(root, 'global');
+  const globalInstall = run('npm', ['install', '-g', '--prefix', prefix, tarball], {
+    timeout: 600_000,
+  });
+  const globalBin = join(prefix, 'bin', 'mindly');
+  const repo4 = join(root, 'repo4');
+  mkdirSync(repo4);
+  run('git', ['init', '-q', '-b', 'main'], { cwd: repo4 });
+  const globalInit = spawnSync(
+    globalBin,
+    ['init', '--project', '--yes', '--agents', 'claude-code'],
+    {
+      cwd: repo4,
+      env: { ...env, PATH: `${join(prefix, 'bin')}${delimiter}${process.env.PATH ?? ''}` },
+      encoding: 'utf8',
+      timeout: 120_000,
+    },
+  );
+  const settings4File = join(repo4, '.claude', 'settings.json');
+  const settings4 = existsSync(settings4File) ? readFileSync(settings4File, 'utf8') : '';
+  const globalCommands = [...settings4.matchAll(/"command":\s*"([^"]+)"/g)].map((m) => m[1]);
+  check(
+    globalInstall.code === 0 &&
+      globalInit.status === 0 &&
+      globalCommands.length > 0 &&
+      globalCommands.every((c) => c.startsWith(`${globalBin} `)),
+    `npm i -g, then mindly init records the global mindly (${globalCommands.length} hooks)`,
+    globalInit.status === 0
+      ? (globalCommands[0] ?? '')
+      : `${globalInstall.stderr}\n${globalInit.stdout}\n${globalInit.stderr}`,
+  );
+  const stopHook = globalCommands.find((c) => / hook claude-code Stop$/.test(c)) ?? 'false';
   const started = Date.now();
-  const offline = runStop();
+  const offline = spawnSync('/bin/sh', ['-c', stopHook], {
+    cwd: repo4,
+    env: { ...env, PATH: process.env.PATH ?? '', npm_config_registry: 'http://127.0.0.1:9/' },
+    input: '{}',
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
   const took = Date.now() - started;
   check(
     offline.status === 0 && offline.stderr === '' && took < 5_000,
-    `recorded hook runs without the npx cache or a registry (exit ${offline.status}, ${took} ms)`,
+    `recorded hook runs with no registry to reach (exit ${offline.status}, ${took} ms)`,
     offline.stderr,
-  );
-  rmSync(join(dirs.mindlyHome, 'runtime'), { recursive: true, force: true });
-  const gone = runStop();
-  check(
-    gone.status === 0 && gone.stdout === '' && gone.stderr === '',
-    `recorded hook ends quietly once the copy is gone (exit ${gone.status})`,
-    `${gone.stdout}${gone.stderr}`,
-  );
-  const repaired = npxInit();
-  const back = runStop();
-  check(
-    repaired.status === 0 &&
-      existsSync(join(copyMain, 'main.js')) &&
-      back.status === 0 &&
-      back.stderr === '',
-    'init through npx again restores the copy',
-    `${repaired.stderr}${back.stderr}`,
   );
 
   // 5. A SessionStart hook payload; with one rule in memory the hook must inject it.
