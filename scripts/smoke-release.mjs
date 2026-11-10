@@ -60,6 +60,25 @@ const env = {
   GIT_CONFIG_NOSYSTEM: '1',
   NO_COLOR: '1',
 };
+// The network settings of the machine running the check: without them `npm install` cannot reach
+// the registry behind a proxy, a private registry or a custom certificate authority.
+for (const name of [
+  'HTTPS_PROXY',
+  'HTTP_PROXY',
+  'NO_PROXY',
+  'https_proxy',
+  'http_proxy',
+  'no_proxy',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'npm_config_registry',
+  'npm_config_cafile',
+  'npm_config_proxy',
+  'npm_config_https_proxy',
+  'npm_config_noproxy',
+]) {
+  if (process.env[name] !== undefined) env[name] = process.env[name];
+}
 
 let failures = 0;
 const check = (ok, label, detail = '') => {
