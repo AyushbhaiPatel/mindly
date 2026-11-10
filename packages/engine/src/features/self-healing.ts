@@ -157,7 +157,7 @@ function legacyPartIn(normContent: string, normExcerpt: string, contentHash: str
   // Heads in [lo, hi) can start an original that ends at the current tail.
   let lo = 0;
   let hi = 0;
-  for (let t = normContent.indexOf(tail, heads[0]! + head.length); t !== -1;) {
+  for (let t = normContent.indexOf(tail, (heads[0] as number) + head.length); t !== -1;) {
     if (++visited > MAX_LEGACY_OCCURRENCES) return 'unknown';
     const end = t + tail.length;
     while (hi < heads.length && (heads[hi] as number) + head.length <= t) hi++;
