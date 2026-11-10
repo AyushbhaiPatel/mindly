@@ -176,8 +176,8 @@ const CLIENT_NAMES = 'curlie|aria2c|lftp|hurl|httpstat|httpie';
  * `/usr/bin/curl`, `CURL.EXE`), including builds such as `curl_chrome116` or
  * `curl-impersonate`; or a variable that holds one. A variable counts when its name is a client
  * name, alone or with an affix (`$CURL`, `${CURL_BIN}`, `$CURL_IMPERSONATE`, `$MY_WGET`), or
- * names an HTTP client or command (`$HTTP_CLIENT`, `$HTTP_CMD`), never a setting that only
- * mentions one (`$HTTP_PORT`, `$HTTP_PROXY`); an assignment counts when its name starts with one
+ * names an HTTP client or command (`$HTTP_CLIENT`, `$HTTP_CMD`), never a setting or address that
+ * only mentions one (`$HTTP_PORT`, `$HTTP_PROXY`, `$HTTPBIN`); an assignment counts when its name starts with one
  * (`CURL_OPTS="..."`, not `use_curl=1`). A client behind a shell function or alias defined
  * elsewhere is not recognised.
  */
@@ -187,7 +187,7 @@ const HTTP_CLIENT_SOURCE = [
   `(?<![$\\{])(?:curl(?:[-_][A-Za-z0-9_-]{1,40}|\\d{1,4})?|wget2?|ab|${CLIENT_NAMES})`,
   '(?:\\.exe)?(?![\\p{L}\\p{N}_])',
   `|\\$\\{?(?:[A-Za-z0-9]{1,16}_)?(?:curl|wget|${CLIENT_NAMES})(?:_(?!proxy\\b)[A-Za-z0-9]{1,16})?\\}?(?![A-Za-z0-9_])`,
-  '|\\$\\{?(?:[A-Za-z0-9]{1,16}_)?https?_?(?:client|cmd|command|bin|tool)\\}?(?![A-Za-z0-9_])',
+  '|\\$\\{?(?:[A-Za-z0-9]{1,16}_)?https?_(?:client|cmd|command|tool)\\}?(?![A-Za-z0-9_])',
   '|(?:curl|wget)(?:_[A-Za-z0-9]{1,12})?=',
   ')',
 ].join('');
@@ -195,13 +195,41 @@ const HTTP_CLIENT_SOURCE = [
 const HTTP_CLIENT = new RegExp(HTTP_CLIENT_SOURCE, 'iu');
 
 /**
- * Commands that run another command, with their options, a number (`timeout 10`) or a variable
- * assignment (`env A=1`) between them and it: `sudo curl`, `time curl`, `nice -n 5 curl`.
+ * Commands that run another command, and the short and long options of each that take a value
+ * (`sudo -u deploy`, `timeout -s KILL`). Knowing which options take one keeps the match
+ * deterministic: every word after the runner is either an option, an option's value or a number.
  */
-const RUNNER_PREFIX =
-  '(?:(?:sudo|doas|time|env|nice|ionice|nohup|command|exec|timeout|stdbuf|caffeinate|chronic)' +
-  '(?:[ \\t]+(?:-[^\\s]{0,40}|\\d{1,6}[smhd]?)){0,8}[ \\t]+' +
-  '|[A-Za-z_][A-Za-z0-9_]{0,40}=[^\\s]{0,200}[ \\t]+){0,6}';
+const RUNNERS: readonly (readonly [string, string, string])[] = [
+  ['sudo', 'ugCDhprtU', 'user|group|chroot|chdir|close-from|host|prompt|role|type|other-user'],
+  ['doas', 'uC', ''],
+  ['timeout', 'sk', 'signal|kill-after'],
+  ['env', 'uCS', 'unset|chdir|split-string'],
+  ['nice', 'n', 'adjustment'],
+  ['ionice', 'cnp', 'class|classdata|pid'],
+  ['stdbuf', 'ioe', 'input|output|error'],
+  ['time', 'fo', 'format|output'],
+  ['exec', 'a', ''],
+  ['nohup|command|caffeinate|chronic', '', ''],
+];
+
+/** One runner with its options, values and numbers (`timeout -s KILL 30`), and a space after. */
+function runnerSource([names, short, long]: readonly [string, string, string]): string {
+  const valued: string[] = [];
+  if (short !== '') valued.push(`-[A-Za-z]{0,8}[${short}]`);
+  if (long !== '') valued.push(`--(?:${long})`);
+  const takesValue = valued.length > 0 ? `(?:${valued.join('|')})` : '';
+  const token =
+    takesValue === ''
+      ? '-\\S{1,40}'
+      : `${takesValue}[ \\t]+\\S{1,64}|-(?!${takesValue}(?:[ \\t]|$))\\S{1,40}`;
+  return `(?:${names})(?:[ \\t]+(?:${token}|\\d{1,6}(?:\\.\\d{1,3})?[smhd]?)){0,8}[ \\t]+`;
+}
+
+/** A variable assignment before a command, its value quoted or not: `A=1`, `NOTE="two words"`. */
+const ASSIGNMENT_PREFIX = `[A-Za-z_][A-Za-z0-9_]{0,40}=(?:"[^"\\n]{0,200}"|'[^'\\n]{0,200}'|[^\\s"']{0,200})[ \\t]+`;
+
+/** Any number of runners and assignments in front of a command: `sudo -u deploy env A=1 curl`. */
+const RUNNER_PREFIX = `(?:${RUNNERS.map(runnerSource).join('|')}|${ASSIGNMENT_PREFIX}){0,6}`;
 
 /**
  * A line whose command is an HTTP client, after an optional shell prompt and runner (`$ curl`,
@@ -340,16 +368,17 @@ function clientBeforeFlag(flagGroup: string, at: MatchContext): boolean {
 }
 
 /** Programs whose short-flag clusters take a `user@host:/path` target, not credentials. */
-const REMOTE_COPY =
-  /^["']?(?:(?:\/|\.{1,2}\/|~\/)[\w./-]{0,200}\/)?(?:rsync|scp|sftp|ssh|rclone)["']?$/i;
+const REMOTE_COPY = /^(?:(?:\/|\.{1,2}\/|~\/)[\w./-]{0,200}\/)?(?:rsync|scp|sftp|ssh|rclone)$/i;
 
 /**
- * True when a remote-copy program is run as a command word in `words`: a whole argument, alone
- * or as an executable path (`/usr/bin/rsync`). A URL or path that only mentions one
- * (`https://ssh.example.com/api`, `/user/ssh/keys`) does not count.
+ * True when a remote-copy program is run as a command word in `words`: a whole, unquoted
+ * argument, alone or as an executable path (`/usr/bin/rsync`), that is not the value of the
+ * option before it. A URL or path that only mentions one (`https://ssh.example.com/api`), a
+ * quoted string (`-d 'ssh'`) or an option's value (`--proto-default sftp`) does not count.
  */
 function namesRemoteCopy(words: string): boolean {
-  return words.split(/[\s;&|()]+/).some((w) => REMOTE_COPY.test(w));
+  const list = words.split(/[\s;&|()]+/);
+  return list.some((w, i) => REMOTE_COPY.test(w) && !(list[i - 1] ?? '').startsWith('-'));
 }
 
 /**

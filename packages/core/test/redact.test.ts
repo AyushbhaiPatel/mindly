@@ -234,6 +234,19 @@ describe('redact', () => {
     ['nice -n 5 curl https://x.test\n    -u admin:PW', 'PW'],
     ['timeout 10 curl https://x.test\n    -u admin:PW', 'PW'],
     ['$ sudo -E command curl https://x.test\n    --user admin:PW', 'PW'],
+    // Runner options that take a value.
+    ['sudo -u deploy curl https://api.example.com/v1/items\n    -u admin:PW', 'PW'],
+    ['sudo -E -u root curl https://api.example.com/v1/items\n    --user admin:PW', 'PW'],
+    ['sudo --user=deploy -n curl https://x.test\n    -u admin:PW', 'PW'],
+    ['doas -u www curl https://api.example.com/v1/items\n    -u admin:PW', 'PW'],
+    ['timeout -s KILL 30 curl https://api.example.com\n    -u admin:PW', 'PW'],
+    ['timeout --kill-after 5 2.5m curl https://x.test\n    -u admin:PW', 'PW'],
+    ['env -u HTTP_PROXY curl https://api.example.com\n    -u admin:PW', 'PW'],
+    ['ionice -c 3 nice -n 10 curl https://x.test\n    -u admin:PW', 'PW'],
+    ['AUTH_NOTE="two words" curl https://api.example.com\n    -u admin:PW', 'PW'],
+    // An ssh or sftp that is a quoted string or an option's value is not a command.
+    ["curl -d 'ssh' -su me@example.com:PW https://x.test", 'PW'],
+    ['curl --proto-default sftp -su me@example.com:PW example.com/file', 'PW'],
     // A URL or path that mentions ssh or rsync is not a remote-copy command.
     ['curl https://ssh.example.com/api -su me@example.com:PW', 'PW'],
     ['curl https://code.example.com/user/ssh/keys -su me@example.com:PW', 'PW'],
@@ -318,6 +331,10 @@ describe('redact', () => {
     'time make build\n    -u 1000:1000',
     // An HTTP setting is not a client.
     'docker run -e PORT=$HTTP_PORT_NUMBER -u app:staff image',
+    'docker run --rm -e TARGET=$HTTPBIN -u 1000:1000 loadtest',
+    'docker run -e URL=$HTTP_TOOL_URL -u app:staff image',
+    'sudo -u deploy docker run image\n    -u app:staff',
+    'sudo -n docker run image\n    -u app:staff',
     // A variable that only mentions http or curl is not a client.
     'docker run -p $HTTP_PORT:80 -u 1000:1000 image',
     'docker run -p ${HTTPS_PORT}:443 -u app:staff image',
@@ -409,6 +426,10 @@ describe('redact', () => {
     ['many ampersands', 'curl x&y & -u a:bcd '.repeat(48_000)],
     ['many runner lines', 'sudo -E -n nice -n 5 x\n  -u a:bcd\n'.repeat(6_000)],
     ['one long runner line', `sudo ${'-a '.repeat(70_000)}\n  -u a:bcd`],
+    ['runner options with values', `sudo ${'-a 1 '.repeat(8)}x\n  -u a:bcd\n`.repeat(4_000)],
+    ['runner chains', 'sudo env A=1 nice -n 5 time timeout 1 x\n  -u a:bcd\n'.repeat(5_000)],
+    ['long assignments', `${`A=${'x'.repeat(199)} `.repeat(6)}y\n  -u a:bcd\n`.repeat(160)],
+    ['tabs after a runner', `sudo${' \t'.repeat(500)}x\n  -u a:bcd\n`.repeat(190)],
     ['unclosed quotes', 'password="'.repeat(20_000)],
   ])('stays fast on %s', (_name, input) => {
     expect(input.length).toBeGreaterThanOrEqual(190_000);

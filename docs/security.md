@@ -64,7 +64,7 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   as `$CURL`, `${CURL_BIN}` or `$HTTP_CLIENT`, but not `$HTTP_PORT`) before the flag. A command
   ends at an unquoted `|`, `&&`, `||`, `;` or standalone `&`; quotes carry across joined lines. A
   line goes on across `\`, `^` or a PowerShell backtick, and into an indented option line below a
-  line that runs a client (also under `sudo`, `time`, `env A=1`, `timeout 10` and the like) or
+  line that runs a client (also under `sudo -u deploy`, `time`, `env A=1`, `timeout -s KILL 10` and the like) or
   is an option line itself. A short-flag cluster such as `-su` is credentials even for an email
   user name, unless an rsync, scp or ssh run as a command after the client owns it. Any other
   program's
