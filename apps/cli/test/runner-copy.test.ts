@@ -58,7 +58,13 @@ function npxTree(): string {
 
 /** A tree as `pnpm dlx` leaves it: packages under `.pnpm`, linked to each other. */
 function pnpmTree(): string {
-  const modules = join(realpathSync(tempDir('mindly-dlx-')), 'dlx', 'ab12', 'node_modules');
+  const modules = join(
+    realpathSync(tempDir('mindly-dlx-')),
+    'dlx',
+    'hfz5kqp2gqeoeyvztqv4ws2fji',
+    '19a1b2c3d4e-1f2a',
+    'node_modules',
+  );
   const store = join(modules, '.pnpm');
   const cliDir = join(store, 'mindly-cli@0.5.0', 'node_modules', 'mindly-cli');
   cliPackage(cliDir);
@@ -91,21 +97,40 @@ function launch(home: string, args: string[]): { code: number | null; out: strin
 }
 
 describe('package runner caches', () => {
-  it('knows the caches of package runners', () => {
-    expect(inRunnerCache('/home/a/.npm/_npx/826d5fe126bc685d/node_modules/.bin/mindly')).toBe(true);
-    expect(
-      inRunnerCache('C:\\Users\\a\\AppData\\Local\\npm-cache\\_npx\\1f\\node_modules\\x'),
-    ).toBe(true);
-    expect(inRunnerCache('/home/a/.cache/pnpm/dlx/abc123/node_modules/.bin/mindly')).toBe(true);
-    expect(inRunnerCache('/home/a/.bun/install/cache/mindly-cli@0.5.0/dist/main.js')).toBe(true);
-    expect(inRunnerCache('/usr/local/lib/node_modules/mindly-cli/dist/main.js')).toBe(false);
-    expect(inRunnerCache('/home/a/project/node_modules/mindly-cli/dist/main.js')).toBe(false);
-    expect(inRunnerCache('/home/a/src/dlxtools/apps/cli/dist/main.js')).toBe(false);
+  it('knows the caches of package runners by their layout', () => {
+    for (const path of [
+      '/home/a/.npm/_npx/826d5fe126bc685d/node_modules/.bin/mindly',
+      'C:\\Users\\a\\AppData\\Local\\npm-cache\\_npx\\1f0e9a2b3c4d5e6f\\node_modules\\mindly-cli\\dist\\main.js',
+      '/home/a/.cache/pnpm/dlx/hfz5kqp2gqeoeyvztqv4ws2fji/19a1b2c3d4e-1f2a/node_modules/.pnpm/mindly-cli@0.5.0/node_modules/mindly-cli/dist/main.js',
+      '/tmp/dlx-12345/node_modules/mindly-cli/dist/main.js',
+      '/tmp/xfs-1a2b3c4d/dlx-4242/node_modules/mindly-cli/dist/main.js',
+      '/tmp/bunx-501-mindly-cli@latest/node_modules/mindly-cli/dist/main.js',
+      '/home/a/.bun/install/cache/mindly-cli@0.5.0/dist/main.js',
+    ]) {
+      expect(inRunnerCache(path), path).toBe(true);
+    }
+  });
+
+  it('does not mistake installs in folders named like a runner for its cache', () => {
+    for (const path of [
+      '/usr/local/lib/node_modules/mindly-cli/dist/main.js',
+      '/home/a/project/node_modules/mindly-cli/dist/main.js',
+      '/home/a/src/dlxtools/apps/cli/dist/main.js',
+      '/home/dlx/.npm-global/lib/node_modules/mindly-cli/dist/main.js',
+      '/home/a/code/dlx-tools/node_modules/mindly-cli/dist/main.js',
+      '/home/a/src/bunx-demo/node_modules/mindly-cli/dist/main.js',
+      'C:\\Users\\dlx\\AppData\\Roaming\\npm\\node_modules\\mindly-cli\\dist\\main.js',
+      '/home/a/_npx/notes/node_modules/mindly-cli/dist/main.js',
+    ]) {
+      expect(inRunnerCache(path), path).toBe(false);
+    }
   });
 
   it("finds the runner's package tree, and none outside a runner's cache", () => {
-    expect(runnerTree('/h/.npm/_npx/1f/node_modules/mindly-cli/dist/main.js')).toEqual({
-      root: '/h/.npm/_npx/1f/node_modules',
+    expect(
+      runnerTree('/h/.npm/_npx/826d5fe126bc685d/node_modules/mindly-cli/dist/main.js'),
+    ).toEqual({
+      root: '/h/.npm/_npx/826d5fe126bc685d/node_modules',
       entry: join('mindly-cli', 'dist', 'main.js'),
     });
     expect(runnerTree('/h/.bun/install/cache/mindly-cli@0.5.0/dist/main.js')).toBe(null);
