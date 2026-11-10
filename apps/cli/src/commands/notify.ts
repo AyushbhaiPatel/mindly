@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { homePaths, mindlyHome, unusableNotifyChannels } from '@mindly/core';
 import { notifyOutbox } from '@mindly/engine';
 import { openMindly } from '@mindly/runtime';
@@ -34,6 +35,8 @@ export async function notifyTest(out: Out, o: { json?: boolean }): Promise<numbe
     const results =
       (await mindly.kernel.ports.notifier.send(
         {
+          // A new id per test: each run is its own notification.
+          id: randomUUID(),
           trigger: 'standup',
           title: 'Mindly test notification',
           body: 'If you can read this, the channel works.',
@@ -70,30 +73,17 @@ export async function notifyTest(out: Out, o: { json?: boolean }): Promise<numbe
   }
 }
 
-/** How long a `notify flush` started by a hook stays around for the next attempt. */
-export const FLUSH_WINDOW_MS = 3 * 60_000;
-
 /**
- * `mindly notify flush` (internal): sends what waits in the pager outbox. A hook that raised a
- * notification starts it detached. It waits for each answer, so a result is never lost, and stays
- * for the retries that fall within a few minutes (30 s, then 2 min); later ones are made by the
- * daemon or the next sender. When another process is flushing, it leaves the work to that one.
+ * `mindly notify flush` (internal): the pager outbox's sender. A hook that raised a notification
+ * starts it detached when no sender is running. It waits for each answer, so a result is never
+ * lost, picks up notifications written while it runs, and stays for the retries that fall within
+ * a few minutes; later ones are made by the daemon or the next sender.
  */
-export async function notifyFlush(out: Out, windowMs: number = FLUSH_WINDOW_MS): Promise<number> {
+export async function notifyFlush(out: Out): Promise<number> {
   const mindly = openMindly({ env: out.io.env });
   try {
-    const outbox = notifyOutbox(mindly);
-    const started = Date.now();
-    for (;;) {
-      const left = windowMs - (Date.now() - started);
-      const r = await outbox.flush({ budgetMs: Math.max(left, 0) + 1 });
-      if (r.busy || r.waiting === 0) return 0;
-      const next = outbox.nextDueAt();
-      if (next === null) return 0;
-      const wait = Math.max(next - mindly.kernel.clock.now(), 0) + 250;
-      if (Date.now() - started + wait >= windowMs) return 0;
-      await new Promise((resolve) => setTimeout(resolve, wait));
-    }
+    await notifyOutbox(mindly).runSender();
+    return 0;
   } finally {
     mindly.close();
   }

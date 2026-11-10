@@ -6,6 +6,7 @@ import {
   OUTBOX_MAX_AGE_MS,
   OUTBOX_MAX_ATTEMPTS,
   OUTBOX_MAX_ENTRIES,
+  withNotificationId,
   type NotifyResult,
 } from '../../src/index.js';
 import { event } from '../helpers.js';
@@ -128,7 +129,7 @@ describe('pager outbox', () => {
     expect(await outbox.flush()).toEqual({ delivered: 1, waiting: 0, dropped: 0 });
   });
 
-  it('is flushed by one process at a time', async () => {
+  it('lets one process send at a time, attempt by attempt', async () => {
     let release: () => void = () => undefined;
     const env = make();
     env.mindly.kernel.ports.notifier = {
@@ -144,18 +145,30 @@ describe('pager outbox', () => {
     outbox.enqueue({ ...page, dedupeKey: 'other' });
     const first = outbox.flush();
     await new Promise((resolve) => setTimeout(resolve, 20));
-    // A second flusher (the daemon, another sender) finds the outbox taken and leaves it.
-    expect(await outbox.flush()).toEqual({ delivered: 0, waiting: 0, dropped: 0, busy: true });
+    // A second flusher (the daemon, another sender) finds an attempt under way and leaves the
+    // due entry for later.
+    expect(await outbox.flush()).toEqual({ delivered: 0, waiting: 2, dropped: 0, busy: true });
     for (let i = 0; i < 2; i++) {
       release();
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     expect(await first).toEqual({ delivered: 2, waiting: 0, dropped: 0 });
     expect(env.sent).toHaveLength(2);
-    // The lease is given back.
+    // The lease is given back after each attempt.
     outbox.enqueue({ ...page, dedupeKey: 'third' });
     env.mindly.kernel.ports.notifier = { send: async () => sentOk };
     expect((await outbox.flush()).delivered).toBe(1);
+  });
+
+  it('is not held up for long by a sender that died during an attempt', async () => {
+    const env = make({ answer: () => sentOk });
+    const outbox = notifyOutbox(env.mindly);
+    // The lease a killed process left: twice the attempt time limit.
+    env.mindly.store.kv.set('notify.outbox-lease', { owner: 'gone', until: env.clock.t + 16_000 });
+    outbox.enqueue(page);
+    expect(await outbox.flush()).toMatchObject({ delivered: 0, busy: true });
+    env.clock.advance(16_001);
+    expect(await outbox.flush()).toEqual({ delivered: 1, waiting: 0, dropped: 0 });
   });
 
   it('takes the entries in the order they are due, beyond the first few', async () => {
@@ -226,10 +239,10 @@ describe('the usage-limit page', () => {
 
   it('is written down by the hook, which sends nothing itself', async () => {
     const env = make({ answer: () => sentOk });
-    expect(notifyOutbox(env.mindly).raisedHere()).toBe(false);
+    expect(notifyOutbox(env.mindly).needsSender()).toBe(false);
     await limitedTurn(env);
     expect(env.sent).toHaveLength(0);
-    expect(notifyOutbox(env.mindly).raisedHere()).toBe(true);
+    expect(notifyOutbox(env.mindly).needsSender()).toBe(true);
     expect(await notifyOutbox(env.mindly).flush()).toEqual({
       delivered: 1,
       waiting: 0,
@@ -249,5 +262,104 @@ describe('the usage-limit page', () => {
     await notifyOutbox(env.mindly).flush();
     expect(env.sent).toHaveLength(2);
     expect(notifyOutbox(env.mindly).nextDueAt()).toBeNull();
+  });
+});
+
+describe('the sender', () => {
+  const quick = { sliceMs: 20, windowMs: 400, attemptMs: 2000 };
+
+  it('sends a notification written while it is busy with another', async () => {
+    const env = make();
+    env.mindly.kernel.ports.notifier = {
+      send: async (n) => {
+        env.sent.push(n);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return sentOk;
+      },
+    };
+    const outbox = notifyOutbox(env.mindly);
+    outbox.enqueue(page);
+    expect(outbox.needsSender()).toBe(true);
+    const running = outbox.runSender(quick);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // A second page while the first is in flight: the running sender is seen and takes it.
+    expect(outbox.senderAlive()).toBe(true);
+    outbox.enqueue({ ...page, dedupeKey: 'second' });
+    expect(await running).toEqual({ delivered: 2, dropped: 0 });
+    expect(env.sent.map((n) => n.dedupeKey)).toEqual(['rate_limited:h1', 'second']);
+    // It is gone, and says so.
+    expect(outbox.senderAlive()).toBe(false);
+  });
+
+  it('does not count a sender whose process is gone', async () => {
+    const env = make({ answer: () => sentOk });
+    const outbox = notifyOutbox(env.mindly);
+    const until = env.clock.t + 15_000;
+    env.mindly.store.kv.set('notify.outbox-sender', { owner: 'x', until, pid: process.pid });
+    expect(outbox.senderAlive()).toBe(true);
+    // A pid that cannot belong to a running process.
+    env.mindly.store.kv.set('notify.outbox-sender', { owner: 'x', until, pid: 2 ** 22 + 1 });
+    expect(outbox.senderAlive()).toBe(false);
+    outbox.enqueue(page);
+    expect(outbox.needsSender()).toBe(true);
+  });
+
+  it('steps aside for a sender that is already running', async () => {
+    const env = make({ answer: () => sentOk });
+    const outbox = notifyOutbox(env.mindly);
+    outbox.enqueue(page);
+    const running = outbox.runSender(quick);
+    const second = outbox.runSender(quick);
+    expect(await second).toEqual({ delivered: 0, dropped: 0 });
+    expect(await running).toEqual({ delivered: 1, dropped: 0 });
+    expect(env.sent).toHaveLength(1);
+  });
+
+  it('waits while another process holds the outbox instead of leaving', async () => {
+    const env = make({ answer: () => sentOk });
+    const outbox = notifyOutbox(env.mindly);
+    env.mindly.store.kv.set('notify.outbox-lease', { owner: 'other', until: env.clock.t + 16_000 });
+    outbox.enqueue(page);
+    const running = outbox.runSender(quick);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(env.sent).toHaveLength(0);
+    env.mindly.store.kv.delete('notify.outbox-lease');
+    expect(await running).toEqual({ delivered: 1, dropped: 0 });
+    expect(env.sent).toHaveLength(1);
+  });
+
+  it('stays for a retry that falls within its window', async () => {
+    let down = true;
+    const env = make({ answer: () => (down ? failed : sentOk) });
+    const outbox = notifyOutbox(env.mindly);
+    outbox.enqueue(page);
+    const running = outbox.runSender({ ...quick, windowMs: 2000 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(env.sent).toHaveLength(1);
+    down = false;
+    // The retry is due 30 s later on the store's clock.
+    env.clock.advance(31_000);
+    expect(await running).toEqual({ delivered: 1, dropped: 0 });
+    expect(env.sent).toHaveLength(2);
+  });
+});
+
+describe('notification id', () => {
+  it('is kept when valid, follows the dedupe key, and is made up otherwise', () => {
+    expect(withNotificationId({ ...page, id: 'abc_123' }).id).toBe('abc_123');
+    const a = withNotificationId({ ...page, id: 'not valid!' }).id;
+    const b = withNotificationId(page).id;
+    expect(a).toBe(b);
+    expect(b).toMatch(/^k[0-9a-f]{32}$/);
+    const noKey: Sent = { trigger: page.trigger, title: page.title, body: page.body };
+    expect(withNotificationId(noKey).id).not.toBe(withNotificationId(noKey).id);
+  });
+
+  it('is the one given to the first attempt when the outbox takes over', async () => {
+    const env = make({ answer: () => sentOk });
+    const outbox = notifyOutbox(env.mindly);
+    outbox.enqueue({ ...page, id: 'first-attempt-id' });
+    await outbox.flush();
+    expect(env.sent[0]!.id).toBe('first-attempt-id');
   });
 });

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { redactText, sanitizeForContext, sanitizeLine, uuidv7 } from '@mindly/core';
+import { readFileSync } from 'node:fs';
+import { redactText, sanitizeForContext, sanitizeLine, sha256, uuidv7 } from '@mindly/core';
 import type { Kernel } from '../kernel.js';
 import type { Mindly } from '../mindly.js';
 import { notifySettled, type NotifyResult, type PagerNotification } from '../ports.js';
@@ -15,13 +16,16 @@ import { serviceOf } from './shared.js';
  * answer and record it. The daemon flushes on a tick as well. A notification whose channels all
  * failed waits here for another attempt instead of being lost.
  *
- * Entries live in the kv store (no table of their own). A flush holds a lease, so only one
- * process sends at a time, and claims each attempt before it is made. An entry is given up after
- * `OUTBOX_MAX_ATTEMPTS` attempts or `OUTBOX_MAX_AGE_MS`.
+ * Entries live in the kv store (no table of their own). Each attempt is made under a short lease
+ * (claim, send, record), so only one process sends at a time and a sender that dies holds nothing
+ * for long; the attempt is claimed before it is made. A running sender keeps a presence mark
+ * fresh, and a hook that raises a page starts a new sender only when no mark is fresh. An entry is
+ * given up after `OUTBOX_MAX_ATTEMPTS` attempts or `OUTBOX_MAX_AGE_MS`.
  */
 
 const PREFIX = 'notify.outbox:';
 const LEASE_KEY = 'notify.outbox-lease';
+const SENDER_KEY = 'notify.outbox-sender';
 /** Attempts per entry, the first one included. */
 export const OUTBOX_MAX_ATTEMPTS = 5;
 /** An entry older than this is no longer news. */
@@ -35,8 +39,16 @@ export const OUTBOX_ATTEMPT_MS = 8_000;
 const BACKOFF_MS = [0, 30_000, 2 * 60_000, 10 * 60_000, 30 * 60_000];
 /** Wait after an attempt the hourly budget held back (it does not count as an attempt). */
 const HELD_BACK_MS = 60_000;
-/** No flush holds the outbox longer than this. */
+/** No lease or presence mark is honoured for longer than this (a clock set back). */
 const MAX_LEASE_MS = 10 * 60_000;
+/** A sender's presence mark is fresh for this long; the sender renews it every second. */
+const SENDER_FRESH_MS = 15_000;
+/** How often a sender looks at the outbox. */
+const SENDER_SLICE_MS = 1_000;
+/** A sender stays this long after the newest entry it has seen (for the first retries). */
+export const SENDER_WINDOW_MS = 3 * 60_000;
+/** A sender never stays longer than this. */
+const SENDER_MAX_LIFE_MS = 10 * 60_000;
 /** Attempts per flush. */
 const MAX_PER_FLUSH = 20;
 /** Entries kept at most; beyond it new ones are dropped (a pager that never works). */
@@ -53,6 +65,25 @@ interface OutboxEntry {
 interface Lease {
   owner: string;
   until: number;
+  /** The sender's process, for its presence mark: a mark whose process is gone is no sender. */
+  pid?: number;
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+  // A process that ended but was not reaped yet (its parent, often a container's init, has not
+  // waited for it) still answers the signal check. On Linux its state says so.
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3);
+    return state !== 'Z' && state !== 'X';
+  } catch {
+    return true;
+  }
 }
 
 function isEntry(v: unknown): v is OutboxEntry {
@@ -87,12 +118,23 @@ export interface OutboxFlush {
   waiting: number;
   /** Entries given up: too many attempts or too old. */
   dropped: number;
-  /** True when another process was flushing, so this one did nothing. */
+  /** True when another process held the outbox, so a due entry was left for later. */
   busy?: boolean;
 }
 
-/** Kernels of this process that raised a notification into the outbox. */
-const raised = new WeakSet<Kernel>();
+/** Kernels of this process that wrote a notification no running sender will see to. */
+const unattended = new WeakSet<Kernel>();
+
+/**
+ * The id a notification keeps on every attempt: its own when it has a valid one, else one derived
+ * from its dedupe key (the same alert raised again gets the same id), else a new one. Assign it
+ * once, before the first attempt.
+ */
+export function withNotificationId<T extends PagerNotification>(n: T): T & { id: string } {
+  if (n.id !== undefined && /^[A-Za-z0-9_-]{1,64}$/.test(n.id)) return { ...n, id: n.id };
+  const id = n.dedupeKey !== undefined ? `k${sha256(n.dedupeKey).slice(0, 32)}` : uuidv7();
+  return { ...n, id };
+}
 
 export class NotifyOutbox {
   constructor(private readonly k: Kernel) {}
@@ -113,7 +155,9 @@ export class NotifyOutbox {
         return;
       }
       const now = this.k.clock.now();
-      const id = uuidv7();
+      const key = uuidv7();
+      // The id the first attempt had, when there was one: a receiver sees one id per alert.
+      const { id } = withNotificationId(n);
       const entry: OutboxEntry = {
         n: {
           trigger: n.trigger,
@@ -129,8 +173,10 @@ export class NotifyOutbox {
         createdAt: now,
         nextAt: now,
       };
-      this.k.store.kv.set(`${PREFIX}${id}`, entry);
-      raised.add(this.k);
+      this.k.store.kv.set(`${PREFIX}${key}`, entry);
+      // Read after the entry is written: a sender that stops clears its mark before its last look
+      // at the outbox, so either it sees this entry or no fresh mark is found here.
+      if (!this.senderAlive()) unattended.add(this.k);
     } catch (err) {
       this.k.logger.warn('notification could not be queued', {
         error: err instanceof Error ? err.message : String(err),
@@ -138,9 +184,110 @@ export class NotifyOutbox {
     }
   }
 
-  /** Whether this process wrote a notification here (the hook then starts a sender). */
-  raisedHere(): boolean {
-    return raised.has(this.k);
+  /** Whether this process wrote a notification here that needs a sender to be started. */
+  needsSender(): boolean {
+    return unattended.has(this.k);
+  }
+
+  /** Whether a sender is running (its presence mark is fresh). */
+  senderAlive(now: number = this.k.clock.now()): boolean {
+    try {
+      const mark = this.k.store.kv.get<Lease>(SENDER_KEY);
+      if (!mark || mark.until <= now || mark.until - now > MAX_LEASE_MS) return false;
+      // A sender that was killed leaves a fresh mark behind: it is not running.
+      return mark.pid === undefined || processAlive(mark.pid);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Renews this sender's presence mark, or returns false when another running sender holds it:
+   * that one looks at the outbox every second, so this one is not needed.
+   */
+  private markSender(owner: string): boolean {
+    return this.k.store.transaction(() => {
+      const now = this.k.clock.now();
+      const mark = this.k.store.kv.get<Lease>(SENDER_KEY);
+      if (mark && mark.owner !== owner && this.senderAlive(now)) return false;
+      this.k.store.kv.set(SENDER_KEY, {
+        owner,
+        until: now + SENDER_FRESH_MS,
+        pid: process.pid,
+      } satisfies Lease);
+      return true;
+    });
+  }
+
+  private clearSender(owner: string): void {
+    this.k.store.transaction(() => {
+      if (this.k.store.kv.get<Lease>(SENDER_KEY)?.owner === owner) {
+        this.k.store.kv.delete(SENDER_KEY);
+      }
+    });
+  }
+
+  /**
+   * Runs as the outbox's sender (`mindly notify flush`): sends what is due, looks again every
+   * second for new entries and for retries, and waits when another process holds the outbox.
+   * Stays `windowMs` after the newest entry it has seen, at most ten minutes in all. Before it
+   * stops it clears its presence mark and looks one last time, so a page written meanwhile is
+   * either sent by it or finds no mark and starts a new sender. Never throws.
+   */
+  async runSender(opts: { windowMs?: number; sliceMs?: number; attemptMs?: number } = {}): Promise<{
+    delivered: number;
+    dropped: number;
+  }> {
+    const window = opts.windowMs ?? SENDER_WINDOW_MS;
+    const slice = opts.sliceMs ?? SENDER_SLICE_MS;
+    const attemptMs = opts.attemptMs ?? OUTBOX_ATTEMPT_MS;
+    const owner = randomUUID();
+    const started = Date.now();
+    let until = started + window;
+    const total = { delivered: 0, dropped: 0 };
+    for (;;) {
+      try {
+        // Between attempts only, so stepping aside never leaves an attempt half made.
+        if (!this.markSender(owner)) return total;
+        const newest = this.newestCreatedAt();
+        if (newest !== null) {
+          // Entry times are on the store's clock; the window is kept in this process's time.
+          const age = Math.max(0, this.k.clock.now() - newest);
+          until = Math.max(until, Date.now() - age + window);
+        }
+        until = Math.min(until, started + SENDER_MAX_LIFE_MS);
+        if (this.hasDue()) {
+          const r = await this.flush({
+            budgetMs: Math.max(until - Date.now(), attemptMs) + 1,
+            attemptMs,
+          });
+          total.delivered += r.delivered;
+          total.dropped += r.dropped;
+          // Something went out: look again at once, entries may have come in meanwhile.
+          if (r.delivered + r.dropped > 0 && !r.busy) continue;
+        }
+        if (Date.now() >= until || this.nextDueAt() === null) {
+          this.clearSender(owner);
+          // The last look, after the mark is gone: an entry written before that was written by a
+          // hook that saw the mark, so this sender sends it.
+          if (!this.hasDue()) return total;
+          if (Date.now() >= started + SENDER_MAX_LIFE_MS + 60_000) return total;
+        }
+      } catch {
+        return total;
+      }
+      await new Promise((resolve) => setTimeout(resolve, slice));
+    }
+  }
+
+  private newestCreatedAt(): number | null {
+    let newest: number | null = null;
+    for (const e of this.k.store.kv.list<unknown>(PREFIX, OUTBOX_MAX_ENTRIES)) {
+      if (isEntry(e.value) && (newest === null || e.value.createdAt > newest)) {
+        newest = e.value.createdAt;
+      }
+    }
+    return newest;
   }
 
   private clean(text: string, max: number): string {
@@ -182,8 +329,8 @@ export class NotifyOutbox {
   /**
    * Sends the entries that are due, earliest first, while `budgetMs` leaves room for a whole
    * attempt. An entry is removed once it needs no further attempt, and kept for a later one
-   * otherwise. Only one process flushes at a time; another one returns at once with `busy`.
-   * Never throws.
+   * otherwise. Each attempt holds a lease for at most twice its time limit, so only one process
+   * sends at a time; when another one holds it, the pass stops with `busy`. Never throws.
    */
   async flush(opts: { budgetMs?: number; attemptMs?: number } = {}): Promise<OutboxFlush> {
     const out: OutboxFlush = { delivered: 0, waiting: 0, dropped: 0 };
@@ -191,8 +338,7 @@ export class NotifyOutbox {
     const budget = opts.budgetMs ?? 30_000;
     const attemptMs = opts.attemptMs ?? OUTBOX_ATTEMPT_MS;
     const owner = randomUUID();
-    if (!this.takeLease(owner, budget + attemptMs + 5_000)) return { ...out, busy: true };
-    try {
+    {
       let rows: { key: string; value: unknown; nextAt: number }[];
       try {
         rows = this.entries();
@@ -223,14 +369,29 @@ export class NotifyOutbox {
             out.waiting++;
             continue;
           }
-          tried++;
-          // Claimed before it is made: an attempt cut short by this process ending still counts.
-          const claimed = this.claim(row.key, entry, now);
-          if (!claimed) {
+          if (out.busy) {
             out.waiting++;
             continue;
           }
-          const results = await withTimeout(this.k.ports.notifier.send(claimed.n), attemptMs);
+          if (!this.takeLease(owner, 2 * attemptMs)) {
+            out.busy = true;
+            out.waiting++;
+            continue;
+          }
+          tried++;
+          let results: Awaited<ReturnType<typeof this.k.ports.notifier.send>> | typeof TIMED_OUT;
+          let claimed: OutboxEntry | null;
+          try {
+            // Claimed before it is made: an attempt cut short by this process ending counts.
+            claimed = this.claim(row.key, entry, now);
+            if (!claimed) {
+              out.waiting++;
+              continue;
+            }
+            results = await withTimeout(this.k.ports.notifier.send(claimed.n), attemptMs);
+          } finally {
+            this.dropLease(owner);
+          }
           if (results !== TIMED_OUT && heldBack(results)) {
             // The hourly budget held it back: nothing was tried, so no attempt is used up.
             this.release(row.key, claimed, entry.attempts, now + HELD_BACK_MS);
@@ -249,8 +410,6 @@ export class NotifyOutbox {
         }
       }
       return out;
-    } finally {
-      this.dropLease(owner);
     }
   }
 

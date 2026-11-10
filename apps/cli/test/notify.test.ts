@@ -188,6 +188,7 @@ describe('a notification raised in a hook', () => {
     sb: Sandbox,
     event: string,
     extra: Record<string, unknown>,
+    sessionId: string = session,
   ): Promise<{ code: number | null; ms: number }> {
     return new Promise((resolve) => {
       const started = Date.now();
@@ -197,7 +198,9 @@ describe('a notification raised in a hook', () => {
         stdio: ['pipe', 'ignore', 'ignore'],
       });
       p.on('close', (code) => resolve({ code, ms: Date.now() - started }));
-      p.stdin.end(payload(sb, event, extra));
+      p.stdin.end(
+        JSON.stringify({ ...JSON.parse(payload(sb, event, extra)), session_id: sessionId }),
+      );
     });
   }
   const outboxSize = (sb: Sandbox): number => {
@@ -219,6 +222,40 @@ describe('a notification raised in a hook', () => {
     }
     return ok();
   };
+
+  it('sends a second page raised while the first is still on its way, each once', async () => {
+    const hook = await endpoint();
+    try {
+      const sb = sandbox();
+      await setChannel(sb, hook.url);
+      hook.status.delayMs = 2000;
+      const limit = {
+        stop_hook_active: false,
+        last_assistant_message: 'Claude usage limit reached. Your limit will reset at 3pm.',
+      };
+      // Two sessions hit their limit one second apart, while the pager is slow.
+      for (const s of ['01', '02']) {
+        const id = `00893aaf-19fa-41d2-8238-1326000000${s}`;
+        expect((await hookProcess(sb, 'SessionStart', { source: 'startup' }, id)).code).toBe(0);
+        expect(
+          (await hookProcess(sb, 'UserPromptSubmit', { prompt: 'Add a field' }, id)).code,
+        ).toBe(0);
+      }
+      const first = await hookProcess(sb, 'Stop', limit, '00893aaf-19fa-41d2-8238-132600000001');
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const second = await hookProcess(sb, 'Stop', limit, '00893aaf-19fa-41d2-8238-132600000002');
+      expect(first.ms).toBeLessThan(2500);
+      expect(second.ms).toBeLessThan(2500);
+
+      expect(await until(() => outboxSize(sb) === 0, 20_000)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(hook.bodies).toHaveLength(2);
+      const ids = hook.bodies.map((b) => (JSON.parse(b) as { id: string }).id);
+      expect(new Set(ids).size).toBe(2);
+    } finally {
+      await hook.close();
+    }
+  }, 40_000);
 
   it('is sent once by a process of its own, and no hook waits for the pager', async () => {
     const hook = await endpoint();
