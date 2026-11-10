@@ -21,6 +21,16 @@ import { diffSummary, runHook, styleFor } from '../src/index.js';
 import { EXPORT_QUERIES } from '../src/commands/data.js';
 import { cli, fixture, sandbox, tempDir, testIo, write, type Sandbox } from './helpers.js';
 
+/** A port on 127.0.0.1 that nothing listens on right now. */
+async function freePort(): Promise<number> {
+  const probe = createServer().listen(0, '127.0.0.1');
+  await once(probe, 'listening');
+  const port = (probe.address() as AddressInfo).port;
+  probe.close();
+  await once(probe, 'close');
+  return port;
+}
+
 function json<T = Record<string, unknown>>(text: string): T {
   return JSON.parse(text) as T;
 }
@@ -1033,6 +1043,108 @@ describe('doctor, config, export, misc', () => {
       bystander.kill('SIGKILL');
     }
     expect(existsSync(stateFile)).toBe(false);
+  }, 60_000);
+
+  it("another home's service on the recorded port is not this home's: status, stop, start", async () => {
+    const other = sandbox();
+    const sb = sandbox();
+    const port = await freePort();
+    expect((await cli(other, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+    const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+      stdio: 'ignore',
+    });
+    await once(bystander, 'spawn');
+    let started = false;
+    try {
+      const up = await cli(other, ['daemon', 'start']);
+      started = up.code === 0;
+      expect(up.stderr).toBe('');
+      expect(up.code).toBe(0);
+      // This home's file is left over: a live PID that is not Mindly's, and the shared port.
+      writeFileSync(
+        join(sb.mindlyHome, 'daemon.json'),
+        JSON.stringify({ pid: bystander.pid, port, startedAt: 1, version: '0.0.1' }),
+      );
+      const status = await cli(sb, ['daemon', 'status']);
+      expect(status.stdout).toContain("Mindly's background service is not running.");
+      expect(status.stdout).toContain('used by the Mindly service of another home');
+      expect(status.stdout).toContain('mindly config set daemon.port');
+      expect(
+        json<{ running: boolean }>((await cli(sb, ['daemon', 'status', '--json'])).stdout).running,
+      ).toBe(false);
+
+      const stop = await cli(sb, ['daemon', 'stop']);
+      expect(stop.code).toBe(0);
+      expect(stop.stdout).toContain('nothing to stop');
+      expect(stop.stdout).toContain('left alone');
+      await new Promise((r) => setTimeout(r, 100));
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
+      expect(
+        json<{ running: boolean }>((await cli(other, ['daemon', 'status', '--json'])).stdout)
+          .running,
+      ).toBe(true);
+
+      // Two homes cannot share a port: the start says so, on the terminal and in the log.
+      const start = await cli(sb, ['daemon', 'start']);
+      expect(start.code).toBe(1);
+      expect(start.stderr).toContain("already in use by another Mindly home's daemon");
+      expect(start.stderr).toContain('mindly config set daemon.port <port>');
+      expect(readFileSync(join(sb.mindlyHome, 'logs', 'mindly.log'), 'utf8')).toContain(
+        'already in use',
+      );
+      expect(readdirSync(join(sb.mindlyHome, 'logs')).filter((f) => f.endsWith('.err'))).toEqual(
+        [],
+      );
+    } finally {
+      if (started) await cli(other, ['daemon', 'stop']);
+      bystander.kill('SIGKILL');
+    }
+  }, 60_000);
+
+  it('daemon start says why the service did not start when the port is taken', async () => {
+    const sb = sandbox();
+    const taken = createServer((socket) => socket.end()).listen(0, '127.0.0.1');
+    await once(taken, 'listening');
+    const port = (taken.address() as AddressInfo).port;
+    try {
+      expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+      const start = await cli(sb, ['daemon', 'start']);
+      expect(start.code).toBe(1);
+      expect(start.stderr).toContain(`port ${port} is already in use by another program`);
+      expect(start.stderr).toContain('mindly config set daemon.port <port>');
+      expect(readFileSync(join(sb.mindlyHome, 'logs', 'mindly.log'), 'utf8')).toContain(
+        `port ${port} is already in use`,
+      );
+      expect(existsSync(join(sb.mindlyHome, 'daemon.json'))).toBe(false);
+    } finally {
+      taken.close();
+    }
+  }, 60_000);
+
+  it('of two daemon starts at once, both succeed and one service runs', async () => {
+    const sb = sandbox();
+    const port = await freePort();
+    expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+    let results: { code: number; stdout: string; stderr: string }[] = [];
+    try {
+      results = await Promise.all([cli(sb, ['daemon', 'start']), cli(sb, ['daemon', 'start'])]);
+      for (const r of results) {
+        expect(r.stderr).toBe('');
+        expect(r.code).toBe(0);
+        expect(r.stdout).toMatch(/Started Mindly's background service|is already running/);
+      }
+      expect(results.filter((r) => r.stdout.includes('Started'))).toHaveLength(1);
+      expect(
+        json<{ running: boolean; state: { port: number } }>(
+          (await cli(sb, ['daemon', 'status', '--json'])).stdout,
+        ),
+      ).toMatchObject({ running: true, state: { port } });
+    } finally {
+      if (results.some((r) => r.code === 0)) await cli(sb, ['daemon', 'stop']);
+    }
+    expect(existsSync(join(sb.mindlyHome, 'daemon.json'))).toBe(false);
   }, 60_000);
 
   it('exit codes: usage 2, help 0', async () => {

@@ -190,6 +190,93 @@ describe('daemon lifecycle', () => {
     }
   });
 
+  it('waits for a daemon that is shutting down and still finishing a job', async () => {
+    const home = tempDir('mindly-live-home-');
+    const statePath = join(home, 'daemon.json');
+    const options = {
+      home,
+      env: { MINDLY_HOME: home },
+      port: 0,
+      dashboardDir: null,
+      jobs: false,
+      runners: fakeRunners(),
+      runtime: { disableNotify: true, disableLlm: true },
+    };
+    const first = await startDaemon(options);
+    let jobDone = false;
+    void first.scheduler.enqueue('slow', async () => {
+      await new Promise((r) => setTimeout(r, 1500));
+      jobDone = true;
+    });
+    const stopped = first.stop();
+    await new Promise((r) => setTimeout(r, 300));
+    // The port is closed and the process alive: only the mark says this is not a crash.
+    expect(await probeDaemonPort(first.port)).toBe('absent');
+    const marked = JSON.parse(readFileSync(statePath, 'utf8')) as { stoppingAt?: number };
+    expect(marked.stoppingAt).toEqual(expect.any(Number));
+    expect(jobDone).toBe(false);
+    await expect(startDaemon({ ...options, stopWaitMs: 200 })).rejects.toThrow(/shutting down/);
+    expect(jobDone).toBe(false);
+    // With time to wait, the new daemon starts once the old one is done, not next to it.
+    daemon = await startDaemon(options);
+    expect(jobDone).toBe(true);
+    await stopped;
+    expect(JSON.parse(readFileSync(statePath, 'utf8'))).toMatchObject({ port: daemon.port });
+    expect(JSON.parse(readFileSync(statePath, 'utf8'))).not.toHaveProperty('stoppingAt');
+  });
+
+  it('a stopping mark that is too old to believe does not block a start', async () => {
+    const home = tempDir('mindly-live-home-');
+    const closed = createServer().listen(0, '127.0.0.1');
+    await once(closed, 'listening');
+    const port = (closed.address() as AddressInfo).port;
+    closed.close();
+    await once(closed, 'close');
+    // A daemon killed in the middle of its shutdown, whose PID another program has by now.
+    writeFileSync(
+      join(home, 'daemon.json'),
+      JSON.stringify({
+        pid: process.pid,
+        port,
+        startedAt: 1,
+        version: '0.0.1',
+        stoppingAt: Date.now() - 60_000,
+      }),
+    );
+    const d = await start(home);
+    expect((await fetch(`${d.url}/api/health`)).status).toBe(200);
+  });
+
+  it("takes another home's daemon on the recorded port for a stale daemon.json", async () => {
+    const other = await start(tempDir('mindly-live-other-'));
+    const home = tempDir('mindly-live-home-');
+    const statePath = join(home, 'daemon.json');
+    writeFileSync(
+      statePath,
+      JSON.stringify({ pid: process.pid, port: other.port, startedAt: 1, version: '0.0.1' }),
+    );
+    const options = {
+      home,
+      env: { MINDLY_HOME: home },
+      dashboardDir: null,
+      jobs: false,
+      runners: fakeRunners(),
+      runtime: { disableNotify: true, disableLlm: true },
+    };
+    // On the same port it cannot listen, and says whose the port is and what to do.
+    await expect(startDaemon({ ...options, port: other.port })).rejects.toThrow(
+      /already in use by another Mindly home's daemon.*mindly config set daemon\.port/,
+    );
+    // On its own port it starts: the file was never about a daemon of this home.
+    const mine = await startDaemon({ ...options, port: 0 });
+    try {
+      expect(JSON.parse(readFileSync(statePath, 'utf8'))).toMatchObject({ port: mine.port });
+      expect((await fetch(`${other.url}/api/health`)).status).toBe(200);
+    } finally {
+      await mine.stop();
+    }
+  });
+
   it('a daemon that loses the port leaves the running daemon and its runs alone', async () => {
     const home = tempDir('mindly-live-home-');
     const d = await start(home);

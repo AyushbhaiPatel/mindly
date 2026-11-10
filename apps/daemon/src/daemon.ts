@@ -6,7 +6,8 @@ import {
   type Logger,
   MINDLY_VERSION,
   MindlyError,
-  probeDaemonPort,
+  daemonHomeId,
+  probeDaemon,
   writeJsonFile,
 } from '@mindly/core';
 import type { Mindly } from '@mindly/engine';
@@ -35,6 +36,11 @@ import { buildServer, defaultDashboardDir } from './server.js';
 export const DAEMON_HOST = '127.0.0.1';
 /** How long shutdown waits for a running job. */
 export const SHUTDOWN_GRACE_MS = 10_000;
+/**
+ * How long a daemon that says it is shutting down is believed: the grace period and some room
+ * for closing sockets and the database. Past that, the mark says nothing any more.
+ */
+export const STOPPING_MARK_MS = SHUTDOWN_GRACE_MS + 5000;
 
 const MINUTE = 60_000;
 
@@ -44,6 +50,22 @@ export interface DaemonState {
   port: number;
   startedAt: number;
   version: string;
+  /**
+   * Set (wall-clock ms) by a daemon the moment it starts shutting down, before it closes its
+   * port: until it removes the file it may still be finishing a job. Absent otherwise, and
+   * always absent after a crash.
+   */
+  stoppingAt?: number;
+}
+
+/** True while the daemon `state` names says it is shutting down and can be believed. */
+export function isStopping(state: DaemonState, now: number = Date.now()): boolean {
+  return (
+    state.stoppingAt !== undefined &&
+    now - state.stoppingAt < STOPPING_MARK_MS &&
+    // A clock set back must not make a mark last for ever.
+    state.stoppingAt - now < STOPPING_MARK_MS
+  );
 }
 
 /** Options for `createDaemon` / `startDaemon`. */
@@ -64,6 +86,11 @@ export interface DaemonOptions {
    * process is never signalled; if it is a daemon on the same port, `listen()` still fails.
    */
   force?: boolean;
+  /**
+   * How long to wait for a daemon that is shutting down before giving up (default
+   * `STOPPING_MARK_MS`, which outlasts its grace period).
+   */
+  stopWaitMs?: number;
   /** Headless agent runners (default `createRunners()`); injectable for tests. */
   runners?: RunnerPort;
   /** Options passed to `openMindly` (e.g. `disableNotify`). */
@@ -116,7 +143,13 @@ export function readDaemonState(path: string): DaemonState | null {
     ) {
       return null;
     }
-    return { pid: raw.pid, port: raw.port, startedAt: raw.startedAt, version: raw.version };
+    return {
+      pid: raw.pid,
+      port: raw.port,
+      startedAt: raw.startedAt,
+      version: raw.version,
+      ...(typeof raw.stoppingAt === 'number' ? { stoppingAt: raw.stoppingAt } : {}),
+    };
   } catch {
     return null;
   }
@@ -126,9 +159,13 @@ export function readDaemonState(path: string): DaemonState | null {
  * Builds a daemon without listening: opens Mindly, loads or creates the token, builds the HTTP
  * app. Refuses to proceed when `daemon.json` names a live process, unless that file is provably
  * left over: after a crash or a restart its PID can belong to another program, and then nothing
- * of Mindly's is on the recorded port (see `probeDaemonPort`). A port that is held open without
+ * of this home's is on the recorded port (see `probeDaemon`). A port that is held open without
  * an answer may be a daemon blocked for a while, and starting a second one next to it would
  * cancel its runs and schedule the same jobs on the same database; that needs `force`.
+ *
+ * A daemon that is shutting down has closed its port but may still be inside a job. It says so
+ * in the file (`stoppingAt`) before closing, and this waits for it to finish. A daemon that was
+ * killed leaves no such mark, so its file is stale at once.
  *
  * The port is `daemon.port` from the config (7878 unless changed) or `options.port`; tests and
  * embedders may pass 0 for an ephemeral one. So two daemons do not always compete for one port,
@@ -148,28 +185,48 @@ export async function createDaemon(options: DaemonOptions = {}): Promise<Daemon>
   let paths: HomePaths;
   try {
     paths = mindly.paths ?? homePaths(options.home ?? '');
-    const existing = readDaemonState(paths.daemonState);
-    if (existing && pidAlive(existing.pid)) {
-      const owner = await probeDaemonPort(existing.port);
-      if (owner === 'daemon') {
+    const home = daemonHomeId(paths.home);
+    const giveUpAt = Date.now() + Math.max(0, options.stopWaitMs ?? STOPPING_MARK_MS);
+    for (;;) {
+      const existing = readDaemonState(paths.daemonState);
+      if (!existing || !pidAlive(existing.pid)) break;
+      if (isStopping(existing)) {
+        if (Date.now() >= giveUpAt) {
+          throw new MindlyError(
+            'conflict',
+            `the Mindly daemon (pid ${existing.pid}) is shutting down and still finishing a job; try again when it has stopped`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 100));
+        continue;
+      }
+      const probe = await probeDaemon(existing.port);
+      // Every home defaults to the same port: a daemon that says it serves another home is not
+      // the one this file is about. One that does not say (an older version) is taken to be.
+      const ours = probe.owner === 'daemon' && (probe.home === null || probe.home === home);
+      if (ours) {
         throw new MindlyError(
           'conflict',
           `a Mindly daemon is already running (pid ${existing.pid}, port ${existing.port})`,
         );
       }
-      if (owner === 'silent' && options.force !== true) {
+      if (probe.owner === 'silent' && options.force !== true) {
         throw new MindlyError(
           'conflict',
           `process ${existing.pid} holds port ${existing.port} and is not answering: it may be a busy Mindly daemon or another program (start with --force to discard the recorded state)`,
         );
       }
       mindly.kernel.logger.warn('ignoring a stale daemon.json', {
-        forced: owner === 'silent',
+        forced: probe.owner === 'silent',
+        otherHome: probe.owner === 'daemon',
         pid: existing.pid,
         port: existing.port,
       });
+      break;
     }
   } catch (err) {
+    // The background daemon's stderr goes nowhere: the log is where the reason is found.
+    mindly.kernel.logger.error('daemon did not start', { error: describeError(err) });
     mindly.close();
     throw err;
   }
@@ -224,10 +281,22 @@ export async function createDaemon(options: DaemonOptions = {}): Promise<Daemon>
       try {
         await app.listen({ host: DAEMON_HOST, port: listener.port });
       } catch (err) {
+        let failure: unknown = err;
         if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
-          throw new MindlyError('conflict', `port ${listener.port} is already in use`);
+          const holder = await probeDaemon(listener.port);
+          const who =
+            holder.owner !== 'daemon'
+              ? 'by another program'
+              : holder.home !== null && holder.home !== daemonHomeId(paths.home)
+                ? "by another Mindly home's daemon (a different MINDLY_HOME)"
+                : 'by a Mindly daemon';
+          failure = new MindlyError(
+            'conflict',
+            `port ${listener.port} is already in use ${who}; choose another with: mindly config set daemon.port <port>`,
+          );
         }
-        throw err;
+        logger.error('daemon did not start', { error: describeError(failure) });
+        throw failure;
       }
       listening = true;
       // Only now is this the one daemon: a second one that lost the port never gets here, so it
@@ -246,6 +315,22 @@ export async function createDaemon(options: DaemonOptions = {}): Promise<Daemon>
     },
     stop() {
       stopping ??= (async () => {
+        // Say so before the port closes: from here on nothing answers there, and without this
+        // mark a daemon started meanwhile would take the file for a crashed daemon's while
+        // this one is still finishing a job on the same database.
+        if (listening) {
+          try {
+            const state = readDaemonState(paths.daemonState);
+            if (state && state.pid === process.pid && state.port === listener.port) {
+              writeJsonFile(paths.daemonState, {
+                ...state,
+                stoppingAt: Date.now(),
+              } satisfies DaemonState);
+            }
+          } catch (err) {
+            logger.warn('could not mark daemon.json as stopping', { error: describeError(err) });
+          }
+        }
         live.close();
         try {
           await app.close();

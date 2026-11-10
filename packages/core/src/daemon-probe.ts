@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { connect } from 'node:net';
+import { resolve as resolvePath } from 'node:path';
 
 /**
  * What is on a port a `daemon.json` names:
@@ -69,14 +72,56 @@ function readAnswer(raw: Buffer, ended: boolean): HttpAnswer | 'incomplete' | 'i
   return ended ? done(rest) : 'incomplete';
 }
 
-function isHealth(answer: HttpAnswer): boolean {
-  if (answer.status !== 200) return false;
+/** What a port said about itself (see {@link PortOwner}). */
+export interface DaemonProbe {
+  owner: PortOwner;
+  /** PID of the daemon that answered; null when it did not say (or nothing answered). */
+  pid: number | null;
+  /** {@link daemonHomeId} of the daemon that answered; null when it did not say. */
+  home: string | null;
+}
+
+/**
+ * A short id of a Mindly home, for telling one home's daemon from another's: every home uses
+ * the same default port, so "a Mindly daemon answers there" does not say whose it is. It is a
+ * hash of the resolved path, never the path itself (the health endpoint needs no login).
+ */
+export function daemonHomeId(home: string): string {
+  let real: string;
   try {
-    const body = JSON.parse(answer.body) as { ok?: unknown; version?: unknown } | null;
-    return body?.ok === true && typeof body.version === 'string';
+    real = realpathSync(home);
   } catch {
-    return false;
+    real = resolvePath(home);
   }
+  return createHash('sha256').update(real).digest('hex').slice(0, 16);
+}
+
+function readHealth(answer: HttpAnswer): DaemonProbe | null {
+  if (answer.status !== 200) return null;
+  try {
+    const body = JSON.parse(answer.body) as {
+      ok?: unknown;
+      version?: unknown;
+      pid?: unknown;
+      home?: unknown;
+    } | null;
+    if (body?.ok !== true || typeof body.version !== 'string') return null;
+    return {
+      owner: 'daemon',
+      pid: typeof body.pid === 'number' && Number.isInteger(body.pid) ? body.pid : null,
+      home: typeof body.home === 'string' && /^[0-9a-f]{8,64}$/.test(body.home) ? body.home : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** {@link probeDaemon}, reduced to who is there. */
+export async function probeDaemonPort(
+  port: number,
+  timeoutMs: number = DAEMON_PROBE_TIMEOUT_MS,
+): Promise<PortOwner> {
+  return (await probeDaemon(port, timeoutMs)).owner;
 }
 
 /**
@@ -87,27 +132,28 @@ function isHealth(answer: HttpAnswer): boolean {
  * answers in another protocol, is clearly not a Mindly daemon (`absent`), while a connection
  * that stays open without an answer may be one that is busy (`silent`).
  */
-export function probeDaemonPort(
+export function probeDaemon(
   port: number,
   timeoutMs: number = DAEMON_PROBE_TIMEOUT_MS,
-): Promise<PortOwner> {
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) return Promise.resolve('absent');
+): Promise<DaemonProbe> {
+  const none = (owner: PortOwner): DaemonProbe => ({ owner, pid: null, home: null });
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return Promise.resolve(none('absent'));
   return new Promise((resolve) => {
     let received = Buffer.alloc(0);
     let settled = false;
     const socket = connect({ host: DAEMON_PROBE_HOST, port });
-    const finish = (owner: PortOwner): void => {
+    const finish = (result: DaemonProbe | PortOwner): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       socket.destroy();
-      resolve(owner);
+      resolve(typeof result === 'string' ? none(result) : result);
     };
     // Whatever was said so far, a peer that hangs up has shown it is not stuck.
     const judge = (ended: boolean): void => {
       const answer = readAnswer(received, ended);
       if (answer === 'incomplete') return;
-      finish(answer !== 'invalid' && isHealth(answer) ? 'daemon' : 'absent');
+      finish((answer === 'invalid' ? null : readHealth(answer)) ?? 'absent');
     };
     const timer = setTimeout(() => finish('silent'), Math.max(1, timeoutMs));
     socket.on('connect', () => {

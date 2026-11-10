@@ -1,7 +1,7 @@
 import { once } from 'node:events';
 import { createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { probeDaemonPort } from '../src/index.js';
+import { daemonHomeId, probeDaemon, probeDaemonPort } from '../src/index.js';
 
 const servers: Server[] = [];
 const sockets: Socket[] = [];
@@ -63,6 +63,23 @@ describe('probeDaemonPort', () => {
       ),
     );
     expect(await probeDaemonPort(untilClose)).toBe('daemon');
+  });
+
+  it('reports which daemon answered, when it says so', async () => {
+    const home = daemonHomeId('/some/home');
+    expect(home).toMatch(/^[0-9a-f]{16}$/);
+    expect(daemonHomeId('/some/home/')).toBe(home);
+    expect(daemonHomeId('/another/home')).not.toBe(home);
+    const body = JSON.stringify({ ok: true, version: '0.5.0', pid: 4242, home });
+    const says = await listen(afterRequest((s) => s.end(http('200 OK', body))));
+    expect(await probeDaemon(says)).toEqual({ owner: 'daemon', pid: 4242, home });
+    // An older daemon does not say; garbage in those fields is not believed.
+    const quiet = await listen(afterRequest((s) => s.end(http('200 OK', HEALTH))));
+    expect(await probeDaemon(quiet)).toEqual({ owner: 'daemon', pid: null, home: null });
+    const odd = JSON.stringify({ ok: true, version: '0.5.0', pid: '1', home: '../etc' });
+    const garbled = await listen(afterRequest((s) => s.end(http('200 OK', odd))));
+    expect(await probeDaemon(garbled)).toEqual({ owner: 'daemon', pid: null, home: null });
+    expect(await probeDaemon(0)).toEqual({ owner: 'absent', pid: null, home: null });
   });
 
   it('nothing listening is absent', async () => {
