@@ -391,7 +391,7 @@ export function createGitPort(): GitPort {
                   // Ignored files too, with `git stash -a`.
                   ...(query.ignored ? [] : ['--exclude-standard']),
                   '--',
-                  ...query.pathspecs,
+                  ...(query.untrackedIn ?? query.pathspecs),
                 ],
                 options,
               )

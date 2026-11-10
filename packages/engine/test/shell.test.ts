@@ -389,7 +389,7 @@ describe('write targets of a shell command', () => {
     // would answer.
     for (const cmd of [
       'git reset && git checkout -- secret/key.txt',
-      'git add -A && git commit -qm wip && git checkout HEAD~1 -- secret/key.txt',
+      'git commit -qm wip && git checkout HEAD@{1} -- secret/key.txt',
       'git stash && git checkout stash@{0} -- secret/key.txt',
       'git branch -f main origin/main; git checkout main -- secret/key.txt',
       './sync.sh && git checkout -- secret/key.txt',
@@ -437,12 +437,49 @@ describe('write targets of a shell command', () => {
     expect(
       readShellWrites('git add -A && git commit -qm wip && git switch feature').questions[0],
     ).toMatchObject({ against: ['feature'], untracked: true });
-    // A stash put away and brought back on the same line is counted once, with the first.
-    expect(
-      readShellWrites('git stash && git checkout feature && git stash pop').questions.map((x) =>
-        x.against.join(' '),
-      ),
-    ).toEqual(['HEAD', '', 'HEAD feature']);
+    // A stash taken back after others were put away on the line: one of those, or one of the
+    // stashes there now, a place further down for each taken off before.
+    const against = (cmd: string) =>
+      readShellWrites(cmd, { home: HOME, top: TOP }).questions.map((x) => x.against.join(' '));
+    expect(against('git stash && git checkout feature && git stash pop')).toEqual([
+      'HEAD',
+      '',
+      'HEAD feature',
+      'stash@{0}^1 stash@{0}',
+      'stash@{0}^3',
+    ]);
+    expect(against('git stash drop && git stash pop')).toEqual([
+      'stash@{1}^1 stash@{1}',
+      'stash@{1}^3',
+    ]);
+    expect(against('git stash && git stash pop stash@{1}')).toEqual([
+      'HEAD',
+      'stash@{0}^1 stash@{0}',
+      'stash@{1}^1 stash@{1}',
+      'stash@{0}^3',
+      'stash@{1}^3',
+    ]);
+    // In another repository the list is another one.
+    expect(against('git -C ../other stash && git stash pop')).toEqual([
+      'HEAD',
+      'stash@{0}^1 stash@{0}',
+      'stash@{0}^3',
+    ]);
+    // A commit moves what `HEAD~n` names; a switch moves HEAD itself.
+    expect(against('git commit -qam wip && git reset --hard HEAD~1')).toEqual(['HEAD']);
+    expect(against('git commit -qam wip && git switch -')).toEqual(['@{-1}']);
+    expect(against('git add -A && git commit -qm wip && git merge x')).toEqual(['HEAD...x']);
+    expect(against('git switch feature && git merge x')).toEqual(['HEAD feature', 'feature...x']);
+    // `git add` of some paths takes only their untracked files; `-u` takes none.
+    expect(readShellWrites('git add src && git stash').questions[0]).toMatchObject({
+      untracked: true,
+      untrackedIn: ['src'],
+    });
+    expect(readShellWrites('git add -u && git stash').questions[0]).toMatchObject({
+      untracked: false,
+    });
+    // A fetch into a local branch moves it.
+    expect(against('git fetch -q origin feature:feature && git checkout feature')).toEqual([]);
     // Looking around first changes nothing, nor does a folder of the same tree.
     for (const cmd of [
       'git status && git checkout -- secret/key.txt',
@@ -486,9 +523,13 @@ describe('write targets of a shell command', () => {
     ]);
     expect(ask('git merge other')).toEqual(['HEAD...other']);
     expect(ask('git merge -m msg a b')).toEqual(['HEAD...a', 'HEAD...b']);
-    expect(ask('git cherry-pick -x abc123')).toEqual(['abc123^ abc123']);
-    expect(ask('git revert a..b')).toEqual(['a b']);
-    expect(ask('git rebase main')).toEqual(['HEAD main']);
+    expect(ask('git cherry-pick -x abc123')).toEqual(['abc123^1 abc123']);
+    expect(ask('git cherry-pick -m 2 abc123')).toEqual(['abc123^2 abc123']);
+    expect(ask('git revert a..b')).toEqual(['a...b']);
+    expect(ask('git rebase main')).toEqual(['HEAD...main']);
+    expect(ask('git rebase')).toEqual(['HEAD...@{upstream}']);
+    expect(ask('git merge -')).toEqual(['HEAD...@{-1}']);
+    expect(ask('git rebase --autostash main')).toEqual(['HEAD', 'HEAD...main']);
     // What cannot be asked is a possible write of the tracked files: a warning at most.
     for (const cmd of ['git pull', 'git am x.mbox', 'git apply x.patch', 'git merge --abort']) {
       const reading = readShellWrites(cmd, { home: HOME, top: TOP });

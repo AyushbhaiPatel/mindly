@@ -677,9 +677,14 @@ export class HookHandler {
     // that matches nothing changes nothing.
     // git compares every file of the tree: on a large one that takes longer than a listing. It
     // gets what the hook can spare, keeping enough to search what is written afterwards.
+    // Never past the hook's own deadline.
     const timeoutMs = Math.floor(
-      Math.max(GIT_QUESTION_MS, Math.min(GIT_QUESTION_MAX_MS, timeLeft() - SEARCH_RESERVE_MS)),
+      Math.min(
+        timeLeft(),
+        Math.max(GIT_QUESTION_MS, Math.min(GIT_QUESTION_MAX_MS, timeLeft() - SEARCH_RESERVE_MS)),
+      ),
     );
+    if (timeoutMs < 50) return null;
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((done) => {
       timer = setTimeout(() => done(null), timeoutMs + 50);
@@ -698,6 +703,7 @@ export class HookHandler {
             guess: q.guess,
             listTree: q.listTree,
             stale: q.stale,
+            ...(q.untrackedIn !== undefined ? { untrackedIn: q.untrackedIn } : {}),
             ...(known !== undefined ? { root: known } : {}),
             timeoutMs,
           })
