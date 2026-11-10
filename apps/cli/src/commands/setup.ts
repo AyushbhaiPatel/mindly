@@ -20,6 +20,7 @@ import {
 import {
   defaultUserConfig,
   ensureHome,
+  MINDLY_VERSION,
   mindlyHome,
   resolveLayout,
   writeJsonFile,
@@ -173,8 +174,36 @@ export function cliEntry(): string {
 export async function installCommand(env: NodeJS.ProcessEnv): Promise<string[]> {
   const running = process.argv[1];
   const global = await onPath('mindly', env);
-  if (global && running && sameFile(global, running)) return [global];
-  return [process.execPath, cliEntry()];
+  const command =
+    global && running && sameFile(global, running) ? [global] : [process.execPath, cliEntry()];
+  // `npx mindly-cli init` runs from a package runner's cache. That cache is disposable: clearing
+  // it would break every hook and MCP entry pointing into it. Ask the runner for this exact
+  // version instead; it reuses its cache while the cache is there and fetches the package again
+  // when it is not.
+  if (inRunnerCache(command[command.length - 1] as string)) {
+    return ['npx', '--yes', `mindly-cli@${MINDLY_VERSION}`];
+  }
+  return command;
+}
+
+/**
+ * True when `path` lies in the temporary cache of a package runner (`npx`, `pnpm dlx`,
+ * `yarn dlx`, `bunx`) rather than in an installed package.
+ */
+export function inRunnerCache(path: string): boolean {
+  let real = path;
+  try {
+    real = realpathSync(path);
+  } catch {
+    // keep the path as given
+  }
+  const p = real.replace(/\\/g, '/');
+  return (
+    /\/_npx\//.test(p) ||
+    /\/dlx[-/]/.test(p) ||
+    /\/\.bun\/install\/cache\//.test(p) ||
+    /\/bunx-[^/]+\//.test(p)
+  );
 }
 
 async function projectRootOf(cwd: string): Promise<string> {
@@ -302,6 +331,13 @@ export async function init(out: Out, o: SetupOptions): Promise<number> {
       `Agents will reach Mindly by running: ${command.join(' ')}${projectRoot ? ` (for the project ${projectRoot} only)` : ' (for all your projects)'}`,
     ),
   );
+  if (command[0] === 'npx') {
+    out.line(
+      out.style.dim(
+        'Mindly is running from a temporary package, so agents will start it through npx. Hooks start faster after a global install (npm i -g mindly-cli) and running mindly init again.',
+      ),
+    );
+  }
   out.line();
   const plans = skipReadOnly(out, planned, 'connect');
   const total = printPlan(out, plans, 'already configured');
