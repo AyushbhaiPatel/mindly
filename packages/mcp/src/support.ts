@@ -57,7 +57,27 @@ export interface ScopedProject extends ProjectContext {
 /** The project and calling session a tool call operates on. */
 export interface CallScope {
   project: ScopedProject;
+  /**
+   * The session the call speaks for. On a guess its `currentTaskId` is the server's own current
+   * task, not the other window's.
+   */
   session: Session;
+  /** Present while the server speaks for a session it only guessed at. */
+  guess?: GuessScope;
+}
+
+/** What a call made on a guessed session records of its own work. */
+export interface GuessScope {
+  /** The guessed session (the one in the store; `CallScope.session` is a view of it). */
+  sessionId: string;
+  /** The session whose work a handoff from this call describes: the server's own, not the window's. */
+  workOf: Session;
+  /** Notes a row this call wrote; it goes along with the server until it is home. */
+  note(kind: 'intent' | 'task' | 'message', id: string): void;
+  /** Notes the task this call made the server's current one. */
+  noteCurrentTask(taskId: string): void;
+  /** True when the server wrote this row while on a guess. */
+  wrote(kind: 'intent' | 'task', id: string): boolean;
 }
 
 /** Sliding-window rate limiter (per server process). */

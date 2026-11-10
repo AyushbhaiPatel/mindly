@@ -1,4 +1,5 @@
 import {
+  fingerprint,
   notFound,
   uuidv7,
   type Clock,
@@ -230,48 +231,94 @@ export class SessionRepo {
    * transaction. Returns how many rows moved.
    */
   /**
-   * Moves particular rows from one session to another, for a server that spoke for a session it
-   * only guessed at and leaves it: active intents and unfinished tasks are given with the
-   * `updatedAt` they had when that server last wrote them, and move only while they still
-   * belong to `fromId` and nobody changed them since; messages move while `fromId` is still
-   * their sender. Anything else is left where it is: when it is not clear whose a row is, it
-   * stays. Current tasks are not touched. Returns the ids that moved and the time they now carry.
+   * What a task or an intent looks like now, to tell later whether anyone changed it: its
+   * `updated_at` and a fingerprint of its content (two writes in one millisecond leave the time
+   * as it was). Null when there is no such row.
+   */
+  rowStamp(kind: 'task' | 'intent', id: string): { updatedAt: number; sig: string } | null {
+    if (kind === 'task') {
+      const r = this.db
+        .prepare(
+          `SELECT updated_at, title, description, status, owner_session_id, parent_id, plan, blockers
+             FROM tasks WHERE id = ?`,
+        )
+        .get(id) as Row | undefined;
+      if (!r) return null;
+      const sig = fingerprint(
+        'task',
+        str(r, 'title'),
+        str(r, 'description'),
+        str(r, 'status'),
+        strOrNull(r, 'owner_session_id') ?? '',
+        strOrNull(r, 'parent_id') ?? '',
+        str(r, 'plan'),
+        str(r, 'blockers'),
+      );
+      return { updatedAt: num(r, 'updated_at'), sig };
+    }
+    const r = this.db
+      .prepare(
+        `SELECT updated_at, summary, status, session_id, task_id, expires_at,
+                (SELECT count(*) FROM intent_targets t WHERE t.intent_id = intents.id) AS targets
+           FROM intents WHERE id = ?`,
+      )
+      .get(id) as Row | undefined;
+    if (!r) return null;
+    const sig = fingerprint(
+      'intent',
+      str(r, 'summary'),
+      str(r, 'status'),
+      str(r, 'session_id'),
+      strOrNull(r, 'task_id') ?? '',
+      String(num(r, 'expires_at')),
+      String(num(r, 'targets')),
+    );
+    return { updatedAt: num(r, 'updated_at'), sig };
+  }
+
+  /**
+   * Moves particular rows from one session to another, for an MCP server that spoke for a
+   * session it only guessed at and leaves it. Intents and tasks are given as they looked after
+   * that server last wrote them (`rowStamp`), and move only while they still belong to `fromId`
+   * and look just the same; messages move while `fromId` is still their sender. Anything else
+   * stays where it is: when it is not clear whose a row is, it is left. Current tasks are not
+   * touched. Returns the ids that moved.
    */
   moveRows(
     fromId: string,
     toId: string,
     rows: {
-      intents: readonly { id: string; updatedAt: number }[];
-      tasks: readonly { id: string; updatedAt: number }[];
+      intents: readonly { id: string; updatedAt: number; sig: string }[];
+      tasks: readonly { id: string; updatedAt: number; sig: string }[];
       messages: readonly string[];
     },
-  ): { intents: string[]; tasks: string[]; messages: string[]; at: number } {
-    const now = this.clock.now();
-    const out = {
-      intents: [] as string[],
-      tasks: [] as string[],
-      messages: [] as string[],
-      at: now,
-    };
+  ): { intents: string[]; tasks: string[]; messages: string[] } {
+    const out = { intents: [] as string[], tasks: [] as string[], messages: [] as string[] };
     if (fromId === toId) return out;
+    const now = this.clock.now();
     transaction(this.db, () => {
+      const unchanged = (
+        kind: 'task' | 'intent',
+        r: { id: string; updatedAt: number; sig: string },
+      ): boolean => {
+        const stamp = this.rowStamp(kind, r.id);
+        return stamp !== null && stamp.updatedAt === r.updatedAt && stamp.sig === r.sig;
+      };
       const intent = this.db.prepare(
         `UPDATE intents SET session_id = ?, updated_at = ?
-           WHERE id = ? AND session_id = ? AND updated_at = ? AND status = 'active'`,
+           WHERE id = ? AND session_id = ? AND status = 'active'`,
       );
       for (const r of rows.intents.slice(0, 500)) {
-        if (Number(intent.run(toId, now, r.id, fromId, r.updatedAt).changes) > 0) {
-          out.intents.push(r.id);
-        }
+        if (!unchanged('intent', r)) continue;
+        if (Number(intent.run(toId, now, r.id, fromId).changes) > 0) out.intents.push(r.id);
       }
       const task = this.db.prepare(
         `UPDATE tasks SET owner_session_id = ?, updated_at = ?
-           WHERE id = ? AND owner_session_id = ? AND updated_at = ?
-             AND status IN ('open', 'in_progress', 'blocked')`,
+           WHERE id = ? AND owner_session_id = ? AND status IN ('open', 'in_progress', 'blocked')`,
       );
       for (const r of rows.tasks.slice(0, 500)) {
-        if (Number(task.run(toId, now, r.id, fromId, r.updatedAt).changes) > 0)
-          out.tasks.push(r.id);
+        if (!unchanged('task', r)) continue;
+        if (Number(task.run(toId, now, r.id, fromId).changes) > 0) out.tasks.push(r.id);
       }
       const message = this.db.prepare(
         'UPDATE deliveries SET source_session_id = ? WHERE id = ? AND source_session_id = ?',

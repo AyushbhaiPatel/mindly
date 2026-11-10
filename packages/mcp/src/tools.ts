@@ -151,22 +151,32 @@ function ensureProject(scope: CallScope, projectId: string, what: string, id: st
 }
 
 /**
- * Runs `fn` (which may make a task the session's current one) without changing the current task
- * of a session the server only guessed at: that is the other window's. The server keeps its own
- * current task and sets it once it speaks for a session that is its own.
+ * Runs a tool call made on a guessed session without changing that session's current task,
+ * which is the other window's: whatever the call made current (a task it created or claimed, a
+ * handoff it picked up) is put back, and becomes the server's own current task instead. A task
+ * the call moved to the session is recorded as the server's work.
  */
-function guardCurrentTask<T>(
+async function onGuess(
   mindly: Mindly,
-  sessions: SessionResolver,
   scope: CallScope,
-  fn: () => T,
-): T {
-  if (!sessions.guessing) return fn();
-  const before = mindly.store.sessions.get(scope.session.id).currentTaskId;
+  run: () => Promise<CallToolResult>,
+): Promise<CallToolResult> {
+  const guess = scope.guess;
+  if (!guess) return run();
+  const before = mindly.store.sessions.find(guess.sessionId);
+  const ownedBefore = new Set(mindly.store.tasks.ownedBy(guess.sessionId).map((t) => t.id));
   try {
-    return fn();
+    return await run();
   } finally {
-    mindly.store.sessions.setCurrentTask(scope.session.id, before);
+    const after = mindly.store.sessions.find(guess.sessionId);
+    const made = after?.currentTaskId ?? null;
+    if (before && made !== before.currentTaskId) {
+      mindly.store.sessions.setCurrentTask(guess.sessionId, before.currentTaskId);
+      if (made && mindly.store.tasks.find(made)?.ownerSessionId === guess.sessionId) {
+        if (!ownedBefore.has(made) || guess.wrote('task', made)) guess.note('task', made);
+        guess.noteCurrentTask(made);
+      }
+    }
   }
 }
 
@@ -185,8 +195,6 @@ function requireTitle(title: string): void {
 /** Registers every `mindly_*` tool on `server`. */
 export function registerTools(server: McpServer, deps: ToolDeps): void {
   const { mindly, sessions, messages, logger } = deps;
-  const keepCurrentTask = <T>(scope: CallScope, fn: () => T): T =>
-    guardCurrentTask(mindly, sessions, scope, fn);
   const now = (): number => mindly.kernel.clock.now();
 
   function tool<S extends z.ZodObject>(
@@ -215,7 +223,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
             );
           }
           const scope = await sessions.resolve();
-          return await handler(parsed.data, scope);
+          return await onGuess(mindly, scope, async () => handler(parsed.data, scope));
         } catch (err) {
           return toolError(err, name, logger);
         }
@@ -495,7 +503,8 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       }),
       annotations: WRITE,
     },
-    (args, { project, session }) => {
+    (args, scope) => {
+      const { project, session } = scope;
       const placed = args.files.map((f) => placePath(mindly, project, f));
       const files = [...new Set(placed.map((p) => p.rel))];
       // How a path was read when that is not obvious (two files it could mean, a folder that is
@@ -507,7 +516,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         files,
         args.symbols ?? [],
       );
-      sessions.noteWork('intent', intent.id, intent.updatedAt);
+      scope.guess?.note('intent', intent.id);
       const warnings = overlap.warnings.map((w) => safeLine(w, 400));
       const sections: Section[] = [
         { heading: 'Coordination warnings', lines: warnings.map((w) => `- ${w}`) },
@@ -553,21 +562,18 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         if (!parent) throw notFound('task', args.parentId);
         ensureProject(scope, parent.projectId, 'task', args.parentId);
       }
-      const t = keepCurrentTask(scope, () =>
-        mindly.tasks.create({
-          projectId: scope.project.project.id,
-          title: args.title,
-          ...(args.description !== undefined
-            ? { description: safeText(args.description, 4000) }
-            : {}),
-          ...(args.plan ? { plan: args.plan } : {}),
-          owner: args.assignToMe === false ? null : scope.session,
-          parentId: args.parentId ?? null,
-        }),
-      );
+      const t = mindly.tasks.create({
+        projectId: scope.project.project.id,
+        title: args.title,
+        ...(args.description !== undefined
+          ? { description: safeText(args.description, 4000) }
+          : {}),
+        ...(args.plan ? { plan: args.plan } : {}),
+        owner: args.assignToMe === false ? null : scope.session,
+        parentId: args.parentId ?? null,
+      });
       if (t.ownerSessionId === scope.session.id) {
-        sessions.noteWork('task', t.id, t.updatedAt);
-        sessions.noteCurrentTask(t.id);
+        scope.guess?.note('task', t.id);
       }
       return ok(`Created task ${t.id}: ${safeLine(t.title, 200)} (${t.status}).`, {
         task: taskSummary(t),
@@ -612,7 +618,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         },
         scope.session,
       );
-      if (sessions.wrote('task', t.id)) sessions.noteWork('task', t.id, t.updatedAt);
+      if (scope.guess?.wrote('task', t.id)) scope.guess.note('task', t.id);
       return ok(`Updated task ${t.id}: ${safeLine(t.title, 200)} (${t.status}).`, {
         task: taskSummary(t),
       });
@@ -635,12 +641,11 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       if (cur.status === 'done' || cur.status === 'abandoned') {
         throw new MindlyError('conflict', `task is ${cur.status}`);
       }
-      const t = keepCurrentTask(scope, () => mindly.tasks.claim(args.id, scope.session));
+      const t = mindly.tasks.claim(args.id, scope.session);
       // A task the guessed session already owned is that session's own work, not this server's,
       // unless this server made it.
-      if (cur.ownerSessionId !== scope.session.id || sessions.wrote('task', t.id)) {
-        sessions.noteWork('task', t.id, t.updatedAt);
-        sessions.noteCurrentTask(t.id);
+      if (cur.ownerSessionId !== scope.session.id || scope.guess?.wrote('task', t.id)) {
+        scope.guess?.note('task', t.id);
       }
       return ok(`Claimed task ${t.id}: ${safeLine(t.title, 200)}.`, { task: taskSummary(t) });
     },
@@ -816,7 +821,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         body: args.body ?? '',
         priority: args.priority ?? 2,
       });
-      for (const d of sent) sessions.noteWork('message', d.id);
+      for (const d of sent) scope.guess?.note('message', d.id);
       return ok(`Queued ${sent.length} message(s).`, { deliveries: sent.map((d) => d.id) });
     },
   );
@@ -892,8 +897,11 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       }),
       annotations: WRITE,
     },
-    async (args, { session }) => {
+    async (args, scope) => {
+      const { session } = scope;
       const h = await failoverService(mindly).handoffs.create(session, {
+        // On a guess: the server's own work, never the other window's task, prompts or files.
+        ...(scope.guess ? { workOf: scope.guess.workOf } : {}),
         summary: args.summary,
         toAgentKind: args.toAgentKind ?? null,
         ...(args.nextSteps ? { nextSteps: args.nextSteps } : {}),
