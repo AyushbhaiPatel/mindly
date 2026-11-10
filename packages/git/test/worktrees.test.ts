@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -5,7 +6,7 @@ import { isMindlyError } from '@mindly/core';
 import {
   addWorktree,
   branchExists,
-  commitsOnlyOn,
+  branchOnlyWork,
   deleteBranch,
   listFiles,
   listWorktrees,
@@ -13,6 +14,16 @@ import {
   removeWorktree,
 } from '../src/index.js';
 import { commitAll, git, makeRepo, tempDir, write } from './helpers.js';
+
+/** The commits only `branch` has, as `branchOnlyWork` lists them. */
+async function only(
+  root: string,
+  branch: string,
+  ignoring: string[] = [],
+  max?: number,
+): Promise<{ commit: string; subject: string }[]> {
+  return (await branchOnlyWork(root, branch, { ignoring, ...(max ? { max } : {}) })).commits;
+}
 
 /** A snapshot of everything a split must never change in the main working tree. */
 function mainState(root: string): { head: string; branch: string; status: string; refs: string } {
@@ -105,32 +116,32 @@ describe('worktrees', () => {
     const b = join(dir, 'b');
     await addWorktree(root, a, 'mindly/demo/a', 'HEAD');
     await addWorktree(root, b, 'mindly/demo/b', 'HEAD');
-    expect(await commitsOnlyOn(root, 'mindly/demo/a')).toEqual([]);
+    expect(await only(root, 'mindly/demo/a')).toEqual([]);
     write(a, 'a.txt', 'a\n');
     commitAll(a, 'first in a');
     write(a, 'a2.txt', 'a2\n');
     commitAll(a, 'second in a');
     const second = git(a, 'rev-parse', 'HEAD').trim();
-    expect((await commitsOnlyOn(root, 'mindly/demo/a')).map((c) => c.subject)).toEqual([
+    expect((await only(root, 'mindly/demo/a')).map((c) => c.subject)).toEqual([
       'second in a',
       'first in a',
     ]);
-    expect((await commitsOnlyOn(root, 'mindly/demo/a', [], 1))[0]).toEqual({
+    expect((await only(root, 'mindly/demo/a', [], 1))[0]).toEqual({
       commit: second,
       subject: 'second in a',
     });
     // Merged into another branch: nothing is lost by deleting it, unless that one goes too.
     git(root, 'branch', 'integration', 'mindly/demo/a');
-    expect(await commitsOnlyOn(root, 'mindly/demo/a')).toEqual([]);
+    expect(await only(root, 'mindly/demo/a')).toEqual([]);
     git(b, 'merge', '-q', '--no-edit', 'mindly/demo/a');
     git(root, 'branch', '-D', 'integration');
-    expect(await commitsOnlyOn(root, 'mindly/demo/a')).toEqual([]);
-    expect(await commitsOnlyOn(root, 'mindly/demo/a', ['mindly/demo/b'])).toHaveLength(2);
+    expect(await only(root, 'mindly/demo/a')).toEqual([]);
+    expect(await only(root, 'mindly/demo/a', ['mindly/demo/b'])).toHaveLength(2);
     // A tag holds commits too; a missing branch has none.
     git(root, 'tag', 'kept', 'mindly/demo/a');
-    expect(await commitsOnlyOn(root, 'mindly/demo/a', ['mindly/demo/b'])).toEqual([]);
-    expect(await commitsOnlyOn(root, 'mindly/demo/none')).toEqual([]);
-    await expect(commitsOnlyOn(root, 'bad..name')).rejects.toThrow();
+    expect(await only(root, 'mindly/demo/a', ['mindly/demo/b'])).toEqual([]);
+    expect(await only(root, 'mindly/demo/none')).toEqual([]);
+    await expect(only(root, 'bad..name')).rejects.toThrow();
   });
 
   it('sees commits merged by a split merge as held, whatever their dates', async () => {
@@ -157,13 +168,102 @@ describe('worktrees', () => {
     });
     expect(merged.status).toBe('merged');
     const parts = keys.map((k) => `mindly/demo/${k}`);
-    for (const p of parts) expect(await commitsOnlyOn(root, p, parts)).toEqual([]);
+    for (const p of parts) expect(await only(root, p, parts)).toEqual([]);
     // A commit made on a part branch after the merge is only there.
     write(join(dir, 'api'), 'late.txt', 'late\n');
     const late = commitAll(join(dir, 'api'), 'late work');
-    expect(await commitsOnlyOn(root, 'mindly/demo/api', parts)).toEqual([
+    expect(await only(root, 'mindly/demo/api', parts)).toEqual([
       { commit: late, subject: 'late work' },
     ]);
+  });
+
+  it('finds a commit made after a merge even when its date is older than every other', async () => {
+    const root = makeRepo({ 'README.md': '# a\n' });
+    for (let i = 0; i < 8; i++) {
+      write(root, 'history.txt', `${i}\n`);
+      commitAll(root, `history ${i}`);
+    }
+    const dir = tempDir();
+    const path = join(dir, 'api');
+    await addWorktree(root, path, 'mindly/demo/api', 'HEAD');
+    for (let i = 0; i < 60; i++) {
+      write(path, 'api.txt', `${i}\n`);
+      commitAll(path, `api ${i}`);
+    }
+    expect(
+      await mergeIntoNewBranch({
+        repoRoot: root,
+        branch: 'mindly/demo/integration',
+        base: 'HEAD',
+        sources: [{ label: 'api', ref: 'mindly/demo/api' }],
+      }),
+    ).toMatchObject({ status: 'merged' });
+    // A clock set far back: the new commit is dated before everything else in the repository.
+    write(path, 'late.txt', 'late\n');
+    git(path, 'add', '-A');
+    execFileSync('git', ['commit', '-q', '--no-verify', '-m', 'late work'], {
+      cwd: path,
+      env: {
+        PATH: process.env['PATH'],
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_AUTHOR_NAME: 'Test Author',
+        GIT_AUTHOR_EMAIL: 'author@example.invalid',
+        GIT_COMMITTER_NAME: 'Test Author',
+        GIT_COMMITTER_EMAIL: 'author@example.invalid',
+        GIT_AUTHOR_DATE: '2001-01-01T00:00:00Z',
+        GIT_COMMITTER_DATE: '2001-01-01T00:00:00Z',
+      },
+    });
+    const late = git(path, 'rev-parse', 'HEAD').trim();
+    expect(await only(root, 'mindly/demo/api', ['mindly/demo/api'])).toEqual([
+      { commit: late, subject: 'late work' },
+    ]);
+  });
+
+  it('says when another branch already has the content of commits only a branch has', async () => {
+    const root = makeRepo({ 'README.md': '# a\n' });
+    const dir = tempDir();
+    const path = join(dir, 'api');
+    await addWorktree(root, path, 'mindly/demo/api', 'HEAD');
+    write(path, 'api.txt', 'api\n');
+    commitAll(path, 'api work');
+    const ask = () =>
+      branchOnlyWork(root, 'mindly/demo/api', {
+        ignoring: ['mindly/demo/api'],
+        contentIn: ['mindly/demo/integration', 'main'],
+      });
+    const before = await ask();
+    expect(before.commits).toHaveLength(1);
+    expect(before.contentIn).toBeNull();
+    // Squash-merged into main, as a pull request does: the commits are gone, the content is not.
+    git(root, 'merge', '-q', '--squash', 'mindly/demo/api');
+    commitAll(root, 'Add api (#1)');
+    const squashed = await ask();
+    expect(squashed.commits).toHaveLength(1);
+    expect(squashed.contentIn).toBe('refs/heads/main');
+    // A later commit main does not have is lost again.
+    write(path, 'late.txt', 'late\n');
+    commitAll(path, 'late work');
+    const late = await ask();
+    expect(late.commits.map((c) => c.subject)).toEqual(['late work', 'api work']);
+    expect(late.contentIn).toBeNull();
+    expect(late.tip).toBe(git(path, 'rev-parse', 'HEAD').trim());
+  });
+
+  it('deletes a branch only while it is where it was checked', async () => {
+    const root = makeRepo();
+    const path = join(tempDir(), 'part');
+    const made = await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    write(path, 'late.txt', 'late\n');
+    const late = commitAll(path, 'late');
+    await removeWorktree(root, path);
+    await expect(deleteBranch(root, 'mindly/demo/p', made.commit)).rejects.toSatisfy((e) =>
+      isMindlyError(e, 'conflict'),
+    );
+    expect(git(root, 'rev-parse', 'mindly/demo/p').trim()).toBe(late);
+    expect(await deleteBranch(root, 'mindly/demo/p', late)).toBe(true);
+    expect(await branchExists(root, 'mindly/demo/p')).toBe(false);
   });
 
   it('lists tracked and untracked files, not ignored ones', async () => {

@@ -465,8 +465,10 @@ export async function splitAbort(
         );
       }
     }
-    // After a merge, -y alone never removes work the merged branch does not have.
-    let discard = o.discard === true;
+    // After a merge, -y alone never removes work the merged branch does not have. A "yes" on the
+    // terminal covers what was listed above, nothing that appears while the question is open.
+    const discard = o.discard === true;
+    let confirmed: SplitUnmergedWork[] | undefined;
     if (!o.json || !o.yes) {
       if (!o.yes && unmerged.length > 0) {
         out.warn(
@@ -480,17 +482,26 @@ export async function splitAbort(
         o.yes === true,
       );
       if (!ok) return 1;
-      if (!o.yes) discard = true;
+      if (!o.yes) confirmed = unmerged;
     }
     let a: SplitAbortResult;
     try {
-      a = await svc.abort(id, { keepBranches, discardUncommitted: discard });
+      a = await svc.abort(id, {
+        keepBranches,
+        discardUncommitted: discard,
+        ...(confirmed ? { confirmed } : {}),
+      });
     } catch (err) {
       if (isMindlyError(err, 'conflict') && Array.isArray(err.details?.['uncommitted'])) {
+        const merged = err.details?.['mergedBranch'];
         throw new HintedError(
           'conflict',
           err.message,
-          `Commit it on the part branch and merge it into ${split.integrationBranch ?? 'the merged branch'}, keep the part branches (mindly split abort --keep-branches), or remove it: mindly split abort --discard`,
+          err.details?.['appeared'] === true
+            ? 'Run mindly split abort again to see everything it would remove.'
+            : typeof merged === 'string'
+              ? `Commit it on the part branch and merge it into ${merged}, keep the part branches (mindly split abort --keep-branches), or remove it: mindly split abort --discard`
+              : 'Commit what you want to keep and keep the part branches (mindly split abort --keep-branches), or remove it: mindly split abort --discard',
         );
       }
       if (isMindlyError(err, 'unavailable') && err.details?.['lossCheckFailed'] === true) {

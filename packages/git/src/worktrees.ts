@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { MindlyError } from '@mindly/core';
@@ -92,92 +93,211 @@ export async function removeWorktree(repoRoot: string, path: string): Promise<bo
 /**
  * Deletes `refs/heads/<branch>` whatever its merge state. Returns false when it did not exist and
  * refuses (`conflict`) a branch that is checked out in any working tree, so work under someone's
- * HEAD is never dropped.
+ * HEAD is never dropped. With `expectedTip`, also refuses (`conflict`) a branch that has moved
+ * since it was looked at, so commits made in between are never dropped either.
  */
-export async function deleteBranch(repoRoot: string, branch: string): Promise<boolean> {
+export async function deleteBranch(
+  repoRoot: string,
+  branch: string,
+  expectedTip?: string,
+): Promise<boolean> {
   assertValidBranchName(branch);
   const root = await findRepoRoot(repoRoot);
   const ref = `refs/heads/${branch}`;
   const commit = await resolveCommit(root, ref);
   if (!commit) return false;
+  const moved = (): MindlyError =>
+    new MindlyError('conflict', `branch ${branch} has commits made after it was checked`, {
+      details: { branch },
+    });
+  if (expectedTip !== undefined && commit !== expectedTip) throw moved();
   const checkedOut = (await listWorktrees(root)).find((w) => w.branch === ref);
   if (checkedOut) {
     throw new MindlyError('conflict', `branch ${branch} is checked out at ${checkedOut.path}`, {
       details: { branch, path: checkedOut.path },
     });
   }
-  await runGit(['update-ref', '-d', ref, commit], { cwd: root });
+  // Deletes only if the branch is still at `commit`: one that moved in between is kept.
+  const res = await runGit(['update-ref', '-d', ref, commit], {
+    cwd: root,
+    okExitCodes: [1, 128],
+  });
+  if (res.exitCode !== 0) {
+    if ((await resolveCommit(root, ref)) !== null) throw moved();
+    return false;
+  }
   return true;
 }
 
-/** A commit that only one branch holds (see `commitsOnlyOn`). */
+/** A commit that only one branch holds (see `branchOnlyWork`). */
 export interface BranchOnlyCommit {
   commit: string;
   subject: string;
 }
 
+/** What deleting a branch would lose (see `branchOnlyWork`). */
+export interface BranchOnlyWork {
+  /** The branch tip that was looked at; null when the branch does not exist. */
+  tip: string | null;
+  /** Commits no other branch, tag or remote-tracking branch has, newest first, at most `max`. */
+  commits: BranchOnlyCommit[];
+  /**
+   * A branch (one of `contentIn`, local or remote-tracking) whose tree already has all of the
+   * branch's changes, so that merging the branch into it would change nothing: the commits are
+   * not kept anywhere but their content is (a squash or rebase merge). Only looked for when
+   * there are such commits.
+   */
+  contentIn: string | null;
+}
+
+const ONLY_WORK_CACHE = new Map<string, BranchOnlyWork>();
+const ONLY_WORK_CACHE_MAX = 256;
+/** Unique tips passed to one `merge-base` call: keeps the command line short. */
+const MERGE_BASE_CHUNK = 2000;
+
 /**
- * Commits of `refs/heads/<branch>` that no other branch, tag or remote-tracking branch reaches,
- * newest first and at most `max`: what deleting the branch would lose. Branches in `ignoring`
- * (deleted together with it) do not count as holding a commit. Empty when the branch is gone.
+ * What deleting `refs/heads/<branch>` would lose: its commits that no other branch, tag or
+ * remote-tracking branch reaches. Branches in `ignoring` (deleted together with it) do not count
+ * as holding a commit. When there are such commits and `contentIn` names branches, also says
+ * whether one of them already has their content.
+ *
+ * A walk from the branch with every other ref negated trusts commit dates, and the merge commits
+ * of `split merge` carry a fixed old one: it would list commits those refs do have. Instead the
+ * newest commits the other refs share with the branch are found with `merge-base`, which does
+ * not stop early on dates, and only the branch's own history above them is walked. Results are
+ * cached per state of the refs, so asking again is cheap until a ref moves.
  */
-export async function commitsOnlyOn(
+export async function branchOnlyWork(
   repoRoot: string,
   branch: string,
-  ignoring: readonly string[] = [],
-  max = 50,
-): Promise<BranchOnlyCommit[]> {
+  options: { ignoring?: readonly string[]; contentIn?: readonly string[]; max?: number } = {},
+): Promise<BranchOnlyWork> {
   assertValidBranchName(branch);
-  for (const b of ignoring) assertValidBranchName(b);
+  const ignoring = options.ignoring ?? [];
+  const targets = options.contentIn ?? [];
+  for (const b of [...ignoring, ...targets]) assertValidBranchName(b);
+  const limit = Math.max(1, Math.floor(options.max ?? 50));
   const root = await findRepoRoot(repoRoot);
   const ref = `refs/heads/${branch}`;
-  if (!(await resolveCommit(root, ref))) return [];
-  const limit = Math.max(1, Math.floor(max));
-  const going = new Set([branch, ...ignoring].map((b) => `refs/heads/${b}`));
+  const tip = await resolveCommit(root, ref);
+  if (!tip) return { tip: null, commits: [], contentIn: null };
   const refs = await runGit(
     [
       'for-each-ref',
-      '--format=%(objectname) %(objecttype) %(*objecttype) %(refname)',
+      '--format=%(objectname) %(objecttype) %(*objectname) %(*objecttype) %(refname)',
       'refs/heads',
       'refs/tags',
       'refs/remotes',
     ],
     { cwd: root, timeoutMs: 30_000 },
   );
+  const key = createHash('sha256')
+    .update(JSON.stringify([root, ref, tip, [...ignoring].sort(), targets, limit, refs.stdout]))
+    .digest('hex');
+  const cached = ONLY_WORK_CACHE.get(key);
+  if (cached) return cached;
+
+  const going = new Set([branch, ...ignoring].map((b) => `refs/heads/${b}`));
   const others = new Set<string>();
+  const byName = new Map<string, string>();
   for (const line of refs.stdout.split('\n')) {
-    const [id, type, peeled, ...name] = line.split(' ');
-    if (!id || going.has(name.join(' '))) continue;
-    if (type === 'commit' || peeled === 'commit') others.add(`^${id}`);
+    const [id, type, peeledId, peeledType, ...rest] = line.split(' ');
+    const name = rest.join(' ');
+    if (!id || !name) continue;
+    const commit = type === 'commit' ? id : peeledType === 'commit' ? peeledId : undefined;
+    if (!commit) continue;
+    byName.set(name, commit);
+    if (!going.has(name)) others.add(commit);
   }
-  // A walk with negative refs trusts commit dates, and the merge commits of `split merge` carry
-  // a fixed synthetic date: it can list commits another ref does have. Each one it lists is
-  // checked with `--contains`, which does not depend on dates.
-  const res = await runGit(
-    ['log', '--no-color', '--format=%H%x09%s', `--max-count=${2 * limit}`, '--stdin', ref, '--'],
-    { cwd: root, timeoutMs: 30_000, input: [...others].map((o) => `${o}\n`).join('') },
-  );
-  const out: BranchOnlyCommit[] = [];
-  for (const line of res.stdout.split('\n')) {
-    const tab = line.indexOf('\t');
-    if (tab <= 0) continue;
-    if (out.length >= limit) break;
-    const commit = line.slice(0, tab);
-    const holders = await runGit(
+
+  // The newest commits of the branch that some other ref also has.
+  const bases = new Set<string>();
+  if (others.has(tip)) bases.add(tip);
+  else {
+    const tips = [...others];
+    for (let i = 0; i < tips.length; i += MERGE_BASE_CHUNK) {
+      const res = await runGit(
+        ['merge-base', '--all', tip, ...tips.slice(i, i + MERGE_BASE_CHUNK)],
+        {
+          cwd: root,
+          timeoutMs: 120_000,
+          okExitCodes: [1],
+        },
+      );
+      for (const id of res.stdout.split('\n')) if (id) bases.add(id);
+    }
+  }
+  const commits: BranchOnlyCommit[] = [];
+  if (!bases.has(tip)) {
+    // Every commit above the bases is the branch's own. Without bases the whole history is: a
+    // plain walk then stops at `max`.
+    const res = await runGit(
       [
-        'for-each-ref',
-        '--format=%(refname)',
-        `--contains=${commit}`,
-        'refs/heads',
-        'refs/tags',
-        'refs/remotes',
+        'log',
+        '--no-color',
+        '--format=%H%x09%s',
+        ...(bases.size > 0 ? ['--topo-order'] : []),
+        `--max-count=${limit}`,
+        tip,
+        ...[...bases].map((b) => `^${b}`),
+        '--',
       ],
-      { cwd: root, timeoutMs: 30_000 },
+      { cwd: root, timeoutMs: 120_000 },
     );
-    if (holders.stdout.split('\n').some((r) => r !== '' && !going.has(r))) continue;
-    out.push({ commit, subject: line.slice(tab + 1) });
+    for (const line of res.stdout.split('\n')) {
+      const tab = line.indexOf('\t');
+      if (tab > 0) commits.push({ commit: line.slice(0, tab), subject: line.slice(tab + 1) });
+    }
   }
+
+  const contentIn =
+    commits.length > 0 && targets.length > 0
+      ? await contentAlreadyIn(root, tip, targets, byName, going)
+      : null;
+  const out: BranchOnlyWork = { tip, commits, contentIn };
+  if (ONLY_WORK_CACHE.size >= ONLY_WORK_CACHE_MAX) {
+    const oldest = ONLY_WORK_CACHE.keys().next().value;
+    if (oldest !== undefined) ONLY_WORK_CACHE.delete(oldest);
+  }
+  ONLY_WORK_CACHE.set(key, out);
   return out;
+}
+
+/** The first target branch into which merging `tip` would change nothing, or null. */
+async function contentAlreadyIn(
+  root: string,
+  tip: string,
+  targets: readonly string[],
+  byName: ReadonlyMap<string, string>,
+  going: ReadonlySet<string>,
+): Promise<string | null> {
+  const version = await gitVersion();
+  if (!versionAtLeast(version, MIN_MERGE_TREE_VERSION.major, MIN_MERGE_TREE_VERSION.minor)) {
+    return null;
+  }
+  const candidates: [string, string][] = [];
+  for (const t of targets) {
+    for (const [name, commit] of byName) {
+      if (going.has(name)) continue;
+      const local = name === `refs/heads/${t}`;
+      const remote = name.startsWith('refs/remotes/') && name.endsWith(`/${t}`);
+      if ((local || remote) && !candidates.some(([, c]) => c === commit)) {
+        candidates.push([name, commit]);
+      }
+    }
+  }
+  const overrides = await driverOverrides(root);
+  for (const [name, commit] of candidates) {
+    const res = await runGit(
+      ['merge-tree', '--write-tree', '--no-messages', '--allow-unrelated-histories', commit, tip],
+      { cwd: root, config: overrides, timeoutMs: 120_000, okExitCodes: [1] },
+    );
+    if (res.exitCode !== 0) continue;
+    const merged = res.stdout.split('\n')[0]?.trim();
+    const own = await runGit(['rev-parse', '--verify', `${commit}^{tree}`], { cwd: root });
+    if (merged && merged === own.stdout.trim()) return name;
+  }
+  return null;
 }
 
 /** Tracked and untracked (non-ignored) files of the working tree at `cwd`, repository-relative. */

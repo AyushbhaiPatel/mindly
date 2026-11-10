@@ -650,6 +650,64 @@ describe('split status, merge and abort (acceptance 4)', () => {
     );
   });
 
+  it('a yes on the terminal never covers a commit made while the question was open', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    let late = '';
+    // The page agent commits on its branch while the user reads the question. The answer is read
+    // with `.trim()`: the commit happens then.
+    const answer = {
+      trim: (): string => {
+        commitIn(partDir(sb, 'page'), 'src/app/late.ts', 'export const late = 1;\n');
+        late = git(partDir(sb, 'page'), 'rev-parse', 'HEAD').trim();
+        return 'y';
+      },
+    };
+    const r = await cli(sb, ['split', 'abort'], { answers: [answer] as unknown as string[] });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('not shown when the abort was confirmed');
+    expect(r.stderr).toContain(`${late.slice(0, 12)} work in src/app/late.ts`);
+    expect(r.stderr).toContain('mindly split abort again');
+    expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(late);
+    expect(existsSync(partDir(sb, 'page'))).toBe(true);
+    // Asked again, the commit is listed and a yes covers it.
+    const again = await cli(sb, ['split', 'abort'], { answers: ['y'] });
+    expect(again.stderr).toContain(`${late.slice(0, 12)} work in src/app/late.ts`);
+    expect(again.code).toBe(0);
+    expect(branches(sb)).toEqual(['mindly/billing/integration']);
+  });
+
+  it('abort after the merged branch was squash-merged into main and deleted', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'api'), 'src/api/plans.ts', 'export const plans = 1;\n');
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    // The usual way a merged branch lands: squash-merged into main by a pull request, deleted.
+    git(sb.repo, 'merge', '-q', '--squash', 'mindly/billing/integration');
+    git(sb.repo, 'commit', '-q', '-m', 'Add billing (#12)');
+    git(sb.repo, 'branch', '-D', 'mindly/billing/integration');
+    // A commit main does not have is still refused, without pointing at the deleted branch.
+    commitIn(partDir(sb, 'page'), 'src/app/late.ts', 'export const late = 1;\n');
+    const refused = await cli(sb, ['split', 'abort', '--yes']);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain(
+      'No other branch has the work of "Billing page" (2 commits only on its branch',
+    );
+    expect(refused.stderr).not.toContain('Billing API');
+    expect(refused.stderr).not.toContain('merge it into');
+    expect(refused.stderr).toContain('--keep-branches');
+    // Once main has it too, nothing is lost and the cleanup goes through.
+    git(sb.repo, 'merge', '-q', '--squash', 'mindly/billing/page');
+    git(sb.repo, 'commit', '-q', '-m', 'Add the late page (#13)');
+    const ok = await cli(sb, ['split', 'abort', '--yes']);
+    expect(ok.stderr).toBe('');
+    expect(ok.code).toBe(0);
+    expect(branches(sb)).toEqual([]);
+  });
+
   it('abort after a merge removes commits only on a part branch with --discard', async () => {
     const sb = await splitSandbox();
     await createSplit(sb);

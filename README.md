@@ -201,7 +201,8 @@ The merge takes what each agent committed on its part's branch. If a part's work
 work that is not committed there, `mindly split merge` stops and names the files (`--force`
 merges without them). After a merge, `mindly split abort` keeps the worktrees and branches if
 they hold work the merged branch does not have (uncommitted files, or commits made on a part
-branch since) unless you pass `--discard`.
+branch since) unless you pass `--discard`. Work whose content your base branch already has, as
+after a squash merge of the merged branch, does not count.
 
 ### Which agent is better at what, in your repo
 

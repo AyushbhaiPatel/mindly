@@ -12,7 +12,7 @@ import {
   createBisectWorkspace,
   checkpointDiskUsage,
   checkpointRefName,
-  commitsOnlyOn,
+  branchOnlyWork,
   createSnapshotRef,
   deleteCheckpointRefs,
   currentBranch,
@@ -101,8 +101,8 @@ export function createSplitGitPort(): SplitGitPort {
     addWorktree: async (repoRoot, path, branch, startPoint) =>
       (await addWorktree(repoRoot, path, branch, startPoint)).path,
     removeWorktree: (repoRoot, path) => removeWorktree(repoRoot, path),
-    deleteBranch: (repoRoot, branch) => deleteBranch(repoRoot, branch),
-    commitsOnlyOn: (repoRoot, branch, ignoring) => commitsOnlyOn(repoRoot, branch, ignoring),
+    deleteBranch: (repoRoot, branch, expectedTip) => deleteBranch(repoRoot, branch, expectedTip),
+    branchOnlyWork: (repoRoot, branch, options) => branchOnlyWork(repoRoot, branch, options),
     changedSince: async (repoRoot, worktree, base) => {
       const captured = await captureWorktreeCommit(worktree, { message: 'mindly split status' });
       const res = await runGit(

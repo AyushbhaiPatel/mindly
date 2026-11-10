@@ -42,8 +42,11 @@ function fakeSplitGit(root: string) {
   const changed = new Map<string, string[]>();
   // Paths of a worktree that are not on its branch (asked for with a branch as the base).
   const uncommitted = new Map<string, string[]>();
-  // Commits only a branch has (by branch), as `commitsOnlyOn` reports them.
+  // Commits only a branch has (by branch), as `branchOnlyWork` reports them; the branch tip is
+  // the newest of them, and a branch whose content is already elsewhere is in `contentIn`.
   const onlyOn = new Map<string, { commit: string; subject: string }[]>();
+  const contentIn = new Map<string, string>();
+  const tipOf = (b: string): string => onlyOn.get(b)?.[0]?.commit ?? `tip-${b}`;
   const calls: { mergeBranches: unknown[] } = { mergeBranches: [] };
   let mergeCheck: SplitMergeCheck | null = null;
   let runChecks: SplitGitPort['runChecks'] = async () => [];
@@ -64,8 +67,16 @@ function fakeSplitGit(root: string) {
       worktrees.delete(path);
       return true;
     },
-    deleteBranch: async (_root, b) => branches.delete(b),
-    commitsOnlyOn: async (_root, b) => (branches.has(b) ? (onlyOn.get(b) ?? []) : []),
+    deleteBranch: async (_root, b, expectedTip) => {
+      if (expectedTip !== undefined && branches.has(b) && tipOf(b) !== expectedTip) {
+        throw new MindlyError('conflict', `branch ${b} has commits made after it was checked`);
+      }
+      return branches.delete(b);
+    },
+    branchOnlyWork: async (_root, b) =>
+      branches.has(b)
+        ? { tip: tipOf(b), commits: onlyOn.get(b) ?? [], contentIn: contentIn.get(b) ?? null }
+        : { tip: null, commits: [], contentIn: null },
     changedSince: async (_root, wt, base) =>
       (base.startsWith('refs/heads/') ? uncommitted.get(wt) : changed.get(wt)) ?? [],
     mergeCheck: async (_root, _base, sides) =>
@@ -95,6 +106,7 @@ function fakeSplitGit(root: string) {
     changed,
     uncommitted,
     onlyOn,
+    contentIn,
     calls,
     setRunChecks: (fn: SplitGitPort['runChecks']) => {
       runChecks = fn;
@@ -799,7 +811,7 @@ describe('split through hook events', () => {
     });
     for (const p of created.parts) mindly.tasks.update(p.taskId, { status: 'done' }, null);
     await svc.merge(created.split.id);
-    fake.port.commitsOnlyOn = async () => {
+    fake.port.branchOnlyWork = async () => {
       throw new MindlyError('timeout', 'git timed out');
     };
     await expect(svc.abort(created.split.id)).rejects.toSatisfy(
@@ -815,6 +827,134 @@ describe('split through hook events', () => {
     const aborted = await svc.abort(created.split.id, { discardUncommitted: true });
     expect(aborted.removedWorktrees).toHaveLength(2);
     expect(aborted.discarded).toEqual([]);
+  });
+
+  it('deletes only the work a confirmation covered, and keeps what appears during the abort', async () => {
+    const { mindly, svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const [api, page] = created.parts as [
+      (typeof created.parts)[number],
+      (typeof created.parts)[number],
+    ];
+    for (const p of created.parts) mindly.tasks.update(p.taskId, { status: 'done' }, null);
+    await svc.merge(created.split.id);
+    const first = { commit: 'late0001late0001', subject: 'First late page' };
+    fake.onlyOn.set(page.branch, [first]);
+    const shown = await svc.abortLoses(created.split.id);
+    // Another commit lands while the question is open: the "yes" does not cover it.
+    fake.onlyOn.set(page.branch, [{ commit: 'late0002late0002', subject: 'Second' }, first]);
+    await expect(svc.abort(created.split.id, { confirmed: shown })).rejects.toSatisfy(
+      (e) =>
+        isMindlyError(e, 'conflict') &&
+        /not shown when the abort was confirmed: "Part page" \(1 commit only on its branch: late0002late Second\)/.test(
+          (e as Error).message,
+        ) &&
+        (e as { details?: Record<string, unknown> }).details?.['appeared'] === true,
+    );
+    expect(fake.branches.has(page.branch)).toBe(true);
+    expect(existsSync(api.worktree)).toBe(true);
+
+    // Confirmed as it is now, the abort goes ahead; a commit made after the check keeps the
+    // branch, and new files in a worktree keep the worktree.
+    const now = await svc.abortLoses(created.split.id);
+    const removeWorktree = fake.port.removeWorktree;
+    fake.port.removeWorktree = async (root, path) => {
+      if (path === api.worktree) {
+        fake.onlyOn.set(page.branch, [
+          { commit: 'late0003late0003', subject: 'Third' },
+          ...(fake.onlyOn.get(page.branch) ?? []),
+        ]);
+      }
+      return removeWorktree(root, path);
+    };
+    const aborted = await svc.abort(created.split.id, { confirmed: now });
+    expect(aborted.removedWorktrees).toEqual([api.worktree, page.worktree]);
+    expect(aborted.deletedBranches).toEqual([api.branch]);
+    expect(aborted.keptBranches).toEqual([page.branch]);
+    expect(fake.branches.has(page.branch)).toBe(true);
+  });
+
+  it('keeps a worktree that gets new files while a merged split is cleaned up', async () => {
+    const { mindly, svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const [api, page] = created.parts as [
+      (typeof created.parts)[number],
+      (typeof created.parts)[number],
+    ];
+    for (const p of created.parts) mindly.tasks.update(p.taskId, { status: 'done' }, null);
+    await svc.merge(created.split.id);
+    const removeWorktree = fake.port.removeWorktree;
+    fake.port.removeWorktree = async (root, path) => {
+      if (path === api.worktree) fake.uncommitted.set(page.worktree, ['src/app/late.ts']);
+      return removeWorktree(root, path);
+    };
+    const aborted = await svc.abort(created.split.id);
+    expect(aborted.removedWorktrees).toEqual([api.worktree]);
+    expect(aborted.keptWorktrees).toEqual([page.worktree]);
+    expect(aborted.keptBranches).toEqual([page.branch]);
+    expect(existsSync(page.worktree)).toBe(true);
+    expect(fake.branches.has(page.branch)).toBe(true);
+  });
+
+  it('does not count commits whose content another branch has, and says when the merged branch is gone', async () => {
+    const { mindly, svc, pid, fake } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const page = created.parts[1]!;
+    for (const p of created.parts) mindly.tasks.update(p.taskId, { status: 'done' }, null);
+    await svc.merge(created.split.id);
+    // The merged branch was squash-merged into main and deleted: the part commits are on no
+    // other branch, but main has their content.
+    fake.branches.delete('mindly/billing/integration');
+    fake.onlyOn.set(page.branch, [{ commit: 'page0001page0001', subject: 'Page' }]);
+    await expect(svc.abort(created.split.id)).rejects.toSatisfy(
+      (e) =>
+        isMindlyError(e, 'conflict') &&
+        /^no other branch has the work of "Part page"/.test((e as Error).message) &&
+        (e as { details?: Record<string, unknown> }).details?.['mergedBranch'] === null,
+    );
+    fake.contentIn.set(page.branch, 'refs/heads/main');
+    expect(await svc.abortLoses(created.split.id)).toEqual([]);
+    expect((await svc.status(created.split.id)).parts[1]!.unmergedCommits).toEqual([]);
+    const aborted = await svc.abort(created.split.id);
+    expect(aborted.deletedBranches).toEqual([created.parts[0]!.branch, page.branch]);
+  });
+
+  it('does not brief a session in a part worktree once the split is merged', async () => {
+    const { mindly, svc, pid } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const api = created.parts[0]!;
+    await mindly.hooks.handle(event(api.worktree, 'claude-code', 'api-1', 'session_start'));
+    for (const p of created.parts) mindly.tasks.update(p.taskId, { status: 'done' }, null);
+    await svc.merge(created.split.id);
+    const next = await mindly.hooks.handle(
+      event(api.worktree, 'claude-code', 'api-2', 'session_start'),
+    );
+    expect(next.context ?? '').not.toContain('Your part of the split');
+    expect(next.context ?? '').not.toContain('Commit your work in this worktree');
   });
 
   it('reports the uncommitted work an abort removes', async () => {

@@ -224,16 +224,23 @@ export interface SplitGitPort {
   addWorktree(repoRoot: string, path: string, branch: string, startPoint: string): Promise<string>;
   /** Removes a linked worktree (and its uncommitted work). False when it was not a worktree. */
   removeWorktree(repoRoot: string, path: string): Promise<boolean>;
-  deleteBranch(repoRoot: string, branch: string): Promise<boolean>;
+  /** Deletes a branch; with `expectedTip`, refuses (`conflict`) one that has moved since. */
+  deleteBranch(repoRoot: string, branch: string, expectedTip?: string): Promise<boolean>;
   /**
-   * Commits of `branch`, newest first and at most 50, that no other branch, tag or remote-tracking
-   * branch has (branches in `ignoring` do not count): what deleting the branch would lose.
+   * What deleting `branch` would lose: its tip, and its commits (newest first, at most 50) that no
+   * other branch, tag or remote-tracking branch has (branches in `ignoring` do not count).
+   * `contentIn` is set to a branch of `options.contentIn` (local or remote-tracking) that already
+   * has the content of those commits, as after a squash or rebase merge.
    */
-  commitsOnlyOn(
+  branchOnlyWork(
     repoRoot: string,
     branch: string,
-    ignoring: readonly string[],
-  ): Promise<{ commit: string; subject: string }[]>;
+    options: { ignoring: readonly string[]; contentIn: readonly string[] },
+  ): Promise<{
+    tip: string | null;
+    commits: { commit: string; subject: string }[];
+    contentIn: string | null;
+  }>;
   /** Paths that differ between `base` and the worktree's current content (committed or not). */
   changedSince(repoRoot: string, worktree: string, base: string): Promise<string[]>;
   /** Shadow-merges the sides' worktrees (uncommitted work included) on top of `base`. */

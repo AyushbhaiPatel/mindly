@@ -75,13 +75,18 @@ export type {
 export {
   addWorktree,
   branchExists,
-  commitsOnlyOn,
+  branchOnlyWork,
   deleteBranch,
   listFiles,
   mergeIntoNewBranch,
   removeWorktree,
 } from './worktrees.js';
-export type { BranchOnlyCommit, MergeIntoBranchResult, MergeSource } from './worktrees.js';
+export type {
+  BranchOnlyCommit,
+  BranchOnlyWork,
+  MergeIntoBranchResult,
+  MergeSource,
+} from './worktrees.js';
 
 export { DEFAULT_CHECK_OUTPUT_BYTES, checkEnv, runChecks } from './checks.js';
 export type { CheckResult, CheckSpec, CheckStatus, RunChecksOptions } from './checks.js';

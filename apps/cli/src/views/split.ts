@@ -314,6 +314,12 @@ export function renderAborted(sc: Screen, a: SplitAbortResult): void {
     }.`,
   );
   if (a.keptBranches.length) sc.note(`Branches kept: ${a.keptBranches.join(', ')}`, 2);
+  if (a.keptWorktrees.length) {
+    sc.text(
+      `${sc.mark('warn')} Kept ${count(a.keptWorktrees.length, 'worktree')} that got new work during the abort: ${a.keptWorktrees.join(', ')}`,
+      2,
+    );
+  }
   if (a.discarded.length > 0) {
     const commits = a.discarded.some((w) => (w.commits ?? []).length > 0);
     sc.text(
