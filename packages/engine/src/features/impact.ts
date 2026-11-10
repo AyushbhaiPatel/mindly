@@ -207,18 +207,20 @@ interface CommitDelta {
  * When the file is the same at both commits (HEAD moved for another file), git did nothing to it
  * and the surface is the baseline as it is. Otherwise, per export:
  *
- * - Absent at both commits: git has nothing to say about it; it is compared as usual.
- * - The file holds it as `now` does: the git operation explains it (a pull brought it, a
- *   checkout or `git stash` put the committed version back over an uncommitted change), so it
- *   reads as unchanged.
+ * - The file holds it as `now` does, present or absent: the git operation explains it, so it reads
+ *   as unchanged. A pull brought it or removed it; a checkout or `git stash` put the committed
+ *   version back over an uncommitted change, or set aside an export only the working tree had.
  * - The surface holds it as `then` did: the surface predates what the commits did to it, so it
  *   takes the value at `now`.
  * - Otherwise the surface shows an uncommitted change still in the working tree (or one the
  *   surface already saw after the commit) and is kept, so the file is compared with it.
  *
- * What cannot be told apart: an agent edit made after such a move that puts an export of this file
- * back to its committed value reads as the git operation and is missed; a checkout between commits
- * where the file is identical that discards an uncommitted change reads as an agent edit.
+ * Which wrong answer is chosen where the two cannot be told apart: an agent edit made after such a
+ * move that removes an uncommitted export, or puts an export back to its committed value, reads as
+ * the git operation and is not reported. Blaming the next agent for what `git stash` or a checkout
+ * did would be worse than missing that report. A checkout between commits where the file is
+ * identical, discarding an uncommitted change, reads as the next agent's edit: with the file the
+ * same at both commits, nothing distinguishes it from one.
  */
 function applyCommitDelta(
   surface: ReadonlyMap<string, string>,
@@ -227,10 +229,10 @@ function applyCommitDelta(
 ): Map<string, string> {
   const out = new Map(surface);
   if (!delta.fileChanged) return out;
-  for (const name of new Set([...delta.then.keys(), ...delta.now.keys()])) {
+  for (const name of new Set([...surface.keys(), ...delta.then.keys(), ...delta.now.keys()])) {
     const was = delta.then.get(name);
     const is = delta.now.get(name);
-    const explained = is !== undefined && after.get(name) === is;
+    const explained = after.get(name) === is;
     if (!explained && out.get(name) !== was) continue;
     if (is === undefined) out.delete(name);
     else out.set(name, is);

@@ -816,12 +816,35 @@ describe('impact radar', () => {
         expected: null,
       },
       {
+        // The same inputs as `git stash && git pull` setting `logout` aside: not reported, so that
+        // a stash never makes the next agent the author of a removal.
         name: 'commit of this file, uncommitted export removed again',
         commits: { h0: AUTH_V1, h1: PULLED.replace(LOGOUT, 'export function other() {}\n') },
         uncommitted: AUTH_V1 + LOGOUT,
         next: AUTH_V1 + 'export function other() {}\n',
-        // `other` came with the commit: not an agent's change.
-        expected: { added: [], removed: ['logout'], changed: [] },
+        expected: null,
+      },
+      {
+        name: 'pull removed an export with an uncommitted change (stash)',
+        commits: { h0: AUTH_V1, h1: AUTH_V1.replace('function login(', 'function signIn(') },
+        uncommitted: AUTH_V1.replace('login(user: string)', OTP),
+        next:
+          AUTH_V1.replace('function login(', 'function signIn(') + 'export function extra() {}\n',
+        expected: null,
+      },
+      {
+        name: 'pull edited the file, uncommitted export set aside (stash)',
+        commits: { h0: AUTH_V1, h1: AUTH_V1.replace('"admin"', '"root"') },
+        uncommitted: AUTH_V1 + LOGOUT,
+        next: AUTH_V1.replace('"admin"', '"root"') + 'export function extra() {}\n',
+        expected: null,
+      },
+      {
+        name: 'pull edited the file, uncommitted export changed afterwards',
+        commits: { h0: AUTH_V1, h1: AUTH_V1.replace('"admin"', '"root"') },
+        uncommitted: AUTH_V1 + LOGOUT,
+        next: AUTH_V1.replace('"admin"', '"root"') + 'export function logout(all: boolean) {}\n',
+        expected: { added: [], removed: [], changed: ['logout'] },
       },
       {
         name: 'commit of this file, uncommitted signature change kept, body edited',
