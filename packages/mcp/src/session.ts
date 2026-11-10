@@ -74,7 +74,12 @@ interface WorkRow {
 interface ServerWork {
   rows: Map<string, WorkRow>;
   currentTask: string | null;
+  /** Memories it recorded: they stay where they are, and are named in its handoffs. */
+  memories: Set<string>;
 }
+
+/** Most rows a server records while on a guess; past it, new rows stay where they are made. */
+const MAX_WORK_ROWS = 1000;
 
 /** How many launchers may stand between a server and its client. */
 const MAX_LAUNCHERS = 2;
@@ -491,26 +496,51 @@ export class SessionResolver {
     const store = this.mindly.store;
     // Looked up when used, not now: by the time a slow call notes what it wrote, the server may
     // have moved on and settled what it had (and the row then goes after it from where it is).
-    const work = (): ServerWork => (this.work ??= { rows: new Map(), currentTask: null });
-    const own = this.work?.currentTask ?? null;
-    const ownTask = own && store.tasks.find(own)?.ownerSessionId === session.id ? own : null;
+    const work = (): ServerWork =>
+      (this.work ??= { rows: new Map(), currentTask: null, memories: new Set() });
     const at = session.id;
+    const unfinished = (id: string | null | undefined): string | null => {
+      if (!id) return null;
+      const t = store.tasks.find(id);
+      return t?.ownerSessionId === at && ['open', 'in_progress', 'blocked'].includes(t.status)
+        ? id
+        : null;
+    };
+    // The server's own current task: the one it made current, or else an unfinished one it wrote.
+    const ownTask = (): string | null =>
+      unfinished(this.work?.currentTask) ??
+      [...(this.work?.rows.values() ?? [])]
+        .filter((r) => r.kind === 'task' && r.at === at)
+        .map((r) => unfinished(r.id))
+        .find((id) => id !== null) ??
+      null;
+    const current = ownTask();
     return {
       project,
-      session: { ...session, currentTaskId: ownTask },
+      session: { ...session, currentTaskId: current },
       guess: {
         sessionId: at,
         // Whose work a handoff describes: none of the other window's.
-        workOf: { ...session, id: `mcp-work-${this.owner}`, currentTaskId: ownTask },
+        workOf: () => ({ ...session, id: `mcp-work-${this.owner}`, currentTaskId: ownTask() }),
+        decisionIds: () => [...(this.work?.memories ?? [])],
         note: (kind, id) => {
-          const rows = work().rows;
-          if (rows.size >= 1000) return;
+          const w = work();
+          if (kind === 'memory') {
+            if (w.memories.size < MAX_WORK_ROWS) w.memories.add(id);
+            return;
+          }
+          if (w.rows.size >= MAX_WORK_ROWS) {
+            this.logger?.warn('mcp work not recorded: too many rows on a guessed session', {
+              kind,
+            });
+            return;
+          }
           if (kind === 'message') {
-            rows.set(`message:${id}`, { kind, id, at, updatedAt: 0, sig: '' });
+            w.rows.set(`message:${id}`, { kind, id, at, updatedAt: 0, sig: '' });
             return;
           }
           const stamp = store.sessions.rowStamp(kind, id);
-          if (stamp) rows.set(`${kind}:${id}`, { kind, id, at, ...stamp });
+          if (stamp) w.rows.set(`${kind}:${id}`, { kind, id, at, ...stamp });
         },
         noteCurrentTask: (taskId) => {
           work().currentTask = taskId;

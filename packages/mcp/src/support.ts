@@ -71,9 +71,14 @@ export interface GuessScope {
   /** The guessed session (the one in the store; `CallScope.session` is a view of it). */
   sessionId: string;
   /** The session whose work a handoff from this call describes: the server's own, not the window's. */
-  workOf: Session;
-  /** Notes a row this call wrote; it goes along with the server until it is home. */
-  note(kind: 'intent' | 'task' | 'message', id: string): void;
+  workOf(): Session;
+  /** The memories the server recorded on the guess, for its handoffs. */
+  decisionIds(): string[];
+  /**
+   * Notes a row this call wrote. Intents, tasks and messages go along with the server until it
+   * is home; memories stay where they are and are named in its handoffs.
+   */
+  note(kind: 'intent' | 'task' | 'message' | 'memory', id: string): void;
   /** Notes the task this call made the server's current one. */
   noteCurrentTask(taskId: string): void;
   /** True when the server wrote this row while on a guess. */

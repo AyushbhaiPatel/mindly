@@ -39,6 +39,7 @@ import {
   safeText,
   toolError,
   type CallScope,
+  type GuessScope,
   type RateLimiter,
   type SessionResolver,
 } from './support.js';
@@ -151,34 +152,29 @@ function ensureProject(scope: CallScope, projectId: string, what: string, id: st
 }
 
 /**
- * Runs a tool call made on a guessed session without changing that session's current task,
- * which is the other window's: whatever the call made current (a task it created or claimed, a
- * handoff it picked up) is put back, and becomes the server's own current task instead. A task
- * the call moved to the session is recorded as the server's work.
+ * Takes `taskId` up for the server while it speaks for a session it only guessed at: the task
+ * becomes the session's (where the server's work lives until it is home) and the server's own
+ * current task. The session's current task is the other window's and is never written.
  */
-async function onGuess(
-  mindly: Mindly,
-  scope: CallScope,
-  run: () => Promise<CallToolResult>,
-): Promise<CallToolResult> {
-  const guess = scope.guess;
-  if (!guess) return run();
-  const before = mindly.store.sessions.find(guess.sessionId);
-  const ownedBefore = new Set(mindly.store.tasks.ownedBy(guess.sessionId).map((t) => t.id));
-  try {
-    return await run();
-  } finally {
-    const after = mindly.store.sessions.find(guess.sessionId);
-    const made = after?.currentTaskId ?? null;
-    if (before && made !== before.currentTaskId) {
-      mindly.store.sessions.setCurrentTask(guess.sessionId, before.currentTaskId);
-      if (made && mindly.store.tasks.find(made)?.ownerSessionId === guess.sessionId) {
-        if (!ownedBefore.has(made) || guess.wrote('task', made)) guess.note('task', made);
-        guess.noteCurrentTask(made);
-      }
-    }
-  }
+function takeUpOnGuess(mindly: Mindly, scope: CallScope, taskId: string): Task {
+  const guess = scope.guess as GuessScope;
+  const task = mindly.store.tasks.update(taskId, {
+    ownerSessionId: guess.sessionId,
+    status: 'in_progress',
+  });
+  mindly.store.events.append({
+    projectId: task.projectId,
+    sessionId: guess.sessionId,
+    type: 'task.updated',
+    payload: { taskId: task.id, status: task.status, claimedBy: guess.sessionId },
+  });
+  guess.note('task', task.id);
+  guess.noteCurrentTask(task.id);
+  return task;
 }
+
+/** Tools whose result names a memory they stored. */
+const MEMORY_TOOLS = new Set(['mindly_remember', 'mindly_record_mistake']);
 
 /**
  * A title must still say something once it is cleaned for storage: the schema's minimum length
@@ -223,7 +219,20 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
             );
           }
           const scope = await sessions.resolve();
-          return await onGuess(mindly, scope, async () => handler(parsed.data, scope));
+          const result = await handler(parsed.data, scope);
+          // A memory stored on a guess is named in the server's handoffs (its source is the
+          // guessed session, so it cannot be found by session).
+          const stored = (result.structuredContent as { memory?: { id?: unknown } } | undefined)
+            ?.memory?.id;
+          if (
+            scope.guess &&
+            MEMORY_TOOLS.has(name) &&
+            typeof stored === 'string' &&
+            !result.isError
+          ) {
+            scope.guess.note('memory', stored);
+          }
+          return result;
         } catch (err) {
           return toolError(err, name, logger);
         }
@@ -247,10 +256,14 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       // Not read-only and not idempotent: a client must not pre-fetch or repeat this call.
       annotations: WRITE,
     },
-    (args, { project, session }) => {
+    (args, scope) => {
+      const { project, session } = scope;
       const built = args.query
         ? mindly.context.prompt(project, session, args.query)
-        : mindly.context.sessionStart(project, session);
+        : // On a guess, a handoff waiting for that session is the other window's to pick up.
+          scope.guess
+          ? mindly.context.sessionStartWithoutClaim(project, session)
+          : mindly.context.sessionStart(project, session);
       return ok(built.text ?? 'No Mindly context for this project right now.', {
         packetId: built.packet?.id ?? null,
         deliveries: built.deliveries.map((d) => d.id),
@@ -562,19 +575,19 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         if (!parent) throw notFound('task', args.parentId);
         ensureProject(scope, parent.projectId, 'task', args.parentId);
       }
-      const t = mindly.tasks.create({
+      const mine = args.assignToMe !== false;
+      const created = mindly.tasks.create({
         projectId: scope.project.project.id,
         title: args.title,
         ...(args.description !== undefined
           ? { description: safeText(args.description, 4000) }
           : {}),
         ...(args.plan ? { plan: args.plan } : {}),
-        owner: args.assignToMe === false ? null : scope.session,
+        // On a guess the task is taken up for the server below, without touching the session.
+        owner: mine && !scope.guess ? scope.session : null,
         parentId: args.parentId ?? null,
       });
-      if (t.ownerSessionId === scope.session.id) {
-        scope.guess?.note('task', t.id);
-      }
+      const t = mine && scope.guess ? takeUpOnGuess(mindly, scope, created.id) : created;
       return ok(`Created task ${t.id}: ${safeLine(t.title, 200)} (${t.status}).`, {
         task: taskSummary(t),
       });
@@ -641,12 +654,13 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       if (cur.status === 'done' || cur.status === 'abandoned') {
         throw new MindlyError('conflict', `task is ${cur.status}`);
       }
-      const t = mindly.tasks.claim(args.id, scope.session);
-      // A task the guessed session already owned is that session's own work, not this server's,
-      // unless this server made it.
-      if (cur.ownerSessionId !== scope.session.id || scope.guess?.wrote('task', t.id)) {
-        scope.guess?.note('task', t.id);
-      }
+      // On a guess, a task the guessed session already owns is that window's own work: claiming
+      // it changes nothing there. Anything else is taken up for the server.
+      const t = !scope.guess
+        ? mindly.tasks.claim(args.id, scope.session)
+        : cur.ownerSessionId !== scope.guess.sessionId || scope.guess.wrote('task', cur.id)
+          ? takeUpOnGuess(mindly, scope, cur.id)
+          : cur;
       return ok(`Claimed task ${t.id}: ${safeLine(t.title, 200)}.`, { task: taskSummary(t) });
     },
   );
@@ -901,7 +915,9 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       const { session } = scope;
       const h = await failoverService(mindly).handoffs.create(session, {
         // On a guess: the server's own work, never the other window's task, prompts or files.
-        ...(scope.guess ? { workOf: scope.guess.workOf } : {}),
+        ...(scope.guess
+          ? { workOf: scope.guess.workOf(), decisionIds: scope.guess.decisionIds() }
+          : {}),
         summary: args.summary,
         toAgentKind: args.toAgentKind ?? null,
         ...(args.nextSteps ? { nextSteps: args.nextSteps } : {}),

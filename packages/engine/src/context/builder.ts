@@ -49,6 +49,22 @@ export class ContextBuilder {
     private readonly mistakes: MistakeService,
   ) {}
 
+  /** Sessions whose handoffs are not to be picked up by the context being built (see below). */
+  private readonly noClaims = new Set<string>();
+
+  /**
+   * The context `sessionStart` builds, without picking up a handoff for the session: for an MCP
+   * server that speaks for a session it only guessed at, whose handoffs are that window's.
+   */
+  sessionStartWithoutClaim(project: ProjectContext, session: Session): BuiltContext {
+    this.noClaims.add(session.id);
+    try {
+      return this.sessionStart(project, session);
+    } finally {
+      this.noClaims.delete(session.id);
+    }
+  }
+
   // ------------------------------------------------------------------ session start
 
   sessionStart(project: ProjectContext, session: Session): BuiltContext {
@@ -336,6 +352,7 @@ export class ContextBuilder {
   }
 
   private claimHandoff(session: Session): Handoff | null {
+    if (this.noClaims.has(session.id)) return null;
     for (const h of this.k.store.handoffs.pendingFor(
       session.projectId,
       session.agentKind,

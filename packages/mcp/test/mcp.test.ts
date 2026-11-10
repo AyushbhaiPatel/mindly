@@ -1342,7 +1342,7 @@ describe('telling windows of one agent apart', () => {
       expect(a.mindly.store.tasks.get(tA.id).ownerSessionId).toBe(sessA);
     });
 
-    it("picks a handoff up for itself on a guess, leaving the window's current task", async () => {
+    it('leaves a handoff alone on a guess, for the session it is for', async () => {
       const a = await harness(windowA);
       const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
       const tA = a.mindly.tasks.create({
@@ -1365,8 +1365,11 @@ describe('telling windows of one agent apart', () => {
       });
       const b = await harness(windowB, a);
       expect(sid(await b.call('mindly_status'))).toBe(sessA);
-      expect((await b.call('mindly_context')).text).toContain('handed off');
+      // On a guess the handoff is not picked up: it may be for that window.
+      expect((await b.call('mindly_context')).text).not.toContain('handed off');
       expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(tA.id);
+      expect(a.mindly.store.tasks.get(tX.id).ownerSessionId).toBe(sessX.id);
+      // Window B's own session starts and picks it up (here its first hook does).
       const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
       expect(sid(await b.call('mindly_status'))).toBe(sessB);
       expect(a.mindly.store.tasks.get(tX.id).ownerSessionId).toBe(sessB);
@@ -1397,6 +1400,98 @@ describe('telling windows of one agent apart', () => {
       slow.guess!.note('task', t.id);
       expect((await resolver.resolve()).session.id).toBe(sessB);
       expect(a.mindly.store.tasks.get(t.id).ownerSessionId).toBe(sessB);
+    });
+
+    it('never undoes what the window does while a slow call on a guess is under way', async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const pid = projectOf(a, sessA);
+      const tA = a.mindly.tasks.create({
+        projectId: pid,
+        title: 'A first task',
+        owner: a.mindly.store.sessions.get(sessA),
+      });
+      const t2 = a.mindly.tasks.create({ projectId: pid, title: 'A claims this next' });
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      // B files a handoff; building it waits on git.
+      const git = a.mindly.kernel.ports.git as unknown as {
+        headCommit: (...x: unknown[]) => Promise<unknown>;
+      };
+      const orig = git.headCommit.bind(git);
+      let release!: () => void;
+      let entered!: () => void;
+      const inGit = new Promise<void>((r) => (entered = r));
+      const gate = new Promise<void>((r) => (release = r));
+      git.headCommit = async (...x: unknown[]) => {
+        entered();
+        await gate;
+        return orig(...x);
+      };
+      try {
+        const slow = b.call('mindly_handoff', { summary: 'B hands off' });
+        await inGit;
+        // Meanwhile window A's own server claims t2.
+        expect((await a.call('mindly_task_claim', { id: t2.id })).isError).toBe(false);
+        release();
+        await slow;
+      } finally {
+        git.headCommit = orig;
+      }
+      expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(t2.id);
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      expect(a.mindly.store.tasks.get(t2.id).ownerSessionId).toBe(sessA);
+      expect(a.mindly.store.tasks.get(tA.id).ownerSessionId).toBe(sessA);
+    });
+
+    it("leaves the window's current task alone under concurrent calls on a guess", async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const pid = projectOf(a, sessA);
+      const tA = a.mindly.tasks.create({
+        projectId: pid,
+        title: 'A task',
+        owner: a.mindly.store.sessions.get(sessA),
+      });
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      const free = Array.from({ length: 5 }, (_, i) =>
+        a.mindly.tasks.create({ projectId: pid, title: `free ${i}` }),
+      );
+      await Promise.all(
+        free.flatMap((t) => [b.call('mindly_task_claim', { id: t.id }), b.call('mindly_status')]),
+      );
+      expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(tA.id);
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      for (const t of free) expect(a.mindly.store.tasks.get(t.id).ownerSessionId).toBe(sessB);
+      expect(free.map((t) => t.id)).toContain(a.mindly.store.sessions.get(sessB).currentTaskId);
+    });
+
+    it('hands off the decisions it recorded on a guess, and an open task of its own', async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      const first = await b.call('mindly_task_create', { title: 'finished already' });
+      const done = (first.structured?.['task'] as { id: string }).id;
+      const second = await b.call('mindly_task_create', { title: 'still going' });
+      const open = (second.structured?.['task'] as { id: string }).id;
+      // The task the server made current last is finished: the open one is handed off.
+      await b.call('mindly_task_update', { id: open, status: 'in_progress' });
+      await b.call('mindly_task_claim', { id: done });
+      await b.call('mindly_task_update', { id: done, status: 'done' });
+      const rem = await b.call('mindly_remember', {
+        kind: 'decision',
+        title: 'B decided: tokens are rotated hourly',
+      });
+      expect(rem.isError).toBe(false);
+      const ho = await b.call('mindly_handoff', { summary: 'B hands off its work' });
+      const handoff = ho.structured?.['handoff'] as { id: string; taskId: string | null };
+      expect(handoff.taskId).toBe(open);
+      const packet = a.mindly.store.handoffs.get(handoff.id).packet as { decisions: string[] };
+      expect(packet.decisions).toContain('B decided: tokens are rotated hourly');
     });
 
     it('keeps its record when moving fails, and moves it on the next call', async () => {
