@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -111,21 +111,63 @@ describe('notification channel URLs', () => {
     await setChannel(sb, 'https://hooks.example.com/abc');
   });
 
-  it('do not stop Mindly when an older config file holds one', async () => {
+  it('in an older config file stop nothing, and are named where they are looked for', async () => {
     const sb = sandbox();
     mkdirSync(sb.mindlyHome, { recursive: true });
+    const file = join(sb.mindlyHome, 'config.json');
     writeFileSync(
-      join(sb.mindlyHome, 'config.json'),
+      file,
       JSON.stringify({
-        notify: { channels: [{ type: 'webhook', url: 'http://example.com/hook' }] },
+        notify: {
+          channels: [{ type: 'desktop' }, { type: 'webhook', url: 'http://example.com/hook' }],
+        },
       }),
     );
-    // Commands still run; the channel is left out and `notify test` says why.
+    // Commands still run.
     expect((await cli(sb, ['status'])).code).toBe(0);
-    const r = await cli(sb, ['notify', 'test']);
-    expect(r.code).not.toBe(0);
-    expect(r.stderr).toMatch(/webhook channel in your config cannot be used: url must use https/i);
-    expect(r.stderr).not.toContain('example.com');
+
+    // Other settings can be changed; the entry stays in the file as it was.
+    const set = await cli(sb, ['config', 'set', 'hooks.timeoutMs', '2000']);
+    expect(set.code, set.stderr).toBe(0);
+    const written = JSON.parse(readFileSync(file, 'utf8')) as {
+      notify: { channels: unknown[] };
+      hooks: { timeoutMs: number };
+    };
+    expect(written.hooks.timeoutMs).toBe(2000);
+    expect(written.notify.channels).toHaveLength(2);
+    expect((await cli(sb, ['config', 'set', 'notify.triggers', '["rate_limited"]'])).code).toBe(0);
+
+    // `config get` shows it as written and says why it is not used.
+    const get = await cli(sb, ['config', 'get', 'notify.channels']);
+    expect(get.code).toBe(0);
+    expect(JSON.parse(get.stdout)).toEqual([
+      { type: 'desktop' },
+      { type: 'webhook', url: 'http://example.com/hook' },
+    ]);
+    expect(get.stderr).toContain('notify.channels[1] (webhook) is not used');
+    expect(get.stderr).toContain('url must use https');
+    const all = await cli(sb, ['config', 'get']);
+    expect(JSON.parse(all.stdout).notify.channels).toHaveLength(2);
+
+    // Setting the channels is held to the rules.
+    const again = await cli(sb, [
+      'config',
+      'set',
+      'notify.channels',
+      JSON.stringify([{ type: 'webhook', url: 'http://example.com/hook' }]),
+    ]);
+    expect(again.code).not.toBe(0);
+
+    // doctor and notify test name it, without the URL.
+    const doctor = await cli(sb, ['doctor', '--json']);
+    expect(doctor.stdout).toContain('notify-channel');
+    expect(doctor.stdout).toContain('notify.channels[1] (webhook)');
+    expect(doctor.stdout).not.toContain('example.com');
+    const test = await cli(sb, ['notify', 'test', '--json']);
+    expect(test.code).toBe(1);
+    expect(JSON.parse(test.stdout).unusable).toEqual([
+      { index: 1, type: 'webhook', problem: 'url must use https (http only for localhost)' },
+    ]);
   });
 });
 

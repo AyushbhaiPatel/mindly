@@ -1,6 +1,13 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { describeError, homePaths, mindlyHome, shortId, type HomePaths } from '@mindly/core';
+import {
+  describeError,
+  homePaths,
+  mindlyHome,
+  shortId,
+  type HomePaths,
+  unusableNotifyChannels,
+} from '@mindly/core';
 import { checkSafePattern, sentinelOf, type Mindly, type ProjectContext } from '@mindly/engine';
 import { gitVersion, lockfileIn, mirrorRemotes, versionAtLeast } from '@mindly/git';
 import { MIGRATIONS, schemaVersion, Store } from '@mindly/store';
@@ -43,6 +50,25 @@ function item(
 ): DoctorItem {
   if (typeof fix === 'string') fix = { why: fix };
   return { check, group, text, fix };
+}
+
+/**
+ * Notification channels the config file holds with a URL that cannot be used. Reading the file
+ * leaves them out, so nothing else says that they never send anything.
+ */
+function notifyChannelChecks(paths: HomePaths): DoctorItem[] {
+  return unusableNotifyChannels(paths.config).map((c) =>
+    item(
+      {
+        name: 'notify-channel',
+        status: 'warn',
+        detail: `notify.channels[${c.index}] (${c.type}): ${c.problem}`,
+      },
+      'Setup',
+      `The ${c.type} channel notify.channels[${c.index}] is not used: its ${c.problem}`,
+      { cmd: 'mindly config get notify.channels', why: 'see it, then set the channels again' },
+    ),
+  );
 }
 
 /** Whether Claude Code's status line (for this project, or user-wide) shows Mindly. */
@@ -482,6 +508,7 @@ export async function runDoctor(out: Out): Promise<DoctorItem[]> {
           `Data folder ${paths.home}`,
         ),
       );
+      items.push(...notifyChannelChecks(paths));
       items.push(...permissionChecks(paths));
       try {
         const store = Store.open(paths.db, { busyTimeoutMs: 2000 });

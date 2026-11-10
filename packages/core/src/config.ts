@@ -257,14 +257,52 @@ function unusableChannels(raw: unknown): { index: number; type: string; problem:
   return out;
 }
 
+/** A notification channel in the config file that is left out when it is read. */
+export interface UnusableChannel {
+  /** Its position in `notify.channels` as written in the file. */
+  index: number;
+  type: string;
+  problem: string;
+}
+
 /** The channels in the config file at `path` that are left out when it is read, with the reason. */
-export function unusableNotifyChannels(path: string): { type: string; problem: string }[] {
+export function unusableNotifyChannels(path: string): UnusableChannel[] {
   if (!existsSync(path)) return [];
   try {
-    return unusableChannels(readBoundedJson(path)).map(({ type, problem }) => ({ type, problem }));
+    return unusableChannels(readBoundedJson(path));
   } catch {
     return [];
   }
+}
+
+/** The channels of a raw config object that are left out when it is read, with the reason. */
+export function unusableChannelsIn(raw: unknown): UnusableChannel[] {
+  return unusableChannels(raw);
+}
+
+/**
+ * Validates a raw config file after `key` was set in it. A notification channel that cannot be
+ * used and that this change did not touch is ignored, as when the file is read: it may come from
+ * a version that did not check channel URLs, and must not block every other setting. A change to
+ * the channels themselves is held to the full rules.
+ */
+export function parseUserConfigUpdate(
+  raw: Record<string, unknown>,
+  key: string,
+): ReturnType<typeof UserConfigSchema.safeParse> {
+  const touchesChannels =
+    key === 'notify' || key === 'notify.channels' || key.startsWith('notify.channels.');
+  return UserConfigSchema.safeParse(touchesChannels ? raw : withoutUnusableChannels(raw));
+}
+
+function withoutUnusableChannels(raw: unknown): unknown {
+  const unusable = new Set(unusableChannels(raw).map((c) => c.index));
+  if (unusable.size === 0) return raw;
+  const src = raw as { notify: { channels: unknown[] } };
+  return {
+    ...src,
+    notify: { ...src.notify, channels: src.notify.channels.filter((_, i) => !unusable.has(i)) },
+  };
 }
 
 /**
@@ -274,16 +312,7 @@ export function unusableNotifyChannels(path: string): { type: string; problem: s
  */
 export function loadUserConfig(path: string): UserConfig {
   if (!existsSync(path)) return defaultUserConfig();
-  let raw = readBoundedJson(path);
-  const unusable = new Set(unusableChannels(raw).map((c) => c.index));
-  if (unusable.size > 0) {
-    const src = raw as { notify: { channels: unknown[] } };
-    raw = {
-      ...src,
-      notify: { ...src.notify, channels: src.notify.channels.filter((_, i) => !unusable.has(i)) },
-    };
-  }
-  const parsed = UserConfigSchema.safeParse(raw);
+  const parsed = UserConfigSchema.safeParse(withoutUnusableChannels(readBoundedJson(path)));
   if (!parsed.success) {
     throw new MindlyError('invalid_input', `invalid config: ${z.prettifyError(parsed.error)}`);
   }

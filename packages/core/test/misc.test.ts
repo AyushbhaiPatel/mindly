@@ -8,7 +8,7 @@ import {
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadUserConfig, unusableNotifyChannels } from '../src/config.js';
+import { loadUserConfig, parseUserConfigUpdate, unusableNotifyChannels } from '../src/config.js';
 import { codename, isUuid, parseCodename, uuidv7 } from '../src/ids.js';
 import { sanitizeForContext, truncate } from '../src/text.js';
 
@@ -160,9 +160,20 @@ describe('config', () => {
     expect(config.notify.channels).toEqual([{ type: 'desktop' }]);
     expect(config.hooks.timeoutMs).toBe(900);
     expect(unusableNotifyChannels(path)).toEqual([
-      { type: 'webhook', problem: 'url must use https (http only for localhost)' },
-      { type: 'ntfy', problem: 'url must not contain credentials' },
+      { index: 0, type: 'webhook', problem: 'url must use https (http only for localhost)' },
+      { index: 2, type: 'ntfy', problem: 'url must not contain credentials' },
     ]);
+  });
+  it('lets other settings change while an old unusable channel stays in the file', () => {
+    const raw = {
+      notify: { channels: [{ type: 'webhook', url: 'http://example.com/hook' }] },
+      hooks: { timeoutMs: 2000 },
+    };
+    expect(parseUserConfigUpdate(raw, 'hooks.timeoutMs').success).toBe(true);
+    expect(parseUserConfigUpdate(raw, 'notify.triggers').success).toBe(true);
+    // A change to the channels themselves is held to the rules.
+    expect(parseUserConfigUpdate(raw, 'notify.channels').success).toBe(false);
+    expect(parseUserConfigUpdate(raw, 'notify').success).toBe(false);
   });
   it('rejects NUL in check argv', () => {
     expect(ProjectConfigSchema.safeParse({ checks: [{ name: 'x', argv: ['a\0'] }] }).success).toBe(

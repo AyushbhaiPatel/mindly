@@ -64,12 +64,17 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   Mindly.
 - Pager payloads contain titles and counts only, never code or prompt text. They go through
   the same redaction as stored text, `redaction.extraPatterns` included, after control and
-  invisible characters are removed. A notification raised in a hook is written to an outbox in
-  the local database and sent afterwards (by the daemon, or by the hook process once the agent
-  has its answer); one that reached no channel is tried again up to five times within six hours
-  and then dropped. Channel URLs must be `https` (`http` only for localhost) without credentials;
-  this is checked when the config is read and again when sending, and redirects are not
-  followed.
+  invisible characters are removed. A hook never contacts a pager: a notification it raises is
+  written, already redacted, to an outbox in the local database, and the hook starts one
+  detached `mindly notify flush` that sends it and waits for the answer. The daemon flushes the
+  outbox as well; a lease in the database lets only one process send at a time. One that
+  reached no channel is tried again (after 30 s, 2 min, 10 min, 30 min) and dropped after five
+  attempts or six hours. Webhook payloads carry an `id` that is the same on every attempt, so a
+  receiver can drop the rare repeat (a sender killed after the pager took the request but before
+  it answered). Channel URLs must be `https` (`http` only for localhost) without credentials;
+  `mindly config set` refuses others, a config file that already holds one keeps working with
+  that channel left out (`mindly config get`, `mindly doctor` and the daemon log name it), and
+  the rule is checked again when sending. Redirects are not followed.
 - Checkpoints (`mindly bisect`) store the working tree after each agent edit as git commits
   inside the repository itself, under `refs/mindly/steps/<worktree id>/<step>`. They hold code,
   not prompts; the prompt is linked by event id and goes through the usual redaction and

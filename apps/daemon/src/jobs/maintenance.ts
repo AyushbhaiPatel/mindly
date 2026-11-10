@@ -1,4 +1,4 @@
-import { describeError } from '@mindly/core';
+import { describeError, unusableNotifyChannels } from '@mindly/core';
 import {
   needsYouCount,
   notifyOutbox,
@@ -144,4 +144,20 @@ export async function standupTick(ctx: JobContext): Promise<void> {
 export async function notifyOutboxTick(ctx: JobContext): Promise<void> {
   const r = await notifyOutbox(ctx.mindly).flush({ budgetMs: 20_000 });
   if (r.delivered > 0 || r.dropped > 0) ctx.logger.info('pager outbox', { ...r });
+}
+
+/**
+ * Says once, at start, which notification channels of the config file are not used because their
+ * URL cannot be (a file written before channel URLs were checked). The URL itself is not logged.
+ */
+export function warnUnusableChannels(ctx: JobContext): void {
+  const path = ctx.mindly.paths?.config;
+  if (!path) return;
+  for (const c of unusableNotifyChannels(path)) {
+    ctx.logger.warn('notification channel not used', {
+      channel: `notify.channels[${c.index}]`,
+      type: c.type,
+      problem: c.problem,
+    });
+  }
 }

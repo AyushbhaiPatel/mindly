@@ -21,6 +21,7 @@ import {
   housekeepingTick,
   notifyOutboxTick,
   selfHealingTick,
+  warnUnusableChannels,
   standupTick,
   trackSurvivalTick,
 } from './jobs/maintenance.js';
@@ -321,6 +322,7 @@ export function registerJobs(jobs: JobContext): void {
   if (config.standup.time) {
     scheduler.every({ name: 'standup', intervalMs: MINUTE, run: () => standupTick(jobs) });
   }
+  warnUnusableChannels(jobs);
   if (config.notify.channels.length > 0) {
     scheduler.every({
       name: 'notify-outbox',
