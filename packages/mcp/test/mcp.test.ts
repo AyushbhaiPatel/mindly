@@ -1970,6 +1970,85 @@ describe('telling windows of one agent apart', () => {
       expect(upd.text).not.toContain('no longer yours');
     });
 
+    /** Hands the server's work off at arm's length; window `win` picks it up at its next start. */
+    async function handOffToWin(h: Harness, winId: string, id: string) {
+      await h.call('mindly_handoff', { summary: 'server hands its work on' });
+      const r = await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win', 'session_start'));
+      expect(r.context).toContain('Handoff for you');
+      expect(h.mindly.store.sessions.get(winId).currentTaskId).toBe(id);
+      expect(sid(await h.call('mindly_status'))).toBe(winId);
+    }
+
+    async function expectNotOwn(h: Harness, id: string) {
+      const mine = await h.call('mindly_tasks', { mine: true });
+      expect(mine.structured?.['tasks']).toEqual([]);
+      const claim = await h.call('mindly_task_claim', { id });
+      expect(claim.structured?.['claimed']).toBe(false);
+    }
+
+    it('does not count a task as its own once the window picked it up from its handoff', async () => {
+      const { h, win, id, reopen } = await soleInBetween();
+      await reopen();
+      await handOffToWin(h, win.id, id);
+      await expectNotOwn(h, id);
+    });
+
+    it('does not count a task it claimed as the one window there is once the window picked it up', async () => {
+      const { h, win, id, reopen } = await soleInBetween();
+      expect((await h.call('mindly_task_claim', { id })).text).toMatch(/^Claimed/);
+      await reopen();
+      await handOffToWin(h, win.id, id);
+      await expectNotOwn(h, id);
+    });
+
+    it("forgets a current task it set once the session moved on, so a later pickup is the window's", async () => {
+      const { h, win, id, reopen } = await soleInBetween();
+      expect((await h.call('mindly_task_claim', { id })).text).toMatch(/^Claimed/);
+      await h.call('mindly_task_create', { title: 'other work' });
+      expect(h.mindly.store.sessions.get(win.id).currentTaskId).not.toBe(id);
+      await reopen();
+      await handOffToWin(h, win.id, id);
+      await expectNotOwn(h, id);
+    });
+
+    it('does not take back a task it let go of when it later updates it as the one window', async () => {
+      const { h, win, id, reopen } = await soleInBetween();
+      await reopen();
+      await handOffToWin(h, win.id, id);
+      await expectNotOwn(h, id);
+      // The third window closes: the guess is the one window there is again.
+      await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win-3', 'session_end'));
+      const upd = await h.call('mindly_task_update', { id, blockers: ['note'] });
+      expect(upd.isError).toBe(false);
+      await reopen();
+      await expectNotOwn(h, id);
+    });
+
+    it('does not take back a task the window picked up by claiming it as the one window', async () => {
+      const { h, win, id, reopen } = await soleInBetween();
+      await reopen();
+      await handOffToWin(h, win.id, id);
+      await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win-3', 'session_end'));
+      expect((await h.call('mindly_task_claim', { id })).text).toMatch(/^Claimed/);
+      await reopen();
+      await expectNotOwn(h, id);
+      expect(h.mindly.store.sessions.get(win.id).currentTaskId).toBe(id);
+    });
+
+    it('does not take back a task the window picked up by updating it as the one window', async () => {
+      const { h, win, id, reopen } = await soleInBetween();
+      await reopen();
+      // The server hands its work off; window `win` picks it up at its next start.
+      await handOffToWin(h, win.id, id);
+      // The third window closes: the guess is the one window there is again. The server only
+      // notes a blocker on the task (shared work any agent may update).
+      await h.mindly.hooks.handle(hook(h.root, 'claude-code', 'win-3', 'session_end'));
+      expect((await h.call('mindly_task_update', { id, blockers: ['note'] })).isError).toBe(false);
+      await reopen();
+      await expectNotOwn(h, id);
+      expect(h.mindly.store.sessions.get(win.id).currentTaskId).toBe(id);
+    });
+
     it('files a handoff in its own name on a guess, so it never picks it up itself', async () => {
       const a = await harness(windowA);
       const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);

@@ -88,6 +88,14 @@ interface ServerWork {
   currents: Map<string, string>;
 }
 
+/** What a call acting as the one window there is began with (see `SessionResolver.callStart`). */
+interface CallStart {
+  /** The tracked tasks that were still the server's own. */
+  own: ReadonlySet<string>;
+  /** The session's current task. */
+  current: string | null;
+}
+
 /** Most rows a server records while on a guess; past it, new rows stay where they are made. */
 const MAX_WORK_ROWS = 1000;
 
@@ -487,11 +495,17 @@ export class SessionResolver {
       if (this.bound.sure || this.relation(session).clientRuns !== false) {
         store.sessions.touch(this.bound.id);
       }
+      this.forgetMovedCurrents();
       this.carryWork(session.id, this.bound.sure);
       const now = store.sessions.get(this.bound.id);
       if (this.bound.sure) return { project, session: now };
       if (await this.sole(project, now)) {
-        return { project, session: now, ownWrite: (taskId) => this.ownWrite(now.id, taskId) };
+        const start = this.callStart(now);
+        return {
+          project,
+          session: now,
+          ownWrite: (taskId) => this.ownWrite(now.id, taskId, start),
+        };
       }
       return this.guessScope(project, now);
     }
@@ -686,23 +700,57 @@ export class SessionResolver {
   }
 
   /**
-   * A call made while the server acted as the guessed session `sessionId` (the one window there
-   * is) wrote task `taskId`. When it is a task the server tracks from a guess, this was the
-   * server's own write: its stamp is taken again, and a current task the call set is the
-   * server's doing, not the window's.
+   * Forgets the current tasks the server set itself that their session has moved away from:
+   * should the session come back to one, that is the window's doing.
    */
-  private ownWrite(sessionId: string, taskId: string): void {
+  private forgetMovedCurrents(): void {
+    const work = this.work;
+    if (!work) return;
+    for (const [id, task] of [...work.currents]) {
+      if (this.mindly.store.sessions.find(id)?.currentTaskId !== task) work.currents.delete(id);
+    }
+  }
+
+  /**
+   * What the server's tracked tasks were when a call acting as the guessed session `session`
+   * (the one window there is) began: which were still its own, and the session's current task.
+   */
+  private callStart(session: Session): CallStart {
+    const work = this.work;
+    if (!work) return { own: new Set(), current: session.currentTaskId };
+    const busy = this.currentTasks(session.projectId, null);
+    const own = new Set<string>();
+    for (const r of work.rows.values()) {
+      if (r.kind === 'task' && this.ownsTask(r, null, busy)) own.add(r.id);
+    }
+    return { own, current: session.currentTaskId };
+  }
+
+  /**
+   * A call made while the server acted as the guessed session `sessionId` (the one window there
+   * is) wrote task `taskId`. A task it tracks from a guess that was still its own when the call
+   * began (`start`) stays its own: its stamp is taken again, and a current task this call set is
+   * the server's doing, not the window's. One that was no longer its own (a window took it up)
+   * is let go of and stays where it is, as on a guess.
+   */
+  private ownWrite(sessionId: string, taskId: string, start: CallStart): void {
     const work = this.work;
     const row = work?.rows.get(`task:${taskId}`);
     if (!work || !row) return;
     const store = this.mindly.store;
     try {
+      if (!start.own.has(taskId)) {
+        work.rows.delete(`task:${taskId}`);
+        if (work.currentTask === taskId) work.currentTask = null;
+        if (work.currents.get(sessionId) === taskId) work.currents.delete(sessionId);
+        return;
+      }
       const task = store.tasks.find(taskId);
       const stamp = store.sessions.rowStamp('task', taskId);
       if (!task || !stamp) return;
       const at = task.ownerSessionId === sessionId ? sessionId : row.at;
       work.rows.set(`task:${taskId}`, { ...row, at, ...stamp });
-      if (store.sessions.find(sessionId)?.currentTaskId === taskId) {
+      if (start.current !== taskId && store.sessions.find(sessionId)?.currentTaskId === taskId) {
         work.currents.set(sessionId, taskId);
       }
     } catch (err) {
