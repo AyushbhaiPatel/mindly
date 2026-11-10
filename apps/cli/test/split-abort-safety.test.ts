@@ -4,6 +4,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -14,7 +15,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type * as GitModule from '@mindly/git';
 import { openMindly } from '@mindly/runtime';
@@ -74,6 +75,17 @@ async function splitSandbox(prepare?: (sb: Sandbox) => void): Promise<Sandbox> {
 }
 
 const partDir = (sb: Sandbox, key: string): string => join(`${sb.repo}.mindly`, `billing-${key}`);
+
+/** The JSON a CLI run printed; when there is none, a failure that says why (exit code, stderr). */
+function jsonOf<T>(r: { code: number; stdout: string; stderr: string }): T {
+  try {
+    return JSON.parse(r.stdout) as T;
+  } catch {
+    throw new Error(
+      `the CLI printed no JSON (exit ${r.code}); stderr: ${r.stderr.trim() || '(none)'}; stdout: ${r.stdout.trim() || '(none)'}`,
+    );
+  }
+}
 
 describe('split abort keeps what it cannot account for', () => {
   it('counts ignored deny-listed files whatever their letter case', async () => {
@@ -153,7 +165,7 @@ describe('split abort does not refuse for what loses nothing', () => {
     const later = new Date(Date.now() + 5000);
     utimesSync(join(page, '.env.example'), later, later);
     const st = await cli(sb, ['split', 'status', '--json']);
-    const parts = (JSON.parse(st.stdout) as { parts: { uncommitted: string[] }[] }).parts;
+    const parts = jsonOf<{ parts: { uncommitted: string[] }[] }>(st).parts;
     expect(parts.map((p) => p.uncommitted)).toEqual([[], []]);
     const r = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
     expect(r.code).toBe(0);
@@ -190,11 +202,11 @@ describe('split abort removes what was confirmed, and copes with what git will n
     git(sb.repo, 'worktree', 'lock', '--reason', 'agent running', page);
     const r1 = await cli(sb, ['split', 'abort', '--yes', '--json']);
     expect(r1.code).toBe(1);
-    const a = JSON.parse(r1.stdout) as {
+    const a = jsonOf<{
       finished: boolean;
       removedWorktrees: string[];
       keptBecause: Record<string, string>;
-    };
+    }>(r1);
     expect(a.finished).toBe(false);
     expect(a.removedWorktrees).toEqual([partDir(sb, 'api')]);
     expect(a.keptBecause[page]).toBe(
@@ -236,7 +248,7 @@ describe('split abort leaves the last word to git, confirmed or not', () => {
     }
     expect(looks).toBe(3);
     expect(r.code).toBe(1);
-    const a = JSON.parse(r.stdout) as Aborted;
+    const a = jsonOf<Aborted>(r);
     expect(a.finished).toBe(false);
     expect(a.keptWorktrees).toEqual([page]);
     expect(a.keptBecause[page]).toBe('it got new work while the abort ran: src/app/late.ts');
@@ -318,7 +330,7 @@ describe('split abort leaves the last word to git, confirmed or not', () => {
     }
     expect(looks).toBe(3);
     expect(r.code).toBe(1);
-    const a = JSON.parse(r.stdout) as Aborted;
+    const a = jsonOf<Aborted>(r);
     expect(a.keptWorktrees).toEqual([page]);
     expect(a.keptBecause[page]).toMatch(/^git did not remove it: .*modified or untracked/);
     expect(readFileSync(join(page, 'config/local.json'), 'utf8')).toContain('postgres://');
@@ -340,7 +352,7 @@ describe('split abort never deletes git data in a worktree, short of a discard',
   async function keptFor(sb: Sandbox, paths: string, args: string[] = []): Promise<Aborted> {
     const r = await cli(sb, ['split', 'abort', '--yes', '--json', ...args]);
     expect(r.code).toBe(1);
-    const a = JSON.parse(r.stdout) as Aborted;
+    const a = jsonOf<Aborted>(r);
     const page = partDir(sb, 'page');
     expect(a.finished).toBe(false);
     expect(a.keptWorktrees).toEqual([page]);
@@ -610,44 +622,55 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     git(page, 'add', '-A');
     const r = await cli(sb, ['split', 'abort', '--json'], { answers: ['y'] });
     expect(r.code).toBe(1);
-    expect((JSON.parse(r.stdout) as Aborted).keptBecause[page]).toBe(HELD('fixtures/remote.git'));
+    expect(jsonOf<Aborted>(r).keptBecause[page]).toBe(HELD('fixtures/remote.git'));
     expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
   });
 
   it('keeps a tracked bare repository whose objects/pack links to an ignored store', async () => {
+    // Packs are made in ordinary repositories and put in place as files: git is never asked to
+    // write through the link, which is the layout under test, not something to depend on.
+    const packsOf = (repo: string): string[] =>
+      readdirSync(join(repo, '.git/objects/pack')).map((f) => join(repo, '.git/objects/pack', f));
+    const seed = join(tempDir('r10-seed-'), 's');
+    repoAt(seed, { 'seed.ts': 'seed\n' });
+    git(seed, 'repack', '-a', '-d', '-q');
     const sb = await splitSandbox((s) => {
       write(s.repo, '.gitignore', 'packstore/\n');
       const b = join(s.repo, 'fx/remote.git');
       mkdirSync(b, { recursive: true });
       git(b, 'init', '-q', '--bare', '-b', 'main');
-      git(b, 'config', 'receive.unpackLimit', '1');
-      const seed = join(tempDir('r10-seed-'), 's');
-      repoAt(seed, { 'seed.ts': 'seed\n' });
-      git(seed, 'push', '-q', b, 'main');
-      git(b, 'repack', '-a', '-d', '-q');
       mkdirSync(join(s.repo, 'packstore'));
-      for (const f of readdirSync(join(b, 'objects/pack'))) {
-        renameSync(join(b, 'objects/pack', f), join(s.repo, 'packstore', f));
-      }
+      for (const f of packsOf(seed)) copyFileSync(f, join(s.repo, 'packstore', basename(f)));
+      writeFileSync(join(b, 'refs/heads/main'), git(seed, 'rev-parse', 'HEAD'));
       rmSync(join(b, 'objects/pack'), { recursive: true });
       symlinkSync('../../../packstore', join(b, 'objects/pack'));
       write(b, 'objects/info/.keep', '');
       git(s.repo, 'add', '-f', 'packstore', 'fx');
     });
     const page = partDir(sb, 'page');
-    const bare = join(page, 'fx/remote.git');
-    // A pack pushed only there lands in the store, outside the repository's own folder.
-    const clone = join(tempDir('r10-cl-'), 'c');
-    git(page, 'clone', '-q', '--no-local', bare, clone);
-    write(clone, 'new.ts', 'hours of work\n');
-    git(clone, 'add', '-A');
-    git(clone, 'commit', '-q', '-m', 'only copy');
-    git(clone, 'push', '-q', 'origin', 'main');
-    rmSync(clone, { recursive: true, force: true });
+    const store = join(page, 'packstore');
+    // A new pack, with a commit only it has, lands in the store: outside the repository's own
+    // folder, which is otherwise exactly as committed (its ref is not even moved yet).
+    const work = join(tempDir('r10-work-'), 'w');
+    git(seed, 'clone', '-q', seed, work);
+    write(work, 'new.ts', 'hours of work\n');
+    git(work, 'add', '-A');
+    git(work, 'commit', '-q', '-m', 'only copy');
+    git(work, 'repack', '-a', '-d', '-q');
+    const before = new Set(readdirSync(store));
+    const added = packsOf(work).filter((f) => !before.has(basename(f)));
+    for (const f of added) copyFileSync(f, join(store, basename(f)));
+    expect(added.length).toBeGreaterThan(0);
     const r = await cli(sb, ['split', 'abort', '--json'], { answers: ['y'] });
+    expect(jsonOf<Aborted>(r).keptBecause[page]).toBe(HELD('fx/remote.git'));
     expect(r.code).toBe(1);
-    expect((JSON.parse(r.stdout) as Aborted).keptBecause[page]).toBe(HELD('fx/remote.git'));
-    expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only copy\n');
+    for (const f of added) expect(existsSync(join(store, basename(f)))).toBe(true);
+    // Its ref moved too: still kept, and the commit is there.
+    const tip = git(work, 'rev-parse', 'HEAD');
+    writeFileSync(join(page, 'fx/remote.git/refs/heads/main'), tip);
+    const again = await cli(sb, ['split', 'abort', '--yes', '--json']);
+    expect(jsonOf<Aborted>(again).keptBecause[page]).toBe(HELD('fx/remote.git'));
+    expect(readFileSync(join(page, 'fx/remote.git/refs/heads/main'), 'utf8')).toBe(tip);
   });
 
   it('keeps a bare clone git accepts, whatever its HEAD looks like', async () => {
@@ -839,7 +862,7 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     }
     expect(looks).toBe(3);
     expect(r.code).toBe(1);
-    const a = JSON.parse(r.stdout) as Aborted;
+    const a = jsonOf<Aborted>(r);
     expect(a.keptBecause[page]).toBe(HELD('src/app/late'));
     expect(git(join(page, 'src/app/late'), 'log', '--format=%s')).toBe('only copy\n');
   });
