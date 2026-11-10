@@ -48,8 +48,23 @@ function rollOf(text: string): number {
  * `stored` the normalised text that is kept for it (redacted, sanitised).
  */
 export function evidenceHash(found: string, stored: string): string {
-  if (stored === found || found.length === 0) return sha256(found);
-  return `span:${found.length}:${rollOf(found).toString(16).padStart(8, '0')}:${sha256(found)}`;
+  // A span never starts or ends inside a character: half of one would compare equal to the
+  // same half of another character once encoded.
+  const whole = wholeChars(found);
+  if ((stored === found && whole === found) || whole.length === 0) return sha256(found);
+  return `span:${whole.length}:${rollOf(whole).toString(16).padStart(8, '0')}:${sha256(whole)}`;
+}
+
+const isHigh = (c: number): boolean => c >= 0xd800 && c <= 0xdbff;
+const isLow = (c: number): boolean => c >= 0xdc00 && c <= 0xdfff;
+
+/** `text` without half a character at either end (an excerpt cut inside a surrogate pair). */
+function wholeChars(text: string): string {
+  let start = 0;
+  let end = text.length;
+  if (end > 0 && isLow(text.charCodeAt(0))) start = 1;
+  if (end > start && isHigh(text.charCodeAt(end - 1))) end -= 1;
+  return text.slice(start, end);
 }
 
 /** Reads a stored `span:` hash; null for the other forms. */
@@ -81,7 +96,14 @@ export function spanIn(content: string, span: Span): boolean {
   let h = 0;
   for (let i = 0; i < n; i++) h = (Math.imul(h, BASE) + content.charCodeAt(i)) | 0;
   for (let start = 0; ; start++) {
-    if (h >>> 0 === span.roll && sha256(content.slice(start, start + n)) === span.hash) return true;
+    if (
+      h >>> 0 === span.roll &&
+      !isLow(content.charCodeAt(start)) &&
+      !isHigh(content.charCodeAt(start + n - 1)) &&
+      sha256(content.slice(start, start + n)) === span.hash
+    ) {
+      return true;
+    }
     const out = start + n;
     if (out >= content.length) return false;
     h =

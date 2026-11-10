@@ -1,4 +1,4 @@
-import { utimesSync } from 'node:fs';
+import { copyFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { normalizeLine, sha256 } from '@mindly/core';
 import { describe, expect, it, vi } from 'vitest';
@@ -287,6 +287,79 @@ describe('self-healing memory', () => {
     expect(selfHealingOf(mindly).sweep(pid)).toMatchObject({ invalid: 1, markedStale: 1 });
     expect(mindly.store.memories.get(redacted.id).trust).toBe('stale');
     expect(mindly.store.memories.get(plain.id).trust).not.toBe('stale');
+  });
+
+  it('looks at evidence found gone again whenever the file is not the one it was gone from', async () => {
+    const { root, clock, mindly, pid, cc, write } = await featureSetup();
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    const good = `export const client = connect({ token: "${secret}", retries: 3 });\n`;
+    const bad = 'export const client = connect({ token: process.env.TOKEN, retries: 3 });\n';
+    const path = join(root, 'src/client.ts');
+    const backup = join(root, 'client.ts.bak');
+    write('src/client.ts', good);
+    writeFileSync(backup, good);
+    const old = (Date.now() - 3_600_000) / 1000;
+    utimesSync(backup, old, old);
+    const m = mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'fact',
+      title: 'The client token is set inline',
+      body: 'b',
+      source: agentSource(cc),
+      evidence: [{ path: 'src/client.ts', excerpt: `token: "${secret}"` }],
+    });
+    const evidence = () => mindly.store.memories.evidenceFor(m.id)[0]!;
+    const sweep = () => selfHealingOf(mindly).sweep(pid);
+    const goneAgain = () => {
+      write('src/client.ts', bad);
+      expect(sweep()).toMatchObject({ invalid: 1 });
+      expect(evidence().valid).toBe(false);
+    };
+    // The store's clock runs ahead of every file time below, as a lagging file system's would.
+    clock.t = Date.now() + 3_600_000;
+
+    // Unchanged since it was found gone: not looked at again.
+    goneAgain();
+    const mark = vi.spyOn(mindly.store.memories, 'markEvidence');
+    expect(sweep()).toMatchObject({ invalid: 1, restored: 0 });
+    expect(mark).not.toHaveBeenCalled();
+    mark.mockRestore();
+
+    // `mv backup src/client.ts`: another inode, an hour-old time.
+    renameSync(backup, path);
+    expect(sweep()).toMatchObject({ invalid: 0, restored: 1 });
+
+    // `cp -p backup src/client.ts`: the same inode, the backup's old times.
+    goneAgain();
+    writeFileSync(backup, good);
+    copyFileSync(backup, path);
+    utimesSync(path, old, old);
+    expect(sweep()).toMatchObject({ invalid: 0, restored: 1 });
+
+    // Written back in place with a time older than the last check.
+    goneAgain();
+    writeFileSync(path, good);
+    utimesSync(path, old, old);
+    expect(sweep()).toMatchObject({ invalid: 0, restored: 1 });
+  });
+
+  it('never cites half of a character', () => {
+    const smile = '\u{1F642}';
+    const grin = '\u{1F600}';
+    // An excerpt cut inside the emoji: the span stops before it.
+    const cut = `const tag = "x${smile}";`.slice(0, 15);
+    expect(cut.charCodeAt(14)).toBe(0xd83d);
+    expect(evidenceHash(cut, 'stored differently')).toBe(
+      evidenceHash(cut.slice(0, 14), 'stored differently'),
+    );
+    expect(evidenceHash(smile.slice(1) + 'abc', 'x')).toBe(evidenceHash('abc', 'x'));
+
+    // A window that starts inside a pair is not a match, even where the encoded text agrees
+    // (half a character is encoded as U+FFFD).
+    const span = evidenceHash('�abc', '[REDACTED]abc');
+    expect(excerptPresent(`x${grin}abc`, '[REDACTED]abc', span)).toBe(false);
+    expect(excerptPresent('x�abc', '[REDACTED]abc', span)).toBe(true);
   });
 
   it('finds redacted evidence past the first 20,000 lines of a file', async () => {

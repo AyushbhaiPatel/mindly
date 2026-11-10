@@ -1,4 +1,4 @@
-import { statSync } from 'node:fs';
+import { statSync, type Stats } from 'node:fs';
 import { REDACTED, sha256, type MemoryEvidence, type Session } from '@mindly/core';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { BusEvents, Kernel } from '../kernel.js';
@@ -221,28 +221,28 @@ export class SelfHealingService {
   private readFile(projectRoot: string, rel: string): FileState {
     const p = safeProjectPath(this.k, projectRoot, rel);
     if (!p) return { kind: 'unreadable' };
-    let isFile: boolean;
+    // Taken before the content is read, so it describes no newer file than the one read.
+    let st: Stats;
     try {
-      isFile = statSync(p.abs).isFile();
+      st = statSync(p.abs);
     } catch {
       return { kind: 'missing' };
     }
-    if (!isFile) return { kind: 'missing' };
+    if (!st.isFile()) return { kind: 'missing' };
     const content = readBounded(p.abs);
     if (content === null) return { kind: 'unreadable' };
-    let mtimeMs = 0;
-    try {
-      mtimeMs = statSync(p.abs).mtimeMs;
-    } catch {
-      // gone meanwhile: compared as read
-    }
     let file: NormFile | null = null;
     return {
       kind: 'present',
-      mtimeMs,
+      seen: `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`,
       // Rules Mindly wrote into an instruction file are not evidence for those same rules.
       file: () => (file ??= normFile(normalizeBlock(stripManagedSection(content)))),
     };
+  }
+
+  /** Where it is kept what a file looked like when a piece of evidence was found gone from it. */
+  private goneKey(projectId: string, evidenceId: string): string {
+    return `self-healing:gone:${projectId}:${evidenceId}`;
   }
 
   private check(
@@ -256,14 +256,10 @@ export class SelfHealingService {
     if (file.kind === 'unreadable') {
       return { ...base, state: 'unknown', markedStale: false, restored: false };
     }
-    if (
-      file.kind === 'present' &&
-      !e.valid &&
-      e.checkedAt !== null &&
-      file.mtimeMs > 0 &&
-      file.mtimeMs < e.checkedAt
-    ) {
-      // Found gone, and the file has not been written since: nothing to look at again.
+    const goneKey = this.goneKey(projectId, e.id);
+    if (file.kind === 'present' && !e.valid && this.k.store.kv.get<string>(goneKey) === file.seen) {
+      // Found gone from this very file (same size, times and inode): nothing to look at again.
+      // Anything else, an older time or another inode included, is looked at.
       return { ...base, state: 'invalid', markedStale: false, restored: false };
     }
     const found =
@@ -278,6 +274,8 @@ export class SelfHealingService {
     }
     const valid = found === 'present';
     this.k.store.memories.markEvidence(e.id, valid);
+    if (valid || file.kind !== 'present') this.k.store.kv.delete(goneKey);
+    else this.k.store.kv.set(goneKey, file.seen);
     if (valid) {
       return { ...base, state: 'valid', markedStale: false, restored: !e.valid };
     }
@@ -310,7 +308,8 @@ export class SelfHealingService {
 
 /** A present file is normalised once, when the first evidence row needs it. */
 type FileState =
-  | { kind: 'present'; mtimeMs: number; file: () => NormFile }
+  /** `seen`: size, modification and change times and inode of the file when it was read. */
+  | { kind: 'present'; seen: string; file: () => NormFile }
   | { kind: 'missing' }
   | { kind: 'unreadable' };
 
