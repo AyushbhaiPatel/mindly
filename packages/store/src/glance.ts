@@ -51,6 +51,26 @@ export function openDatabaseReadOnly(path: string, options: { busyTimeoutMs?: nu
   return db;
 }
 
+/**
+ * The schema version of the database at `path`, read without changing anything: no migration, no
+ * journal mode switch, no file created. Null when there is no database yet. A diagnostic uses it
+ * to tell an older or newer database from one this Mindly can work with before it opens the store
+ * (which upgrades an older database and refuses a newer one).
+ */
+export function peekSchemaVersion(
+  path: string,
+  options: { busyTimeoutMs?: number } = {},
+): number | null {
+  if (!existsSync(path)) return null;
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.trunc(options.busyTimeoutMs ?? 200)}`);
+    return schemaVersion(db);
+  } finally {
+    db.close();
+  }
+}
+
 /** The project whose root is `dir` or its nearest ancestor, or null when Mindly does not know it. */
 function findProject(db: Db, dir: string): { id: string; name: string } | null {
   const stmt = db.prepare('SELECT id, name FROM projects WHERE root = ?');

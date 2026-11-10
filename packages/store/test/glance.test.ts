@@ -1,9 +1,17 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError, type Severity } from '@mindly/core';
-import { openDatabaseReadOnly, readGlance, startOfLocalDay, Store } from '../src/index.js';
+import {
+  MIGRATIONS,
+  openDatabaseReadOnly,
+  peekSchemaVersion,
+  readGlance,
+  startOfLocalDay,
+  Store,
+} from '../src/index.js';
 
 const user = { type: 'user' as const, sessionId: null, agentKind: null };
 const NOW = Date.now();
@@ -216,5 +224,31 @@ describe('readGlance', () => {
     }
     expect(isMindlyError(error, 'not_found')).toBe(true);
     expect(() => statSync(missing)).toThrow();
+  });
+});
+
+describe('peekSchemaVersion', () => {
+  it('reads the version of any database without changing or creating it', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-peek-')));
+    const path = join(dir, 'mindly.db');
+    expect(peekSchemaVersion(path)).toBeNull();
+    expect(existsSync(path)).toBe(false);
+
+    // An older database: every migration but the last.
+    const old = new DatabaseSync(path);
+    for (const sql of MIGRATIONS.slice(0, -1)) old.exec(sql);
+    old.exec(`PRAGMA user_version = ${MIGRATIONS.length - 1}`);
+    old.close();
+    const before = readFileSync(path);
+    expect(peekSchemaVersion(path)).toBe(MIGRATIONS.length - 1);
+    expect(readFileSync(path).equals(before)).toBe(true);
+    expect(existsSync(`${path}-wal`)).toBe(false);
+
+    // A newer one is read too; opening the store is what refuses it.
+    const newer = new DatabaseSync(path);
+    newer.exec(`PRAGMA user_version = ${MIGRATIONS.length + 2}`);
+    newer.close();
+    expect(peekSchemaVersion(path)).toBe(MIGRATIONS.length + 2);
+    expect(() => Store.open(path)).toThrow(/newer than this Mindly/);
   });
 });
