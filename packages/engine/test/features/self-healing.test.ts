@@ -575,6 +575,64 @@ describe('self-healing memory', () => {
     expect(deletedMs).toBeLessThan(500);
   });
 
+  it('places whole-line evidence whose lines changed in number when it was made safe', () => {
+    const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
+    const tail = `const TOKEN = "${secret}"; // the production key for billing`;
+    for (const [name, block, n] of [
+      // A line of only an invisible character: gone from the excerpt, a line of the file.
+      ['an invisible-only line', `const A = 1;\n\u200B\n${tail}`, 3],
+      // A lone carriage return: a line break in the excerpt, a space in the file.
+      ['a lone carriage return', `a;\rb;\n${tail}`, 2],
+    ] as const) {
+      const text: string = block;
+      const stored = sanitizeForContext(redactText(text), 2000);
+      const cited = `lines:${n}:${sha256(normalizeBlock(text))}`;
+      const content = `// header\n${text}\nexport {};\n`;
+      expect(excerptState(content, stored, cited), name).toBe('present');
+      expect(excerptState(content.replace('billing', 'payroll'), stored, cited), name).toBe(
+        'absent',
+      );
+      expect(excerptState(content.replace(secret, 'sk_live_other'), stored, cited), name).toBe(
+        'absent',
+      );
+    }
+  });
+
+  it('keeps whole-line evidence it cannot place within the work for one file', () => {
+    const timed = <T>(f: () => T): [T, number] => {
+      const t = performance.now();
+      const r = f();
+      return [r, performance.now() - t];
+    };
+    const lines: string[] = [];
+    for (let i = 0, size = 0; size < 500 * 1024; i++) {
+      lines.push(`k${i}`);
+      size += 6;
+    }
+    const file = lines.join('\n');
+    // A cited block of 400 lines whose stored excerpt was cut short: no fixed end to place it by.
+    const block = Array.from({ length: 400 }, (_, i) => `v${i}`).join('\n');
+    const cut = timed(() =>
+      excerptState(file, `${block.slice(0, 1500)}…`, `lines:400:${sha256(normalizeBlock(block))}`),
+    );
+    // A cited block of 200 lines of which only redactions were kept.
+    const keys = Array.from({ length: 200 }, (_, i) => `abcdef1234567890${i}`).join('\n');
+    const redacted = timed(() =>
+      excerptState(
+        file,
+        keys
+          .split('\n')
+          .map(() => '[REDACTED]')
+          .join('\n'),
+        `lines:200:${sha256(normalizeBlock(keys))}`,
+      ),
+    );
+    // Not decided either way: the evidence keeps the validity it had.
+    expect(cut[0]).toBe('unknown');
+    expect(redacted[0]).toBe('unknown');
+    expect(Math.max(cut[1], redacted[1])).toBeLessThan(100);
+  });
+
   it('keeps the validity of earlier evidence it cannot decide within the work for one file', () => {
     // Nothing but redactions was kept, on 40 lines: only every run of 40 whole lines could place
     // it, and in a 500 KB file that is more hashing than one check may do.

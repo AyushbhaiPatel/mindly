@@ -228,12 +228,21 @@ interface NormFile {
   /** Where each line of `content` starts. */
   lineStarts(): Int32Array;
   /**
-   * True when some run of `n` whole lines of the file has this hash. With `budgeted`, null when
-   * finding out would go past the work allowed for evidence of the earliest form in one file.
+   * True when some run of `n` whole lines of the file has this hash; null when finding out would
+   * go past the work allowed for one file (the evidence then keeps its validity).
    */
-  hasLines(n: number, hash: string, budgeted: boolean): boolean | null;
+  hasLines(n: number, hash: string): boolean | null;
+  /** Where each line of the made-safe view starts (see `safe`). */
+  safeLineStarts(): Int32Array;
   /** The file made safe the way a stored excerpt was (see `SafeView`). */
   safe(): SafeView;
+}
+
+/** Where each line of `text` starts. */
+function lineStartsOf(text: string): Int32Array {
+  const s = [0];
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) s.push(i + 1);
+  return Int32Array.from(s);
 }
 
 /** `raw`: the file as read. */
@@ -241,6 +250,7 @@ function normFile(raw: string): NormFile {
   const normContent = normalizeBlock(raw);
   let lines: string[] | null = null;
   let starts: Int32Array | null = null;
+  let safeStarts: Int32Array | null = null;
   let view: SafeView | null = null;
   let work = 0;
   const runs = new Map<number, Set<string>>();
@@ -248,20 +258,16 @@ function normFile(raw: string): NormFile {
     content: normContent,
     safe: () => (view ??= safeView(raw, normContent)),
     lineStarts() {
-      if (!starts) {
-        const s = [0];
-        for (let i = normContent.indexOf('\n'); i !== -1; i = normContent.indexOf('\n', i + 1)) {
-          s.push(i + 1);
-        }
-        starts = Int32Array.from(s);
-      }
-      return starts;
+      return (starts ??= lineStartsOf(normContent));
     },
-    hasLines(n, hash, budgeted) {
+    safeLineStarts() {
+      return (safeStarts ??= lineStartsOf(this.safe().text));
+    },
+    hasLines(n, hash) {
       let set = runs.get(n);
       if (!set) {
         const cost = normContent.length * n;
-        if (budgeted && work + cost > MAX_LINE_RUN_WORK) return null;
+        if (work + cost > MAX_LINE_RUN_WORK) return null;
         work += cost;
         lines ??= normContent.split('\n');
         set = new Set<string>();
@@ -311,7 +317,7 @@ function excerptIn(file: NormFile, excerpt: string, contentHash: string | null):
   // Hashes of the whole lines an excerpt spanned, written by an earlier build of this release.
   const cited = parseCitedLines(contentHash);
   if (cited) {
-    return wholeLines(file, keptText(normExcerpt), cited.lines, cited.hash, false);
+    return wholeLines(file, keptText(normExcerpt), cited.lines, cited.hash, true);
   }
 
   // The bare hash of the excerpt as it was found.
@@ -329,7 +335,7 @@ function excerptIn(file: NormFile, excerpt: string, contentHash: string | null):
   // It opens or closes with a redaction, so it has no fixed start or end: an original that was
   // whole lines is looked for by the hash of runs of as many lines.
   const n = Math.max(1, normExcerpt.split('\n').length);
-  return wholeLines(file, kept, n, contentHash, true);
+  return wholeLines(file, kept, n, contentHash, false);
 }
 
 /** The longest piece of kept text; none when every piece is only whitespace (line breaks). */
@@ -366,18 +372,21 @@ function keptText(normExcerpt: string): Kept {
 }
 
 /**
- * Evidence whose original was `n` whole lines with this hash. The longest piece of what was kept
- * lies on a known line of the excerpt, so each place it occurs in the file gives the one run of
- * lines that can be the original: one hash per place. Without such a piece (only redactions and
- * line breaks were kept), or past the places or work allowed, every run of `n` lines is hashed;
- * `budgeted` limits that for evidence of the earliest form, which then keeps its validity.
+ * Evidence whose original was whole lines with this hash. The longest piece of what was kept
+ * lies on a known line of the excerpt. Each place it occurs in the file made safe (which has the
+ * excerpt's lines: making safe can drop a line or split one) gives the run of lines the excerpt
+ * spans there; that run is mapped back to the file's own lines and hashed: one hash per place.
+ * When every place maps cleanly (and to `n` lines, with `counted`), a miss means the original is
+ * gone. Otherwise, and without such a piece (only redactions and line breaks were kept, or the
+ * excerpt was cut short), every run of `n` lines is hashed within the work allowed for one file;
+ * past it the answer is `unknown` and the evidence keeps its validity.
  */
 function wholeLines(
   file: NormFile,
   kept: Kept,
   n: number,
   hash: string,
-  budgeted: boolean,
+  counted: boolean,
 ): ExcerptState {
   const key = longest(kept.parts);
   if (key.length > 0 && !kept.cut) {
@@ -387,28 +396,45 @@ function wholeLines(
       offset += p.length + REDACTED.length;
     }
     const lineInExcerpt = kept.text.slice(0, offset).split('\n').length - 1;
+    const excerptLines = kept.text.split('\n').length;
     const view = file.safe();
+    const viewStarts = file.safeLineStarts();
     const starts = file.lineStarts();
     const norm = file.content;
     let tries = 0;
     let work = 0;
-    let decided = true;
+    let exact = true;
     for (let o = view.text.indexOf(key); o !== -1; o = view.text.indexOf(key, o + 1)) {
       if (++tries > MAX_LEGACY_OCCURRENCES || work > MAX_LINE_RUN_WORK) {
-        decided = false;
+        exact = false;
         break;
       }
-      const pos = view.at[o] as number;
-      if (pos < 0) continue;
-      const first = lineOf(starts, pos) - lineInExcerpt;
-      if (first < 0 || first + n > starts.length) continue;
-      const end = first + n < starts.length ? (starts[first + n] as number) - 1 : norm.length;
-      work += end - (starts[first] as number);
-      if (sha256(norm.slice(starts[first] as number, end)) === hash) return 'present';
+      const first = lineOf(viewStarts, o) - lineInExcerpt;
+      const last = first + excerptLines - 1;
+      if (first < 0 || last >= viewStarts.length) continue;
+      // The first character of the first line and the last of the last, in the file's lines.
+      const from = view.at[viewStarts[first] as number] as number;
+      const lastEnd =
+        last + 1 < viewStarts.length ? (viewStarts[last + 1] as number) - 2 : view.text.length - 1;
+      const to = view.at[lastEnd] as number;
+      if (from < 0 || to < 0) {
+        exact = false;
+        continue;
+      }
+      const lineFrom = lineOf(starts, from);
+      const lineTo = lineOf(starts, to);
+      if (counted && lineTo - lineFrom + 1 !== n) {
+        exact = false;
+        continue;
+      }
+      const start = starts[lineFrom] as number;
+      const end = lineTo + 1 < starts.length ? (starts[lineTo + 1] as number) - 1 : norm.length;
+      work += end - start;
+      if (sha256(norm.slice(start, end)) === hash) return 'present';
     }
-    if (decided) return 'absent';
+    if (exact) return 'absent';
   }
-  const found = file.hasLines(n, hash, budgeted);
+  const found = file.hasLines(n, hash);
   return found === null ? 'unknown' : found ? 'present' : 'absent';
 }
 
