@@ -23,15 +23,26 @@ const MAX_BASELINE_BYTES = 512 * 1024;
  */
 export const SURFACE_FORMAT = 2;
 
+/** What one format changed about the signatures stored by the formats before it. */
+interface FormatChange {
+  /** Kinds whose signature is written differently: an older one is never comparable. */
+  rewritten: readonly string[];
+  /**
+   * Kinds the analysis now resolves further: an export stored under one of them may be reported
+   * under another kind for the same code, so that kind change is not a change.
+   */
+  resolved: readonly string[];
+}
+
 /**
- * Per format, the kinds of export whose signature is written differently from that format on. A
- * signature of one of these kinds stored by an earlier format cannot be compared with a fresh one;
- * every other stored signature, and which names exist, still can.
+ * Per format, what it changed. Signatures stored by an earlier format are compared with a fresh
+ * surface except where listed here; which names exist always is.
  *
- * - 2: class signatures cover constructor parameters and function-valued members.
+ * - 2: class signatures cover constructor parameters and function-valued members; declarations
+ *   the analysis could not read before (kind `unknown`) are now read.
  */
-const FORMAT_CHANGES: Readonly<Record<number, readonly string[]>> = {
-  2: ['class'],
+const FORMAT_CHANGES: Readonly<Record<number, FormatChange>> = {
+  2: { rewritten: ['class'], resolved: ['unknown'] },
 };
 
 /**
@@ -44,23 +55,25 @@ function kindOf(signature: string): string {
 }
 
 /**
- * The kinds whose stored signatures are not comparable when they were written in format `from`:
- * those changed by any later format. `null` means none can be compared (a format newer than this
- * version knows).
+ * What the formats after `from` changed, merged. `null` when `from` is newer than this version
+ * knows: nothing stored by it can be compared.
  */
-function staleKinds(from: number): ReadonlySet<string> | null {
+function changesSince(from: number): { rewritten: Set<string>; resolved: Set<string> } | null {
   if (from > SURFACE_FORMAT) return null;
-  const kinds = new Set<string>();
+  const rewritten = new Set<string>();
+  const resolved = new Set<string>();
   for (let v = from + 1; v <= SURFACE_FORMAT; v++) {
-    for (const kind of FORMAT_CHANGES[v] ?? []) kinds.add(kind);
+    for (const kind of FORMAT_CHANGES[v]?.rewritten ?? []) rewritten.add(kind);
+    for (const kind of FORMAT_CHANGES[v]?.resolved ?? []) resolved.add(kind);
   }
-  return kinds;
+  return { rewritten, resolved };
 }
 
 /**
  * Brings signatures stored in format `from` up to the current one. A signature that can no longer
  * be compared takes the current signature of the same export, so it reads as unchanged; a name
- * that is gone, or whose kind changed, is left alone and still reports as removed or changed.
+ * that is gone, or whose kind really changed, is left alone and still reports as removed or
+ * changed.
  */
 function migrateSignatures(
   stored: Iterable<[string, string]>,
@@ -69,13 +82,30 @@ function migrateSignatures(
 ): Map<string, string> {
   const out = new Map(stored);
   if (from === SURFACE_FORMAT) return out;
-  const stale = staleKinds(from);
+  const changes = changesSince(from);
   for (const [name, sig] of out) {
     const now = current.get(name);
-    if (now === undefined || kindOf(now) !== kindOf(sig)) continue;
-    if (stale === null || stale.has(kindOf(sig))) out.set(name, now);
+    if (now === undefined) continue;
+    const kind = kindOf(sig);
+    const sameKind = kindOf(now) === kind;
+    const stale = changes === null || changes.rewritten.has(kind) ? sameKind : false;
+    const furtherResolved = changes !== null && changes.resolved.has(kind) && !sameKind;
+    if (stale || furtherResolved) out.set(name, now);
   }
   return out;
+}
+
+/**
+ * True when a signature stored in format `from` can still show that an export is back as it was.
+ * One that the current format writes differently cannot: nothing it is compared with would match
+ * for the right reason.
+ */
+function canShowRestored(signature: string, from: number): boolean {
+  if (from === SURFACE_FORMAT) return true;
+  const changes = changesSince(from);
+  if (changes === null) return false;
+  const kind = kindOf(signature);
+  return !changes.rewritten.has(kind) && !changes.resolved.has(kind);
 }
 
 /** Result of analysing one changed file. */
@@ -100,7 +130,11 @@ export function surfaceKey(projectId: string, path: string, worktree?: string): 
 
 /** What is remembered next to a stored surface. */
 interface SurfaceState {
-  /** `SURFACE_FORMAT` the surface was written with (1 when stored before formats were recorded). */
+  /**
+   * `SURFACE_FORMAT` the surface was written with. Formats have been recorded since format 2, so
+   * a surface with no state entry, or a state entry without this field, was written before formats
+   * existed and is format 1.
+   */
   format: number;
   /** HEAD of the checkout when the surface was stored (null when unknown). */
   head: string | null;
@@ -125,6 +159,7 @@ function readState(value: unknown): SurfaceState {
       )
     : [];
   return {
+    // No recorded format means format 1 (see `SurfaceState.format`).
     format: typeof v.format === 'number' ? v.format : 1,
     head: typeof v.head === 'string' ? v.head : null,
     open,
@@ -203,50 +238,66 @@ export class ImpactService {
     // The file, its HEAD version and its importers are those of the checkout the agent works in.
     const tree = treeRootOf(file, projectRoot);
     const key = surfaceKey(projectId, file.path, tree === projectRoot ? undefined : tree);
-    const stored = this.k.store.kv.get<Record<string, string>>(key);
-    const state = readState(this.k.store.kv.get<unknown>(stateKey(key)));
+    const kv = this.k.store.kv;
+
+    // Everything that has to be waited for comes first. What it depends on (is there a stored
+    // surface, which HEAD was it taken at) is only a first look here and is checked again below.
+    const seen = readState(kv.get<unknown>(stateKey(key)));
+    const hadSurface = kv.get<unknown>(key) !== null;
     const head = await git.headCommit(tree);
-    let before: Map<string, string> | null;
-    if (stored && typeof stored === 'object') {
-      // A surface stored by another version is still right about which exports exist and about
-      // every signature that version wrote the same way; only the others are taken as unchanged.
-      before = migrateSignatures(
-        Object.entries(stored).filter(([, v]) => typeof v === 'string'),
-        state.format,
-        after,
-      );
-      state.open = state.open.map((o) => ({
-        conflictId: o.conflictId,
-        before: Object.fromEntries(
-          migrateSignatures(Object.entries(o.before), state.format, after),
-        ),
-      }));
-      if (head !== null && state.head !== null && head !== state.head) {
-        before = (await this.committedSurface(tree, file.path, state.head, head)) ?? before;
-      }
-    } else {
-      const atHead = await git.fileAtRef(tree, 'HEAD', file.path);
-      before = atHead === null ? null : git.exportSurface(atHead, file.path);
-    }
-    // The surface and what is recorded about it (its format, HEAD) are written together, so a
-    // failure further down never leaves one describing the other wrongly.
-    const save = (): void => {
-      this.k.store.transaction(() => {
-        this.k.store.kv.set(key, Object.fromEntries(after));
-        this.k.store.kv.set(stateKey(key), {
-          format: SURFACE_FORMAT,
-          head,
-          open: state.open.slice(-MAX_OPEN_PER_FILE),
-        });
-      });
-    };
-    if (!before) {
-      save();
-      return null;
+    let atHead: Map<string, string> | null = null;
+    let committed: Map<string, string> | null = null;
+    if (!hadSurface) {
+      const content = await git.fileAtRef(tree, 'HEAD', file.path);
+      atHead = content === null ? null : git.exportSurface(content, file.path);
+    } else if (head !== null && seen.head !== null && head !== seen.head) {
+      committed = await this.committedSurface(tree, file.path, seen.head, head);
     }
 
-    state.open = this.closeRestored(projectId, session, file.path, state.open, after);
-    save();
+    // Reading the stored surface, comparing and storing the new one is one transaction with no
+    // wait in it. Two edits of the file analysed at the same time (each hook is its own process)
+    // are then compared one after the other, and a change is reported once, for the first.
+    const { before, restored } = this.k.store.transaction(() => {
+      const stored = kv.get<Record<string, string>>(key);
+      const state = readState(kv.get<unknown>(stateKey(key)));
+      let baseline: Map<string, string> | null;
+      let open = state.open;
+      if (stored && typeof stored === 'object') {
+        // A surface stored by another version is still right about which exports exist and about
+        // every signature that version wrote the same way; only the others are taken as unchanged.
+        baseline = migrateSignatures(
+          Object.entries(stored).filter(([, v]) => typeof v === 'string'),
+          state.format,
+          after,
+        );
+        // A conflict remembered with a signature that cannot be compared any more can never be
+        // shown restored. It is forgotten here and stays open until someone resolves it.
+        open = open.filter((o) =>
+          Object.values(o.before).every((sig) => canShowRestored(sig, state.format)),
+        );
+        if (committed && state.head === seen.head) baseline = committed;
+      } else {
+        baseline = atHead;
+      }
+      const back: SurfaceState['open'] = [];
+      const kept: SurfaceState['open'] = [];
+      for (const o of open) {
+        const names = Object.keys(o.before);
+        const isBack =
+          baseline !== null && names.length > 0 && names.every((n) => after.get(n) === o.before[n]);
+        (isBack ? back : kept).push(o);
+      }
+      kv.set(key, Object.fromEntries(after));
+      kv.set(stateKey(key), {
+        format: SURFACE_FORMAT,
+        head,
+        open: kept.slice(-MAX_OPEN_PER_FILE),
+      });
+      return { before: baseline, restored: back };
+    });
+    if (!before) return null;
+
+    this.closeRestored(projectId, session, file.path, restored);
     const raw = git.diffExportSurface(before, after);
     const diff: ExportSurfaceDiff = {
       added: cleanNames(raw.added),
@@ -307,11 +358,14 @@ export class ImpactService {
       const sig = before.get(name);
       if (sig !== undefined) was[name] = sig;
     }
-    state.open = [
-      ...state.open.filter((o) => o.conflictId !== conflict.id),
-      { conflictId: conflict.id, before: was },
-    ];
-    save();
+    this.k.store.transaction(() => {
+      const state = readState(kv.get<unknown>(stateKey(key)));
+      const open = [
+        ...state.open.filter((o) => o.conflictId !== conflict.id),
+        { conflictId: conflict.id, before: was },
+      ];
+      kv.set(stateKey(key), { ...state, open: open.slice(-MAX_OPEN_PER_FILE) });
+    });
     const diffKey = fingerprint(...diff.removed, '|', ...diff.changed, '|', ...diff.added);
     for (const a of affected) {
       this.send(
@@ -362,24 +416,16 @@ export class ImpactService {
   }
 
   /**
-   * Closes the conflicts of earlier changes to `path` whose exports are back as they were, and
-   * tells the sessions that were warned. Returns the conflicts that stay open.
+   * Closes the conflicts of earlier changes to `path` whose exports are back as they were
+   * (`restored`, already taken off the file's state) and tells the sessions that were warned.
    */
   private closeRestored(
     projectId: string,
     actor: Session,
     path: string,
-    open: SurfaceState['open'],
-    after: ReadonlyMap<string, string>,
-  ): SurfaceState['open'] {
-    const kept: SurfaceState['open'] = [];
-    for (const o of open) {
-      const names = Object.keys(o.before);
-      const restored = names.length > 0 && names.every((n) => after.get(n) === o.before[n]);
-      if (!restored) {
-        kept.push(o);
-        continue;
-      }
+    restored: SurfaceState['open'],
+  ): void {
+    for (const o of restored) {
       const conflict = this.k.store.conflicts.find(o.conflictId);
       if (!conflict || (conflict.status !== 'open' && conflict.status !== 'acknowledged')) continue;
       this.k.store.conflicts.setStatus(conflict.id, 'resolved');
@@ -399,11 +445,10 @@ export class ImpactService {
         kind: 'impact',
         priority: 5,
         title: `${sessionLabel(actor)} restored the exports of ${path}`,
-        body: `Back as before: ${nameList(cleanNames(names))}. The earlier warning about ${path} no longer applies.`,
+        body: `Back as before: ${nameList(cleanNames(Object.keys(o.before)))}. The earlier warning about ${path} no longer applies.`,
         dedupeKey: `impact-restored:${conflict.id}:${conflict.updatedAt}`,
       });
     }
-    return kept;
   }
 
   private send(

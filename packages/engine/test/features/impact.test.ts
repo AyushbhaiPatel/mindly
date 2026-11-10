@@ -385,4 +385,139 @@ describe('impact radar', () => {
       format: SURFACE_FORMAT,
     });
   });
+
+  it('reports a change once when two edits of the file are analysed at the same time', async () => {
+    const { root, mindly, pid, cc, cx, write } = await featureSetup();
+    write('src/auth.ts', AUTH_V1 + 'export function logout() {}\n');
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'logout') }),
+    );
+
+    // Claude removes `logout`; Codex's body-only edit lands before Claude's hook has finished.
+    write('src/auth.ts', AUTH_V1);
+    const first = mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'x') }),
+    );
+    write('src/auth.ts', AUTH_V1.replace('"admin"', '"owner"'));
+    const second = mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/auth.ts', 'owner') }),
+    );
+    await Promise.all([first, second]);
+
+    const impact = impactConflicts(mindly, pid);
+    expect(impact).toHaveLength(1);
+    expect(impact[0]!.title).toMatch(/^claude-code #[0-9a-f]{8} changed the exports/);
+    const told = mindly.store.deliveries.list(pid).filter((d) => d.kind === 'impact');
+    expect(told.map((d) => d.targetSessionId)).toEqual([cx.id]);
+    expect(told.some((d) => d.targetSessionId === cc.id)).toBe(false);
+  });
+
+  it('reports a change once for analyses that overlap on every wait', async () => {
+    const { root, mindly, pid, cc, cx, write } = await featureSetup();
+    const file = {
+      path: 'src/auth.ts',
+      abs: `${root}/src/auth.ts`,
+      addedText: '',
+      removedText: '',
+      wholeFile: false,
+    };
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+    );
+    await impactOf(mindly).analyze(pid, root, cc, file);
+    // Both analyses are held at the HEAD lookup until each has taken its first look at the store.
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let waiting = 0;
+    mindly.kernel.ports.git.headCommit = async () => {
+      waiting += 1;
+      if (waiting === 2) release();
+      await gate;
+      return 'h1';
+    };
+    write('src/auth.ts', AUTH_V2);
+    const reports = await Promise.all([
+      impactOf(mindly).analyze(pid, root, cc, file),
+      impactOf(mindly).analyze(pid, root, cx, file),
+    ]);
+    expect(waiting).toBe(2);
+    expect(reports.filter((r) => r !== null)).toHaveLength(1);
+    expect(impactConflicts(mindly, pid)).toHaveLength(1);
+  });
+
+  it('leaves a conflict open when its remembered signature cannot be compared any more', async () => {
+    const { root, mindly, pid, repo, cc, cx, write } = await featureSetup();
+    mindly.kernel.ports.git.exportSurface = (source) =>
+      new Map(
+        [...source.matchAll(/^export (class|function) (\w+)(.*)$/gm)].map((m) => [
+          m[2]!,
+          `${m[1]}:${m[3]!.replace(/\s+/g, '')}`,
+        ]),
+      );
+    const file = (extra = ''): string => `export class Service extends Other {}\n${extra}`;
+    repo.head['src/auth.ts'] = file();
+    write('src/auth.ts', file());
+    const { conflict } = mindly.store.conflicts.report({
+      projectId: pid,
+      kind: 'impact',
+      severity: 'warning',
+      title: 'codex changed the exports of src/auth.ts',
+      detail: 'Changed signature: Service',
+      sessionIds: [cc.id, cx.id].sort(),
+      paths: ['src/auth.ts'],
+      fingerprint: 'impact-test',
+    });
+    // Remembered in an older format: the class as it was before the change, hashed the old way.
+    mindly.store.kv.set(surfaceKey(pid, 'src/auth.ts'), { Service: 'class:#old-after' });
+    mindly.store.kv.set(`surface-state:${pid}:src/auth.ts`, {
+      head: null,
+      open: [{ conflictId: conflict.id, before: { Service: 'class:#old-before' } }],
+    });
+
+    write('src/auth.ts', file('export function added() {}\n'));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'added') }),
+    );
+    expect(mindly.store.conflicts.get(conflict.id).status).toBe('open');
+    const restored = mindly.store.deliveries
+      .list(pid)
+      .filter((d) => d.kind === 'impact' && /restored/.test(d.title));
+    expect(restored).toHaveLength(0);
+  });
+
+  it('does not report a declaration the analysis could not read before as changed', async () => {
+    const { root, mindly, pid, repo, write } = await featureSetup();
+    mindly.kernel.ports.git.exportSurface = (source) =>
+      new Map(
+        [...source.matchAll(/^export (class|function) (\w+)(.*)$/gm)].map((m) => [
+          m[2]!,
+          `${m[1]}:${m[3]!.replace(/\s+/g, '')}`,
+        ]),
+      );
+    const file = (body: string): string => `export function compare(a, b) { return ${body}; }\n`;
+    repo.head['src/auth.ts'] = file('0');
+    write('src/auth.ts', file('0'));
+    await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/dashboard.ts', 'y') }),
+    );
+    // The earlier version knew the name but not what it was.
+    mindly.store.kv.set(surfaceKey(pid, 'src/auth.ts'), { compare: 'unknown:' });
+
+    write('src/auth.ts', file('1'));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', '1') }),
+    );
+    expect(impactConflicts(mindly, pid)).toHaveLength(0);
+    expect(mindly.store.kv.get(surfaceKey(pid, 'src/auth.ts'))).toEqual({
+      compare: 'function:(a,b){return1;}',
+    });
+
+    // In the current format the same kind change is a real one.
+    mindly.store.kv.set(surfaceKey(pid, 'src/auth.ts'), { compare: 'unknown:' });
+    write('src/auth.ts', file('2'));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', '2') }),
+    );
+    expect(impactConflicts(mindly, pid)).toHaveLength(1);
+  });
 });
