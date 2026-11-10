@@ -213,7 +213,7 @@ An abort never moves, rewrites or deletes git data inside a part's worktree, sho
 checkout in `deps/` or `node_modules`, one made in a folder the part tracks), a submodule, a
 `.git` file, folder or link in any folder that holds a file (even one git does not accept as a
 repository), a git directory among untracked or ignored files (a `--separate-git-dir`, a bare
-clone: a `HEAD` that reads like git's beside an `objects/` folder, refs packed or not), files
+clone: any untracked or ignored `HEAD` beside an `objects` that is not tracked), files
 written into the folder of an uninitialised submodule (git lists nothing there; empty folders
 do not count), or the git directories of the part's submodules, initialised or not. A part holding any of it keeps its worktree and branch, the
 abort stays unfinished, and it says, naming each path (the worktree itself as "the worktree's
@@ -228,7 +228,9 @@ with mindly split abort --yes --discard
 The other parts are removed as usual. A new nested repository, an edit in a folder holding a
 `.git`, a submodule moved to another commit, or a file in the folder of an uninitialised
 submodule also counts as work not on the part branch: `mindly split merge` stops and names it,
-and `--force` merges without it and says so. One gap remains: a folder whose only content is a
+and `--force` merges without it and says so. The git directory rule errs on the safe side: a
+folder of your own with an untracked `HEAD` file next to an untracked `objects` (unusual outside
+git itself) is taken for one, and the abort asks you to move it out. One gap remains: a folder whose only content is a
 `.git` that git does not accept as a repository is not seen (git lists nothing in it), and goes
 with the worktree.
 

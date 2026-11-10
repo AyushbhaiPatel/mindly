@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError } from '@mindly/core';
@@ -500,10 +500,43 @@ describe('worktrees', () => {
     git(path, 'init', '-q', '--bare', join(path, '.repos/empty.git'));
     // A HEAD that reads like git's, beside tracked objects/ and refs/: not a git directory.
     write(path, 'x/HEAD', 'ref: refs/heads/main\n');
-    // An untracked HEAD that does not read like git's, beside an untracked objects/.
-    write(path, 'y/HEAD', 'build output\n');
-    write(path, 'y/objects/o.txt', 'o\n');
+    // A HEAD at the top beside untracked objects/: never the worktree itself.
+    write(path, 'HEAD', 'build output\n');
+    write(path, 'objects/o.txt', 'o\n');
     expect((await worktreeScan(path)).gitData).toEqual(['.repos/empty.git', '.repos/lib.git']);
+  });
+
+  it('takes any HEAD beside an untracked objects for a git directory, as git would', async () => {
+    const origin = makeRepo({ 'a.ts': 'a\n' });
+    const root = makeRepo({ '.gitignore': '.repos/\n' });
+    const path = join(tempDir(), 'part');
+    await addWorktree(root, path, 'mindly/demo/p', 'HEAD');
+    const bare = (name: string, args: string[] = []): string => {
+      const at = join(path, '.repos', name);
+      git(origin, ...args, 'clone', '-q', '--bare', origin, at);
+      return at;
+    };
+    // HEAD a link (core.preferSymlinkRefs), HEAD over 256 bytes, `ref:` with no space.
+    bare('link.git', ['-c', 'core.preferSymlinkRefs=true']);
+    git(bare('long.git'), 'branch', '-m', 'main', `feature/${'a'.repeat(120)}/${'b'.repeat(130)}`);
+    writeFileSync(join(bare('nospace.git'), 'HEAD'), 'ref:refs/heads/main\n');
+    // objects a link to a folder elsewhere in the part.
+    const linked = bare('linked.git');
+    renameSync(join(linked, 'objects'), join(path, '.repos/store'));
+    symlinkSync('../store', join(linked, 'objects'));
+    // A HEAD of anything beside an untracked objects: may be one, so it counts.
+    write(path, 'tmp/y/HEAD', 'build output\n');
+    write(path, 'tmp/y/objects/o.txt', 'o\n');
+    for (const name of ['link.git', 'long.git', 'nospace.git', 'linked.git']) {
+      expect(git(join(path, '.repos', name), 'log', '--format=%s', '-1')).toBe('initial\n');
+    }
+    expect((await worktreeScan(path)).gitData).toEqual([
+      '.repos/link.git',
+      '.repos/linked.git',
+      '.repos/long.git',
+      '.repos/nospace.git',
+      'tmp/y',
+    ]);
   });
 
   it('finds git directories kept apart from their work tree, in ignored folders', async () => {

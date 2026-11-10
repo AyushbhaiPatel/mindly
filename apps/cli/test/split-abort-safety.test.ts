@@ -500,6 +500,32 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     expect(git(bare, 'log', '--format=%s', '-1', 'main')).toBe('only here\n');
   });
 
+  it('keeps a bare clone git accepts, whatever its HEAD looks like', async () => {
+    const origin = tempDir('r10-origin-');
+    repoAt(origin, { 'only.ts': 'x\n' });
+    const sb = await splitSandbox((s) => write(s.repo, '.gitignore', '.repos/\n'));
+    const page = partDir(sb, 'page');
+    // HEAD a link (core.preferSymlinkRefs), and HEAD over 256 bytes (a long branch name), each
+    // with a commit pushed only there.
+    const link = join(page, '.repos/link.git');
+    const long = join(page, '.repos/long.git');
+    git(origin, '-c', 'core.preferSymlinkRefs=true', 'clone', '-q', '--bare', origin, link);
+    git(origin, 'clone', '-q', '--bare', origin, long);
+    for (const bare of [link, long]) {
+      const wt = join(tempDir('r10-wt-'), 'c');
+      git(origin, 'clone', '-q', bare, wt);
+      write(wt, 'new.ts', 'hours of work\n');
+      git(wt, 'add', '-A');
+      git(wt, 'commit', '-q', '-m', 'only here');
+      git(wt, 'push', '-q', 'origin', 'main');
+      rmSync(wt, { recursive: true, force: true });
+    }
+    git(long, 'branch', '-m', 'main', `feature/${'a'.repeat(120)}/${'b'.repeat(130)}`);
+    await keptFor(sb, '.repos/link.git, .repos/long.git');
+    expect(git(link, 'log', '--format=%s', '-1')).toBe('only here\n');
+    expect(git(long, 'log', '--format=%s', '-1')).toBe('only here\n');
+  });
+
   it('keeps a separate git directory whose refs are packed', async () => {
     const sb = await splitSandbox((s) => write(s.repo, '.gitignore', '.cache/\n'));
     const page = partDir(sb, 'page');
