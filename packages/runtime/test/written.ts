@@ -122,7 +122,16 @@ export function runInCopy(
   sub = '',
 ): { written: string[]; output: string } {
   const copy = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-written-copy-')));
-  execFileSync('cp', ['-a', `${dir}/.`, copy]);
+  // git's background maintenance (macOS) can drop a lock file while it is being copied; try again.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      execFileSync('cp', ['-a', `${dir}/.`, copy]);
+      break;
+    } catch (e) {
+      if (attempt >= 5) throw e;
+      execFileSync('sleep', ['0.2']);
+    }
+  }
   // Let mtimes move apart from the copy's.
   execFileSync('sleep', ['0.05']);
   const before = snapshot(copy, covered);

@@ -74,6 +74,8 @@ const TEST_V = BASH_MAJOR >= 42;
 const has = (program: string): boolean => works(`command -v ${program}`);
 const CO = 'git checkout -q v1 -- certs/server.pem';
 const ENV_SPLIT = works("env -S 'true'");
+/** GNU cp takes `-T`; BSD cp (macOS) does not. */
+const CP_T = works('d=$(mktemp -d) && mkdir "$d/a" && cp -rT "$d/a" "$d/b" && rm -rf "$d"');
 /** GNU `ln` takes abbreviated long options; BSD `ln` (macOS) does not. */
 const LN_LONG = works('d=$(mktemp -d) && ln --sy "$d" "$d/l" && rm -rf "$d"');
 /** bash 3.2 cannot parse a `case` inside `$(…)`. */
@@ -831,6 +833,7 @@ cases.push(
     prep: D_FOLDER,
     command: 'cp -rT d certs',
     want: ['warn'],
+    runs: CP_T,
   },
   {
     name: 'cp -r --no-target-directory',
@@ -838,6 +841,7 @@ cases.push(
     prep: D_FOLDER,
     command: 'cp -r --no-target-directory d certs',
     want: ['warn'],
+    runs: CP_T,
   },
   {
     name: 'ln with one operand links into the folder it runs in',
