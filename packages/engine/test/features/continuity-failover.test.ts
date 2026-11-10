@@ -8,6 +8,7 @@ import {
   MAX_TRANSCRIPT_TAIL_BYTES,
   parseTranscriptTail,
   RATE_LIMIT_HANDOFF_MAX_AGE_MS,
+  RATE_LIMIT_SIGNATURES,
   readTranscriptTail,
   recentAgentTexts,
   turnEntries,
@@ -464,6 +465,104 @@ describe('rate-limit failover', () => {
       );
       const pid = mindly.store.projects.list()[0]!.id;
       expect([line, mindly.store.handoffs.list(pid).length, sent.length]).toEqual([line, 0, 0]);
+    }
+  });
+
+  // One wording for every signature in the table, as its client reports it.
+  const CLIENT_WORDINGS: [string, string, string][] = [
+    ['claude-code', 'Claude AI usage limit reached', 'claude.usage_limit_reached'],
+    ['claude-code', '5-hour limit reached', 'claude.five_hour_limit'],
+    ['claude-code', 'Opus weekly limit reached', 'claude.limit_reached'],
+    ['claude-code', 'Your limit will reset at 3pm', 'claude.limit_will_reset'],
+    [
+      'claude-code',
+      'API Error: Request rejected (429) rate_limit_error',
+      'claude.rate_limit_error',
+    ],
+    ['claude-code', '429', 'claude.http_429'],
+    ['codex', "You've hit your usage limit", 'codex.usage_limit'],
+    ['codex', 'Rate limit reached for gpt-5 in organization org-abc', 'codex.rate_limit'],
+    ['codex', 'exceeded retry limit, last status: 429', 'codex.retry_limit'],
+    ['codex', '429', 'codex.http_429'],
+    ['gemini', 'You have exhausted your daily quota on gemini-2.5-pro', 'gemini.quota_exhausted'],
+    ['gemini', 'You have exhausted your capacity', 'gemini.quota_exhausted'],
+    ['gemini', 'You have exhausted your daily quota for today', 'gemini.quota_exhausted'],
+    ['gemini', 'Resource has been exhausted', 'gemini.resource_exhausted'],
+    ['gemini', '[API Error: {"status":"RESOURCE_EXHAUSTED"', 'gemini.resource_exhausted_status'],
+    ['cursor', 'Usage limit exceeded', 'generic.usage_limit'],
+    ['cursor', 'You exceeded your current quota', 'generic.quota_used_up'],
+    ['cursor', 'Rate limit exceeded', 'generic.rate_limit'],
+    ['cursor', 'Too many requests', 'generic.too_many_requests'],
+    ['cursor', 'Quota exceeded', 'generic.quota_exceeded'],
+    ['cursor', 'HTTP 429', 'generic.http_429'],
+  ];
+
+  it('reads every wording in the client error reports, whatever follows it', () => {
+    const covered = new Set(CLIENT_WORDINGS.map(([, , id]) => id));
+    const all = Object.values(RATE_LIMIT_SIGNATURES)
+      .flat()
+      .map((sig) => sig.id);
+    expect(all.filter((id) => !covered.has(id))).toEqual([]);
+    const tails = [
+      '',
+      ' and anything else the client wants to add, which may run on for a while, so be it.',
+      '. Your quota will reset after 2h.',
+      ' on gemini-2.5-pro. Please see https://example.com/docs/quota?x=1 for details',
+    ];
+    for (const [kind, wording, id] of CLIENT_WORDINGS) {
+      for (const tail of tails) {
+        for (const prefix of ['', 'Error: ', '⚠ ', '[12:03:11] ']) {
+          const line = `${prefix}${wording}${tail}`;
+          expect([line, detectRateLimit(kind, [line], 'client')]).toEqual([line, id]);
+        }
+      }
+    }
+    // Wordings from the reports this rule exists for.
+    for (const line of [
+      'You have exhausted your daily quota on gemini-2.5-pro.',
+      'You have exhausted your capacity on gemini-2.5-pro. Your quota will reset after 2h.',
+      'You have exhausted your daily quota for today.',
+    ]) {
+      expect(detectRateLimit('gemini', [line], 'client')).toBe('gemini.quota_exhausted');
+    }
+  });
+
+  it('reads a long notice the assistant relays, sentence by sentence', () => {
+    const notices: [string, string, string][] = [
+      [
+        'codex',
+        "You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 5:12 PM.",
+        'codex.usage_limit',
+      ],
+      [
+        'codex',
+        'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.',
+        'generic.quota_used_up',
+      ],
+      [
+        'claude-code',
+        'Claude usage limit reached. Your limit will reset at 5pm (America/Los_Angeles). To continue now, upgrade to Max.',
+        'claude.usage_limit_reached',
+      ],
+      [
+        'claude-code',
+        "You've hit your weekly limit · resets Oct 9, 5pm. To keep going, send a request to your admin or try again in 3 hours.",
+        'claude.limit_reached',
+      ],
+    ];
+    for (const [kind, text, id] of notices) {
+      expect([text, detectRateLimit(kind, [text])]).toEqual([text, id]);
+      expect([text, detectRateLimit(kind, [`${LONG_ANSWER}\n\n${text}`])]).toEqual([text, id]);
+    }
+    // A sentence about code is not the tail of a notice, whatever word it opens with.
+    for (const text of [
+      'Usage limit reached. Retry logic added in src/limit.ts.',
+      'Usage limit reached. Upgrade path is documented in docs/limits.md.',
+      'Usage limit reached. The `retry` helper now waits.',
+      'Usage limit reached.\nI updated the billing docs.',
+      'Usage limit reached. Then I fixed the tests.',
+    ]) {
+      expect([text, detectRateLimit('claude-code', [text])]).toEqual([text, null]);
     }
   });
 
@@ -1201,16 +1300,29 @@ describe('rate-limit failover', () => {
     };
   }
 
-  it('takes the reported last message as the end of a turn the transcript has not caught up with', async () => {
+  it('keeps the handoff when only the last message, not the transcript, shows an answer', async () => {
+    // The client may not have written its final answer yet, or the message is a limit in a
+    // wording no signature knows, or text from earlier in the turn: when in doubt, keep it.
     const working = (ts: number) => [toolUse(ts), toolResult(ts + 1)];
-    expect(await resumedTurn(working, 'All done, tests pass.')).toEqual({
+    for (const lastMessage of [
+      'All done, tests pass.',
+      'Out of credits until 3pm.',
+      'You’re out of extra usage · resets 3pm (Europe/Berlin)',
+      'Let me run the tests.',
+      "You've hit your usage limit. Upgrade to Pro or try again later.",
+      undefined,
+    ]) {
+      expect([lastMessage, await resumedTurn(working, lastMessage)]).toEqual([
+        lastMessage,
+        { status: 'pending', count: 1 },
+      ]);
+    }
+    // Once the transcript holds the answer, the turn ended normally.
+    const answered = (ts: number) => [...working(ts), assistant('All done, tests pass.', ts + 2)];
+    expect(await resumedTurn(answered, 'All done, tests pass.')).toEqual({
       status: 'cancelled',
       count: 1,
     });
-    expect(await resumedTurn(working)).toEqual({ status: 'pending', count: 1 });
-    expect(
-      await resumedTurn(working, "You've hit your usage limit. Upgrade to Pro or try again later."),
-    ).toEqual({ status: 'pending', count: 1 });
   });
 
   it('reads every error the client reported at the end of the turn', async () => {
@@ -1294,6 +1406,32 @@ describe('rate-limit failover', () => {
     );
     const fpid = fresh.mindly.store.projects.list()[0]!.id;
     expect(fresh.mindly.store.handoffs.list(fpid)).toHaveLength(1);
+  });
+
+  it('reads a one-line JSON document and a pretty one with an empty object in it', () => {
+    const session = {
+      sessionId: 'g2',
+      messages: [
+        { type: 'user', content: 'fix the tests' },
+        { type: 'gemini', content: 'Running them.', toolCalls: [{ name: 'run_shell_command' }] },
+        { type: 'gemini', content: 'You have exhausted your daily quota on this model.' },
+      ],
+    };
+    const compact = parseTranscriptTail(`${JSON.stringify(session)}\n`);
+    expect(compact.map((e) => e.text)).toEqual([
+      '',
+      'Running them.',
+      'You have exhausted your daily quota on this model.',
+    ]);
+    const withEmpty = { ...session, metadata: {} };
+    const pretty = JSON.stringify(withEmpty, null, 2);
+    expect(pretty.split('\n').some((l) => l.trim() === '"metadata": {}' || l.trim() === '{}')).toBe(
+      true,
+    );
+    const prettyWithBareObject = pretty.replace('"metadata": {}', '"extra": [\n    {}\n  ]');
+    for (const text of [pretty, prettyWithBareObject]) {
+      expect(parseTranscriptTail(text).map((e) => e.text)).toEqual(compact.map((e) => e.text));
+    }
   });
 
   it('reads a transcript that is one JSON document', async () => {

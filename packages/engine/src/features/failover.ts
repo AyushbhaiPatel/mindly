@@ -47,12 +47,15 @@ export type NoticeSource = 'assistant' | 'client';
 
 /**
  * One rate-limit signature: a stable id (recorded in events) and the patterns that detect it.
+ * Both patterns match the wording at the start of a line (after an optional label) and say
+ * nothing about what follows it.
  *
- * `account` marks the wordings that name the account's own limit ("Usage limit reached",
- * "You've hit your weekly limit"). Only those are looked for in text the assistant wrote, with
- * the strict pattern `re`. The vocabulary of any rate-limited API ("rate limit exceeded", "429",
- * "too many requests") is what an agent writes about all day, so it counts only in the client's
- * own error reports, with the pattern `client`.
+ * `client` is matched against the client's own error reports, and anything may follow the
+ * wording there. `account` marks the wordings that name the account's own limit ("Usage limit
+ * reached", "You've hit your weekly limit"): only those are looked for in text the assistant
+ * wrote, with `re`, and there the rest of the line must be the notice's own tail (see
+ * `noticeTail`). The vocabulary of any rate-limited API ("rate limit exceeded", "429", "too
+ * many requests") is what an agent writes about all day, so it counts only from the client.
  */
 export interface RateLimitSignature {
   id: string;
@@ -67,8 +70,8 @@ export const RATE_LIMIT_HANDOFF_MAX_AGE_MS = 7 * DAY_MS;
 /** Longest handoff summary kept; the CLI and the MCP tool accept exactly this much. */
 export const HANDOFF_SUMMARY_MAX_CHARS = 300;
 
-/** A notice the assistant relays is one short line; an error body from a client can be long. */
-const MAX_NOTICE_LINE_CHARS: Record<NoticeSource, number> = { assistant: 300, client: 2000 };
+/** A notice the assistant relays is one line; an error body from a client can be long. */
+const MAX_NOTICE_LINE_CHARS: Record<NoticeSource, number> = { assistant: 400, client: 2000 };
 /** An answer longer than this is more than a notice. */
 const MAX_NOTICE_MESSAGE_CHARS = 400;
 
@@ -81,47 +84,79 @@ const LABEL_WORDS: Record<NoticeSource, string> = {
   assistant: `${QUALIFIER}error|request failed|fatal`,
   client: `${QUALIFIER}(?:error|failed|failure|fatal|warning|warn)`,
 };
-// When to come back, which is how a notice goes on after the phrase.
-const HINT =
-  '(?:(?:please )?(?:try again|retry|wait|resets?|upgrade|check (?:your|quota))\\b|your (?:limit|quota) will reset\\b|\\(e\\.g\\.)';
 // Words that start another clause: "..., and the new resetAt field says when", "which ...".
 const CLAUSE =
   ',\\s*(?:and|but|which|so|because|while|when|then|since|though|once)\\b|\\b(?:which|because|while|whereas|once|so that|and the|that the)\\b';
-// What may follow a hint: a time, a plan, where to go. Never another clause or sentence.
-const REST = `(?:(?!${CLAUSE}|[.!?;]\\s)[^\\n]){0,60}?`;
-const SEP = '[.,;:!|\\u00b7\\u2219\\u2022\\u2013\\u2014/-]?';
-// One part of the tail of a notice: "· resets 3pm", ". Try again at 5pm", ". Upgrade to Pro or
-// try again in 3 hours", ". Your quota will reset after 2h".
-const SEGMENT = `\\s*${SEP}\\s*${HINT}${REST}`;
-const END = '\\s*[.!]?\\s*$';
-// What may follow the phrase. For the client's reports: the end of the line, punctuation or a
-// hint. For the assistant only a notice's own tail and then the end of the line (or the reset
-// time some clients append as "|<epoch>"), so that "Usage limit reached: discussed in standup"
-// or "Your limit will reset at midnight, and the new field says when" stays a sentence.
-const TAIL: Record<NoticeSource, string> = {
-  assistant: `(?=(?:${SEGMENT}){0,3}${END}|\\s*\\|\\d{9,13}\\s*$)`,
-  client: `(?=\\s*(?:$|[.,:;!(\\[{|\\u00b7\\u2219\\u2022]|[-\\u2013\\u2014]\\s|${HINT}))`,
-};
-// A line that is only the tail of a notice, as a client prints it under the notice:
-// "/upgrade to increase your usage limit.", "Try again at 5pm."
-const TAIL_ONLY_LINE = new RegExp(`^(?:${SEGMENT}){1,3}${END}`, 'i');
+// The time in "Your limit will reset at 3pm (Europe/Berlin)": no other clause, no new sentence.
+const RESET_TIME = `(?:(?!${CLAUSE}|[.!?;]\\s)[^\\n]){0,60}`;
+
+// Every sentence of the tail of a notice says how to get going again.
+const TAIL_WORD =
+  /\b(?:upgrade|try again|retry|resets?|credits?|plan|billing|usage|quota|admin|docs|settings|pricing|subscribe|subscription|wait)\b/i;
+// A tail line on its own starts with that word: "Try again at 5pm.", "/upgrade to ...".
+const TAIL_START =
+  /^(?:(?:please|or|and|then|to|you can)\s+)*(?:upgrade|try again|retry|resets?|wait|subscribe|check your|contact your admin|your (?:limit|quota) will reset)\b/i;
+// Code in a sentence makes it a sentence about code: "Retry logic added in src/limit.ts".
+const CODE_REF =
+  /`|\b[\w-]+\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|swift|php|cs|md|json|ya?ml|toml|sql|sh|css|html)\b/i;
+const URL = /\bhttps?:\/\/\S+/gi;
+const NOTICE_SEP = /^\s*[.,;:!|·∙•–—/-]/;
+const SENTENCE_BREAK = /[.!?;](?=\s|$)|[|·∙•–—]/;
+
+/** The sentences of `text`, with the dots and marks inside URLs left alone. */
+function tailSentences(text: string): string[] {
+  const masked = text.replace(URL, (u) => u.replace(/[.!?;|]/g, '_'));
+  return masked
+    .split(SENTENCE_BREAK)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
+/** True when every sentence of `text` is about getting going again and none is about code. */
+function allTail(text: string, mustStart: boolean): boolean {
+  const sentences = tailSentences(text);
+  return (
+    sentences.length > 0 &&
+    sentences.every(
+      (t) => TAIL_WORD.test(t) && !CODE_REF.test(t) && (!mustStart || TAIL_START.test(t)),
+    )
+  );
+}
+
+/**
+ * True when `rest`, what follows the wording of a notice on its line, is the notice's own tail:
+ * nothing; the reset time some clients append as "|<epoch>"; or, after a mark, sentences that
+ * each say how to get going again ("· resets 3pm", ". Upgrade to Pro (https://...), visit
+ * https://... to purchase more credits or try again at 5:12 PM."). "Usage limit reached in
+ * the billing module" or "...: discussed in standup" stay sentences about something else.
+ */
+function noticeTail(rest: string): boolean {
+  const t = rest.trim();
+  if (/^[.!]?$/.test(t) || /^\|\d{9,13}$/.test(t)) return true;
+  return NOTICE_SEP.test(rest) && allTail(t.replace(/^[.,;:!|·∙•–—/-]+/, ''), false);
+}
+
+/** A line that is only the tail of a notice, as a client prints it under the notice. */
+function tailOnlyLine(line: string): boolean {
+  return allTail(line, true);
+}
 
 function label(source: NoticeSource): string {
   return `(?:\\[?(?:${LABEL_WORDS[source]})\\b\\]?\\s*[:\\-]?\\s*(?:\\(?\\d{3}\\)?\\s*[:\\-]?\\s*)?)`;
 }
 
-type Build = (label: string, tail: string) => string;
+type Build = (label: string) => string;
 
 function signature(id: string, account: boolean, build: Build): RateLimitSignature {
-  const re = (source: NoticeSource) => new RegExp(build(label(source), TAIL[source]), 'i');
+  const re = (source: NoticeSource) => new RegExp(build(label(source)), 'i');
   return { id, account, re: re('assistant'), client: re('client') };
 }
 
-/** The phrase opens the line (after an optional label) and is followed by a tail. */
+/** The phrase opens the line, after an optional label. */
 const opening =
   (body: string): Build =>
-  (l, tail) =>
-    `^${l}?(?:${body})${tail}`;
+  (l) =>
+    `^${l}?(?:${body})`;
 
 /** A wording that names the account's limit: read from the assistant and from the client. */
 function account(id: string, build: Build): RateLimitSignature {
@@ -135,8 +170,7 @@ function api(id: string, build: Build): RateLimitSignature {
 
 const HTTP = '(?:http(?:/\\d(?:\\.\\d)?)? )?';
 // "429" alone matches line numbers and ids, so it must open the line as a status.
-const HTTP_429: Build = (l, tail) =>
-  `^${l}?${HTTP}(?:status(?: code)?\\s*:?\\s*)?429\\b${tail}|^${l}?${HTTP}429 too many requests\\b`;
+const HTTP_429: Build = (l) => `^${l}?${HTTP}(?:status(?: code)?\\s*:?\\s*)?429\\b`;
 const RATE_LIMITED = `(?:you are being |you${APOS}re being |requests? (?:was|were|is|are) )?rate[ -]?limited`;
 const HIT = `you${APOS}ve (?:hit|reached)`;
 const PLAN = '(?:session|weekly|daily|5-hour|opus|sonnet)';
@@ -171,7 +205,7 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
     // "Your limit will reset at 3pm (Europe/Berlin)."
     account(
       'claude.limit_will_reset',
-      (l, tail) => `^${l}?(?:your )?limit will reset (?:at|in|on|after)\\b${REST}${tail}`,
+      (l) => `^${l}?(?:your )?limit will reset (?:at|in|on|after)\\b${RESET_TIME}`,
     ),
     // 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}',
     // "API Error: Request rejected (429) · rate_limit_error"
@@ -185,8 +219,8 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
     // Please try again in 2s."
     api(
       'codex.rate_limit',
-      (l, tail) =>
-        `^${l}?(?:(?:rate limit (?:reached|exceeded|hit)|you${APOS}ve hit (?:a|the|your) rate limit|${RATE_LIMITED})${tail}|rate limit reached for\\b)`,
+      (l) =>
+        `^${l}?(?:rate limit (?:reached|exceeded|hit)|you${APOS}ve hit (?:a|the|your) rate limit|${RATE_LIMITED})`,
     ),
     // "exceeded retry limit, last status: 429 Too Many Requests"
     api('codex.retry_limit', (l) => `^${l}?exceeded retry limit\\b.{0,80}\\b429\\b`),
@@ -197,8 +231,8 @@ export const RATE_LIMIT_SIGNATURES: Readonly<Record<string, readonly RateLimitSi
     // on this model. Your quota will reset after 2h."
     account(
       'gemini.quota_exhausted',
-      (l, tail) =>
-        `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)(?: (?:on|for) (?:this|the) model)?${tail}`,
+      (l) =>
+        `^${l}?(?:you have|you${APOS}ve) exhausted your (?:(?:daily|free|current) )?(?:quota|capacity)(?: (?:on|for) (?:this|the) model)?`,
     ),
     // "Resource has been exhausted (e.g. check quota)."
     api('gemini.resource_exhausted', opening('resource has been exhausted')),
@@ -268,9 +302,15 @@ const ACCOUNT_SIGNATURES: readonly RateLimitSignature[] = Object.values(RATE_LIM
   .flat()
   .filter((sig) => sig.account);
 
+/** True when `line` is the notice of `sig` as the assistant would relay it: wording, then tail. */
+function relaysNotice(sig: RateLimitSignature, line: string): boolean {
+  const m = sig.re.exec(line);
+  return m !== null && noticeTail(line.slice(m[0].length));
+}
+
 /** True when `line` (decoration stripped) is a notice or the tail a client prints under one. */
 function noticeShaped(line: string): boolean {
-  return TAIL_ONLY_LINE.test(line) || ACCOUNT_SIGNATURES.some((sig) => sig.re.test(line));
+  return tailOnlyLine(line) || ACCOUNT_SIGNATURES.some((sig) => relaysNotice(sig, line));
 }
 
 /** A non-empty line of a message, and whether it is a fence marker or inside a fence. */
@@ -356,7 +396,9 @@ export function detectRateLimit(
         : source;
     for (const line of noticeLines(text, from)) {
       for (const s of sigs) {
-        if (from === 'client' ? s.client.test(line) : s.account && s.re.test(line)) return s.id;
+        if (from === 'client' ? s.client.test(line) : s.account && relaysNotice(s, line)) {
+          return s.id;
+        }
       }
     }
   }
@@ -605,32 +647,44 @@ function parseJson(text: string): { ok: true; value: unknown } | { ok: false } {
 // A line of pretty-printed JSON: a bracket, or a `"key": value` pair.
 const JSON_FRAGMENT = /^\s*(?:[{}[\],]+|"(?:[^"\\]|\\.)*"\s*:.*)$/;
 
+/** The `messages` of a session document, or of a top-level array; null for anything else. */
+function documentMessages(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) return value;
+  const messages = field(value, 'messages');
+  return Array.isArray(messages) ? messages : null;
+}
+
+const isObject = (v: unknown): v is object => v !== null && typeof v === 'object';
+
 /**
- * Parses transcript text. JSONL (Claude Code, Codex): one entry per line; a line that does not
- * parse (cut off by the tail, or still being written) is not an entry. A transcript that is one
- * JSON document (Gemini CLI is believed to keep its session that way; unverified) is read from
- * its `messages` array, or from the document when it is an array; one cut by the tail is not
- * read at all. Text that is not JSON at all is read one line per entry.
+ * Parses transcript text. A transcript that is one JSON document, on one line or pretty-printed
+ * (Gemini CLI is believed to keep its session that way; unverified), is read from its
+ * `messages` array, or from the document when it is an array; one cut by the tail is not read at
+ * all. JSONL (Claude Code, Codex): one entry per line, and a line that does not parse (cut off
+ * by the tail, or still being written) is not an entry. Text that is not JSON at all is read one
+ * line per entry.
  */
 export function parseTranscriptTail(tail: string): TranscriptEntry[] {
+  const first = tail.trimStart()[0];
+  if (first === '{' || first === '[') {
+    const doc = parseJson(tail);
+    const messages = doc.ok ? documentMessages(doc.value) : null;
+    if (messages) return messages.slice(-MAX_ENTRIES).map(entryOf);
+  }
   const lines = tail
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
   const parsed = lines.map((l) => parseJson(l));
-  if (parsed.some((r) => r.ok && r.value !== null && typeof r.value === 'object')) {
+  if (parsed.some((r) => r.ok && isObject(r.value))) {
     return parsed
+      .flatMap((r) => {
+        if (!r.ok || !isObject(r.value) || Array.isArray(r.value)) return [];
+        const messages = documentMessages(r.value);
+        return messages ?? [r.value];
+      })
       .slice(-MAX_ENTRIES)
-      .flatMap((r) => (r.ok && r.value !== null && typeof r.value === 'object' ? [r.value] : []))
       .map(entryOf);
-  }
-  const first = tail.trimStart()[0];
-  if (first === '{' || first === '[') {
-    const doc = parseJson(tail);
-    if (doc.ok) {
-      const messages = Array.isArray(doc.value) ? doc.value : field(doc.value, 'messages');
-      return Array.isArray(messages) ? messages.slice(-MAX_ENTRIES).map(entryOf) : [];
-    }
   }
   const fragments = lines.filter((l) => JSON_FRAGMENT.test(l)).length;
   if (lines.length > 0 && fragments * 2 >= lines.length) return [];
@@ -1010,14 +1064,12 @@ export class FailoverService {
         .find((id) => id !== null) ??
       (lastMessage ? detectRateLimit(session.agentKind, [lastMessage]) : null);
     if (!signature) {
-      // The handoff an earlier limit left is withdrawn only by a turn that ended normally: with
-      // an answer, not with an error of any wording and not cut off after a tool call. A client
-      // can stop the hook before it writes the final answer to the transcript: a transcript
-      // that ends in a tool call while the hook reports an answer ended normally. Without the
+      // The handoff an earlier limit left is withdrawn only by a turn the transcript shows ended
+      // normally: with an answer, not with an error of any wording and not cut off after a tool
+      // call. The last message the hook passes on does not count for this: it may be a limit
+      // worded in a way no signature knows, or text from earlier in the turn. Without the
       // transcript the turn was not really looked at.
-      const endedNormally = last
-        ? isAnswer(last) || (last.tool && lastMessage.trim() !== '')
-        : !path && said.length > 0;
+      const endedNormally = last ? isAnswer(last) : !path && said.length > 0;
       if (lastPrompt && transcriptRead && endedNormally) {
         this.withdrawStaleHandoff(p.projectId, session, lastPrompt.createdAt, { ranTools, said });
       }
