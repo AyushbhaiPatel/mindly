@@ -50,6 +50,10 @@ routes each call through that one rule:
   work;
 - `mindly_task_claim` does not claim a task that window owns, and `mindly_tasks` with `mine` lists
   only the tasks the server took up itself; neither changes that window's current task;
+- a task the server took up stays its own only while nothing but the server has changed it and no
+  other live session has it as its current task (that window may have picked it up from a
+  handoff): after that it is listed as yours nowhere, `mindly_task_claim` refuses it, and
+  `mindly_task_update` changes it where it is; neither takes it along;
 - intents, tasks and messages the server writes are noted, and go along with it to its own
   session once that is known.
 

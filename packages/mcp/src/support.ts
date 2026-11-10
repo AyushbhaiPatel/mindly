@@ -87,6 +87,14 @@ export interface GuessScope {
   noteCurrentTask(taskId: string): void;
   /** True when the server wrote this row while on a guess. */
   wrote(kind: 'intent' | 'task', id: string): boolean;
+  /**
+   * True when task `id` is the server's own: it wrote the task on a guess, the task is still
+   * where the server's work is, nothing but the server has changed it since, and no live
+   * session other than the server's own has it as its current task.
+   */
+  owns(id: string): boolean;
+  /** Stops taking task `id` along: it is no longer the server's own. */
+  disown(id: string): void;
 }
 
 /** Sliding-window rate limiter (per server process). */

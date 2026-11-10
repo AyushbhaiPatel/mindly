@@ -1552,11 +1552,15 @@ describe('telling windows of one agent apart', () => {
       expect(slow.session.id).toBe(sessA);
       expect(slow.guess).toBeDefined();
       // A call that started on the guess writes a task; before it notes it, another call has
-      // already moved the server to its own session.
-      const t = a.mindly.tasks.create({
+      // already moved the server to its own session. (Written as a guess writes a task: with the
+      // session, without making it the window's current task.)
+      const created = a.mindly.tasks.create({
         projectId: projectOf(a, sessA),
         title: 'written by the slow call',
-        owner: a.mindly.store.sessions.get(sessA),
+      });
+      const t = a.mindly.store.tasks.update(created.id, {
+        ownerSessionId: sessA,
+        status: 'in_progress',
       });
       const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
       expect((await resolver.resolve()).session.id).toBe(sessB);
@@ -1844,6 +1848,71 @@ describe('telling windows of one agent apart', () => {
       expect(mine.structured?.['tasks']).toEqual([]);
       // It is still listed among the project's tasks.
       expect((await b.call('mindly_tasks')).text).toContain('B work');
+    });
+
+    /** B writes a task on a guess at A's session and hands it off; A's next start picks it up. */
+    async function pickedUpByWindow() {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      const made = await b.call('mindly_task_create', { title: 'B work' });
+      const id = (made.structured?.['task'] as { id: string }).id;
+      expect((await b.call('mindly_tasks', { mine: true })).text).toContain('B work');
+      await b.call('mindly_handoff', { summary: 'B hands its work on' });
+      // Window A starts again (resume, compact): its session start picks the handoff up. The
+      // task's owner does not change, but it is now window A's current task.
+      const r = await a.mindly.hooks.handle(hook(a.root, 'claude-code', 'win-a', 'session_start'));
+      expect(r.context).toContain('Handoff for you');
+      expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(id);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      return { a, b, sessA, id };
+    }
+
+    it('does not count a task the guessed window picked up as its own, nor claim it', async () => {
+      const { a, b, sessA, id } = await pickedUpByWindow();
+      const mine = await b.call('mindly_tasks', { mine: true });
+      expect(mine.structured?.['tasks']).toEqual([]);
+      expect((await b.call('mindly_context')).text).not.toMatch(/Your open tasks[\s\S]*B work/);
+      const claim = await b.call('mindly_task_claim', { id });
+      expect(claim.structured?.['claimed']).toBe(false);
+      expect(claim.text).toMatch(/^Not claimed: .*no longer yours/);
+      // B's own hooks start: the task stays with window A, which still has it as its current one.
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      expect(a.mindly.store.tasks.get(id).ownerSessionId).toBe(sessA);
+      expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(id);
+      expect(a.mindly.store.sessions.get(sessB).currentTaskId).not.toBe(id);
+    });
+
+    it('updates a task the guessed window picked up without taking it along', async () => {
+      const { a, b, sessA, id } = await pickedUpByWindow();
+      const upd = await b.call('mindly_task_update', { id, blockers: ['waiting on review'] });
+      expect(upd.text).toContain('no longer yours and stays where it is');
+      expect(upd.structured?.['own']).toBe(false);
+      expect(a.mindly.store.tasks.get(id).blockers).toEqual(['waiting on review']);
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      expect(a.mindly.store.tasks.get(id).ownerSessionId).toBe(sessA);
+      expect(a.mindly.store.sessions.get(sessA).currentTaskId).toBe(id);
+    });
+
+    it("keeps updating and taking along a task that is still the server's own", async () => {
+      const a = await harness(windowA);
+      const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+      const b = await harness(windowB, a);
+      expect(sid(await b.call('mindly_status'))).toBe(sessA);
+      const made = await b.call('mindly_task_create', { title: 'B work' });
+      const id = (made.structured?.['task'] as { id: string }).id;
+      const upd = await b.call('mindly_task_update', { id, blockers: ['one'] });
+      expect(upd.text).not.toContain('no longer yours');
+      expect((await b.call('mindly_tasks', { mine: true })).text).toContain('B work');
+      const again = await b.call('mindly_task_claim', { id });
+      expect(again.text).toMatch(/^Claimed/);
+      const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+      expect(sid(await b.call('mindly_status'))).toBe(sessB);
+      expect(a.mindly.store.tasks.get(id).ownerSessionId).toBe(sessB);
+      expect(a.mindly.store.sessions.get(sessB).currentTaskId).toBe(id);
     });
 
     it('files a handoff in its own name on a guess, so it never picks it up itself', async () => {

@@ -176,12 +176,17 @@ function takeUpOnGuess(mindly: Mindly, scope: CallScope, taskId: string): Task {
 
 /**
  * True when `task` is the server's own while it speaks for a session it only guessed at: it took
- * the task up itself and the task is still with that session (where its work lives until it is
- * home), not taken since by anyone else.
+ * the task up itself, the task is still with that session (where its work lives until it is
+ * home), nobody else changed it since, and no other live session has made it its current task.
  */
 function ownOnGuess(guess: GuessScope, task: Task): boolean {
-  return task.ownerSessionId === guess.sessionId && guess.wrote('task', task.id);
+  return task.ownerSessionId === guess.sessionId && guess.owns(task.id);
 }
+
+/** Why a task the server wrote on a guess is no longer its own. */
+const TAKEN_SINCE =
+  'Another session has taken it up or changed it since this server wrote it, and this server ' +
+  "cannot tell its own session from that window's";
 
 /** Tools whose result names a memory they stored. */
 const MEMORY_TOOLS = new Set(['mindly_remember', 'mindly_record_mistake']);
@@ -317,7 +322,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         ? mindly.context.prompt(project, session, query)
         : mindly.context.sessionStart(project, session);
     const built = guest
-      ? mindly.context.asGuest(session, build, { ownsTask: (id) => guest.wrote('task', id) })
+      ? mindly.context.asGuest(session, build, { ownsTask: (id) => guest.owns(id) })
       : build();
     return ok(built.text ?? 'No Mindly context for this project right now.', {
       packetId: built.packet?.id ?? null,
@@ -688,8 +693,9 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         description: z.string().max(4000).optional(),
       }),
       annotations: WRITE_IDEMPOTENT,
-      // Tasks are shared work any agent may update; the session only names who did. A task the
-      // server wrote on a guess is noted again, so it still goes along with the server.
+      // Tasks are shared work any agent may update; the session only names who did. A task that
+      // is still the server's own is noted again, so it still goes along with the server; one it
+      // wrote that someone else has taken up since stays where it is.
       onGuess: 'shared',
     },
     (args, scope) => {
@@ -697,6 +703,9 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       const cur = mindly.store.tasks.find(args.id);
       if (!cur) throw notFound('task', args.id);
       ensureProject(scope, cur.projectId, 'task', args.id);
+      const guess = scope.guess;
+      const own = guess ? ownOnGuess(guess, cur) : false;
+      const lost = guess !== undefined && !own && guess.wrote('task', cur.id);
       const t = mindly.tasks.update(
         args.id,
         {
@@ -710,7 +719,14 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         },
         scope.session,
       );
-      if (scope.guess?.wrote('task', t.id)) scope.guess.note('task', t.id);
+      if (own) guess?.note('task', t.id);
+      if (lost) {
+        guess?.disown(t.id);
+        return ok(
+          `Updated task ${t.id}: ${safeLine(t.title, 200)} (${t.status}). It is no longer yours and stays where it is: ${TAKEN_SINCE}.`,
+          { task: taskSummary(t), own: false },
+        );
+      }
       return ok(`Updated task ${t.id}: ${safeLine(t.title, 200)} (${t.status}).`, {
         task: taskSummary(t),
       });
@@ -725,11 +741,21 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         'Take ownership of a task; it becomes your current task and moves to in progress.',
       input: z.strictObject({ id: Id }),
       annotations: WRITE_IDEMPOTENT,
-      // A task the guessed session already owns is that window's own work: claiming it changes
-      // nothing there. Anything else is taken up for the server.
+      // A task the guessed session already owns is that window's own work, unless the server
+      // took it up itself and nobody has taken it up since: claiming it changes nothing there.
+      // Anything else is taken up for the server.
       onGuess: (args, scope) => {
         const cur = claimable(args.id, scope);
-        if (cur.ownerSessionId === scope.guess.sessionId && !scope.guess.wrote('task', cur.id)) {
+        const guess = scope.guess;
+        if (cur.ownerSessionId === guess.sessionId && !ownOnGuess(guess, cur)) {
+          if (guess.wrote('task', cur.id)) {
+            // It stays where it is, and no longer goes along with the server.
+            guess.disown(cur.id);
+            return ok(
+              `Not claimed: task ${cur.id} (${safeLine(cur.title, 200)}) is no longer yours. ${TAKEN_SINCE}, so nothing was changed and the task stays where it is. Create a new task for your work instead.`,
+              { claimed: false, task: taskSummary(cur) },
+            );
+          }
           return ok(
             `Not claimed: task ${cur.id} (${safeLine(cur.title, 200)}) belongs to a session this server cannot tell apart from another window's, so nothing was changed. Create a new task for your work instead.`,
             { claimed: false, task: taskSummary(cur) },

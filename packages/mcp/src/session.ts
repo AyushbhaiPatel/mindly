@@ -571,12 +571,14 @@ export class SessionResolver {
     const work = (): ServerWork =>
       (this.work ??= { rows: new Map(), currentTask: null, memories: new Set() });
     const at = session.id;
+    const owns = (id: string): boolean => {
+      const row = this.work?.rows.get(`task:${id}`);
+      return row !== undefined && row.at === at && this.ownsTask(row, null);
+    };
     const unfinished = (id: string | null | undefined): string | null => {
-      if (!id) return null;
+      if (!id || !owns(id)) return null;
       const t = store.tasks.find(id);
-      return t?.ownerSessionId === at && ['open', 'in_progress', 'blocked'].includes(t.status)
-        ? id
-        : null;
+      return t && ['open', 'in_progress', 'blocked'].includes(t.status) ? id : null;
     };
     // The server's own current task: the one it made current, or else an unfinished one it wrote.
     const ownTask = (): string | null =>
@@ -628,8 +630,43 @@ export class SessionResolver {
           work().currentTask = taskId;
         },
         wrote: (kind, id) => this.work?.rows.has(`${kind}:${id}`) ?? false,
+        owns,
+        disown: (id) => {
+          this.work?.rows.delete(`task:${id}`);
+          if (this.work?.currentTask === id) this.work.currentTask = null;
+        },
       },
     };
+  }
+
+  /**
+   * True when the task the server wrote on a guess (`row`) is still its own: with the session
+   * the server left it with, changed by nobody since the server last wrote it, and the current
+   * task of no live session but the server's own (`ownId`, and its `mcp-` session). A window that
+   * picked the task up (a handoff it claimed, say) has made it its own even where the task row
+   * itself did not change.
+   */
+  private ownsTask(
+    row: WorkRow,
+    ownId: string | null,
+    busy: ReadonlySet<string> | null = null,
+  ): boolean {
+    const store = this.mindly.store;
+    const task = store.tasks.find(row.id);
+    if (!task || task.ownerSessionId !== row.at) return false;
+    const stamp = store.sessions.rowStamp('task', row.id);
+    if (!stamp || stamp.updatedAt !== row.updatedAt || stamp.sig !== row.sig) return false;
+    return !(busy ?? this.currentTasks(task.projectId, ownId)).has(task.id);
+  }
+
+  /** The current tasks of the live sessions of a project, but the server's own (`ownId`). */
+  private currentTasks(projectId: string, ownId: string | null): Set<string> {
+    const out = new Set<string>();
+    for (const s of this.mindly.store.sessions.listLive(projectId, LIVE_WINDOW_MS)) {
+      if (s.status === 'ended' || s.id === ownId || s.externalId === this.externalId) continue;
+      if (s.currentTaskId) out.add(s.currentTaskId);
+    }
+    return out;
   }
 
   /**
@@ -645,9 +682,18 @@ export class SessionResolver {
     try {
       // Handoffs the server filed in its own name stay so until it is home: then they are filed
       // in the name of its session, which therefore cannot pick its own handoff up.
-      const moving = [...work.rows.values()].filter(
-        (r) => r.at !== toId && (r.kind !== 'handoff' || home),
-      );
+      const projectId = this.scoped?.project.id ?? null;
+      const busy = projectId ? this.currentTasks(projectId, home ? toId : null) : null;
+      const moving = [...work.rows.values()].filter((r) => {
+        if (r.at === toId || (r.kind === 'handoff' && !home)) return false;
+        // A task that is no longer the server's own (a window took it up) stays where it is.
+        if (r.kind === 'task' && !this.ownsTask(r, home ? toId : null, busy)) {
+          work.rows.delete(`task:${r.id}`);
+          if (work.currentTask === r.id) work.currentTask = null;
+          return false;
+        }
+        return true;
+      });
       for (const at of new Set(moving.map((r) => r.at))) {
         const rows = moving.filter((r) => r.at === at);
         const pick = (kind: WorkRow['kind']) => rows.filter((r) => r.kind === kind);
