@@ -360,20 +360,26 @@ const SHELLS = new Set([
 
 /**
  * How a shell is told what to run: `-c` anywhere in a cluster of its options (`-ce`, `-xc`)
- * makes the first word after its options the code; `--` or `-` ends them, and `-o` / `-O` (also
- * `+o`, `+O`, `--rcfile`, `--init-file`) take the next word. `code` is null when `-c` is given
- * without code the text shows; `dynamic` when an option is not plain text.
+ * makes the first word after its options the code; `-s` makes it read the code from its input,
+ * the words after its options being arguments; otherwise the first word is a script file (or
+ * `/dev/stdin`, `-`, a process substitution), and without one the code comes from its input.
+ * `--` or `-` ends the options, and `-o` / `-O` (also `+o`, `+O`, `--rcfile`, `--init-file`)
+ * take the next word. `dynamic`: an option is not plain text.
  */
 function shellInvocation(words: readonly Word[]): {
   c: boolean;
-  code: Word | null;
+  s: boolean;
+  /** The code (`-c`), or the script, or null. */
+  operand: Word | null;
   dynamic: boolean;
 } {
   let c = false;
+  let s = false;
   let i = 1;
   for (; i < words.length; i++) {
     const w = words[i] as Word;
-    if (w.dynamic) return { c, code: null, dynamic: true };
+    if (w.procSub !== undefined) break;
+    if (w.dynamic) return { c, s, operand: null, dynamic: true };
     const t = w.text;
     if (t === '--' || t === '-') {
       i++;
@@ -385,12 +391,55 @@ function shellInvocation(words: readonly Word[]): {
       continue;
     }
     if (t.startsWith('-') && t.includes('c')) c = true;
+    if (t.startsWith('-') && t.includes('s')) s = true;
     // Each `o` / `O` in the cluster takes a word of its own.
     i += (t.match(/[oO]/g) ?? []).length;
   }
-  const code = c ? (words[i] ?? null) : null;
-  return { c, code, dynamic: code?.dynamic ?? false };
+  const operand = words[i] ?? null;
+  return { c, s, operand, dynamic: c && (operand?.dynamic ?? false) };
 }
+
+/** Paths that stand for a program's own input. */
+const STDIN_PATHS = new Set(['-', '/dev/stdin', '/dev/fd/0', '/proc/self/fd/0']);
+
+/**
+ * The text a process substitution prints, when the text shows it: `echo` or `printf` of words
+ * that are plain text. Null for anything else.
+ */
+function printedBy(code: string): string | null {
+  const parsed = parse(code);
+  const only = parsed.commands[0];
+  if (parsed.cut || parsed.commands.length !== 1 || only === undefined) return null;
+  if (only.nested.length > 0 || only.redirects.length > 0) return null;
+  const words = withoutAssignments(only.words);
+  const name = words[0]?.text;
+  if ((name !== 'echo' && name !== 'printf') || words.some((w) => w.dynamic)) return null;
+  let args = words.slice(1);
+  if (name === 'echo') {
+    while (args[0] && /^-[neE]+$/.test(args[0].text)) args = args.slice(1);
+    return args.map((w) => w.text).join(' ');
+  }
+  // printf: a format with no conversion, or `%s\n` printing each word on a line of its own.
+  const [format, ...rest] = args;
+  if (format === undefined) return null;
+  if (format.text === '%s\\n') return rest.map((w) => w.text).join('\n');
+  if (rest.length > 0 || format.text.includes('%')) return null;
+  return format.text.replace(/\\n/g, '\n');
+}
+
+/**
+ * Code a shell or `source` reads from its input or from a file the text names: the code when the
+ * text shows it (a here-document or here-string that is plain text, what `echo` before a pipe
+ * prints, a process substitution that prints plain text), or null when it does not.
+ */
+function codeFrom(from: Word | null, stdin: string | null, stdinDynamic: boolean): string | null {
+  if (from === null || (!from.dynamic && STDIN_PATHS.has(from.text))) {
+    return stdin !== null && !stdinDynamic ? stdin : null;
+  }
+  if (from.procSub !== undefined) return printedBy(from.procSub);
+  return null;
+}
+
 const SCRIPT_RUNNERS = new Set(['python', 'python3', 'node', 'ruby', 'perl', 'php', 'deno', 'bun']);
 
 /** Programs that remove or rewrite what `find -exec` hands them. */
@@ -481,6 +530,8 @@ interface Word {
    * for: only part of what it names was read.
    */
   cut?: boolean | undefined;
+  /** A process substitution (`<(…)`, `>(…)`): the code whose output or input it stands for. */
+  procSub?: string | undefined;
 }
 
 interface Redirect {
@@ -507,6 +558,8 @@ interface SimpleCommand {
   apart: boolean;
   /** The here-document is expanded by the shell (its delimiter was not quoted). */
   stdinExpands: boolean;
+  /** What it reads on standard input holds a value not known here (`<<< "$c"`). */
+  stdinDynamic: boolean;
   /** Text of `(( … ))` and `$(( … ))` arithmetic written in this command. */
   arithmetic: string[];
   /**
@@ -652,6 +705,7 @@ function parse(
     otherwise,
     apart: piped,
     stdinExpands: false,
+    stdinDynamic: false,
     arithmetic: [],
     taint: false,
   });
@@ -696,8 +750,10 @@ function parse(
       return;
     }
     if (pendingRedirect !== null) {
-      if (pendingRedirect === '<<<') current.stdin = w.text;
-      else current.redirects.push({ op: pendingRedirect, target: w });
+      if (pendingRedirect === '<<<') {
+        current.stdin = w.text;
+        current.stdinDynamic = w.dynamic;
+      } else current.redirects.push({ op: pendingRedirect, target: w });
       pendingRedirect = null;
       return;
     }
@@ -834,6 +890,8 @@ function parse(
         }
         doc.into.stdin = src.slice(start, end);
         doc.into.stdinExpands = doc.expands;
+        // Expanded, it holds values not known here.
+        doc.into.stdinDynamic = doc.expands && /[$`]/.test(doc.into.stdin);
       }
       continue;
     }
@@ -889,6 +947,16 @@ function parse(
     if (c === '#' && open === null) {
       const nl = src.indexOf('\n', i);
       i = nl === -1 ? src.length : nl;
+      continue;
+    }
+    if ((c === '>' || c === '<') && src[i + 1] === '(' && open === null) {
+      // `<(…)` / `>(…)`: a process substitution, a word naming a file that is the output of (or
+      // the input to) the code in it. The code runs; the word's value is not known here.
+      const end = closeParen(i + 2);
+      const code = src.slice(i + 2, Math.max(i + 2, end - 1));
+      current.nested.push(code);
+      open = { text: '', mask: '', dynamic: true, dynamicAt: 0, procSub: code };
+      i = end;
       continue;
     }
     if ((c === '>' || c === '<') && current.words[0]?.text === '[[') {
@@ -1021,6 +1089,16 @@ function programWords(words: readonly Word[]): { words: Word[]; chdir: Word | nu
     if (launcher === undefined) break;
     // `command -v x` asks about a program, it does not run one.
     if (name === 'command' && /^-[vV]$/.test(rest[1]?.text ?? '')) return { words: [], chdir };
+    // `flock lock -c code`: the code is a shell's.
+    if (name === 'flock') {
+      const c = rest.findIndex((w, i) => i > 0 && /^(-c|--command)(=|$)/.test(w.text));
+      const flag = rest[c];
+      if (flag !== undefined) {
+        const eq = flag.text.indexOf('=');
+        const code = eq === -1 ? rest[c + 1] : sliceWord(flag, eq + 1);
+        return { words: [word('sh'), word('-c'), code ?? word('', true)], chdir };
+      }
+    }
     let at = 1;
     while (at < rest.length) {
       const w = rest[at] as Word;
@@ -1131,7 +1209,8 @@ type Verdict =
   | { kind: 'writes'; items: Item[] }
   | { kind: 'unknown'; args: Word[]; bare: boolean }
   | { kind: 'cd'; how: 'cd' | 'pushd' | 'popd'; dir: Word | null }
-  | { kind: 'inline'; code: string }
+  /** Shell code it runs; `unread`: some of it is not known here, said as not read. */
+  | { kind: 'inline'; code: string; unread?: string }
   | { kind: 'script'; code: string }
   | {
       kind: 'git';
@@ -1174,6 +1253,8 @@ const isRemote = (w: Word): boolean => /^[^/]+:/.test(w.text);
 interface GitContext {
   settings: boolean;
   timeUp: () => boolean;
+  /** What the command reads on its input holds values not known here. */
+  stdinDynamic?: boolean;
 }
 
 const PLAIN_GIT: GitContext = { settings: false, timeUp: () => false };
@@ -1364,6 +1445,10 @@ function classify(
           .slice(1)
           .map((w) => w.text)
           .join(' '),
+        // A value in it is code the text does not show.
+        ...(words.some((w) => w.dynamic)
+          ? { unread: 'eval runs code the text does not show' }
+          : {}),
       };
     case 'mapfile':
     case 'readarray': {
@@ -1372,8 +1457,17 @@ function classify(
       return callback ? { kind: 'inline', code: callback.text } : READS;
     }
     case 'source':
-    case '.':
+    case '.': {
+      // Code read from its input or a process substitution: read when the text shows it. A file
+      // it names is not read (it runs in this shell, which taints the line).
+      const from = args[0] ?? null;
+      if (from === null || from.procSub !== undefined || STDIN_PATHS.has(from.text)) {
+        const code = codeFrom(from, stdin, git.stdinDynamic ?? false);
+        if (code !== null) return { kind: 'inline', code };
+        return { kind: 'unread', why: 'source reads code the text does not show', taints: true };
+      }
       return { kind: 'unknown', args: withoutScript(words), bare: false };
+    }
     case 'npm':
     case 'pnpm':
     case 'yarn':
@@ -1414,14 +1508,24 @@ function classify(
 
   if (SHELLS.has(program)) {
     const shell = shellInvocation(words);
+    // Code the text does not show may do anything, to this line's variables too.
+    const unshown: Verdict = {
+      kind: 'unread',
+      why: 'a shell runs code the text does not show',
+      taints: true,
+    };
     if (shell.c || shell.dynamic) {
-      if (shell.code !== null && !shell.dynamic) return { kind: 'inline', code: shell.code.text };
-      // Code the text does not show may do anything, to this line's variables too.
-      return { kind: 'unread', why: 'a shell runs code the text does not show', taints: true };
+      return shell.operand !== null && !shell.dynamic
+        ? { kind: 'inline', code: shell.operand.text }
+        : unshown;
     }
-    // No script file: the commands come from a here-document, here-string or pipe.
-    if (stdin !== null && args.filter((w) => w.text !== '-' && w.text !== '-s').length === 0)
-      return { kind: 'inline', code: stdin };
+    // The code from its input (`-s`, no script, `/dev/stdin`) or a process substitution.
+    const from = shell.s ? null : shell.operand;
+    if (from === null || from.procSub !== undefined || STDIN_PATHS.has(from.text)) {
+      const code = codeFrom(from, stdin, git.stdinDynamic ?? false);
+      return code !== null ? { kind: 'inline', code } : unshown;
+    }
+    // A script file: what it does is its own, as for a program run by its path.
     return { kind: 'unknown', args: withoutScript(words), bare: false };
   }
   if (SCRIPT_RUNNERS.has(program)) {
@@ -1888,7 +1992,25 @@ export const SHELL_BUILTINS: Readonly<Record<string, 'safe' | 'prefix' | 'taints
 
 /** Whether a builtin marked safe is given an option that sets a variable or runs a command. */
 function builtinTaints(name: string, args: readonly Word[]): boolean {
+  // A word that does not start as plain text may be any option (`o=-v; printf "$o" …`), where
+  // the builtin still reads options; and a subscript with a substitution in it may be evaluated.
+  const optionsEnd = args.findIndex((w) => !w.dynamic && !/^[-+]/.test(w.text));
+  const options = optionsEnd === -1 ? args : args.slice(0, optionsEnd);
+  if (OPTIONED.has(name) && options.some((w) => w.dynamic && !w.dynamicAt)) return true;
+  if (args.some(subscripted)) return true;
   switch (name) {
+    case 'test':
+    case '[':
+      // `-v name` and `-R name` evaluate the name, a subscript in it too. A word not plain text
+      // may be one of them when a name follows it (`test "$o" 'a[i=1]'`, `test "$o" "$n"`).
+      return args.some(
+        (w, i) =>
+          /^-[vR]$/.test(w.text) ||
+          (w.dynamic &&
+            !w.dynamicAt &&
+            args[i + 1] !== undefined &&
+            (args[i + 1]?.dynamic || (args[i + 1] as Word).text.includes('['))),
+      );
     case 'printf':
     case 'print':
       // `printf -v name`: the output goes into a variable.
@@ -1908,6 +2030,82 @@ function builtinTaints(name: string, args: readonly Word[]): boolean {
     default:
       return false;
   }
+}
+
+/** Safe builtins whose options may set a variable or run a command, given as any word. */
+const OPTIONED = new Set(['printf', 'print', 'wait', 'jobs', 'umask']);
+
+/** A word with a subscript holding a substitution (`'a[$(…)]'`), which may be evaluated. */
+const subscripted = (w: Word): boolean => {
+  const at = w.text.indexOf('[');
+  return at !== -1 && /\$\(|`/.test(w.text.slice(at));
+};
+
+/** Builtins that read a name as a variable, an array element's subscript being evaluated. */
+const NAMING = new Set([
+  'test',
+  '[',
+  '[[',
+  'printf',
+  'print',
+  'read',
+  'mapfile',
+  'readarray',
+  'declare',
+  'typeset',
+  'local',
+  'readonly',
+  'export',
+  'unset',
+  'getopts',
+  'let',
+  'wait',
+]);
+
+/**
+ * The substitutions in the subscripts of names a builtin evaluates (`test -v 'a[$(…)]'`,
+ * `printf -v 'a[$(…)]' x`): code the shell runs, though the text quotes it.
+ */
+function subscriptCode(words: readonly Word[]): string[] {
+  const name = words[0];
+  if (name === undefined || name.dynamic || !NAMING.has(name.text)) return [];
+  const out: string[] = [];
+  for (const w of words.slice(1)) {
+    if (!subscripted(w)) continue;
+    out.push(...substitutions(w.text.slice(w.text.indexOf('['))));
+  }
+  return out;
+}
+
+/**
+ * The words of the program `xargs -I{}` or `parallel` runs, a word holding the string they
+ * replace with what they read (`{}`) marked as a value not known here.
+ */
+function givenByInput(all: readonly Word[], words: Word[]): Word[] {
+  const at = all.indexOf(words[0] as Word);
+  const before = at === -1 ? [] : all.slice(0, at);
+  let replace: string | null = null;
+  for (let i = 0; i < before.length; i++) {
+    const w = before[i] as Word;
+    const name = programName(w);
+    if (name === 'parallel') replace = '{}';
+    if (name !== 'xargs') continue;
+    for (let j = i + 1; j < before.length; j++) {
+      const o = (before[j] as Word).text;
+      if (o === '-I') replace = before[j + 1]?.text ?? '{}';
+      else if (o.startsWith('-I')) replace = o.slice(2);
+      else if (o === '-i' || o === '--replace') replace = '{}';
+      else if (o.startsWith('-i')) replace = o.slice(2);
+      else if (o.startsWith('--replace=')) replace = o.slice('--replace='.length);
+    }
+  }
+  if (replace === null || replace === '') return words;
+  const r = replace;
+  return words.map((w) =>
+    w.text.includes(r)
+      ? { ...w, dynamic: true, dynamicAt: Math.min(w.dynamicAt ?? Infinity, w.text.indexOf(r)) }
+      : w,
+  );
 }
 
 /**
@@ -3066,6 +3264,11 @@ export interface ShellReadOptions {
    * and says so in `limit`.
    */
   timeUp?: () => boolean;
+  /**
+   * Whether a path (relative to where the command starts, or absolute) is a symbolic link. A
+   * `cd` through one makes where later commands run unknown. Without it, none is.
+   */
+  linked?: (path: string) => boolean;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3303,6 +3506,11 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     later: [],
     deferred: new Set(),
     added: new Set(),
+    read: new Set(),
+    splitChars: 0,
+    possibleOnly: false,
+    linked: options.linked ?? null,
+    linksMade: false,
   };
   collectTargets(command, '', 0, reading);
   // A variable git reads is set somewhere on the line: the git commands read before it may change
@@ -3311,13 +3519,18 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     // A line that may set what git runs with may also evaluate text as code where the shell
     // does arithmetic (`printf -v 'a[$(…)]'`, `x='a[$(…)]'; $((x))`): every substitution in it,
     // quoted or not, is read as code too.
+    // What the shell would not run unless it evaluates it can only warn; each is read once.
+    reading.possibleOnly = true;
     for (const code of substitutions(command.slice(0, MAX_COMMAND_CHARS), Infinity)) {
+      if (reading.read.has(code)) continue;
       if (reading.timeUp() || reading.commands > MAX_COMMANDS) {
         reading.limit ??= 'no time was left to read all of it';
         break;
       }
+      reading.read.add(code);
       collectTargets(code, '', 1, reading);
     }
+    reading.possibleOnly = false;
     for (const then of reading.later) then();
   }
   return {
@@ -3350,6 +3563,16 @@ interface Reading {
   deferred: Set<string>;
   /** What `add` was already given, so a repeat of it costs nothing. */
   added: Set<string>;
+  /** Substitutions already read as code the shell runs. */
+  read: Set<string>;
+  /** Characters `env -S` strings gave to read, over the whole line. */
+  splitChars: number;
+  /** What is read now is code the shell may not run: its writes are possible, never certain. */
+  possibleOnly: boolean;
+  /** Whether a path, placed as targets are, is a symbolic link; null when not asked. */
+  linked: ((path: string) => boolean) | null;
+  /** A command read so far makes symbolic links (`ln -s`). */
+  linksMade: boolean;
 }
 
 /**
@@ -3464,7 +3687,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // The same word, given the same way from the same place, adds nothing new: a long line of
     // repeats is read in the time of one.
     if (item.entries === undefined) {
-      const flags = `${item.tree ? 't' : ''}${item.certain === false ? 'u' : ''}${item.ifExists ? 'e' : ''}${item.pattern ? 'p' : ''}${item.dotfiles ? 'd' : ''}${item.nocase ? 'c' : ''}`;
+      const flags = `${item.tree ? 't' : ''}${item.certain === false || r.possibleOnly ? 'u' : ''}${item.ifExists ? 'e' : ''}${item.pattern ? 'p' : ''}${item.dotfiles ? 'd' : ''}${item.nocase ? 'c' : ''}`;
       const kinds = item.touches
         ? `${item.touches.tracked ? 't' : ''}${item.touches.untracked ? 'u' : ''}${item.touches.ignored ? 'i' : ''}`
         : '-';
@@ -3480,7 +3703,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           { text: w.text, glob: false },
         ]
       : [{ text: pattern, glob }];
-    const certain = item.certain ?? true;
+    // Code the shell may not run (quoted text read on a line that may evaluate it) only warns.
+    const certain = (item.certain ?? true) && !r.possibleOnly;
     const only = item.only ?? null;
     const how = item.how ?? 'write';
     // No more than are kept are placed.
@@ -3490,6 +3714,9 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     }));
     for (const form of forms) {
       const path = place(form.text, tilde(w), from);
+      if (path === null && from === null && !posix.isAbsolute(form.text)) {
+        r.limit ??= 'a command runs in a folder the text does not tell';
+      }
       if (path === null || /^\/(dev|proc)\//.test(path)) continue;
       const touches = item.touches ?? null;
       const kinds = touches
@@ -3537,6 +3764,29 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   /** Where a `cd` to `to` leads from `from`; null when unknown. */
   const enter = (to: Word, from: string | null): string | null =>
     to.dynamic ? null : place(to.text, tilde(to), from);
+  /**
+   * Whether the way from `from` to `to` passes a symbolic link, as the caller's `linked` finds
+   * on disk: the shell's `..` after it, and the paths git is given there, lead elsewhere than the
+   * text says. Unknown (too many parts, no time) counts as yes.
+   */
+  const throughLink = (to: Word, from: string | null): boolean => {
+    if (to.dynamic) return false;
+    // A line that makes symbolic links may make one on the way: any way that names a folder.
+    if (r.linksMade && to.text.split('/').some((p) => p !== '' && p !== '.' && p !== '..'))
+      return true;
+    if (r.linked === null) return false;
+    const parts = to.text.split('/');
+    if (parts.length > 64) return true;
+    let cur: string | null = parts[0] === '' ? '/' : place(parts[0] as string, tilde(to), from);
+    if (cur === null) return false;
+    if (parts[0] !== '' && parts[0] !== '.' && parts[0] !== '..' && r.linked(cur)) return true;
+    for (const part of parts.slice(1)) {
+      if (part === '' || part === '.') continue;
+      cur = posix.join(cur, part);
+      if (part !== '..' && r.linked(cur)) return true;
+    }
+    return false;
+  };
   /** Whether a directory is inside the working tree the command line starts in, as far as known. */
   const insideTop = (at: string | null): boolean =>
     at !== null &&
@@ -3554,7 +3804,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     verdict: GitVerdict,
     here: string | null,
   ): { at: string; base: string; top: boolean } | null => {
-    const at = verdict.dir ? enter(verdict.dir, here) : here;
+    let at = verdict.dir ? enter(verdict.dir, here) : here;
+    if (verdict.dir && at !== null && throughLink(verdict.dir, here)) at = null;
     if (at === null) {
       r.limit ??= 'a git command runs in a folder the text does not tell';
       return null;
@@ -3621,10 +3872,16 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // Substitutions run where they are written, before the command that holds them.
     const at = cmd.otherwise && wasCd ? beforeCd : dir;
     wasCd = false;
-    for (const inner of cmd.nested) collectTargets(inner, at, depth + 1, r);
+    for (const inner of cmd.nested) {
+      if (r.read.size < MAX_COMMANDS) r.read.add(inner);
+      collectTargets(inner, at, depth + 1, r);
+    }
     // The shell expands a here-document whose delimiter is not quoted: substitutions in it run.
     if (cmd.stdin !== null && cmd.stdinExpands) {
-      for (const inner of substitutions(cmd.stdin)) collectTargets(inner, at, depth + 1, r);
+      for (const inner of substitutions(cmd.stdin)) {
+        if (r.read.size < MAX_COMMANDS) r.read.add(inner);
+        collectTargets(inner, at, depth + 1, r);
+      }
     }
     const runs = programWords(cmd.words);
     const { chdir } = runs;
@@ -3637,16 +3894,27 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     if (taint.taints) r.gitEnv = true;
     // `xargs git …`: git, given words from the input, is read from its name on.
     if (taint.gitAt !== null) words = cmd.words.slice(taint.gitAt);
-    // `env -S '…'` splits a string into the words it runs: read as a line of its own.
+    // `env -S '…'` splits a string into the words it runs: read as a line of its own, within a
+    // budget for the whole line (a split string may hold another).
     const split = envSplitString(cmd.words);
-    if (split !== null) collectTargets(split, here, depth + 1, r);
+    if (split !== null) {
+      r.splitChars += split.length;
+      if (r.splitChars > MAX_COMMAND_CHARS || r.timeUp()) {
+        r.limit ??= 'env -S splits more than was read';
+        r.gitEnv = true;
+      } else collectTargets(split, here, depth + 1, r);
+    }
+    // `xargs -I{} …`, `parallel …`: a word holding the replace string is given by the input.
+    words = givenByInput(cmd.words, words);
     // What the program reads on standard input, when the text shows it: its own here-document,
     // or what an `echo` / `printf` / `cat <<EOF` before the pipe prints.
     let stdin = cmd.stdin;
+    let stdinDynamic = cmd.stdinDynamic;
     if (stdin === null && cmd.piped && before !== null) {
       const feeder = programWords(before.words).words;
       const name = feeder[0] && !feeder[0].dynamic ? programName(feeder[0]) : '';
       if (name === 'echo' || name === 'printf') {
+        stdinDynamic = feeder.some((w) => w.dynamic);
         const flags = feeder.slice(1).filter((w) => name === 'echo' && /^-[neE]+$/.test(w.text));
         const text = feeder
           .slice(1 + flags.length)
@@ -3659,16 +3927,43 @@ function collectTargets(command: string, startDir: string | null, depth: number,
               c === 'n' ? '\n' : c === 't' ? '\t' : c === 'r' ? '\r' : '\\',
             )
           : text;
-      } else if (name === 'cat' && feeder.length === 1) stdin = before.stdin;
+      } else if (name === 'cat' && feeder.length === 1) {
+        stdin = before.stdin;
+        stdinDynamic = before.stdinDynamic;
+      }
     }
     before = cmd;
+    // `ln -s`, `cp -s`: a later `cd` may pass through the link it makes.
+    const maker = words[0] && !words[0].dynamic ? programName(words[0]) : '';
+    if (
+      (maker === 'ln' || maker === 'cp') &&
+      words.some(
+        (w) => /^-[^-]*s|^--symbolic/.test(w.text) && !(maker === 'cp' && w.text === '--sparse'),
+      )
+    )
+      r.linksMade = true;
+    // Builtins that evaluate a name as an array element (`test -v 'a[$(…)]'`, `printf -v`,
+    // `read`, `declare`) run the substitutions in its subscript: read as code.
+    for (const code of subscriptCode(words)) collectTargets(code, here, depth + 1, r);
     // A variable set for git, or a line that may set what it runs with (above), may make it do
     // anything to the tree.
     const assigned = cmd.words
       .slice(0, words[0] ? cmd.words.indexOf(words[0]) : cmd.words.length)
       .some((w) => isAssignment(w) && unsafeVariable(w));
     const settings = assigned || r.gitEnv;
-    const verdict = classify(words, stdin, 0, { settings, timeUp: r.timeUp });
+    const verdict = classify(words, stdin, 0, { settings, timeUp: r.timeUp, stdinDynamic });
+    // A program not known here that is given `git` and words after it (`taskset -c 0 git …`,
+    // `strace -f git …`) may run git with settings of its own: read from there as git given one.
+    const gitAt =
+      verdict.kind === 'unknown' && words[0] !== undefined && programName(words[0]) !== 'git'
+        ? words.findIndex(
+            (w, i) => i > 0 && i < words.length - 1 && !w.dynamic && /(^|\/)git$/.test(w.text),
+          )
+        : -1;
+    const launched =
+      gitAt === -1
+        ? null
+        : classify(words.slice(gitAt), stdin, 0, { settings: true, timeUp: r.timeUp });
     const runsGit = !settings && words.some((w) => !w.dynamic && programName(w) === 'git');
     // A short command given again is read again only once.
     const deferral =
@@ -3692,152 +3987,164 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     /** Code this command runs: a shell's, git's own, or this shell's (`eval`, `trap`). */
     const nested = (code: string, from: string | null): void =>
       collectTargets(code, from, depth + 1, r);
-    switch (verdict.kind) {
-      case 'reads':
-        break;
-      case 'cd': {
-        if (chdir || cmd.apart) break;
-        beforeCd = dir;
-        wasCd = true;
-        if (verdict.how === 'popd') {
-          if (stack.length > 0) {
-            previous = dir;
-            dir = stack.pop() as string | null;
+    const judge = (verdict: Verdict): void => {
+      switch (verdict.kind) {
+        case 'reads':
+          break;
+        case 'cd': {
+          if (chdir || cmd.apart) break;
+          beforeCd = dir;
+          wasCd = true;
+          if (verdict.how === 'popd') {
+            if (stack.length > 0) {
+              previous = dir;
+              dir = stack.pop() as string | null;
+            }
+            break;
+          }
+          const to = verdict.dir;
+          let next: string | null;
+          if (to === null) {
+            // A bare `cd` goes home; a bare `pushd` swaps with the directory it put away.
+            if (verdict.how === 'pushd') {
+              if (stack.length === 0) break;
+              next = stack.pop() as string | null;
+            } else next = r.home;
+          } else if (to.text === '-' && !to.dynamic) next = previous;
+          else next = enter(to, dir);
+          // Through a symbolic link, `..` and the paths git is given lead elsewhere than the text
+          // says: where later commands run is not known.
+          if (to !== null && next !== null && throughLink(to, dir)) next = null;
+          if (verdict.how === 'pushd' && stack.length < 256) stack.push(dir);
+          previous = dir;
+          dir = next;
+          break;
+        }
+        case 'writes':
+          for (const item of verdict.items) add(item, here);
+          break;
+        case 'unread':
+          r.limit ??= verdict.why;
+          if (verdict.taints) r.gitEnv = true;
+          break;
+        case 'inline':
+          nested(verdict.code, here);
+          if (verdict.unread !== undefined) {
+            r.limit ??= verdict.unread;
+            r.gitEnv = true;
+          }
+          break;
+        case 'git': {
+          const where = gitWhere(verdict, here);
+          if (where === null) break;
+          const { at, base, top } = where;
+          const how = verdict.how ?? 'write';
+          const possibly = (kinds: FileKinds): void => wholeTree(verdict, where, kinds);
+          if (verdict.whole !== null) possibly(verdict.whole);
+          for (const code of verdict.exec ?? []) nested(code, at);
+          // Files and folders named as such, where git runs: an output file, a folder a clone or
+          // a new working tree is put in.
+          for (const p of verdict.paths) {
+            if (p.literal)
+              add({ word: p.word, tree: p.tree ?? false, how: p.land ? 'land' : 'write' }, at);
+          }
+          const pathspecs = verdict.paths.filter((p) => !p.literal);
+          if (pathspecs.some((p) => p.word.dynamic)) break;
+          // Pathspecs that only leave files out stand for everything else. One given again (the
+          // same text, read the same way) adds nothing.
+          const seen = new Set<string>();
+          const given: { p: GitPath; magic: ReturnType<typeof pathspecMagic> }[] = [];
+          let excluded = false;
+          for (const p of pathspecs) {
+            const key = `${p.word.text}\0${p.word.mask}\0${p.ifExists ? 'e' : ''}${p.tracked ? 't' : ''}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const magic = pathspecMagic(p.word.text);
+            if (magic.exclude) excluded = true;
+            else given.push({ p, magic });
+          }
+          if (given.length === 0 && excluded) possibly(ANY_FILE);
+          for (const { p, magic } of given) {
+            if (r.out.size >= MAX_TARGETS) {
+              r.limit ??= `more than ${MAX_TARGETS} write targets`;
+              break;
+            }
+            const bare = magic.rest === '' ? '.' : magic.rest;
+            const fromTop = magic.top && top;
+            // The tree where it runs named as `.` (or the top, `:/`): any tracked file there.
+            if (bare === '.' && !magic.literal) {
+              add(
+                {
+                  word: word(fromTop ? TOP : '.'),
+                  tree: true,
+                  certain: false,
+                  how,
+                  touches: ANY_FILE,
+                },
+                base,
+              );
+              continue;
+            }
+            const patterns = magic.literal || magic.glob ? [bare] : gitWildcards(bare);
+            for (const pattern of patterns) {
+              const text = fromTop ? `${TOP}/${pattern}` : pattern;
+              add(
+                {
+                  word: {
+                    text,
+                    mask: (magic.literal ? 'q' : 'u').repeat(text.length),
+                    dynamic: false,
+                    cut: p.word.cut,
+                  },
+                  tree: true,
+                  how,
+                  ifExists: p.ifExists ?? false,
+                  // git's wildcards also match names that start with a dot.
+                  dotfiles: true,
+                  nocase: verdict.nocase || magic.icase,
+                  // `git rm` only removes tracked files.
+                  ...(p.tracked ? { touches: TRACKED_FILES } : {}),
+                },
+                base,
+              );
+            }
           }
           break;
         }
-        const to = verdict.dir;
-        let next: string | null;
-        if (to === null) {
-          // A bare `cd` goes home; a bare `pushd` swaps with the directory it put away.
-          if (verdict.how === 'pushd') {
-            if (stack.length === 0) break;
-            next = stack.pop() as string | null;
-          } else next = r.home;
-        } else if (to.text === '-' && !to.dynamic) next = previous;
-        else next = enter(to, dir);
-        if (verdict.how === 'pushd' && stack.length < 256) stack.push(dir);
-        previous = dir;
-        dir = next;
-        break;
+        case 'script': {
+          const found = readCode(verdict.code);
+          for (const p of found.paths) {
+            // A bare name is a path only when a file of that name exists.
+            const item: Item = { word: word(p.text, true), certain: p.certain, tree: p.tree };
+            if (looksLikePath(p.text)) add(item, here);
+            else if (p.certain && /^[\w@+.-]+$/.test(p.text))
+              add({ ...item, ifExists: true }, here);
+          }
+          for (const line of found.commands) nested(line, here);
+          break;
+        }
+        case 'unknown':
+          // A program Mindly does not know may write what it is given, or only read it. A
+          // directory it is given may be walked, so it counts with everything under it. Text with
+          // spaces in it is a message or a command for somewhere else, not a path.
+          for (const w of verdict.args) {
+            if (w.dynamic) continue;
+            if (isFlag(w)) {
+              const eq = w.text.indexOf('=');
+              if (eq !== -1 && looksLikePath(w.text.slice(eq + 1)))
+                add({ word: sliceWord(w, eq + 1), tree: true, certain: false }, here);
+            } else if (looksLikePath(w.text)) {
+              add({ word: w, tree: true, certain: false }, here);
+            } else if (verdict.bare && bare < MAX_BARE_WORDS && /^[\w@+-]+$/.test(w.text)) {
+              bare++;
+              add({ word: w, tree: true, certain: false, ifExists: true }, here);
+            }
+          }
+          break;
       }
-      case 'writes':
-        for (const item of verdict.items) add(item, here);
-        break;
-      case 'unread':
-        r.limit ??= verdict.why;
-        if (verdict.taints) r.gitEnv = true;
-        break;
-      case 'git': {
-        const where = gitWhere(verdict, here);
-        if (where === null) break;
-        const { at, base, top } = where;
-        const how = verdict.how ?? 'write';
-        const possibly = (kinds: FileKinds): void => wholeTree(verdict, where, kinds);
-        if (verdict.whole !== null) possibly(verdict.whole);
-        for (const code of verdict.exec ?? []) nested(code, at);
-        // Files and folders named as such, where git runs: an output file, a folder a clone or
-        // a new working tree is put in.
-        for (const p of verdict.paths) {
-          if (p.literal)
-            add({ word: p.word, tree: p.tree ?? false, how: p.land ? 'land' : 'write' }, at);
-        }
-        const pathspecs = verdict.paths.filter((p) => !p.literal);
-        if (pathspecs.some((p) => p.word.dynamic)) break;
-        // Pathspecs that only leave files out stand for everything else. One given again (the
-        // same text, read the same way) adds nothing.
-        const seen = new Set<string>();
-        const given: { p: GitPath; magic: ReturnType<typeof pathspecMagic> }[] = [];
-        let excluded = false;
-        for (const p of pathspecs) {
-          const key = `${p.word.text}\0${p.word.mask}\0${p.ifExists ? 'e' : ''}${p.tracked ? 't' : ''}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          const magic = pathspecMagic(p.word.text);
-          if (magic.exclude) excluded = true;
-          else given.push({ p, magic });
-        }
-        if (given.length === 0 && excluded) possibly(ANY_FILE);
-        for (const { p, magic } of given) {
-          if (r.out.size >= MAX_TARGETS) {
-            r.limit ??= `more than ${MAX_TARGETS} write targets`;
-            break;
-          }
-          const bare = magic.rest === '' ? '.' : magic.rest;
-          const fromTop = magic.top && top;
-          // The tree where it runs named as `.` (or the top, `:/`): any tracked file there.
-          if (bare === '.' && !magic.literal) {
-            add(
-              {
-                word: word(fromTop ? TOP : '.'),
-                tree: true,
-                certain: false,
-                how,
-                touches: ANY_FILE,
-              },
-              base,
-            );
-            continue;
-          }
-          const patterns = magic.literal || magic.glob ? [bare] : gitWildcards(bare);
-          for (const pattern of patterns) {
-            const text = fromTop ? `${TOP}/${pattern}` : pattern;
-            add(
-              {
-                word: {
-                  text,
-                  mask: (magic.literal ? 'q' : 'u').repeat(text.length),
-                  dynamic: false,
-                  cut: p.word.cut,
-                },
-                tree: true,
-                how,
-                ifExists: p.ifExists ?? false,
-                // git's wildcards also match names that start with a dot.
-                dotfiles: true,
-                nocase: verdict.nocase || magic.icase,
-                // `git rm` only removes tracked files.
-                ...(p.tracked ? { touches: TRACKED_FILES } : {}),
-              },
-              base,
-            );
-          }
-        }
-        break;
-      }
-      case 'inline':
-        nested(verdict.code, here);
-        break;
-      case 'script': {
-        const found = readCode(verdict.code);
-        for (const p of found.paths) {
-          // A bare name is a path only when a file of that name exists.
-          const item: Item = { word: word(p.text, true), certain: p.certain, tree: p.tree };
-          if (looksLikePath(p.text)) add(item, here);
-          else if (p.certain && /^[\w@+.-]+$/.test(p.text)) add({ ...item, ifExists: true }, here);
-        }
-        for (const line of found.commands) nested(line, here);
-        break;
-      }
-      case 'unknown':
-        // A program Mindly does not know may write what it is given, or only read it. A
-        // directory it is given may be walked, so it counts with everything under it. Text with
-        // spaces in it is a message or a command for somewhere else, not a path.
-        for (const w of verdict.args) {
-          if (w.dynamic) continue;
-          if (isFlag(w)) {
-            const eq = w.text.indexOf('=');
-            if (eq !== -1 && looksLikePath(w.text.slice(eq + 1)))
-              add({ word: sliceWord(w, eq + 1), tree: true, certain: false }, here);
-          } else if (looksLikePath(w.text)) {
-            add({ word: w, tree: true, certain: false }, here);
-          } else if (verdict.bare && bare < MAX_BARE_WORDS && /^[\w@+-]+$/.test(w.text)) {
-            bare++;
-            add({ word: w, tree: true, certain: false, ifExists: true }, here);
-          }
-        }
-        break;
-    }
+    };
+    judge(verdict);
+    if (launched !== null) judge(launched);
   }
 }
 

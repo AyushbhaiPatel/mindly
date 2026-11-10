@@ -68,7 +68,11 @@ memory, which is then injected into every other agent.
     lower-case variable, and `if`, `then`, `elif`, `else`, `fi`, `while`, `until`, `do`, `done`,
     `case`, `esac`, `{`, `}`, `!`, `time` and `function`. So `export`, `shopt`, `setopt`,
     `source` and `.`, `eval`, `trap`, `read`, `mapfile`, `let`, `[[`, `alias`, `hash`, `local`,
-    `unset`, `command`, `exec` and the rest count, and so does `set`, strict options included;
+    `unset`, `command`, `exec` and the rest count, and so does `set`, strict options included.
+    A harmless one counts too when a word that does not start as plain text may be the option
+    that sets a variable or runs a command (`printf "$o"`, `wait "$pid"`), when `test` or `[` is
+    given `-v` or `-R`, which evaluate a name, and when a word holds a subscript with a
+    substitution in it (`'a[$(…)]'`), which a builtin that reads a name runs;
   - a word that holds anything but text, `$name`, `${name}`, a special parameter (`$?`, `$@`)
     or a substitution (whose code is read as part of the line): `${x:=y}`, `${a[i]}`, `${x:1}`,
     `$(( … ))`, `$[ … ]`, and `(( … ))`;
@@ -79,14 +83,26 @@ memory, which is then injected into every other agent.
   - a program whose name is not plain text (`$f x`), a word that is not plain text given to a
     program that runs another (`env "$v" git …`), `env -S`, and `xargs` or `parallel` running
     git, which is then read as git given a setting;
-  - a shell given code the text does not show (`bash -c "$cmd"`), which is also said as not
-    read.
+  - a shell, `source` or `eval` given code the text does not show, which is also said as not
+    read: `bash -c "$cmd"`, `bash <<< "$c"`, a here-document with values in it, a shell fed
+    through a pipe by anything but `echo` of plain text (`cat x.sh`, `echo "$c"`), a process
+    substitution that is not such an `echo`, and `xargs -I{} sh -c '{}'`. Code the text does
+    show is read wherever it comes from: `-c` among other options, `-s` with arguments,
+    `/dev/stdin`, a here-string, a quoted here-document, `echo '…' |`, `<(echo '…')`,
+    `flock … -c`. A script a shell is given by its path is not read, as for a program run by
+    its path.
 
   On such a line every substitution in its text, quoted or not, is read as code too
-  (`printf -v 'a[$(…)]'` runs it). So a line that exports anything, turns on shell options,
-  reads input into a variable, tests with `[[`, or sets an upper-case variable for any program
-  (`CI=1 npm test && git commit`) gets a warning for each of its git commands when a covered file
-  is there.
+  (`printf -v 'a[$(…)]'` runs it), once each; what it writes is only a possible write, a
+  warning and never a block, since the shell may not run it. A program not known here that is
+  given `git` and words after it (`taskset -c 0 git …`, `strace -f git …`) runs git with
+  settings of its own: git is read from there as given a setting. A `cd` (or `git -C`) through
+  a symbolic link, found on disk when the command is checked or made earlier on the line with
+  `ln -s`, makes where later commands run unknown, since `..` and the paths git is given lead
+  elsewhere than the text says: what they write is said as not checked. So a line that exports
+  anything, turns on shell options, reads input into a variable, tests with `[[`, or sets an
+  upper-case variable for any program (`CI=1 npm test && git commit`) gets a warning for each
+  of its git commands when a covered file is there.
 
 - Rendered memory text is sanitised: control characters stripped, fence/delimiter sequences
   neutralised, length capped.
