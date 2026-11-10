@@ -339,8 +339,9 @@ export class TrackRepo {
    * When the kept event log of a project starts, if that is later than its first recorded edit at
    * or after `from`; otherwise null. Events are deleted after `retention.eventsDays` while edits
    * are kept, so a window can reach back further than the events that outcomes are read from.
+   * With edits in the window and no event left at all, nothing is known up to `now`.
    */
-  eventsStartAfter(projectId: string, from: number): number | null {
+  eventsStartAfter(projectId: string, from: number, now: number): number | null {
     const edit = this.db
       .prepare(
         'SELECT MIN(created_at) AS at FROM file_changes WHERE project_id = ? AND created_at >= ?',
@@ -353,7 +354,7 @@ export class TrackRepo {
       .prepare('SELECT created_at AS at FROM events WHERE project_id = ? ORDER BY seq ASC LIMIT 1')
       .get(projectId) as Row | undefined;
     const firstEvent = event ? numOrNull(event, 'at') : null;
-    if (firstEvent === null) return null;
+    if (firstEvent === null) return now;
     return firstEvent > firstEdit ? firstEvent : null;
   }
 

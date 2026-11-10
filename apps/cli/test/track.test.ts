@@ -502,6 +502,7 @@ describe('mindly track output safety', () => {
     const partial = text(to - 7 * DAY);
     expect(partial).toContain('only known for the last 7 days');
     expect(partial).toContain('retention.eventsDays');
+    expect(text(to)).toContain('is not known for any of it');
   });
 
   it('says so when there is nothing yet', async () => {

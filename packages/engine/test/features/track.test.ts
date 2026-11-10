@@ -612,6 +612,12 @@ describe('attribution', () => {
       trackOf(w.mindly).report(w.pid, { windowMs: w.clock.now() - cutoff, since: '1h' })
         .eventsSince,
     ).toBeNull();
+
+    // With every event gone, nothing of the window is known.
+    w.mindly.store.events.deleteOlderThan(w.clock.now() + 1);
+    const none = report(w, { minEdits: 1 });
+    expect(none.totals.edits).toBeGreaterThan(0);
+    expect(none.eventsSince).toBe(none.window.to);
   });
 
   it('does not pin a contract break on an edit made in another worktree', async () => {
@@ -734,6 +740,57 @@ describe('attribution', () => {
     await blocked('claude-code', 'cc2');
     expect(row(w, 'claude-code').ruleAttempts.count).toBe(1);
     expect(row(w, 'codex').ruleAttempts.count).toBe(0);
+  });
+
+  it('counts one attempt per session and rule, however many saves the rule has', async () => {
+    const { w } = await twoAgents();
+    w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**', 'src/web/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const blocked = async (agent: string, id: string, ...files: string[]) => {
+      const t = tool(join(w.root, files[0]!), 'x');
+      for (const f of files.slice(1)) {
+        t!.edits.push({ path: join(w.root, f), addedText: 'x', removedText: '', wholeFile: false });
+      }
+      const res = await w.mindly.hooks.handle(event(w.root, agent, id, 'pre_tool', { tool: t }));
+      expect(res.decision).toBe('deny');
+      w.clock.advance(1000);
+    };
+    const A = 'src/api/generated/a.ts';
+    const B = 'src/api/generated/b.ts';
+    // Codex is stopped on one file, then on two: two saves of one rule that share a file.
+    await blocked('codex', 'cx', A);
+    await blocked('codex', 'cx', A, B);
+    await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'stop'));
+    expect(
+      w.mindly.store.saves.list(w.pid, { kinds: ['rule_enforced'] }).map((s) => s.status),
+    ).toEqual(['confirmed', 'confirmed']);
+    // Claude Code is stopped once, on the shared file.
+    await blocked('claude-code', 'cc', A);
+    expect(row(w, 'codex').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(1);
+
+    // The attempt belongs to the area of the file that session was stopped on, not to every
+    // area a save of the rule names.
+    await w.edit('claude-code', 'cc', 'src/web/x.ts', 'export const x = 1;\n');
+    await w.session('gemini', 'gm');
+    await w.edit('gemini', 'gm', 'src/web/y.ts', 'export const y = 1;\n');
+    await w.edit('gemini', 'gm', 'src/api/c.ts', 'export const c = 1;\n');
+    await blocked('gemini', 'gm', 'src/web/generated/w.ts', A);
+    await w.mindly.hooks.handle(event(w.root, 'gemini', 'gm', 'stop'));
+    await blocked('claude-code', 'cc', A);
+    const web = report(w, { minEdits: 1 }).areas.find((a) => a.area === 'src/web')!;
+    expect(web.agents.find((a) => a.agent === 'gemini')!.ruleAttempts.count).toBe(1);
+    expect(web.agents.find((a) => a.agent === 'claude-code')!.ruleAttempts.count).toBe(0);
+    expect(row(w, 'gemini').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(1);
   });
 
   it('counts usage limits per agent from rate-limit events and handoffs', async () => {

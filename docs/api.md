@@ -315,6 +315,7 @@ interface TrackReport {
   truncated: boolean; // a query hit its row limit: the record is partial
   // set when the window is longer than the kept event log (retention.eventsDays): when the kept
   // events start. Outcomes read from events before it are missing, so their counts are too low
+  // (equal to window.to when no event of the window is kept)
   eventsSince: number | null;
 }
 ```

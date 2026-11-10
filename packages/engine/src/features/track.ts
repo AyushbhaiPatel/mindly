@@ -229,6 +229,7 @@ export interface TrackReport {
    * `retention.eventsDays`, edits are not): the time the kept events start. Broken decisions,
    * failed merge checks, blocked writes and usage limits before it are not in the counts, so
    * those counts and the rates built on them are too low for the window.
+   * Equal to `window.to` when no event of the window is kept at all.
    */
   eventsSince: number | null;
 }
@@ -655,7 +656,7 @@ export class TrackService {
             ? store.track.countPendingSurvival(projectId, survivedBefore, from)
             : 0,
         checkedNow: o.checkedNow ?? 0,
-        eventsSince: store.track.eventsStartAfter(projectId, from),
+        eventsSince: store.track.eventsStartAfter(projectId, from, now),
       },
     );
   }
@@ -771,10 +772,11 @@ export class TrackService {
   }
 
   /**
-   * Writes an enforced rule blocked, where the rule held (a confirmed save): one per session that
-   * ran into it in the window. A save is recorded once per rule and files, however many agents
-   * are stopped by it later, so the sessions come from the denials themselves; the save says the
-   * rule held and which files it is about.
+   * Writes an enforced rule blocked, where the rule held (a confirmed save): one attempt per
+   * session and rule in the window, however often that session retried and however many saves
+   * the rule has. A save is recorded once per rule and files, whoever runs into it later, so the
+   * sessions come from the denials themselves; the saves say that the rule held for a file. An
+   * attempt is about the protected files that session was stopped on.
    */
   private ruleAttempts(
     projectId: string,
@@ -786,23 +788,38 @@ export class TrackService {
     const saves = this.k.store.track.confirmedSaves(projectId, 'rule_enforced', 0);
     const denials = this.k.store.track.ruleDenials(projectId, from);
     out.truncated = saves.length >= TRACK_MAX_ROWS || denials.length >= TRACK_MAX_ROWS;
-    const byRule = new Map<string, typeof denials>();
-    for (const d of denials) {
-      const list = byRule.get(d.ruleId);
-      if (list) list.push(d);
-      else byRule.set(d.ruleId, [d]);
-    }
+    /** Per rule, the files it was confirmed to protect. */
+    const held = new Map<string, Set<string>>();
     for (const s of saves) {
-      const sessions = new Set<string>();
-      // The session the save was recorded for, also when its event is no longer kept.
-      if (s.createdAt >= from && s.sessionIds[0]) sessions.add(s.sessionIds[0]);
-      const about = new Set(s.paths);
-      for (const d of s.ruleId ? (byRule.get(s.ruleId) ?? []) : []) {
-        if (d.paths.some((p) => about.has(p))) sessions.add(d.sessionId);
-      }
-      for (const sessionId of sessions) {
-        const agent = agentKinds.get(sessionId);
-        if (agent) out.push({ agent, sessionId, paths: s.paths, measure: 'ruleAttempts' });
+      if (!s.ruleId) continue;
+      let files = held.get(s.ruleId);
+      if (!files) held.set(s.ruleId, (files = new Set()));
+      for (const p of s.paths) files.add(p);
+    }
+    /** Per session and rule, the protected files that session was stopped on. */
+    const attempts = new Map<string, { sessionId: string; paths: Set<string> }>();
+    const attempt = (sessionId: string, ruleId: string, paths: readonly string[]): void => {
+      const key = `${sessionId}\u0000${ruleId}`;
+      let a = attempts.get(key);
+      if (!a) attempts.set(key, (a = { sessionId, paths: new Set() }));
+      for (const p of paths) a.paths.add(p);
+    };
+    for (const d of denials) {
+      const files = held.get(d.ruleId);
+      if (!files) continue;
+      const stopped = d.paths.filter((p) => files.has(p));
+      if (stopped.length > 0) attempt(d.sessionId, d.ruleId, stopped);
+    }
+    // The session a save of the window was recorded for, when its event is no longer kept.
+    for (const s of saves) {
+      const sessionId = s.sessionIds[0];
+      if (!s.ruleId || !sessionId || s.createdAt < from) continue;
+      if (!attempts.has(`${sessionId}\u0000${s.ruleId}`)) attempt(sessionId, s.ruleId, s.paths);
+    }
+    for (const a of attempts.values()) {
+      const agent = agentKinds.get(a.sessionId);
+      if (agent) {
+        out.push({ agent, sessionId: a.sessionId, paths: [...a.paths], measure: 'ruleAttempts' });
       }
     }
     return out;
