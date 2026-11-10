@@ -382,11 +382,11 @@ class Finder {
    * The scheme is kept. A word in a sentence (`the Authorization: header`), or a quote that
    * closes before any value (`headers['Authorization: ']`), is not a credential.
    */
-  private header(at: number, lineEnd: number): void {
+  private header(at: number, lineEnd: number): boolean {
     const text = this.text;
     let from = this.skipQuoting(at, lineEnd);
     // A quote right at the colon closes the string the header name was in: no value follows.
-    if (from > at && (text[from] === ']' || text[from] === ',' || text[from] === ')')) return;
+    if (from > at && (text[from] === ']' || text[from] === ',' || text[from] === ')')) return false;
     AUTH_SCHEME.lastIndex = from;
     const scheme = AUTH_SCHEME.exec(text);
     if (scheme !== null) from = this.skipQuoting(from + scheme[0].length, lineEnd);
@@ -396,31 +396,36 @@ class Finder {
       if (isSpace(c) || c === '"' || c === "'" || c === '\\' || c === '`') break;
       to++;
     }
-    if (to - from < (scheme !== null ? MIN_SCHEME_TOKEN : MIN_BARE_TOKEN)) return;
+    if (to - from < (scheme !== null ? MIN_SCHEME_TOKEN : MIN_BARE_TOKEN)) return false;
     // Digest and AWS Signature parameters (`username="u"`) are read by `params`, on the line; a
     // single token after those schemes (`Digest dXNlcm5h...==`) is redacted as one.
     const params = PARAM_SCHEME.test(scheme?.[1] ?? '');
-    if (params && PARAM_START.test(text.slice(from, to))) return;
+    if (params && PARAM_START.test(text.slice(from, to))) return true;
     this.push(from, to);
+    return true;
   }
 
   /**
-   * From `at`: past quotes and backslashes, and past a line continuation (`\\`, `^` or a backtick
-   * at the end of a physical line) with the spaces around it, which a header value can be split
-   * by (`-H "Authorization: \\` and then `Bearer ...` on the next line).
+   * From `at`: past quotes and backslashes, and past a line continuation (`\`, `^` or a backtick
+   * at the end of a physical line) with the spaces before and after it, which a header value can
+   * be split by (`-H "Authorization: \` and then `Bearer ...` on the next line). A continuation is
+   * crossed only while the value is still open: never after a quote, which may close it
+   * (`-H "Authorization:" \` removes the header, and the next line is another argument).
    */
   private skipQuoting(at: number, lineEnd: number): number {
     const text = this.text;
     let k = at;
+    let quoted = false;
     while (k < lineEnd) {
       const c = text[k] ?? '';
       const next = text[k + 1] === '\r' ? k + 2 : k + 1;
-      if ((c === '\\' || c === '^' || c === '`') && text[next] === '\n') {
+      if (!quoted && (c === '\\' || c === '^' || c === '`') && text[next] === '\n') {
         k = next + 1;
         while (k < lineEnd && (text[k] === ' ' || text[k] === '\t')) k++;
       } else if (c === '"' || c === "'" || c === '\\') {
+        if (c !== '\\') quoted = true;
         k++;
-      } else if (c === ' ' || c === '\t') {
+      } else if (!quoted && (c === ' ' || c === '\t')) {
         // Spaces count only before a continuation.
         let j = k;
         while (j < lineEnd && (text[j] === ' ' || text[j] === '\t')) j++;
@@ -538,8 +543,10 @@ class Finder {
         if (header === null) continue;
         const glued = k >= runStart + 2 && text[k - 2] === '-' && text[k - 1] === 'H';
         if (!glued && k > runStart && /[\p{L}\p{N}_-]/u.test(text[k - 1] ?? '')) continue;
-        this.header(k + header[0].length, end);
-        break;
+        // A header with no credential (`"Authorization":""`, `-H "Authorization:"`) does not end
+        // the search: a real one may come later in the same run.
+        if (this.header(k + header[0].length, end)) break;
+        k += header[0].length - 1;
       }
       const option = readOption(text, runStart, runEnd, gate(runStart));
       if (option === null) continue;

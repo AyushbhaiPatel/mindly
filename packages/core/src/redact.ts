@@ -195,8 +195,7 @@ const TOKEN_RULES: Rule[] = [
   },
   {
     kind: 'auth_header',
-    // Also as a quoted key: `{"Authorization": "Bearer ..."}`, `{'Authorization': 'Bearer ...'}`.
-    re: /\b(authorization["']?\s{0,5}[:=]\s{0,5}["']?(?:bearer|basic|token)\s{1,5})[A-Za-z0-9._~+/=-]{8,4000}/gi,
+    re: /\b(authorization\s{0,5}[:=]\s{0,5}(?:bearer|basic|token)\s{1,5})[A-Za-z0-9._~+/=-]{8,4000}/gi,
     replace: `$1${REDACTED}`,
   },
   {

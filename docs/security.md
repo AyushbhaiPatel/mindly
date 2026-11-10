@@ -74,8 +74,8 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   `user,<value>`), and `(`, `)`, `;`, `|` and a PowerShell escape inside an unquoted value stay
   part of it. A bare user name or a `$VARIABLE` is left alone, and so is an rsync target
   `user@host:/path` after a cluster. An `Authorization:` header or item (also a quoted key,
-  `"Authorization": "Bearer ..."`, and split by a line continuation) is redacted when its
-  value looks like a credential: a scheme (`Bearer`, `Basic`, `Token`, ...) and a token of at
+  `"Authorization": "Bearer ..."`, and one split by a line continuation inside its value) is
+  redacted when its value looks like a credential: a scheme (`Bearer`, `Basic`, `Token`, ...) and a token of at
   least 8 characters, a single token of at least 16, or the secret parameters of `Digest` and
   `AWS4-...` (SigV4 and SigV4a: `response`, `nonce`, `cnonce`, `opaque`, `Signature`), which are
   redacted wherever they are on a line that holds such a header (its scheme may follow a line
@@ -85,7 +85,8 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   The trade-off: on a line that names a client, another program's `-u x:y` after it has its
   value redacted too (`curl … && docker run -u 1000:[REDACTED]`), which garbles that value and
   nothing else. Known gaps: a value on the line after its flag, a flag on a line that only a
-  multi-line quoted body joins to the client, and a client behind a shell alias or function.
+  multi-line quoted body joins to the client, a client behind a shell alias or function, and a
+  quoted `"Authorization"` key on a line that names no client (`fetch(url, {headers: ...})`).
   Task titles, plan steps and blockers go through the same pass. Type annotations and references
   such as `process.env.X` or `$TOKEN` are left alone, since they hold no secret. So is quoted UI
   text, but only when both the name says so (it ends in `placeholder`, `label`, `hint`, `help`,

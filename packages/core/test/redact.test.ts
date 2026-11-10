@@ -629,15 +629,37 @@ describe('redact', () => {
     'curl https://x.test \\\n  -H "Authorization: \\\n    Basic PW"',
     'curl https://x.test \\\n  -H "Authorization: Bearer \\\n    PW"',
     'curl.exe https://x.test ^\r\n  -H "Authorization: ^\r\n    Bearer PW"',
-    // A header map in JSON or code, the key quoted.
+    // A header map in JSON, the key quoted, on a line that names a client.
     '{"tool":"curl","url":"https://x.test","headers":{"Authorization":"Bearer PW"}}',
-    'fetch(url, { headers: { "Authorization": "Bearer PW" } })',
-    "requests.get(url, headers={'Authorization': 'Basic PW'})",
   ])('redacts a header token: %j', (template) => {
     const secret = 'f00dfacecafebeef1234567890abcdef';
     const out = redactText(template.replace('PW', secret));
     expect(out).not.toContain(secret);
     expect(out).toContain(REDACTED);
+  });
+
+  it.each([
+    // A header with no credential does not hide one after it in the same run.
+    `{"env":{"Authorization":""},"args":["curl","-H","Authorization: Negotiate PW"]}`,
+    `{"env":{"Authorization":"none"},"argv":["curl","-H","Proxy-Authorization: NTLM PW"]}`,
+    `curl x -H"Authorization":-H"Proxy-Authorization: NTLM PW"`,
+  ])('redacts a header after one with no credential: %j', (template) => {
+    const secret = 'f00dfacecafebeef1234567890abcdef';
+    expect(redactText(template.replace('PW', secret))).not.toContain(secret);
+  });
+
+  it.each([
+    // `-H "Authorization:"` removes the header; the line after the continuation is no value.
+    'curl -H "Authorization:" \\\n  https://api.example.com/v1/items',
+    "curl -sS -H 'Authorization:' \\\n  --data-urlencode q=1 https://x.test",
+    'curl.exe -H "Authorization:" ^\r\n  https://api.example.com/v1/items',
+    // Prose and placeholders, on lines that name no client.
+    'Set Authorization: "Basic authentication is disabled" in the config.',
+    'Add the header "Authorization": "Bearer followed by the token".',
+    '{"Authorization": "Bearer YOUR_TOKEN_HERE"}',
+    '"Authorization": "Bearer process.env.API_TOKEN"',
+  ])('leaves a line without a header credential alone: %j', (line) => {
+    expect(redactText(line)).toBe(line);
   });
 
   it('keeps a spaced value that is the next parameter for that parameter', () => {
