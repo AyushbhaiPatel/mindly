@@ -80,6 +80,9 @@ describe('parsePsTable', () => {
     expect(t.size).toBe(3);
     expect(t.get(34567)).toEqual({ ppid: 812, start: 'Tue Nov 10 03:01:09 2026' });
     expect(t.get(1)).toEqual({ ppid: 0, start: 'Mon Nov 9 20:13:54 2026' });
+    // A header, CRLF line ends and junk around the table do not get in the way.
+    const odd = parsePsTable(`  PID  PPID STARTED\r\n${out.replace(/\n/g, '\r\n')}junk\r\n`);
+    expect(odd.get(812)).toEqual({ ppid: 1, start: 'Mon Nov 9 20:14:02 2026' });
     const lookup: ProcessLookup = (pid) => t.get(pid) ?? null;
     expect(ancestorChain(34567, lookup)).toEqual([{ pid: 812, start: 'Mon Nov 9 20:14:02 2026' }]);
   });

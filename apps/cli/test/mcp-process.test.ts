@@ -221,6 +221,46 @@ describe('rememberClient', () => {
     expect(kv.has(key)).toBe(true);
   });
 
+  it('does not keep an empty answer: the next hook tries again, a minute later', () => {
+    const { kv, mindly } = fakeStore();
+    const t0 = 1_000_000;
+    let reads = 0;
+    const nothing = () => {
+      reads++;
+      return [];
+    };
+    rememberClient(mindly, event('session_start'), { now: t0, chain: nothing });
+    expect(Array.isArray(kv.get(key))).toBe(false);
+    rememberClient(mindly, event('prompt'), { now: t0 + 1000, chain: nothing });
+    expect(reads).toBe(1);
+    const found = () => [{ pid: 42, start: 's42' }];
+    rememberClient(mindly, event('prompt'), { now: t0 + 61_000, chain: found });
+    expect(kv.get(key)).toEqual([{ pid: 42, start: 's42' }]);
+  });
+
+  it('clears out what sessions that never ended left behind', async () => {
+    const sb = sandbox();
+    const { openMindly } = await import('@mindly/runtime');
+    const mindly = openMindly({ env: sb.env });
+    try {
+      const day = 86_400_000;
+      mindly.store.kv.set(hookAncestryKey('codex', 'gone'), [{ pid: 9, start: 'x' }]);
+      mindly.store.kv.set('hook:ancestryX', 'not a chain key');
+      mindly.store.kv.set('mcp:claims', {});
+      const later = Date.now() + 8 * day;
+      rememberClient(mindly, event('session_start'), {
+        now: later,
+        chain: () => [{ pid: 1, start: 'y' }],
+      });
+      expect(mindly.store.kv.get(hookAncestryKey('codex', 'gone'))).toBeNull();
+      expect(mindly.store.kv.get('hook:ancestryX')).toBe('not a chain key');
+      expect(mindly.store.kv.get('mcp:claims')).toEqual({});
+      expect(mindly.store.kv.get(key)).toEqual([{ pid: 1, start: 'y' }]);
+    } finally {
+      mindly.close();
+    }
+  });
+
   it('never throws, whatever it is given', () => {
     expect(() => rememberClient(null, event('session_start'))).not.toThrow();
     expect(() => rememberClient({}, event('session_start'))).not.toThrow();

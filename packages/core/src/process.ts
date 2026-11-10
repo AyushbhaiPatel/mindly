@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 
 /*
@@ -44,7 +44,7 @@ function fromProc(pid: number): ProcessInfo | null {
 export function parsePsTable(out: string): Map<number, ProcessInfo> {
   const table = new Map<number, ProcessInfo>();
   for (const line of out.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\S.*?)\s*$/.exec(line);
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S.*?)\s*\r?$/.exec(line);
     if (!m) continue;
     table.set(Number(m[1]), { ppid: Number(m[2]), start: (m[3] as string).replace(/\s+/g, ' ') });
   }
@@ -53,20 +53,26 @@ export function parsePsTable(out: string): Map<number, ProcessInfo> {
 
 const PS_PATHS = ['/bin/ps', '/usr/bin/ps'];
 
-/** The process table from one `ps` call (macOS, BSD). Empty when `ps` cannot be run in time. */
+/**
+ * The process table from one `ps` call (macOS, BSD), or an empty one when `ps` is missing or
+ * prints nothing in time. A `ps` that is too slow is killed outright (it must not be able to
+ * hold a hook up by ignoring SIGTERM), and what it printed before exiting with an error is
+ * still read: lines that do not parse are skipped anyway.
+ */
 function psTable(): Map<number, ProcessInfo> {
   const ps = PS_PATHS.find((p) => existsSync(p));
   if (!ps) return new Map();
   try {
-    const out = execFileSync(ps, ['-A', '-o', 'pid=,ppid=,lstart='], {
+    const r = spawnSync(ps, ['-A', '-o', 'pid=,ppid=,lstart='], {
       encoding: 'utf8',
       timeout: 400,
+      killSignal: 'SIGKILL',
       maxBuffer: 4 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'ignore'],
       // A fixed locale, so the start time reads the same in every process that asks.
       env: { LC_ALL: 'C', PATH: '/bin:/usr/bin' },
     });
-    return parsePsTable(out);
+    return parsePsTable(typeof r.stdout === 'string' ? r.stdout : '');
   } catch {
     return new Map();
   }
@@ -151,7 +157,25 @@ export function parseProcessChain(value: unknown): ProcessRef[] {
   return out;
 }
 
+/** Prefix of the keys under which hook sessions' ancestors are kept. */
+export const HOOK_ANCESTRY_PREFIX = 'hook:ancestry:';
+
 /** Key under which the ancestors of a hook session's first hook process are kept. */
 export function hookAncestryKey(agentKind: string, externalSessionId: string): string {
-  return `hook:ancestry:${agentKind}:${externalSessionId}`;
+  return `${HOOK_ANCESTRY_PREFIX}${agentKind}:${externalSessionId}`;
 }
+
+/**
+ * How long a recorded chain is kept without being written again. A session that is still in use
+ * after that has its chain recorded again by its next hook; one that ended without saying so
+ * (its window was closed) leaves nothing behind for longer than this.
+ */
+export const HOOK_ANCESTRY_TTL_MS = 7 * 24 * 60 * 60_000;
+
+/** What is stored when the ancestors could not be read: try again after `retryAfter`. */
+export interface AncestryRetry {
+  retryAfter: number;
+}
+
+/** How long a hook waits before it tries to read the ancestors again after it could not. */
+export const HOOK_ANCESTRY_RETRY_MS = 60_000;

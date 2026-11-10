@@ -1,4 +1,4 @@
-import { describeError } from '@mindly/core';
+import { describeError, HOOK_ANCESTRY_PREFIX, HOOK_ANCESTRY_TTL_MS } from '@mindly/core';
 import { needsYouCount, savesOf, selfHealingOf, standupService, trackOf } from '@mindly/engine';
 import type { JobContext } from './context.js';
 
@@ -57,7 +57,9 @@ export function housekeepingTick(ctx: JobContext): HousekeepingResult {
     result.sessionsEnded += store.sessions.endStale(p.id, STALE_SESSION_MS).length;
   }
   result.saves = savesOf(ctx.mindly).sweep();
-  ctx.logger.info('housekeeping', { ...result });
+  // Which processes started the hooks of sessions that ended without saying so.
+  const ancestry = store.kv.deleteStale(HOOK_ANCESTRY_PREFIX, now - HOOK_ANCESTRY_TTL_MS, 1000);
+  ctx.logger.info('housekeeping', { ...result, ancestryDeleted: ancestry });
   return result;
 }
 

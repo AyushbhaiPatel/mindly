@@ -5,8 +5,13 @@ import {
   defaultUserConfig,
   describeError,
   fileSink,
+  HOOK_ANCESTRY_PREFIX,
+  HOOK_ANCESTRY_RETRY_MS,
+  HOOK_ANCESTRY_TTL_MS,
   hookAncestryKey,
   homePaths,
+  type AncestryRetry,
+  type ProcessRef,
   loadUserConfig,
   mindlyHome,
   nullSink,
@@ -148,17 +153,36 @@ export async function runHook(
  * hook of a session only (an empty result is kept too, so it is not tried again). Whatever goes
  * wrong is ignored: a hook never fails or waits because of it.
  */
-export function rememberClient(mindly: unknown, evt: NormalizedHookEvent): void {
+export function rememberClient(
+  mindly: unknown,
+  evt: NormalizedHookEvent,
+  options: { now?: number; chain?: () => ProcessRef[] } = {},
+): void {
   try {
     const kv = (mindly as { store?: { kv?: Mindly['store']['kv'] } }).store?.kv;
     if (!kv) return;
+    const now = options.now ?? Date.now();
     const key = hookAncestryKey(evt.agentKind, evt.externalSessionId);
     if (evt.event === 'session_end') {
       kv.delete(key);
       return;
     }
-    if (evt.event !== 'session_start' && kv.get<unknown>(key) !== null) return;
-    kv.set(key, ancestorChain(process.pid));
+    const stored = kv.get<unknown>(key);
+    if (evt.event !== 'session_start' && stored !== null) {
+      // Recorded already, or not readable a moment ago: try again only once that has passed.
+      const retry = (stored as Partial<AncestryRetry>).retryAfter;
+      if (typeof retry !== 'number' || retry > now) return;
+    }
+    // Sessions that ended without a session end (a closed window) leave their record behind;
+    // a new session clears out the ones nobody wrote for a long time, a bounded number at once.
+    if (evt.event === 'session_start') {
+      kv.deleteStale?.(HOOK_ANCESTRY_PREFIX, now - HOOK_ANCESTRY_TTL_MS, 50);
+    }
+    const chain = (options.chain ?? (() => ancestorChain(process.pid)))();
+    // Nothing read (a slow or failing process table) is not stored as an answer: the next hook
+    // tries again, a minute later at the earliest.
+    const retry: AncestryRetry = { retryAfter: now + HOOK_ANCESTRY_RETRY_MS };
+    kv.set(key, chain.length > 0 ? chain : retry);
   } catch {
     // Not knowing the client only means the server falls back to its guess.
   }
