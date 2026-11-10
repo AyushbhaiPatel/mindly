@@ -1,6 +1,7 @@
 import {
   fingerprint,
   hasUnsafeChars,
+  redactText,
   sanitizeLine,
   shortId,
   type Conflict,
@@ -132,14 +133,17 @@ export class IntentService {
     files: string[],
     symbols: string[] = [],
   ): { intent: Intent; overlap: OverlapReport } {
+    // What an agent says it is about to do is stored, shown to other agents and written to the
+    // event log, so it goes through the redactor like any other agent text.
+    const redaction = { extraPatterns: this.k.config.redaction.extraPatterns };
     const intent = this.k.store.intents.declare({
       projectId: session.projectId,
       sessionId: session.id,
       taskId: session.currentTaskId,
-      summary: sanitizeLine(summary, 300),
+      summary: sanitizeLine(redactText(summary, redaction), 300),
       targets: {
         files: files.filter((f) => !hasUnsafeChars(f) && f.length <= 1024).slice(0, 100),
-        symbols: symbols.slice(0, 100).map((s) => sanitizeLine(s, 120)),
+        symbols: symbols.slice(0, 100).map((s) => sanitizeLine(redactText(s, redaction), 120)),
       },
       ttlMs: INTENT_TTL_MS,
     });
