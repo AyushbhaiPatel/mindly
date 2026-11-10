@@ -212,6 +212,7 @@ export function unmergedLine(w: SplitUnmergedWork): string {
   if (commits.length > 0) {
     what.push(`${count(commits.length, 'commit')} only on its branch: ${list(commits)}`);
   }
+  if (w.more) what.push('and more than can be listed');
   return `Part "${clean(w.title, 60)}": ${what.join('; ')}`;
 }
 
@@ -221,27 +222,32 @@ function nextSteps(r: SplitStatusReport): Step[] {
   const { split, parts } = r;
   const uncommitted = parts.filter((p) => p.uncommitted.length > 0);
   if (split.status === 'merged') {
-    const behind = parts.filter((p) => p.uncommitted.length > 0 || p.unmergedCommits.length > 0);
+    const withCommits = parts.some((p) => p.unmergedCommits.length > 0);
     return [
       {
         cmd: `git log --oneline ${split.integrationBranch ?? ''}`.trim(),
         why: 'review the merged branch and open a PR from it',
       },
       // Removing the worktrees would delete work the merged branch does not have.
-      ...(behind.length > 0
-        ? behind.slice(0, 3).map((p) => ({
-            cmd: `cd ${p.part.worktree}`,
-            why:
-              p.uncommitted.length > 0
-                ? 'this part has work that is not in the merged branch; commit or copy it before removing the worktrees'
-                : 'this part has commits that are not in the merged branch; merge them before removing its branch',
-          }))
-        : [
-            {
-              cmd: 'mindly split abort',
-              why: 'remove the part worktrees (the merged branch stays)',
-            },
-          ]),
+      ...uncommitted.slice(0, 3).map((p) => ({
+        cmd: `cd ${p.part.worktree}`,
+        why: 'this part has work that is not committed; commit or copy it before removing the worktrees',
+      })),
+      ...(uncommitted.length > 0
+        ? []
+        : withCommits
+          ? [
+              {
+                cmd: 'mindly split abort --keep-branches',
+                why: 'remove the worktrees and keep the part branches: they have commits no other branch has (expected after a squash or rebase merge)',
+              },
+            ]
+          : [
+              {
+                cmd: 'mindly split abort',
+                why: 'remove the part worktrees (the merged branch stays)',
+              },
+            ]),
     ];
   }
   if (split.status === 'aborted') return [];
@@ -307,7 +313,7 @@ export function renderMerged(sc: Screen, m: SplitMergeResult): void {
 
 export function renderAborted(sc: Screen, a: SplitAbortResult): void {
   sc.summary(
-    `${sc.mark('ok')} Split "${clean(a.split.goal, 80)}" closed: removed ${count(a.removedWorktrees.length, 'worktree')}${
+    `${sc.mark(a.finished ? 'ok' : 'warn')} Split "${clean(a.split.goal, 80)}" ${a.finished ? 'closed' : 'not closed yet'}: removed ${count(a.removedWorktrees.length, 'worktree')}${
       a.keptBranches.length
         ? `, kept ${count(a.keptBranches.length, 'branch', 'branches')}`
         : `, deleted ${count(a.deletedBranches.length, 'branch', 'branches')}`
@@ -317,6 +323,12 @@ export function renderAborted(sc: Screen, a: SplitAbortResult): void {
   if (a.keptWorktrees.length) {
     sc.text(
       `${sc.mark('warn')} Kept ${count(a.keptWorktrees.length, 'worktree')} that got new work during the abort: ${a.keptWorktrees.join(', ')}`,
+      2,
+    );
+  }
+  if (!a.finished) {
+    sc.text(
+      `${sc.mark('warn')} New work appeared while the split was being removed; what holds it was kept. Run mindly split abort again to finish.`,
       2,
     );
   }

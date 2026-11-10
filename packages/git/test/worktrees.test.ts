@@ -221,34 +221,35 @@ describe('worktrees', () => {
     ]);
   });
 
-  it('says when another branch already has the content of commits only a branch has', async () => {
+  it('counts only reachability: squash-merged commits are still only on their branch', async () => {
     const root = makeRepo({ 'README.md': '# a\n' });
     const dir = tempDir();
     const path = join(dir, 'api');
     await addWorktree(root, path, 'mindly/demo/api', 'HEAD');
-    write(path, 'api.txt', 'api\n');
-    commitAll(path, 'api work');
-    const ask = () =>
+    for (let i = 0; i < 3; i++) {
+      write(path, `api${i}.txt`, 'api\n');
+      commitAll(path, `api work ${i}`);
+    }
+    const ask = (max?: number) =>
       branchOnlyWork(root, 'mindly/demo/api', {
         ignoring: ['mindly/demo/api'],
-        contentIn: ['mindly/demo/integration', 'main'],
+        ...(max ? { max } : {}),
       });
-    const before = await ask();
-    expect(before.commits).toHaveLength(1);
-    expect(before.contentIn).toBeNull();
-    // Squash-merged into main, as a pull request does: the commits are gone, the content is not.
+    expect(await ask()).toMatchObject({ more: false });
+    // Squash-merged into main, as a pull request does: main has the changes, not the commits.
     git(root, 'merge', '-q', '--squash', 'mindly/demo/api');
     commitAll(root, 'Add api (#1)');
     const squashed = await ask();
-    expect(squashed.commits).toHaveLength(1);
-    expect(squashed.contentIn).toBe('refs/heads/main');
-    // A later commit main does not have is lost again.
-    write(path, 'late.txt', 'late\n');
-    commitAll(path, 'late work');
-    const late = await ask();
-    expect(late.commits.map((c) => c.subject)).toEqual(['late work', 'api work']);
-    expect(late.contentIn).toBeNull();
-    expect(late.tip).toBe(git(path, 'rev-parse', 'HEAD').trim());
+    expect(squashed.commits.map((c) => c.subject)).toEqual([
+      'api work 2',
+      'api work 1',
+      'api work 0',
+    ]);
+    expect(squashed.tip).toBe(git(path, 'rev-parse', 'HEAD').trim());
+    // More commits than asked for: the list says so.
+    const capped = await ask(2);
+    expect(capped.commits).toHaveLength(2);
+    expect(capped.more).toBe(true);
   });
 
   it('deletes a branch only while it is where it was checked', async () => {
@@ -258,8 +259,8 @@ describe('worktrees', () => {
     write(path, 'late.txt', 'late\n');
     const late = commitAll(path, 'late');
     await removeWorktree(root, path);
-    await expect(deleteBranch(root, 'mindly/demo/p', made.commit)).rejects.toSatisfy((e) =>
-      isMindlyError(e, 'conflict'),
+    await expect(deleteBranch(root, 'mindly/demo/p', made.commit)).rejects.toSatisfy(
+      (e) => isMindlyError(e, 'conflict') && e.details?.['moved'] === true,
     );
     expect(git(root, 'rev-parse', 'mindly/demo/p').trim()).toBe(late);
     expect(await deleteBranch(root, 'mindly/demo/p', late)).toBe(true);

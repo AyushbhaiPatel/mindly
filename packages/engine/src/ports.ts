@@ -227,19 +227,18 @@ export interface SplitGitPort {
   /** Deletes a branch; with `expectedTip`, refuses (`conflict`) one that has moved since. */
   deleteBranch(repoRoot: string, branch: string, expectedTip?: string): Promise<boolean>;
   /**
-   * What deleting `branch` would lose: its tip, and its commits (newest first, at most 50) that no
-   * other branch, tag or remote-tracking branch has (branches in `ignoring` do not count).
-   * `contentIn` is set to a branch of `options.contentIn` (local or remote-tracking) that already
-   * has the content of those commits, as after a squash or rebase merge.
+   * What deleting `branch` would lose: its tip, and its commits (newest first, at most 50; `more`
+   * when there are others) that no other branch, tag or remote-tracking branch reaches (branches
+   * in `ignoring` do not count). Only reachability counts, not where else the changes are.
    */
   branchOnlyWork(
     repoRoot: string,
     branch: string,
-    options: { ignoring: readonly string[]; contentIn: readonly string[] },
+    options: { ignoring: readonly string[] },
   ): Promise<{
     tip: string | null;
     commits: { commit: string; subject: string }[];
-    contentIn: string | null;
+    more: boolean;
   }>;
   /** Paths that differ between `base` and the worktree's current content (committed or not). */
   changedSince(repoRoot: string, worktree: string, base: string): Promise<string[]>;

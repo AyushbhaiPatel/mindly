@@ -18,10 +18,10 @@ import {
   trackOf,
   trackPromptLines,
   validatePlan,
+  type SplitAbortCheck,
   type SplitAbortResult,
   type SplitMergeCheckResult,
   type SplitMergeResult,
-  type SplitUnmergedWork,
   type TrackReport,
   type TrackSuggestion,
 } from '@mindly/engine';
@@ -451,24 +451,26 @@ export async function splitAbort(
     const svc = splitOf(scope.mindly);
     const split = scope.mindly.store.splits.get(id);
     const keepBranches = o.keepBranches === true;
-    // What the abort would delete that nothing else holds: uncommitted work in the worktrees and
-    // commits only the part branches have. Not knowing is not a reason to delete it.
-    let unmerged: SplitUnmergedWork[] = [];
+    // A "yes" on the terminal covers what is listed here and nothing else, with or without
+    // --discard: only `-y --discard` deletes whatever the parts hold.
+    const blanket = o.yes === true && o.discard === true;
+    const KEEP =
+      'Remove only the worktrees and keep the part branches, so nothing is lost: mindly split abort --keep-branches';
+    const DISCARD = 'To delete it anyway: mindly split abort --yes --discard';
+    let check: SplitAbortCheck | null = null;
     try {
-      if (split.status !== 'aborted') unmerged = await svc.abortLoses(id, { keepBranches });
+      if (split.status !== 'aborted') check = await svc.abortCheck(id, { keepBranches });
     } catch (err) {
-      if (o.discard !== true) {
+      if (!blanket) {
         throw new HintedError(
           'unavailable',
           `could not check the parts for work an abort would delete, so nothing was removed: ${err instanceof Error ? err.message : String(err)}`,
-          'Try again, or remove the worktrees and branches whatever they hold: mindly split abort --discard',
+          `Try again. ${DISCARD}`,
         );
       }
     }
-    // After a merge, -y alone never removes work the merged branch does not have. A "yes" on the
-    // terminal covers what was listed above, nothing that appears while the question is open.
-    const discard = o.discard === true;
-    let confirmed: SplitUnmergedWork[] | undefined;
+    const unmerged = check?.work ?? [];
+    let confirmed: SplitAbortCheck | undefined;
     if (!o.json || !o.yes) {
       if (!o.yes && unmerged.length > 0) {
         out.warn(
@@ -478,38 +480,32 @@ export async function splitAbort(
       }
       const ok = await confirm(
         out.io,
-        `Remove the worktrees${keepBranches ? '' : ' and branches'} of the split "${split.goal.slice(0, 60)}"? Uncommitted work in them${keepBranches ? '' : ' and commits only on their branches'} is lost.`,
+        `Remove the worktrees${keepBranches ? '' : ' and branches'} of the split "${split.goal.slice(0, 60)}"? ${unmerged.length > 0 ? 'The work listed above is lost.' : `Uncommitted work in them${keepBranches ? '' : ' and commits only on their branches'} is lost.`}`,
         o.yes === true,
       );
       if (!ok) return 1;
-      if (!o.yes) confirmed = unmerged;
+      if (!o.yes && check) confirmed = check;
     }
     let a: SplitAbortResult;
     try {
       a = await svc.abort(id, {
         keepBranches,
-        discardUncommitted: discard,
+        discardUncommitted: blanket,
         ...(confirmed ? { confirmed } : {}),
       });
     } catch (err) {
       if (isMindlyError(err, 'conflict') && Array.isArray(err.details?.['uncommitted'])) {
-        const merged = err.details?.['mergedBranch'];
+        const files = err.details?.['paths'] === true;
         throw new HintedError(
           'conflict',
           err.message,
           err.details?.['appeared'] === true
             ? 'Run mindly split abort again to see everything it would remove.'
-            : typeof merged === 'string'
-              ? `Commit it on the part branch and merge it into ${merged}, keep the part branches (mindly split abort --keep-branches), or remove it: mindly split abort --discard`
-              : 'Commit what you want to keep and keep the part branches (mindly split abort --keep-branches), or remove it: mindly split abort --discard',
+            : `${files ? 'Commit the files on their part branch first. ' : ''}${KEEP}. ${DISCARD}`,
         );
       }
       if (isMindlyError(err, 'unavailable') && err.details?.['lossCheckFailed'] === true) {
-        throw new HintedError(
-          'unavailable',
-          err.message,
-          'Try again, or remove the worktrees and branches whatever they hold: mindly split abort --discard',
-        );
+        throw new HintedError('unavailable', err.message, `Try again. ${DISCARD}`);
       }
       throw err;
     }

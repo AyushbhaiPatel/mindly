@@ -1,4 +1,12 @@
-import { existsSync, realpathSync, rmdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmdirSync,
+} from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
   fingerprint,
@@ -331,13 +339,26 @@ export interface SplitMergeCheckResult {
 export interface SplitUnmergedWork {
   part: string;
   title: string;
-  /** Paths that differ between the worktree and the tip of the part's branch. */
+  /** Paths that differ between the worktree and the tip of the part's branch (at most 200). */
   paths: string[];
   /**
    * Commits (`<id> <subject>`, newest first, at most 50) that only the part's branch has, when
    * the branch is to be deleted. Absent when there are none.
    */
   commits?: string[];
+  /** Set when there are more paths or commits than listed. */
+  more?: true;
+}
+
+/**
+ * What an abort would delete, as it was when it was looked at (`abortCheck`). Passed back to
+ * `abort` as `confirmed` once the user has seen `work` and agreed: the abort then deletes that
+ * and nothing else.
+ */
+export interface SplitAbortCheck {
+  work: SplitUnmergedWork[];
+  /** By part key: the tip of its branch and a fingerprint of its uncommitted files' content. */
+  state: Record<string, { tip: string | null; content: string }>;
 }
 
 export interface SplitMergeResult {
@@ -357,6 +378,11 @@ export interface SplitAbortResult {
   removedWorktrees: string[];
   /** Worktrees left in place because they got work the abort was not allowed to delete. */
   keptWorktrees: string[];
+  /**
+   * False when something was kept because new work appeared during the abort: the split keeps
+   * its state, and `abort` can be run again to finish.
+   */
+  finished: boolean;
   deletedBranches: string[];
   keptBranches: string[];
   /** Uncommitted work, and commits only a deleted branch had, that went away with the split. */
@@ -645,36 +671,45 @@ export class SplitService {
   }
 
   private async notOnBranch(git: SplitGitPort, root: string, part: SplitPart): Promise<string[]> {
-    if (!existsSync(part.worktree)) return [];
-    if (!(await git.branchExists(root, part.branch))) return [];
-    const paths = await git.changedSince(root, part.worktree, `refs/heads/${part.branch}`);
-    return [...new Set(paths)].sort().slice(0, 200);
+    return (await this.worktreeState(git, root, part)).paths.slice(0, PATHS_SHOWN);
+  }
+
+  /**
+   * Every path of the worktree that is not on the part's branch, and a fingerprint of their
+   * content: the same paths edited again give another fingerprint.
+   */
+  private async worktreeState(
+    git: SplitGitPort,
+    root: string,
+    part: SplitPart,
+  ): Promise<{ paths: string[]; content: string }> {
+    const none = { paths: [], content: contentFingerprint(part.worktree, []) };
+    if (!existsSync(part.worktree)) return none;
+    if (!(await git.branchExists(root, part.branch))) return none;
+    const changed = await git.changedSince(root, part.worktree, `refs/heads/${part.branch}`);
+    const paths = [...new Set(changed)].sort();
+    return { paths, content: contentFingerprint(part.worktree, paths) };
   }
 
   /**
    * Commits only the part's branch has: no other branch, tag or remote-tracking branch reaches
    * them, the split's other part branches aside (they go with it). After a merge these are commits
-   * made on the part branch since; before it, the part's work. Commits whose content the merged
-   * branch or the base branch already has (squash or rebase merged) lose nothing and are left out.
+   * made on the part branch since, or, after a squash or rebase merge, all of the part's commits:
+   * another branch having the same changes does not keep the commits.
    */
   private async onlyOnBranch(
     git: SplitGitPort,
     root: string,
-    split: Split,
     part: SplitPart,
     parts: readonly SplitPart[],
-  ): Promise<{ tip: string | null; commits: string[] }> {
-    const contentIn = [split.integrationBranch, split.baseBranch].filter(
-      (b): b is string => typeof b === 'string' && isValidBranchName(b),
-    );
+  ): Promise<{ tip: string | null; commits: string[]; more: boolean }> {
     const work = await git.branchOnlyWork(root, part.branch, {
       ignoring: parts.map((p) => p.branch),
-      contentIn,
     });
-    if (work.contentIn) return { tip: work.tip, commits: [] };
     return {
       tip: work.tip,
       commits: work.commits.map((c) => `${c.commit.slice(0, 12)} ${sanitizeLine(c.subject, 120)}`),
+      more: work.more,
     };
   }
 
@@ -686,37 +721,39 @@ export class SplitService {
     splitId: string,
     options: { keepBranches?: boolean } = {},
   ): Promise<SplitUnmergedWork[]> {
-    const split = this.k.store.splits.get(splitId);
-    return (await this.losses(split, options.keepBranches === true)).work;
+    return (await this.abortCheck(splitId, options)).work;
   }
 
-  /** `abortLoses`, with the tip each part branch had when it was looked at. */
-  private async losses(
-    split: Split,
-    keepBranches: boolean,
-  ): Promise<{ work: SplitUnmergedWork[]; tips: Map<string, string> }> {
+  /** `abortLoses`, with the state it was found in: what a confirmation of it covers. */
+  async abortCheck(
+    splitId: string,
+    options: { keepBranches?: boolean } = {},
+  ): Promise<SplitAbortCheck> {
+    const split = this.k.store.splits.get(splitId);
     const root = this.projects.byId(split.projectId).root;
     const git = this.git();
     const parts = this.k.store.splits.parts(split.id);
     const work: SplitUnmergedWork[] = [];
-    const tips = new Map<string, string>();
+    const state: SplitAbortCheck['state'] = {};
     for (const part of parts) {
-      const paths = await this.notOnBranch(git, root, part);
-      let commits: string[] = [];
-      if (!keepBranches) {
-        const only = await this.onlyOnBranch(git, root, split, part, parts);
-        if (only.tip) tips.set(part.branch, only.tip);
-        commits = only.commits;
-      }
-      if (paths.length === 0 && commits.length === 0) continue;
+      const files = await this.worktreeState(git, root, part);
+      let only: { tip: string | null; commits: string[]; more: boolean } = {
+        tip: null,
+        commits: [],
+        more: false,
+      };
+      if (!options.keepBranches) only = await this.onlyOnBranch(git, root, part, parts);
+      state[part.key] = { tip: only.tip, content: files.content };
+      if (files.paths.length === 0 && only.commits.length === 0) continue;
       work.push({
         part: part.key,
         title: part.title,
-        paths,
-        ...(commits.length > 0 ? { commits } : {}),
+        paths: files.paths.slice(0, PATHS_SHOWN),
+        ...(only.commits.length > 0 ? { commits: only.commits } : {}),
+        ...(only.more || files.paths.length > PATHS_SHOWN ? { more: true as const } : {}),
       });
     }
-    return { work, tips };
+    return { work, state };
   }
 
   /** The latest merge check of a split. */
@@ -755,7 +792,7 @@ export class SplitService {
       }
       if (git && split.status === 'merged') {
         try {
-          unmergedCommits = (await this.onlyOnBranch(git, root, split, part, all)).commits;
+          unmergedCommits = (await this.onlyOnBranch(git, root, part, all)).commits;
         } catch (err) {
           this.k.logger.warn('split status: could not list the commits of a part branch', {
             part: part.key,
@@ -1093,21 +1130,29 @@ export class SplitService {
    * briefs, closes the parts' intents and tasks and marks the split aborted; the contract
    * decisions of an aborted split are archived. A branch the user has checked out somewhere is
    * kept and reported. A merged split only loses its worktrees and part branches: it stays merged
-   * and keeps its integration branch, and work nothing else has (uncommitted, or committed on a
-   * part branch after the merge) is only deleted with `discardUncommitted`, or when it is in
-   * `confirmed`: the work the user was shown and agreed to lose. With `confirmed`, work that is
-   * not in it stops the abort, whatever the split's state. If git cannot say what would be
-   * deleted, nothing is, unless `discardUncommitted` is set.
+   * and keeps its integration branch.
    *
-   * What is deleted is checked again as it goes: a branch that moved since the check is kept, and
-   * so is a worktree that holds new work the abort may not delete.
+   * What it may delete that no other branch has (uncommitted files, commits only on a part
+   * branch):
+   * - with `confirmed` (what the user was shown and agreed to), exactly that: anything else, a
+   *   listed file edited since, a branch that moved or work beyond what the list could show
+   *   stops the abort, `discardUncommitted` or not;
+   * - otherwise with `discardUncommitted`, everything;
+   * - otherwise everything before a merge (throwing the parts away is what aborting is for) and
+   *   nothing after it.
+   * If git cannot say what would be deleted, nothing is, unless `discardUncommitted` is set and
+   * nothing was confirmed.
+   *
+   * It checks again as it goes: a branch is deleted only at the tip that was checked, and a
+   * worktree that got new files is kept. Whatever is kept that way leaves the split as it was
+   * (`finished: false`), so that `abort` can be run again.
    */
   async abort(
     splitId: string,
     options: {
       keepBranches?: boolean;
       discardUncommitted?: boolean;
-      confirmed?: readonly SplitUnmergedWork[];
+      confirmed?: SplitAbortCheck;
     } = {},
   ): Promise<SplitAbortResult> {
     const split = this.k.store.splits.get(splitId);
@@ -1115,14 +1160,15 @@ export class SplitService {
       throw new MindlyError('conflict', 'the split is already aborted');
     const root = this.projects.byId(split.projectId).root;
     const git = this.git();
-    let discarded: SplitUnmergedWork[] = [];
-    let tips = new Map<string, string>();
+    const confirmed = options.confirmed;
+    const everything = options.discardUncommitted === true && !confirmed;
+    let check: SplitAbortCheck | null = null;
     try {
-      ({ work: discarded, tips } = await this.losses(split, options.keepBranches === true));
+      check = await this.abortCheck(split.id, { keepBranches: options.keepBranches === true });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      // Not knowing what would be lost is no reason to delete it: only an explicit discard goes on.
-      if (!options.discardUncommitted) {
+      // Not knowing what would be lost is no reason to delete it: only a blanket discard goes on.
+      if (!everything) {
         throw new MindlyError(
           'unavailable',
           `could not check the parts for work an abort would delete, so nothing was removed: ${sanitizeLine(error, 300)}`,
@@ -1134,46 +1180,27 @@ export class SplitService {
         error,
       });
     }
-    // What the abort may delete. Before a merge, by default, everything: throwing the parts away
-    // is what aborting is for. After a merge cleaning up is expected to lose nothing.
-    const allowed: readonly SplitUnmergedWork[] | null = options.discardUncommitted
-      ? null
-      : (options.confirmed ?? (split.status === 'merged' ? [] : null));
-    const fresh = allowed ? notCovered(discarded, allowed) : [];
-    if (fresh.length > 0) {
-      const merged =
-        split.integrationBranch && (await git.branchExists(root, split.integrationBranch))
-          ? split.integrationBranch
-          : null;
-      const list = fresh.map(describeWork).join('; ');
-      throw new MindlyError(
-        'conflict',
-        options.confirmed
-          ? `nothing was removed: there is work that was not shown when the abort was confirmed: ${list}`
-          : `${merged ? 'the merged branch does not have' : 'no other branch has'} the work of ${list}`,
-        {
-          details: {
-            uncommitted: fresh,
-            mergedBranch: merged,
-            ...(options.confirmed ? { appeared: true } : {}),
-          },
-        },
-      );
+    const discarded = check?.work ?? [];
+    // Limited: only what was confirmed may go, or (after a merge, unconfirmed) nothing.
+    const limited = everything ? false : confirmed ? true : split.status === 'merged';
+    if (limited && check) {
+      const fresh = confirmed ? unconfirmed(check, confirmed) : discarded;
+      if (fresh.length > 0) throw lossRefusal(fresh, confirmed !== undefined);
     }
     const removedWorktrees: string[] = [];
     const keptWorktrees: string[] = [];
     const deletedBranches: string[] = [];
     const keptBranches: string[] = [];
+    const unfinishedParts = new Set<string>();
     for (const part of this.k.store.splits.parts(split.id)) {
-      // Checked again right before the worktree goes: work written since is not deleted.
-      let keep = false;
-      if (allowed && existsSync(part.worktree)) {
-        const now = await this.notOnBranch(git, root, part).catch(() => null);
-        keep =
-          now === null ||
-          notCovered([{ part: part.key, title: part.title, paths: now }], allowed).length > 0;
+      const was = check?.state[part.key];
+      let unfinished = false;
+      // Checked again right before the worktree goes: files written since are not deleted.
+      if (limited && existsSync(part.worktree)) {
+        const now = await this.worktreeState(git, root, part).catch(() => null);
+        if (!now || !was || now.content !== was.content) unfinished = true;
       }
-      if (keep) {
+      if (unfinished) {
         keptWorktrees.push(part.worktree);
         keptBranches.push(part.branch);
         this.k.logger.warn('split abort: worktree kept, it has new work', { part: part.key });
@@ -1183,18 +1210,24 @@ export class SplitService {
         else {
           try {
             // Only at the tip that was checked: a commit made since keeps the branch.
-            if (await git.deleteBranch(root, part.branch, tips.get(part.branch))) {
+            if (await git.deleteBranch(root, part.branch, was?.tip ?? undefined)) {
               deletedBranches.push(part.branch);
             }
           } catch (err) {
             if (!(err instanceof MindlyError && err.code === 'conflict')) throw err;
             keptBranches.push(part.branch);
+            if (err.details?.['moved'] === true) unfinished = true;
             this.k.logger.warn('split abort: branch kept', {
               branch: part.branch,
               error: err.message,
             });
           }
         }
+      }
+      // A part that kept new work is still being worked on: its task, intents and brief stay.
+      if (unfinished) {
+        unfinishedParts.add(part.key);
+        continue;
       }
       this.k.store.handoffs.cancelForWorktree(split.projectId, part.worktree);
       const task = this.k.store.tasks.get(part.taskId);
@@ -1209,34 +1242,38 @@ export class SplitService {
         );
       }
     }
+    const finished = unfinishedParts.size === 0;
     if (
+      finished &&
       split.status === 'merged' &&
-      removedWorktrees.length + deletedBranches.length + keptWorktrees.length === 0
+      removedWorktrees.length + deletedBranches.length === 0
     ) {
       throw new MindlyError('conflict', 'the split is merged and its worktrees are already gone');
     }
-    try {
-      rmdirSync(split.worktreeRoot);
-    } catch {
-      // Not empty (other splits' folders) or already gone: leave it.
-    }
-    const parent = this.k.store.tasks.get(split.taskId);
-    if (parent.status !== 'done') {
-      this.tasks.update(
-        parent.id,
-        { status: split.status === 'merged' ? 'done' : 'abandoned' },
-        null,
-      );
-    }
-    if (split.status !== 'merged') {
-      for (const c of split.contract) {
-        const m = c.memoryId ? this.k.store.memories.find(c.memoryId) : null;
-        if (m && m.status === 'active') this.memory.archive(m.id);
+    if (finished) {
+      try {
+        rmdirSync(split.worktreeRoot);
+      } catch {
+        // Not empty (other splits' folders) or already gone: leave it.
+      }
+      const parent = this.k.store.tasks.get(split.taskId);
+      if (parent.status !== 'done') {
+        this.tasks.update(
+          parent.id,
+          { status: split.status === 'merged' ? 'done' : 'abandoned' },
+          null,
+        );
+      }
+      if (split.status !== 'merged') {
+        for (const c of split.contract) {
+          const m = c.memoryId ? this.k.store.memories.find(c.memoryId) : null;
+          if (m && m.status === 'active') this.memory.archive(m.id);
+        }
       }
     }
     const updated =
-      split.status === 'merged'
-        ? split
+      split.status === 'merged' || !finished
+        ? this.k.store.splits.get(split.id)
         : this.k.store.splits.update(split.id, {
             status: 'aborted',
             finishedAt: this.k.clock.now(),
@@ -1245,15 +1282,21 @@ export class SplitService {
       projectId: split.projectId,
       sessionId: null,
       type: 'split.aborted',
-      payload: { splitId: split.id, removedWorktrees: removedWorktrees.length, keptBranches },
+      payload: {
+        splitId: split.id,
+        removedWorktrees: removedWorktrees.length,
+        keptBranches,
+        finished,
+      },
     });
     return {
       split: updated,
       removedWorktrees,
       keptWorktrees,
+      finished,
       deletedBranches,
       keptBranches,
-      discarded,
+      discarded: discarded.filter((w) => !unfinishedParts.has(w.part)),
     };
   }
 
@@ -1349,22 +1392,67 @@ export class SplitService {
   }
 }
 
-/** The parts of `work` (paths and commits) that `allowed` does not list. */
-function notCovered(
-  work: readonly SplitUnmergedWork[],
-  allowed: readonly SplitUnmergedWork[],
-): SplitUnmergedWork[] {
-  const id = (c: string): string => c.split(' ')[0] ?? c;
-  const out: SplitUnmergedWork[] = [];
-  for (const w of work) {
-    const ok = allowed.find((a) => a.part === w.part);
-    const paths = w.paths.filter((p) => !ok?.paths.includes(p));
-    const okCommits = new Set((ok?.commits ?? []).map(id));
-    const commits = (w.commits ?? []).filter((c) => !okCommits.has(id(c)));
-    if (paths.length === 0 && commits.length === 0) continue;
-    out.push({ part: w.part, title: w.title, paths, ...(commits.length > 0 ? { commits } : {}) });
+/** Paths listed in full; more are summarised and cannot be confirmed. */
+const PATHS_SHOWN = 200;
+
+/** The work in `now` that `shown` does not cover: a part whose files or branch changed since. */
+function unconfirmed(now: SplitAbortCheck, shown: SplitAbortCheck): SplitUnmergedWork[] {
+  return now.work.filter((w) => {
+    if (w.more) return true;
+    const before = shown.state[w.part];
+    const after = now.state[w.part];
+    const listed = shown.work.find((x) => x.part === w.part);
+    if (!before || !after || !listed || listed.more) return true;
+    if (w.paths.length > 0 && before.content !== after.content) return true;
+    const commits = w.commits ?? [];
+    if (commits.length === 0) return false;
+    const id = (c: string): string => c.split(' ')[0] ?? c;
+    const seen = new Set((listed.commits ?? []).map(id));
+    return before.tip !== after.tip || commits.some((c) => !seen.has(id(c)));
+  });
+}
+
+/** Why an abort stops: work no other branch has that it may not delete. */
+function lossRefusal(fresh: readonly SplitUnmergedWork[], afterConfirm: boolean): MindlyError {
+  const list = fresh.map(describeWork).join('; ');
+  const commits = fresh.some((w) => (w.commits ?? []).length > 0);
+  const paths = fresh.some((w) => w.paths.length > 0);
+  const more = fresh.some((w) => w.more);
+  const message = afterConfirm
+    ? `nothing was removed: the parts hold work that was not shown when the abort was confirmed: ${list}`
+    : `nothing was removed: the parts hold work no other branch has: ${list}${
+        commits
+          ? '. Commits only on the part branches are expected after a squash or rebase merge'
+          : ''
+      }`;
+  return new MindlyError('conflict', message, {
+    details: {
+      uncommitted: fresh,
+      commits,
+      paths,
+      more,
+      ...(afterConfirm ? { appeared: true } : {}),
+    },
+  });
+}
+
+/** SHA-256 over the paths and the content each has in the worktree (or that it is gone). */
+function contentFingerprint(worktree: string, paths: readonly string[]): string {
+  const h = createHash('sha256');
+  for (const rel of paths) {
+    h.update(rel).update('\0');
+    const abs = join(worktree, rel);
+    try {
+      const st = lstatSync(abs);
+      if (st.isSymbolicLink()) h.update('link:').update(readlinkSync(abs));
+      else if (st.isFile()) h.update('file:').update(readFileSync(abs));
+      else h.update(`other:${st.mode}`);
+    } catch {
+      h.update('missing');
+    }
+    h.update('\0');
   }
-  return out;
+  return h.digest('hex');
 }
 
 /** `"API" (not committed: a.ts; 2 commits only on its branch: 1a2b3c4d5e6f Add plans, …)`. */
@@ -1374,9 +1462,10 @@ function describeWork(w: SplitUnmergedWork): string {
   const commits = w.commits ?? [];
   if (commits.length > 0) {
     what.push(
-      `${commits.length >= 50 ? 'at least 50 commits' : commits.length === 1 ? '1 commit' : `${commits.length} commits`} only on its branch: ${describePaths(commits)}`,
+      `${commits.length === 1 ? '1 commit' : `${commits.length} commits`} only on its branch: ${describePaths(commits)}`,
     );
   }
+  if (w.more) what.push('and more than can be listed');
   return `"${w.title}" (${what.join('; ')})`;
 }
 

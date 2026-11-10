@@ -108,7 +108,7 @@ export async function deleteBranch(
   if (!commit) return false;
   const moved = (): MindlyError =>
     new MindlyError('conflict', `branch ${branch} has commits made after it was checked`, {
-      details: { branch },
+      details: { branch, moved: true },
     });
   if (expectedTip !== undefined && commit !== expectedTip) throw moved();
   const checkedOut = (await listWorktrees(root)).find((w) => w.branch === ref);
@@ -141,13 +141,8 @@ export interface BranchOnlyWork {
   tip: string | null;
   /** Commits no other branch, tag or remote-tracking branch has, newest first, at most `max`. */
   commits: BranchOnlyCommit[];
-  /**
-   * A branch (one of `contentIn`, local or remote-tracking) whose tree already has all of the
-   * branch's changes, so that merging the branch into it would change nothing: the commits are
-   * not kept anywhere but their content is (a squash or rebase merge). Only looked for when
-   * there are such commits.
-   */
-  contentIn: string | null;
+  /** True when there are more such commits than `commits` lists. */
+  more: boolean;
 }
 
 const ONLY_WORK_CACHE = new Map<string, BranchOnlyWork>();
@@ -158,8 +153,8 @@ const MERGE_BASE_CHUNK = 2000;
 /**
  * What deleting `refs/heads/<branch>` would lose: its commits that no other branch, tag or
  * remote-tracking branch reaches. Branches in `ignoring` (deleted together with it) do not count
- * as holding a commit. When there are such commits and `contentIn` names branches, also says
- * whether one of them already has their content.
+ * as holding a commit. Only reachability counts: a commit whose changes another branch has under
+ * a different id (a squash or rebase merge) is still lost with the branch.
  *
  * A walk from the branch with every other ref negated trusts commit dates, and the merge commits
  * of `split merge` carry a fixed old one: it would list commits those refs do have. Instead the
@@ -170,17 +165,16 @@ const MERGE_BASE_CHUNK = 2000;
 export async function branchOnlyWork(
   repoRoot: string,
   branch: string,
-  options: { ignoring?: readonly string[]; contentIn?: readonly string[]; max?: number } = {},
+  options: { ignoring?: readonly string[]; max?: number } = {},
 ): Promise<BranchOnlyWork> {
   assertValidBranchName(branch);
   const ignoring = options.ignoring ?? [];
-  const targets = options.contentIn ?? [];
-  for (const b of [...ignoring, ...targets]) assertValidBranchName(b);
+  for (const b of ignoring) assertValidBranchName(b);
   const limit = Math.max(1, Math.floor(options.max ?? 50));
   const root = await findRepoRoot(repoRoot);
   const ref = `refs/heads/${branch}`;
   const tip = await resolveCommit(root, ref);
-  if (!tip) return { tip: null, commits: [], contentIn: null };
+  if (!tip) return { tip: null, commits: [], more: false };
   const refs = await runGit(
     [
       'for-each-ref',
@@ -192,22 +186,19 @@ export async function branchOnlyWork(
     { cwd: root, timeoutMs: 30_000 },
   );
   const key = createHash('sha256')
-    .update(JSON.stringify([root, ref, tip, [...ignoring].sort(), targets, limit, refs.stdout]))
+    .update(JSON.stringify([root, ref, tip, [...ignoring].sort(), limit, refs.stdout]))
     .digest('hex');
   const cached = ONLY_WORK_CACHE.get(key);
   if (cached) return cached;
 
   const going = new Set([branch, ...ignoring].map((b) => `refs/heads/${b}`));
   const others = new Set<string>();
-  const byName = new Map<string, string>();
   for (const line of refs.stdout.split('\n')) {
     const [id, type, peeledId, peeledType, ...rest] = line.split(' ');
     const name = rest.join(' ');
-    if (!id || !name) continue;
+    if (!id || !name || going.has(name)) continue;
     const commit = type === 'commit' ? id : peeledType === 'commit' ? peeledId : undefined;
-    if (!commit) continue;
-    byName.set(name, commit);
-    if (!going.has(name)) others.add(commit);
+    if (commit) others.add(commit);
   }
 
   // The newest commits of the branch that some other ref also has.
@@ -237,7 +228,7 @@ export async function branchOnlyWork(
         '--no-color',
         '--format=%H%x09%s',
         ...(bases.size > 0 ? ['--topo-order'] : []),
-        `--max-count=${limit}`,
+        `--max-count=${limit + 1}`,
         tip,
         ...[...bases].map((b) => `^${b}`),
         '--',
@@ -250,54 +241,14 @@ export async function branchOnlyWork(
     }
   }
 
-  const contentIn =
-    commits.length > 0 && targets.length > 0
-      ? await contentAlreadyIn(root, tip, targets, byName, going)
-      : null;
-  const out: BranchOnlyWork = { tip, commits, contentIn };
+  const more = commits.length > limit;
+  const out: BranchOnlyWork = { tip, commits: commits.slice(0, limit), more };
   if (ONLY_WORK_CACHE.size >= ONLY_WORK_CACHE_MAX) {
     const oldest = ONLY_WORK_CACHE.keys().next().value;
     if (oldest !== undefined) ONLY_WORK_CACHE.delete(oldest);
   }
   ONLY_WORK_CACHE.set(key, out);
   return out;
-}
-
-/** The first target branch into which merging `tip` would change nothing, or null. */
-async function contentAlreadyIn(
-  root: string,
-  tip: string,
-  targets: readonly string[],
-  byName: ReadonlyMap<string, string>,
-  going: ReadonlySet<string>,
-): Promise<string | null> {
-  const version = await gitVersion();
-  if (!versionAtLeast(version, MIN_MERGE_TREE_VERSION.major, MIN_MERGE_TREE_VERSION.minor)) {
-    return null;
-  }
-  const candidates: [string, string][] = [];
-  for (const t of targets) {
-    for (const [name, commit] of byName) {
-      if (going.has(name)) continue;
-      const local = name === `refs/heads/${t}`;
-      const remote = name.startsWith('refs/remotes/') && name.endsWith(`/${t}`);
-      if ((local || remote) && !candidates.some(([, c]) => c === commit)) {
-        candidates.push([name, commit]);
-      }
-    }
-  }
-  const overrides = await driverOverrides(root);
-  for (const [name, commit] of candidates) {
-    const res = await runGit(
-      ['merge-tree', '--write-tree', '--no-messages', '--allow-unrelated-histories', commit, tip],
-      { cwd: root, config: overrides, timeoutMs: 120_000, okExitCodes: [1] },
-    );
-    if (res.exitCode !== 0) continue;
-    const merged = res.stdout.split('\n')[0]?.trim();
-    const own = await runGit(['rev-parse', '--verify', `${commit}^{tree}`], { cwd: root });
-    if (merged && merged === own.stdout.trim()) return name;
-  }
-  return null;
 }
 
 /** Tracked and untracked (non-ignored) files of the working tree at `cwd`, repository-relative. */
