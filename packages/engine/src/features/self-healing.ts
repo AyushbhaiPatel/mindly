@@ -45,6 +45,8 @@ export interface SweepResult {
 const MAX_ORIGINAL_CHARS = 4000;
 /** Candidate texts hashed for one excerpt stored with the earlier kind of hash. */
 const MAX_LEGACY_TRIES = 300;
+/** Occurrences of either end visited for one such excerpt: the work stays linear and small. */
+const MAX_LEGACY_OCCURRENCES = 200_000;
 
 /** What a look for an excerpt says: it is there, it is not, or that could not be told. */
 export type ExcerptState = 'present' | 'absent' | 'unknown';
@@ -119,6 +121,10 @@ function excerptIn(file: NormFile, excerpt: string, contentHash: string | null):
     return 'absent';
   }
   // Stored redacted by an earlier version: the original was a run of whole lines, or a part of one.
+  // Either way it holds the text the redaction left; when the longest piece of it is not in the
+  // file there is nothing to hash. (A piece with a neutralised delimiter differs from the file.)
+  const key = normExcerpt.split(REDACTED).reduce((a, b) => (b.length > a.length ? b : a), '');
+  if (key.length > 0 && !key.includes('‹') && !file.content.includes(key)) return 'absent';
   if (file.hasLines(Math.max(1, normExcerpt.split('\n').length), contentHash)) return 'present';
   return legacyPartIn(file.content, normExcerpt, contentHash);
 }
@@ -128,26 +134,41 @@ function excerptIn(file: NormFile, excerpt: string, contentHash: string | null):
  * redacted. The text before the first redaction and after the last one is as it was, so the
  * original starts at an occurrence of the first and ends at an occurrence of the second, and the
  * hash says which pair. An excerpt that opens or closes with a redaction has no such start or
- * end and cannot be placed. A few hundred candidates are tried at most; past that the answer is
- * `unknown` and the evidence keeps the validity it had.
+ * end and cannot be placed.
+ *
+ * Both ends are found in one forward pass, and only pairs close enough to be an excerpt are
+ * hashed, nearest first. A few hundred hashes at most, and the occurrences visited are bounded
+ * too; past either limit the answer is `unknown` and the evidence keeps the validity it had.
  */
 function legacyPartIn(normContent: string, normExcerpt: string, contentHash: string): ExcerptState {
   const parts = normExcerpt.split(REDACTED);
   const head = parts[0] as string;
   const tail = parts[parts.length - 1] as string;
   if (parts.length < 2 || head === '' || tail === '') return 'absent';
+  const heads: number[] = [];
+  for (let h = normContent.indexOf(head); h !== -1; h = normContent.indexOf(head, h + 1)) {
+    if (heads.length >= MAX_LEGACY_OCCURRENCES) return 'unknown';
+    heads.push(h);
+  }
+  // Without its start the text cannot be there: no need to look at the ends.
+  if (heads.length === 0) return 'absent';
   let tries = 0;
-  for (let t = normContent.indexOf(tail); t !== -1; t = normContent.indexOf(tail, t + 1)) {
+  let visited = 0;
+  // Heads in [lo, hi) can start an original that ends at the current tail.
+  let lo = 0;
+  let hi = 0;
+  for (let t = normContent.indexOf(tail, heads[0]! + head.length); t !== -1;) {
+    if (++visited > MAX_LEGACY_OCCURRENCES) return 'unknown';
     const end = t + tail.length;
-    // Starts before this end, nearest first, as far back as an excerpt can reach.
-    for (
-      let h = normContent.lastIndexOf(head, t - head.length);
-      h !== -1 && end - h <= MAX_ORIGINAL_CHARS;
-      h = h === 0 ? -1 : normContent.lastIndexOf(head, h - 1)
-    ) {
+    while (hi < heads.length && (heads[hi] as number) + head.length <= t) hi++;
+    while (lo < hi && end - (heads[lo] as number) > MAX_ORIGINAL_CHARS) lo++;
+    for (let i = hi - 1; i >= lo; i--) {
       if (++tries > MAX_LEGACY_TRIES) return 'unknown';
-      if (sha256(normContent.slice(h, end)) === contentHash) return 'present';
+      if (sha256(normContent.slice(heads[i] as number, end)) === contentHash) return 'present';
     }
+    // No head left that a later tail could close: done.
+    if (lo === heads.length) break;
+    t = normContent.indexOf(tail, t + 1);
   }
   return 'absent';
 }

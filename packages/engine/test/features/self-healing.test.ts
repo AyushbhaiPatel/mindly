@@ -362,6 +362,61 @@ describe('self-healing memory', () => {
     expect(excerptPresent('x�abc', '[REDACTED]abc', span)).toBe(true);
   });
 
+  it('decides about earlier redacted evidence in a large file without delaying the hook', async () => {
+    const timed = <T>(f: () => T): [T, number] => {
+      const t = performance.now();
+      const r = f();
+      return [r, performance.now() - t];
+    };
+    const lines: string[] = [];
+    for (let i = 0, size = 0; size < 500 * 1024; i++) {
+      const l = `  "key${i}": "value${i}",`;
+      lines.push(l);
+      size += l.length + 1;
+    }
+    const content = lines.join('\n');
+    const original = 'apiToken: "sk-live-0123456789abcdef"';
+    // Its start is gone, its end (`"`) is on every line.
+    const [gone, goneMs] = timed(() =>
+      excerptState(content, 'apiToken: "[REDACTED]"', sha256(original)),
+    );
+    expect(gone).toBe('absent');
+    // Both ends on every line and no pair is the original: decided within the budget.
+    const [lookalike, lookalikeMs] = timed(() =>
+      excerptState(content, '"key[REDACTED]",', sha256('"key0": "nothing here",')),
+    );
+    expect(['absent', 'unknown']).toContain(lookalike);
+    // The original among them is still found.
+    const placed = `${lines.slice(0, 15_000).join('\n')}\n  ${original},\n${lines.slice(15_000).join('\n')}`;
+    expect(excerptState(placed, 'apiToken: "[REDACTED]"', sha256(original))).toBe('present');
+
+    // Through the post-edit path: a stored row of that kind, the key renamed.
+    const { root, mindly, pid, cx, write } = await featureSetup();
+    write('src/settings.json', `{\n  ${original},\n${content}\n}\n`);
+    const m = mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'decision',
+      title: 'settings token',
+      body: 'b',
+      source: agentSource(cx),
+      evidence: [{ path: 'src/settings.json', excerpt: original }],
+    });
+    mindly.store.db
+      .prepare('UPDATE memory_evidence SET content_hash = ? WHERE memory_id = ?')
+      .run(sha256(original), m.id);
+    write(
+      'src/settings.json',
+      `{\n  ${original.replace('apiToken', 'serviceToken')},\n${content}\n}\n`,
+    );
+    const [checks, recheckMs] = timed(() =>
+      selfHealingOf(mindly).recheckFile(pid, root, 'src/settings.json', null),
+    );
+    expect(checks.map((c) => c.state)).toEqual(['invalid']);
+    // Tens of milliseconds on an idle machine (it took seconds); room left for a busy one.
+    expect(Math.max(goneMs, lookalikeMs, recheckMs)).toBeLessThan(500);
+  });
+
   it('finds redacted evidence past the first 20,000 lines of a file', async () => {
     const { root, mindly, pid, cc, write } = await featureSetup();
     const secret = ['sk', 'live', 'a1B2c3D4e5F6g7H8i9J0k1L2'].join('_');
