@@ -1116,6 +1116,115 @@ describe('telling windows of one agent apart', () => {
     }
   });
 
+  it('keeps answering when the session it guessed leaves the live window', async () => {
+    const MINUTE = 60_000;
+    let now = Date.UTC(2026, 0, 1);
+    const mindly = Mindly.open({
+      inMemory: true,
+      ports: { git: createGitPort() },
+      clock: { now: () => now },
+    });
+    installDefaultModules(mindly);
+    // A window (client 550, still open) whose session this server can only guess at; this
+    // server's own client (100) runs no hooks.
+    for (const pid of [550, 1600]) running.add(pid);
+    try {
+      const a = await harness(
+        { ...world, pid: 1600, startTime: 1, ancestors: [ref(100), TERMINAL] },
+        { root: repo(), mindly },
+      );
+      const other = await hookSession(a, 'win-x', [ref(551), ref(550), TERMINAL]);
+      expect(sid(await a.call('mindly_status'))).toBe(other);
+      now += 31 * MINUTE;
+      const later = await a.call('mindly_status');
+      expect(later.isError).toBe(false);
+      const intent = await a.call('mindly_declare_intent', {
+        summary: 'edit',
+        files: ['src/auth.ts'],
+      });
+      expect(intent.isError).toBe(false);
+      // And once that window is closed, its session is not kept alive by this server.
+      running.delete(550);
+      const seen = mindly.store.sessions.get(other).lastSeenAt;
+      now += MINUTE;
+      await a.call('mindly_status');
+      expect(mindly.store.sessions.get(other).lastSeenAt).toBe(seen);
+    } finally {
+      for (const pid of [550, 1600]) running.delete(pid);
+    }
+  });
+
+  it('does not keep a guessed window alive once its client is gone', async () => {
+    const MINUTE = 60_000;
+    let now = Date.UTC(2026, 0, 1);
+    const mindly = Mindly.open({
+      inMemory: true,
+      ports: { git: createGitPort() },
+      clock: { now: () => now },
+    });
+    installDefaultModules(mindly);
+    // Window B (client 260, gone) had run its hooks straight from shell 60, where this server's
+    // client (100) runs now; that client records no hooks.
+    for (const pid of [60, 1700]) running.add(pid);
+    try {
+      const a = await harness(
+        {
+          ...world,
+          pid: 1700,
+          startTime: 1,
+          ancestors: [ref(100), { ...ref(60), name: 'bash' }, TERMINAL],
+        },
+        { root: repo(), mindly },
+      );
+      const stale = await hookSession(a, 'win-b', [ref(260), ref(60), TERMINAL]);
+      const seen = mindly.store.sessions.get(stale).lastSeenAt;
+      expect(sid(await a.call('mindly_status'))).toBe(stale);
+      now += 10 * MINUTE;
+      await a.call('mindly_status');
+      expect(mindly.store.sessions.get(stale).lastSeenAt).toBe(seen);
+      // Once it has left the live window, the server stops using it.
+      now += 25 * MINUTE;
+      expect(sid(await a.call('mindly_status'))).not.toBe(stale);
+    } finally {
+      for (const pid of [60, 1700]) running.delete(pid);
+    }
+  });
+
+  it('takes what it did on a wrong guess along, and leaves the other window its own work', async () => {
+    const a = await harness(windowA);
+    const sessA = await hookSession(a, 'win-a', [ref(101), ref(100), TERMINAL]);
+    a.mindly.tasks.create({
+      projectId: a.mindly.store.sessions.get(sessA).projectId,
+      title: 'window A task',
+      owner: a.mindly.store.sessions.get(sessA),
+    });
+    await a.mindly.intents.declare(a.mindly.store.sessions.get(sessA), 'A edits pkg', [
+      'package.json',
+    ]);
+    // Window B's server asks before any hook of window B has run: it guesses window A's session.
+    const b = await harness(windowB, a);
+    expect(sid(await b.call('mindly_status'))).toBe(sessA);
+    await b.call('mindly_declare_intent', { summary: 'B edits auth', files: ['src/auth.ts'] });
+    const task = await b.call('mindly_task_create', { title: 'window B task' });
+    const taskB = (task.structured?.['task'] as { id: string }).id;
+    await b.call('mindly_send_message', { toAgentKind: 'codex', title: 'from B' });
+    // Window B's hook record arrives: B moves to its own session, with its own work.
+    const sessB = await hookSession(a, 'win-b', [ref(201), ref(200), TERMINAL]);
+    expect(sid(await b.call('mindly_status'))).toBe(sessB);
+    const intents = (id: string) =>
+      a.mindly.store.intents.activeForSession(id).map((i) => i.summary);
+    expect(intents(sessB)).toEqual(['B edits auth']);
+    expect(intents(sessA)).toEqual(['A edits pkg']);
+    expect(a.mindly.store.tasks.get(taskB).ownerSessionId).toBe(sessB);
+    const ownedByA = a.mindly.tasks.list(a.mindly.store.sessions.get(sessA).projectId);
+    expect(ownedByA.filter((t) => t.ownerSessionId === sessA).map((t) => t.title)).toEqual([
+      'window A task',
+    ]);
+    const project = a.mindly.store.sessions.get(sessA).projectId;
+    const sent = a.mindly.store.deliveries.list(project, { limit: 10 });
+    expect(sent.find((d) => d.title === 'from B')?.sourceSessionId).toBe(sessB);
+  });
+
   it('never leaves its own session out of a guess, whatever stands between', async () => {
     // A helper process with a name that says nothing (not a known launcher) stands between.
     for (const pid of [120, 1200]) running.add(pid);

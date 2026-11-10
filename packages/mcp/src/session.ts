@@ -47,6 +47,24 @@ interface Claim {
 
 type Claims = Record<string, Claim>;
 
+/** How a session relates to a server (see `SessionResolver.relation`). */
+interface Relation {
+  known: boolean;
+  depth: number;
+  rank: number | null;
+  windowAlive: boolean | null;
+  /** Whether a process of the session's client still runs; null when nothing was recorded. */
+  clientRuns: boolean | null;
+}
+
+/** What a server did while it spoke for a session it only guessed at. */
+interface GuessWork {
+  sessionId: string;
+  intents: Set<string>;
+  tasks: Set<string>;
+  messages: Set<string>;
+}
+
 /** How many launchers may stand between a server and its client. */
 const MAX_LAUNCHERS = 2;
 
@@ -86,6 +104,7 @@ export class SessionResolver {
   private self: ProcessRef | null = null;
   private ancestors: readonly ProcessRef[] | null;
   private bound: { id: string; own: boolean; sure: boolean } | null = null;
+  private guessWork: GuessWork | null = null;
   private scoped: ScopedProject | null = null;
   private readonly roots = new Map<string, string | null>();
 
@@ -164,16 +183,13 @@ export class SessionResolver {
    *   client), and nothing below the meeting point on the hook's side runs any more: a window
    *   that was closed without ending its session (`windowAlive` false).
    */
-  private relation(session: Session): {
-    known: boolean;
-    depth: number;
-    rank: number | null;
-    windowAlive: boolean | null;
-  } {
+  private relation(session: Session): Relation {
     const recorded = parseProcessChain(
       this.mindly.store.kv.get<unknown>(hookAncestryKey(session.agentKind, session.externalId)),
     );
-    if (recorded.length === 0) return { known: false, depth: -1, rank: 2, windowAlive: null };
+    if (recorded.length === 0) {
+      return { known: false, depth: -1, rank: 2, windowAlive: null, clientRuns: null };
+    }
     const mine = this.chain();
     const same = (a: ProcessRef, b: ProcessRef): boolean =>
       a.pid === b.pid && a.start === b.start && a.start !== '';
@@ -186,19 +202,27 @@ export class SessionResolver {
         depth = j;
       }
     }
-    if (meet === -1) return { known: false, depth: -1, rank: 2, windowAlive: true };
-    if (depth === 0) return { known: true, depth, rank: 0, windowAlive: true };
+    if (meet === -1) {
+      // Another tree: its client is the hook's parent or the process above it.
+      const clientRuns = recorded.slice(0, 2).some((h) => this.runs(h));
+      return { known: false, depth: -1, rank: 2, windowAlive: true, clientRuns };
+    }
+    if (depth === 0) return { known: true, depth, rank: 0, windowAlive: true, clientRuns: true };
     const below = recorded.slice(0, meet);
-    if (below.some((h) => this.runs(h))) return { known: false, depth, rank: 4, windowAlive: true };
+    if (below.some((h) => this.runs(h))) {
+      return { known: false, depth, rank: 4, windowAlive: true, clientRuns: true };
+    }
     const through =
       depth <= MAX_LAUNCHERS && mine.slice(0, depth).every((m) => isLauncherName(m.name));
     if (!through) {
       return below.length <= 1
-        ? { known: false, depth, rank: 2, windowAlive: null }
-        : { known: false, depth, rank: null, windowAlive: false };
+        ? { known: false, depth, rank: 2, windowAlive: null, clientRuns: false }
+        : { known: false, depth, rank: null, windowAlive: false, clientRuns: false };
     }
     const close = below.length <= 1 && !isShellName(mine[depth]?.name);
-    return { known: false, depth, rank: close ? 1 : 3, windowAlive: null };
+    // Through launchers to a close meeting point, the client is that point, a running ancestor
+    // of this server; otherwise nothing of the hook's side runs any more.
+    return { known: false, depth, rank: close ? 1 : 3, windowAlive: null, clientRuns: close };
   }
 
   // ----------------------------------------------------------------- project
@@ -312,7 +336,9 @@ export class SessionResolver {
     const before = this.bound;
     const all = await this.hookSessions(project);
     const relations = new Map(all.map((s) => [s.id, this.relation(s)]));
-    const rel = (s: Session) => relations.get(s.id) as ReturnType<SessionResolver['relation']>;
+    // A session that is not live (the bound guess, once it has left the live window) is looked
+    // at directly rather than assumed to be among the live ones.
+    const rel = (s: Session): Relation => relations.get(s.id) ?? this.relation(s);
     // Known: the session whose hooks the server's parent started, when only one has. Several is
     // one host running several sessions, which ancestry cannot tell apart: a guess among those.
     const known = all.filter((s) => rel(s).known);
@@ -402,9 +428,11 @@ export class SessionResolver {
         if (ended) this.drop();
         else this.bound = null;
       } else if (cur && !this.bound.own && !this.bound.sure) {
-        // A guessed session whose client is gone (a window closed without ending its session)
-        // is not kept alive by this server: it is let go, and the server chooses again.
-        if (this.relation(cur).windowAlive === false) this.drop();
+        // A guessed session whose client is gone (a window closed without ending its session),
+        // or that has left the live window because nothing kept it alive, is let go, and the
+        // server chooses again.
+        const stale = this.mindly.kernel.clock.now() - cur.lastSeenAt > LIVE_WINDOW_MS;
+        if (stale || this.relation(cur).windowAlive === false) this.drop();
       }
     }
 
@@ -412,12 +440,14 @@ export class SessionResolver {
     if (!this.bound || this.bound.own || !this.bound.sure) await this.improve(project);
 
     if (this.bound && !this.bound.own) {
-      // The session is alive while its server is being used, whether or not a hook ran lately;
-      // except a weak guess, which may be a window that is gone.
+      // The session is alive while its server is being used, whether or not a hook ran lately.
+      // A guess only while its client still runs (or nothing is known about it): the server
+      // must not keep the session of a window that is gone alive.
       const session = store.sessions.get(this.bound.id);
-      if (this.bound.sure || (this.relation(session).rank ?? Infinity) < 3) {
+      if (this.bound.sure || this.relation(session).clientRuns !== false) {
         store.sessions.touch(this.bound.id);
       }
+      this.carryGuessWork(session.id);
       return { project, session: store.sessions.get(this.bound.id) };
     }
 
@@ -436,7 +466,51 @@ export class SessionResolver {
       transcriptPath: null,
     });
     if (!this.bound) this.take(session.id, true, true);
+    this.carryGuessWork(session.id);
     return { project, session };
+  }
+
+  /**
+   * Notes something this server did while it speaks for a session it only guessed at: an
+   * intent it declared, a task it created or claimed, a message it sent. When the server moves
+   * to another session, these go with it; the guessed session's own work stays where it is.
+   */
+  noteWork(kind: 'intent' | 'task' | 'message', id: string): void {
+    const bound = this.bound;
+    if (!bound || bound.own || bound.sure) return;
+    if (this.guessWork?.sessionId !== bound.id) {
+      this.guessWork = {
+        sessionId: bound.id,
+        intents: new Set(),
+        tasks: new Set(),
+        messages: new Set(),
+      };
+    }
+    const set =
+      kind === 'intent'
+        ? this.guessWork.intents
+        : kind === 'task'
+          ? this.guessWork.tasks
+          : this.guessWork.messages;
+    if (set.size < 500) set.add(id);
+  }
+
+  /** Moves what this server did on a guess it has left to the session it speaks for now. */
+  private carryGuessWork(toId: string): void {
+    const work = this.guessWork;
+    if (!work || work.sessionId === toId) return;
+    this.guessWork = null;
+    try {
+      this.mindly.store.sessions.moveRows(work.sessionId, toId, {
+        intents: [...work.intents],
+        tasks: [...work.tasks],
+        messages: [...work.messages],
+      });
+    } catch (err) {
+      this.logger?.warn('mcp work not moved', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**

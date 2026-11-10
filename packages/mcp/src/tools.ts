@@ -485,6 +485,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         files,
         args.symbols ?? [],
       );
+      sessions.noteWork('intent', intent.id);
       const warnings = overlap.warnings.map((w) => safeLine(w, 400));
       const sections: Section[] = [
         { heading: 'Coordination warnings', lines: warnings.map((w) => `- ${w}`) },
@@ -540,6 +541,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         owner: args.assignToMe === false ? null : scope.session,
         parentId: args.parentId ?? null,
       });
+      if (t.ownerSessionId === scope.session.id) sessions.noteWork('task', t.id);
       return ok(`Created task ${t.id}: ${safeLine(t.title, 200)} (${t.status}).`, {
         task: taskSummary(t),
       });
@@ -606,6 +608,8 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         throw new MindlyError('conflict', `task is ${cur.status}`);
       }
       const t = mindly.tasks.claim(args.id, scope.session);
+      // A task the guessed session already owned is that session's own work, not this server's.
+      if (cur.ownerSessionId !== scope.session.id) sessions.noteWork('task', t.id);
       return ok(`Claimed task ${t.id}: ${safeLine(t.title, 200)}.`, { task: taskSummary(t) });
     },
   );
@@ -780,6 +784,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         body: args.body ?? '',
         priority: args.priority ?? 2,
       });
+      for (const d of sent) sessions.noteWork('message', d.id);
       return ok(`Queued ${sent.length} message(s).`, { deliveries: sent.map((d) => d.id) });
     },
   );

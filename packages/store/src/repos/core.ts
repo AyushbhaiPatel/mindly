@@ -8,7 +8,18 @@ import {
   type SessionStatus,
   type MindlyEvent,
 } from '@mindly/core';
-import { json, limit, num, numOrNull, str, strOrNull, toJson, type Db, type Row } from '../db.js';
+import {
+  json,
+  limit,
+  num,
+  numOrNull,
+  str,
+  strOrNull,
+  toJson,
+  transaction,
+  type Db,
+  type Row,
+} from '../db.js';
 
 // ---------------------------------------------------------------------------------------------
 // Projects
@@ -218,6 +229,52 @@ export class SessionRepo {
    * a session of its own and then found the session its client's hooks made). Call it inside a
    * transaction. Returns how many rows moved.
    */
+  /**
+   * Moves particular rows from one session to another: active intents, unfinished tasks it owns
+   * and messages it sent, each only while it still belongs to `fromId`. For a server that spoke
+   * for a session it only guessed at and leaves it: what it did there goes with it, and the
+   * session's own work stays. Returns how many rows moved.
+   */
+  moveRows(
+    fromId: string,
+    toId: string,
+    rows: { intents: readonly string[]; tasks: readonly string[]; messages: readonly string[] },
+  ): number {
+    if (fromId === toId) return 0;
+    const now = this.clock.now();
+    let moved = 0;
+    const each = (ids: readonly string[], sql: string, args: (id: string) => unknown[]): void => {
+      const stmt = this.db.prepare(sql);
+      for (const id of ids.slice(0, 500))
+        moved += Number(stmt.run(...(args(id) as never[])).changes);
+    };
+    const move = (): void => {
+      each(
+        rows.intents,
+        `UPDATE intents SET session_id = ?, updated_at = ? WHERE id = ? AND session_id = ? AND status = 'active'`,
+        (id) => [toId, now, id, fromId],
+      );
+      each(
+        rows.tasks,
+        `UPDATE tasks SET owner_session_id = ?, updated_at = ?
+           WHERE id = ? AND owner_session_id = ? AND status IN ('open', 'in_progress', 'blocked')`,
+        (id) => [toId, now, id, fromId],
+      );
+      each(
+        rows.messages,
+        'UPDATE deliveries SET source_session_id = ? WHERE id = ? AND source_session_id = ?',
+        (id) => [toId, id, fromId],
+      );
+      const from = this.find(fromId);
+      if (from?.currentTaskId && rows.tasks.includes(from.currentTaskId)) {
+        this.setCurrentTask(toId, from.currentTaskId);
+        this.setCurrentTask(fromId, null);
+      }
+    };
+    transaction(this.db, move);
+    return moved;
+  }
+
   moveWork(fromId: string, toId: string): number {
     if (fromId === toId) return 0;
     const now = this.clock.now();
