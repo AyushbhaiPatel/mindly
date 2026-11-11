@@ -123,7 +123,7 @@ const CP_REMOVES_DESTINATION = works(
 );
 /** GNU `ln` takes `-t`; BSD `ln` (macOS) does not. */
 const LN_TARGET = works(
-  'd=$(mktemp -d) && mkdir "$d/b" && ln -s x -t "$d/b"; r=$?; rm -rf "$d"; exit $r',
+  'd=$(mktemp -d) && mkdir "$d/b" && ln -s -t "$d/b" x && [ -L "$d/b/x" ] && [ ! -L "$d/b/-t" ]; r=$?; rm -rf "$d"; exit $r',
 );
 /** `ln -n` given a link to a folder with a `/` after it puts the new name in the folder. */
 const LN_N_SLASH = works(
@@ -2214,6 +2214,16 @@ const unsettled: {
         name: 'a source named --target-directory=…',
         command: 'cp -- b.txt --target-directory=out2 certs',
       },
+    ],
+  },
+  {
+    title: 'a name after -- that looks like an option, onto another name of a covered file',
+    scopes: ['certs/**'],
+    prep: 'mkdir -p hl && echo z > cur && ln certs/server.pem hl/cur',
+    covered: inCerts,
+    // The scratch copy has to keep the two names as one file for the run to show the write.
+    runs: CP_KEEPS_NAMES,
+    cases: [
       {
         name: 'a source named --remove-destination',
         command: 'cp -- cur --remove-destination hl/',
