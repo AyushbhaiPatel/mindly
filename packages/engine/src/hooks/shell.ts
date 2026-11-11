@@ -3201,11 +3201,15 @@ function readGit(
 export interface ShellTarget {
   /**
    * The path as the command gives it, relative to the directory the command starts in (after any
-   * `cd` before it) or absolute. May hold `*`, `?` or `{a,b}` when `glob` is set. A path that
-   * starts with `~` is under a home directory that could not be placed here (`~name/x`, or any
-   * `~` path when no home was given).
+   * `cd` before it) or absolute. May hold `*`, `?` or `{a,b}` when `glob` is set.
    */
   path: string;
+  /**
+   * The path is under a home directory that could not be placed here (`~name/x`, or any `~`
+   * path when no home was given): it starts with the `~` the shell expands. A name that merely
+   * starts with `~` (`./~x`, `'~'/x`) is a path like any other.
+   */
+  unplaced: boolean;
   /** The path is a wildcard pattern. */
   glob: boolean;
   /**
@@ -3280,12 +3284,14 @@ export interface ShellReading {
  * A write a line makes in place (the content, mode, owner or times of what is there), placed
  * like targets; with `glob`, its `*` and `?` are kept. `file`: the path itself. `tree`: the path
  * and all it holds (`chmod -R`). `copy`: what `from` brings, on the path and under it; with no
- * `from`, anything there. `land`: files of names not known, put right in the folder.
+ * `from`, anything there. `land`: files of names not known, put right in the folder. `link`:
+ * nothing is written in place, but a symbolic link the wildcards may match is followed: a
+ * folder on the way to what is written, or a name removed with a `/` after it.
  */
 export interface InPlace {
   path: string;
   glob: boolean;
-  kind: 'file' | 'tree' | 'copy' | 'land';
+  kind: 'file' | 'tree' | 'copy' | 'land' | 'link';
   from?: string | null;
 }
 
@@ -3638,6 +3644,9 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
 
 /** Paths of a line not read fully kept as possible writes. */
 const MAX_UNREAD_TARGETS = 32;
+
+/** Folders above a path that are held against what the line made. */
+const MAX_DEPTH_ABOVE = 256;
 
 /** Simple commands read of a line not read fully, for the paths it names. */
 const MAX_UNREAD_COMMANDS = 2000;
@@ -4120,7 +4129,14 @@ function scanLine(command: string, said: { tooMany: boolean }, searched: boolean
       target = 'any';
       continue;
     }
-    if (c === '#' && !open) return false;
+    if (c === '#' && !open) {
+      // A comment: from a `#` that starts a word to the end of its line, nothing is run.
+      if (target !== null) return false;
+      const end = s.indexOf('\n', i);
+      if (end === -1) break;
+      i = end - 1;
+      continue;
+    }
     if (c === '[' || c === ']') {
       bracket = true;
       text += c;
@@ -4234,6 +4250,7 @@ function unreadLine(top: string | null): ShellReading {
     targets: [
       {
         path: top ?? '.',
+        unplaced: false,
         glob: false,
         dotfiles: false,
         nocase: false,
@@ -4431,7 +4448,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   /** The folders above a path, nearest first, as far as the text tells them. */
   const above = (at: string): string[] => {
     const out: string[] = [];
-    for (let up = posix.dirname(at); out.length < 256; up = posix.dirname(up)) {
+    for (let up = posix.dirname(at); out.length < MAX_DEPTH_ABOVE; up = posix.dirname(up)) {
       if (up === at || up === '..' || up.endsWith('/..') || up.startsWith('~')) break;
       out.push(up);
       if (up === '/' || up === '.') break;
@@ -4455,6 +4472,14 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       !at.startsWith('~') &&
       posix.isAbsolute(g.pattern) === posix.isAbsolute(at) &&
       partsHold(g.parts, parts));
+  /** Whether a word has an unquoted wildcard in a part that is not its last: a folder. */
+  const wildFolder = (w: Word): boolean => {
+    const last = w.text.replace(/\/+$/, '').lastIndexOf('/');
+    for (let i = 0; i < last; i++) {
+      if (w.mask[i] === 'u' && (w.text[i] === '*' || w.text[i] === '?')) return true;
+    }
+    return false;
+  };
   /**
    * Whether a word names a path its text does not settle: a `..` after a folder's name, which
    * the system takes off the folder a link before it leads to; or a `~` the shell expands to
@@ -4481,7 +4506,9 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     const at = anchor(path);
     const own = r.through.get(at);
     if (own !== undefined && (slash || (onto && own))) return true;
-    if (above(at).some((up) => r.through.has(up))) return true;
+    const ups = above(at);
+    // Deeper than is walked: a folder above it may be one the line made.
+    if (ups.length >= MAX_DEPTH_ABOVE || ups.some((up) => r.through.has(up))) return true;
     if (r.wild.length === 0) return false;
     const parts = pathParts(at);
     const up = parts.slice(0, -1);
@@ -4600,6 +4627,17 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         // a link that leads nowhere yet, is not read here. A name taken away or given to
         // something else leaves the file be, and git puts a new file where it writes one of
         // its tree. A copy writes its destination, or what each source brings under its name.
+        // A wildcard the shell matches against a symbolic link leads where the link does: for
+        // a folder on the way, whatever the command; for the last part, when a removal names it
+        // with a `/` after it, which goes through to what it holds.
+        if (r.strays !== null && form.glob && !item.pathspec && !item.pattern) {
+          if (
+            (wildFolder(w) && r.strays({ path: posix.dirname(path), glob: true, kind: 'link' })) ||
+            (gone && w.text.endsWith('/') && r.strays({ path, glob: true, kind: 'link' }))
+          ) {
+            r.unmatched = true;
+          }
+        }
         if (r.strays !== null && !gone && !folding && !item.replaces && !item.pathspec) {
           const glob = form.glob;
           const writes: InPlace[] =
@@ -4660,6 +4698,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       }
       r.out.set(key, {
         path,
+        unplaced: path.startsWith('~') && (tilde(w) || w.text.startsWith(HOME)),
         glob: form.glob,
         dotfiles: item.dotfiles ?? false,
         nocase: item.nocase ?? false,
@@ -5076,6 +5115,18 @@ function collectTargets(command: string, startDir: string | null, depth: number,
             else given.push({ p, magic });
           }
           if (given.length === 0 && excluded) possibly(ANY_FILE);
+          // A pathspec git matches by rules of its own (`:(icase)`, `:(glob)`, `:/`, or all of
+          // them under `--icase-pathspecs` and the like) may name anything in its tree: what
+          // the tree holds counts as made, for the words of later commands.
+          if (
+            r.exact &&
+            given.length > 0 &&
+            (pathspecs.some((p) => /^:[(/!^]/.test(p.word.text)) ||
+              words.some((w) => /^--(icase|glob|noglob|literal)-pathspecs$/.test(w.text)))
+          ) {
+            const tree = top && r.top !== null ? r.top : base;
+            pending.push({ path: posix.join(tree, '*'), glob: true, kind: 'made', link: true });
+          }
           for (const { p, magic } of given) {
             if (r.out.size >= MAX_TARGETS) {
               r.limit ??= `more than ${MAX_TARGETS} write targets`;
