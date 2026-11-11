@@ -1045,10 +1045,10 @@ describe('write targets of a shell command', () => {
     ]);
     expect(targets('cd ~ && rm a.ts')).toEqual([`${HOME}/a.ts`]);
     expect(targets('cd && rm a.ts')).toEqual([`${HOME}/a.ts`]);
-    // A quoted `~` is a file name, not the home directory.
-    expect(targets('rm "~/a.ts"')).toEqual(['~/a.ts']);
-    expect(targets("rm '~'/a.ts")).toEqual(['~/a.ts']);
-    expect(targets('rm \\~/a.ts')).toEqual(['~/a.ts']);
+    // A quoted `~` is a file name, not the home directory: told apart as `./~`.
+    expect(targets('rm "~/a.ts"')).toEqual(['./~/a.ts']);
+    expect(targets("rm '~'/a.ts")).toEqual(['./~/a.ts']);
+    expect(targets('rm \\~/a.ts')).toEqual(['./~/a.ts']);
     // Another user's home cannot be placed here: the path is kept as written, not dropped.
     expect(targets('rm ~ci/app/a.ts')).toEqual(['~ci/app/a.ts']);
     expect(targets('cd ~ci/app && rm a.ts')).toEqual(['~ci/app/a.ts']);
@@ -1655,13 +1655,13 @@ describe('write targets of a shell command', () => {
     expect(readShellWrites('cd sub && ls # x\nrm y', { understoodOnly: true }).understood).toBe(
       false,
     );
-    // A name that merely starts with `~` is a path like any other; one the shell expands to a
-    // home that is not known here is marked, and not placed.
+    // A name that merely starts with `~` is a path like any other, given as `./~…`; one the
+    // shell expands to a home that is not known here keeps its `~`, is marked, and not placed.
     const placed = (line: string) =>
       readShellWrites(line).targets.map((t) => `${t.path}${t.unplaced ? ' unplaced' : ''}`);
-    expect(placed('rm -f ./~/k.pem')).toEqual(['~/k.pem']);
-    expect(placed("rm -f '~'/k.pem")).toEqual(['~/k.pem']);
-    expect(placed('rm -f ./~old.pem "~new.pem"')).toEqual(['~old.pem', '~new.pem']);
+    expect(placed('rm -f ./~/k.pem')).toEqual(['./~/k.pem']);
+    expect(placed("rm -f '~'/k.pem")).toEqual(['./~/k.pem']);
+    expect(placed('rm -f ./~old.pem "~new.pem"')).toEqual(['./~old.pem', './~new.pem']);
     expect(placed('rm -f ~other/k.pem')).toEqual(['~other/k.pem unplaced']);
     // The shell expands a `~` only as the first character of a word, with nothing quoted (not
     // even an empty string) before the first `/`, and never after the `=` of an option.
@@ -1673,9 +1673,9 @@ describe('write targets of a shell command', () => {
       'rm -f "~"/k.pem',
       'rm -f \\~/k.pem',
     ]) {
-      expect(placed(line), line).toEqual(['~/k.pem']);
+      expect(placed(line), line).toEqual(['./~/k.pem']);
     }
-    expect(placed('git diff --output=~/n.pem v1 v2')).toEqual(['~/n.pem']);
+    expect(placed('git diff --output=~/n.pem v1 v2')).toEqual(['./~/n.pem']);
     expect(placed('rm -f ~/\'k.pem\' ~/"k.pem"')).toEqual(['~/k.pem unplaced']);
     expect(placed('rm -f ~/k.pem')).toEqual(['~/k.pem unplaced']);
     expect(readShellWrites('rm -f ~/k.pem', { home: '/home/u' }).targets[0]).toMatchObject({
@@ -1684,7 +1684,7 @@ describe('write targets of a shell command', () => {
     });
     expect(readShellWrites('cd ./~ && rm -f k.pem', { understoodOnly: true })).toMatchObject({
       understood: true,
-      targets: [{ path: '~/k.pem', unplaced: false }],
+      targets: [{ path: './~/k.pem', unplaced: false }],
     });
     // A wildcard the shell may match against a symbolic link leads where the link does: a
     // folder on the way, whatever the command; the last part, for a write in place or a removal
@@ -1710,15 +1710,33 @@ describe('write targets of a shell command', () => {
       ['echo x > l?k', false],
       ['rm -rf packages/*/dist', true],
       ["git checkout -- 'l?k/x'", true],
-      // What a copy, move or link brings lands in a link to a folder the last part matches.
+      // A wildcard in the destination of a copy, move or link: what is brought lands in a
+      // folder the wildcard matches, or under the name as written when nothing matches.
       ['mv b.txt l?k', false],
       ['mv -t l?k b.txt', false],
       ['ln -s ../a.txt l?k', false],
       ['cp b.txt l?k', false],
-      ['mv b.txt d?r', true],
+      ['mv b.txt d?r', false],
+      ['cp b.txt out/*/', false],
+      ['mv *.log logs/', true],
+      ['chmod 600 d?r', true],
     ] as const) {
       expect(withLinks(line), line).toBe(fully);
     }
+    // A wildcard in a name a command makes itself stays as written when nothing matches: the
+    // name is read both ways, as what it matches and as the name itself.
+    const both = (line: string) =>
+      readShellWrites(line, { understoodOnly: true }).targets.map(
+        (t) => `${t.path}${t.glob ? ' (wildcard)' : ''}`,
+      );
+    expect(both('touch certs/zz*')).toEqual(['certs/zz* (wildcard)', 'certs/zz*']);
+    expect(both('echo x > certs/new?.pem')).toEqual([
+      'certs/new?.pem (wildcard)',
+      'certs/new?.pem',
+    ]);
+    expect(both('mkdir -p out/n?w')).toEqual(['out/n?w (wildcard)', 'out/n?w']);
+    expect(both('rm -f certs/*.pem')).toEqual(['certs/*.pem (wildcard)']);
+    expect(both('chmod 600 certs/*.pem')).toEqual(['certs/*.pem (wildcard)']);
     links.length = 0;
     withLinks('rm -rf packages/*/dist/*.js && rm -rf out/*/');
     expect(links).toEqual(['link packages/*/dist', 'link out/*']);
@@ -1788,6 +1806,8 @@ describe('write targets of a shell command', () => {
     expect(asked).toEqual([
       'link d* glob',
       'file d*/f glob',
+      // The name as written too: it is made when the wildcard matches nothing.
+      'file d*/f',
       'file b',
       'copy b/a from a',
       'file out',
@@ -1849,6 +1869,95 @@ describe('write targets of a shell command', () => {
     // A character of the reader's own marks, written in the line, is not one of them.
     expect(readShellWrites('rm \ue000/x').targets).toEqual([]);
     expect(readShellWrites('rm "$PWD/x"').targets.map((t) => t.path)).toEqual(['x']);
+  });
+
+  it('reads what stands after --, a colon in a name and paths the system makes up as they are', () => {
+    const copy = (line: string) =>
+      readShellWrites(line).targets.map(
+        (t) => `${t.path} <- ${t.entries.join(',')}${t.noFollow ? ' (the name itself)' : ''}`,
+      );
+    // After `--` a word is an operand, whatever it looks like.
+    expect(copy('ln -sf -- -n out/dl')).toEqual(['out/dl <- -n']);
+    expect(copy('ln -sf -t out/dl -- -n')).toEqual(['out/dl <- -n']);
+    expect(copy('cp -- b.txt -t out2 certs')).toEqual(['certs <- b.txt,-t,out2']);
+    expect(copy('cp -- cur --remove-destination hl/')).toEqual(['hl <- cur,--remove-destination']);
+    expect(readShellWrites('cp -- cur --remove-destination f').targets).toHaveLength(1);
+    // `ln -n` takes a link to a folder as a name, unless a `/` follows it or there are sources.
+    expect(copy('ln -sfn b.txt lk')).toEqual(['lk <- b.txt (the name itself)']);
+    expect(copy('ln -sfn b.txt lk/')).toEqual(['lk <- b.txt']);
+    expect(copy('ln -sfn b.txt lk/.')).toEqual(['lk <- b.txt']);
+    expect(copy('ln -sfn b.txt c.txt lk')).toEqual(['lk <- b.txt,c.txt']);
+    // Only scp and rsync take `host:path`; to `mv` and `cp` a colon is part of a name.
+    const paths = (line: string) => readShellWrites(line).targets.map((t) => t.path);
+    expect(paths('mv k:1.pem x.txt')).toEqual(['k:1.pem', 'x.txt']);
+    expect(readShellWrites('cp k:1.pem x.txt').targets[0]?.sources).toEqual(['k:1.pem']);
+    expect(paths('scp host:k.pem x.txt')).toEqual(['x.txt']);
+    expect(readShellWrites('scp host:k.pem x.txt').targets[0]?.sources).toEqual([null]);
+    // Where a write goes nowhere is no file; any other path under /dev, /proc or /sys leads
+    // where the text does not tell.
+    const fully = (line: string) => readShellWrites(line, { understoodOnly: true }).understood;
+    for (const sink of ['/dev/null', '/dev/stderr', '/dev/stdout', '/dev/tty', '/dev/fd/2']) {
+      expect(paths(`echo x > ${sink}`), sink).toEqual([]);
+      expect(fully(`echo x > ${sink}`), sink).toBe(true);
+    }
+    for (const line of [
+      'rm -f /proc/self/cwd/certs/server.pem',
+      'echo x > /proc/self/root/w/certs/server.pem',
+      'touch /dev/shm/x',
+      'echo 1 > /sys/kernel/x',
+    ]) {
+      expect(fully(line), line).toBe(false);
+    }
+    // A home that is set and empty: the shell takes `~/x` as `/x`.
+    expect(readShellWrites('rm -f ~/w/k.pem $HOME/w/l.pem', { home: '' }).targets).toMatchObject([
+      { path: '/w/k.pem', unplaced: false },
+      { path: '/w/l.pem', unplaced: false },
+    ]);
+  });
+
+  it('holds a name that starts with ~, and a link that was there, against what the line made', () => {
+    const fully = (line: string, links: readonly string[] = []) =>
+      readShellWrites(line, {
+        understoodOnly: true,
+        cwd: '/w',
+        viaLink: (path) => links.some((l) => path === l || path.startsWith(`${l}/`)),
+      }).understood;
+    // A link the line made is one whatever its name starts with.
+    for (const line of [
+      "ln -s certs '~x'; rm -f '~x'/server.pem",
+      'ln -s certs "~" && rm -f "~"/server.pem',
+      'ln -s certs ./~l && rm -f ./~l/server.pem',
+      "ln -s certs ~''l && touch ~''l/new.pem",
+      "mkdir '~'; ln -s ../certs '~'/l; rm -f '~'/l/server.pem",
+      "ln -s certs '~l' && cp b.txt '~l'",
+      "cd '~d' && ln -s ../certs l && rm -f l/server.pem",
+    ]) {
+      expect(fully(line), line).toBe(false);
+    }
+    expect(fully("mkdir '~d' && touch '~d'/x && rm -f '~e'/y")).toBe(true);
+    // Once the line has made something, a link that was there may lead to it.
+    for (const [line, read] of [
+      ['ln -s ../../certs d/a/sub; rm -f lnk/sub/server.pem', false],
+      ['mkdir secrets && mv b.txt lnk/k', false],
+      ['mkdir secrets && mv b.txt lnk', false],
+      ['echo x > f && cp b.txt out/lnk', false],
+      // Not for what git is given in its tree, and not before anything is made.
+      ['mkdir secrets && git checkout -- lnk/x', true],
+      ['rm -f lnk/sub/server.pem', true],
+      ['rm -f lnk/a && rm -f lnk/b', true],
+      ['mkdir -p out/a/b && touch out/a/b/x', true],
+    ] as const) {
+      expect(fully(line, ['lnk', 'out/lnk']), line).toBe(read);
+    }
+    // Folders `mkdir -p` makes on the way are folders for a later copy, however many.
+    const lands = (line: string) =>
+      readShellWrites(line, { understoodOnly: true, cwd: '/w' }).targets.map((t) => t.path);
+    expect(lands('mkdir -p a/b/c a/b/d && cp x.txt a/b')).toEqual([
+      'a/b/c',
+      'a/b/d',
+      'a/b',
+      'a/b/x.txt',
+    ]);
   });
 
   it('answers a line of 200,000 characters of any shape in good time', () => {

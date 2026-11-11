@@ -9,7 +9,7 @@ import {
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, parse, resolve, sep } from 'node:path';
 import {
   EMPTY_HOOK_RESULT,
   deniedPathTest,
@@ -417,14 +417,17 @@ export class HookHandler {
     }
   }
 
-  /** A name in a located folder, the name itself not followed. */
-  private under(dir: Located, name: string): Located {
+  /**
+   * A name in a located folder, the name itself not followed. With `onTheWay`, a folder that
+   * only leads to the names placed under it: whether one may be recorded is decided for each.
+   */
+  private under(dir: Located, name: string, onTheWay = false): Located {
     const rel = dir.rel === '' ? toPosix(name) : `${dir.rel}/${toPosix(name)}`;
     return {
       ...dir,
       rel,
       abs: `${dir.abs}${sep}${name}`,
-      own: dir.own && !isDeniedPath(rel, this.k.config.redaction.denyPaths),
+      own: dir.own && (onTheWay || !isDeniedPath(rel, this.k.config.redaction.denyPaths)),
     };
   }
 
@@ -577,6 +580,31 @@ export class HookHandler {
       if (++lookups > MAX_LINK_LOOKUPS || timeUp()) return true;
       return mayHold(toPosix(physical(resolve(cwd, path))), toPosix(physical(resolve(cwd, dir))));
     };
+    /** For each name looked at: whether it is a symbolic link; null when it is not there. */
+    const links = new Map<string, boolean | null>();
+    const start = toPosix(cwd);
+    // The folder the line runs in is told as it is on disk, so no link is above it: a path
+    // under it is looked at from there, any other from the root, down to the first part that
+    // is not there.
+    const viaLink = (path: string): boolean => {
+      const abs = toPosix(resolve(cwd, path));
+      const from = abs.startsWith(`${start}/`) ? start.length : 0;
+      for (let end = abs.indexOf('/', from + 1); ; end = abs.indexOf('/', end + 1)) {
+        const at = end === -1 ? abs : abs.slice(0, end);
+        let link = links.get(at);
+        if (link === undefined) {
+          if (++looked > MAX_NAME_LOOKUPS || timeUp()) return true;
+          try {
+            link = lstatSync(at, { throwIfNoEntry: false })?.isSymbolicLink() ?? null;
+          } catch {
+            link = null;
+          }
+          links.set(at, link);
+        }
+        if (link === null || end === -1) return link === true;
+        if (link) return true;
+      }
+    };
     const reading = readShellWrites(command, {
       home: toPosix(homedir()),
       top: toPosix(treeRoot),
@@ -588,6 +616,7 @@ export class HookHandler {
       cdpath: (process.env.CDPATH ?? '') !== '',
       cwd: toPosix(cwd),
       holds,
+      viaLink,
       // A file with another name is written under both, and a link that leads nowhere yet
       // is written through: looked for while there is time.
       strays: (write) =>
@@ -669,12 +698,23 @@ export class HookHandler {
           return null;
         }
         // Under a folder that is not there, a name is where the folder is: the folder is
-        // placed once for all the names the line gives under it.
+        // placed once for all the names the line gives under it, from the nearest folder above
+        // it that is there, which is placed once for all the folders missing under it.
         const dir = dirname(abs);
         if (dir !== abs && !exists(dir)) {
           let at = missing.get(dir);
           if (at === undefined) {
-            at = await this.locate(project, treeRoot, dir, late ? null : trees);
+            const up = nearestThere(dir);
+            let from = missing.get(up);
+            if (from === undefined) {
+              from = await this.locate(project, treeRoot, up, late ? null : trees);
+              missing.set(up, from);
+            }
+            const rest = dir.slice(up.length).replace(/^[\\/]+/, '');
+            at =
+              from === null || from === 'unknown' || rest === ''
+                ? from
+                : this.under(from, rest, true);
             missing.set(dir, at);
           }
           if (at === 'unknown') into.unchecked++;
@@ -1042,15 +1082,34 @@ export class HookHandler {
       if (unchecked > 0 || tool.editsCut === true) {
         return uncheckedDenial(unchecked, tool.editsCut === true);
       }
-      if (checked.length === 0) {
+      // A file with another name as well is written under both: it is the very file a rule
+      // names, or it may be a file a rule covers, which the name does not tell. Looked at for
+      // every path the tool reports, one outside the project too: its other name may be inside.
+      const enforced = this.enforced(pid);
+      const inside = new Set(checked.map((p) => p.abs));
+      const beyond =
+        enforced.length > 0
+          ? [
+              ...new Set(
+                tool.edits
+                  .slice(0, MAX_CHECKED_PATHS)
+                  .filter((e) => typeof e.path === 'string' && e.path.length > 0)
+                  .map((e) => physical(resolve(evt.cwd, e.path))),
+              ),
+            ].filter((abs) => !inside.has(abs) && linkCount(abs) > 1)
+          : [];
+      if (checked.length === 0 && beyond.length === 0) {
         if (pending.length > 0)
           this.appendToolEvent(pid, session, 'tool.before', { tool: toolName });
         return EMPTY_HOOK_RESULT;
       }
-      // A file with another name as well is written under both: it is the very file a rule
-      // names, or it may be a file a rule covers, which the name does not tell.
-      const enforced = this.enforced(pid);
-      const twice = enforced.length > 0 ? checked.filter((p) => linkCount(p.abs) > 1) : [];
+      const twice =
+        enforced.length > 0
+          ? [
+              ...checked.filter((p) => linkCount(p.abs) > 1),
+              ...beyond.map((abs) => ({ rel: toPosix(abs), abs })),
+            ]
+          : [];
       const same = twice
         .map((p) => {
           const named = ruleNaming(enforced, project.root, p.abs);
@@ -1098,29 +1157,29 @@ export class HookHandler {
           deniedBy: rule?.rule.id ?? null,
         });
       }
-      const titles = enforced.slice(0, 5).map((m) => `"${m.title}"`);
       const more = enforced.length > 5 ? ` and ${enforced.length - 5} more` : '';
+      /** The warning for each such file, the rules named by `title`. */
+      const linked = (title: (m: Memory) => string): string[] =>
+        twice.slice(0, 5).map(
+          (p) =>
+            `${sanitizeLine(p.rel, 160)} has another name as well (a hard link): this write changes the file under every name it has, which may be a file covered by ${enforced.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${enforced
+              .slice(0, 5)
+              .map((m) => `"${title(m)}"`)
+              .join(', ')}${more}. Do not change it without asking the user.`,
+        );
       const context = joinContext(
         built?.text ?? null,
         renderSections([
           {
             heading: 'Coordination warning',
-            lines: [
-              ...outside.warnings,
-              ...twice
-                .slice(0, 5)
-                .map(
-                  (p) =>
-                    `${sanitizeLine(p.rel, 160)} has another name as well (a hard link): this write changes the file under every name it has, which may be a file covered by ${enforced.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${titles.join(', ')}${more}. Do not change it without asking the user.`,
-                ),
-            ].map((w) => `- ${w}`),
+            lines: [...outside.warnings, ...linked((m) => m.title)].map((w) => `- ${w}`),
           },
         ]),
       );
       if (rule) return this.ruleDenial(rule, context);
       const denied = guard.deny ?? outside.deny;
       if (denied) return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: denied, context };
-      return { ...EMPTY_HOOK_RESULT, context };
+      return withEnforcementWarning({ ...EMPTY_HOOK_RESULT, context }, linked(plainTitle));
     }
     if (tool.shell && tool.command) {
       const mistakes = this.d.mistakes.forCommand(pid, tool.command);
@@ -1237,13 +1296,19 @@ export class HookHandler {
             (h) => !h.unfinished,
           )
         : [];
-      let unreadWarning: string | null = null;
+      // What is said about enforced rules, and about what was not checked against them, is
+      // kept as plain text too, the rules named without markup characters.
+      const plain: string[] = [];
+      const warn = (text: (title: (m: Memory) => string) => string): void => {
+        warnings.push(text((m) => m.title));
+        plain.push(text(plainTitle));
+      };
       if (understood) {
         for (const hit of [...rules.warn, ...mayApply].slice(0, 5)) {
-          warnings.push(
+          warn((title) =>
             hit.unfinished
-              ? `Mindly could not search all of ${names(hit)} for files covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
-              : `This command names ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change it without asking the user.`,
+              ? `Mindly could not search all of ${names(hit)} for files covered by a project rule the user marked as enforced: "${title(hit.rule)}". Do not change such files without asking the user.`
+              : `This command names ${names(hit)}, covered by a project rule the user marked as enforced: "${title(hit.rule)}". Do not change it without asking the user.`,
           );
         }
       } else if (enforced.length > 0) {
@@ -1256,23 +1321,31 @@ export class HookHandler {
           ...enforced.filter((m) => reached.has(m.id)),
           ...enforced.filter((m) => !reached.has(m.id)),
         ];
-        const titles = ordered.slice(0, 5).map((m) => `"${m.title}"`);
         const more = ordered.length > 5 ? ` and ${ordered.length - 5} more` : '';
         // What could not be searched is not said to be covered.
         const covered = [...new Set(hits.flatMap((hit) => (hit.unfinished ? [] : hit.covers)))]
           .slice(0, 5)
           .map((x) => sanitizeLine(x, 160));
-        unreadWarning = `Mindly could not read this command fully; it may write any file, including files covered by ${ordered.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${titles.join(', ')}${more}.${covered.length > 0 ? ` Of what it names or may reach, ${covered.join(', ')} ${covered.length === 1 ? 'is' : 'are'} covered.` : ''} Do not change such files without asking the user.`;
-        warnings.push(unreadWarning);
+        warn(
+          (title) =>
+            `Mindly could not read this command fully; it may write any file, including files covered by ${ordered.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${ordered
+              .slice(0, 5)
+              .map((m) => `"${title(m)}"`)
+              .join(
+                ', ',
+              )}${more}.${covered.length > 0 ? ` Of what it names or may reach, ${covered.join(', ')} ${covered.length === 1 ? 'is' : 'are'} covered.` : ''} Do not change such files without asking the user.`,
+        );
       }
       if (possible.unchecked > 0) {
-        warnings.push(
-          `${possible.unchecked} of the paths this command names lie outside this working tree and were not checked against the project's rules.`,
+        warn(
+          () =>
+            `${possible.unchecked} of the paths this command names lie outside this working tree and were not checked against the project's rules.`,
         );
       }
       if (limit !== null) {
-        warnings.push(
-          `Mindly did not read this whole command (${limit}); the part it did not read was not checked against the project's rules. Do not use it to change files a rule protects.`,
+        warn(
+          () =>
+            `Mindly did not read this whole command (${limit}); the part it did not read was not checked against the project's rules. Do not use it to change files a rule protects.`,
         );
       }
       const sections = [
@@ -1293,10 +1366,7 @@ export class HookHandler {
       if (guard.deny)
         return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: guard.deny, context };
       if (context === null) return EMPTY_HOOK_RESULT;
-      // The warning on its own too, as plain text, for an agent that shows it to the person.
-      return unreadWarning === null
-        ? { ...EMPTY_HOOK_RESULT, context }
-        : { ...EMPTY_HOOK_RESULT, context, unreadWarning: sanitizeLine(unreadWarning, 2000) };
+      return withEnforcementWarning({ ...EMPTY_HOOK_RESULT, context }, plain);
     }
     if (pending.length > 0) this.appendToolEvent(pid, session, 'tool.before', { tool: toolName });
     return EMPTY_HOOK_RESULT;
@@ -1649,6 +1719,18 @@ export class HookHandler {
 /** Upper bound on file size read to map partial-line edits back to whole lines. */
 const MAX_PROVENANCE_FILE_BYTES = 512 * 1024;
 
+/** A rule's title as plain text for a person: one line, without characters that mark text up. */
+const plainTitle = (m: Memory): string => sanitizeLine(m.title, 160).replace(/[<>`*[\]]/g, '');
+
+/**
+ * A result with what it warns about enforced rules as plain text of its own, for an agent that
+ * takes no context before a tool runs and shows this to the person instead.
+ */
+function withEnforcementWarning(result: HookResult, warnings: readonly string[]): HookResult {
+  const text = sanitizeLine(warnings.join(' '), 2000);
+  return text === '' ? result : { ...result, enforcementWarning: text };
+}
+
 /** Two context blocks as one text; null when both are empty. */
 function joinContext(a: string | null, b: string | null): string | null {
   if (a === null) return b;
@@ -1716,7 +1798,8 @@ function writesElsewhere(
     /** A link to nothing, when the name is there; null when it is not. */
     const state = (name: string): boolean | null => {
       try {
-        return lstatSync(name).isSymbolicLink() && !existsSync(name);
+        const there = lstatSync(name, { throwIfNoEntry: false });
+        return there === undefined ? null : there.isSymbolicLink() && !existsSync(name);
       } catch {
         return null;
       }
@@ -1932,12 +2015,16 @@ function writePlaces(raw: string): {
 } {
   const places: { at: string; name?: string }[] = [];
   let lost = false;
-  let named = false;
-  const back = raw.split(/[\\/]/).some((part) => {
-    if (part === '..') return named;
-    if (part !== '' && part !== '.') named = true;
-    return false;
-  });
+  /** Whether a path has a `..` after a named part: taken off wherever a link before it leads. */
+  const backs = (path: string): boolean => {
+    let named = false;
+    return path.split(/[\\/]/).some((part) => {
+      if (part === '..') return named;
+      if (part !== '' && part !== '.') named = true;
+      return false;
+    });
+  };
+  const back = backs(raw);
   /** Whether a name is a symbolic link; with `nowhere`, one that leads to nothing. */
   const linkAt = (path: string, nowhere = false): boolean => {
     try {
@@ -1955,8 +2042,11 @@ function writePlaces(raw: string): {
     try {
       let at = path;
       for (let i = 0; i < MAX_LINKS_FOLLOWED && linkAt(at, true); i++) {
+        const to = readlinkSync(at);
+        // Where such a target leads is not settled by folding its text.
+        if (backs(to)) throw new Error('not followed');
         // From the folder the link is in, not the one the path names it by.
-        at = resolve(realpathSync.native(dirname(at)), readlinkSync(at));
+        at = resolve(realpathSync.native(dirname(at)), to);
       }
       if (linkAt(at, true)) lost = true;
       else places.push({ at });
@@ -1965,6 +2055,33 @@ function writePlaces(raw: string): {
     }
   }
   return { places, lost };
+}
+
+/**
+ * The nearest path at or above `path` that is there, links followed: what the system would place
+ * the rest under. Whatever is there has everything above it there too, so it is found in a few
+ * looks, however deep the path.
+ */
+function nearestThere(path: string): string {
+  const { root } = parse(path);
+  // Where the path and each folder above it ends, deepest first; the root is the last resort.
+  const ends = [path.length];
+  for (let i = path.length - 1; i >= root.length && i > 0; i--) if (path[i] === sep) ends.push(i);
+  const there = (end: number): boolean => {
+    try {
+      return statSync(path.slice(0, end), { throwIfNoEntry: false }) !== undefined;
+    } catch {
+      return false;
+    }
+  };
+  let low = 0;
+  let high = ends.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (there(ends[mid] as number)) high = mid;
+    else low = mid + 1;
+  }
+  return low === ends.length ? root : path.slice(0, ends[low]);
 }
 
 /** The deepest existing directory at or above `path`; null when there is none. */
@@ -2043,8 +2160,7 @@ function downTo(from: string, root: string, rest: readonly string[]): string[] |
 /** Whether a file or directory is there (a link counts, wherever it points). */
 function exists(path: string): boolean {
   try {
-    lstatSync(path);
-    return true;
+    return lstatSync(path, { throwIfNoEntry: false }) !== undefined;
   } catch {
     return false;
   }

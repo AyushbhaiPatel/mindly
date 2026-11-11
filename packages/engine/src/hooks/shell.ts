@@ -489,6 +489,8 @@ const TOP = String.fromCharCode(0xe002);
 /** `$OLDPWD`: the directory before the last `cd`. */
 const BACK = String.fromCharCode(0xe003);
 const MARKS = new RegExp(`[${HERE}-${BACK}]`);
+/** Where a write goes nowhere, or to what the command already writes to: no file of a project. */
+const SINKS = /^\/dev\/(null|zero|stdout|stderr|tty|fd\/\d+)$/;
 
 interface Word {
   text: string;
@@ -1139,12 +1141,17 @@ function joinWords(dir: Word, name: Word): Word {
 
 const isFlag = (w: Word): boolean => w.text.startsWith('-') && w.text !== '-';
 const plainArgs = (words: readonly Word[]): Word[] => words.slice(1).filter((w) => !isFlag(w));
+/** The words after the program's name where an option may stand: those before a `--`. */
+const optionWords = (words: readonly Word[]): Word[] => {
+  const end = words.findIndex((w, i) => i > 0 && w.text === '--');
+  return words.slice(1, end === -1 ? undefined : end);
+};
 const hasFlag = (words: readonly Word[], re: RegExp): boolean =>
-  words.slice(1).some((w) => isFlag(w) && re.test(w.text));
+  optionWords(words).some((w) => isFlag(w) && re.test(w.text));
 
 /** A short-option cluster (`-rf`) that holds one of `letters`, or one of the long `names`. */
 function hasOption(words: readonly Word[], letters: string, names: readonly string[]): boolean {
-  return words.slice(1).some((w) => {
+  return optionWords(words).some((w) => {
     if (!isFlag(w)) return false;
     if (w.text.startsWith('--')) return names.includes(w.text.split('=')[0] as string);
     return [...w.text.slice(1)].some((ch) => letters.includes(ch));
@@ -1173,6 +1180,8 @@ function argsWithout(words: readonly Word[], valued: readonly string[]): Word[] 
 function optionValue(words: readonly Word[], names: readonly string[]): Word | null {
   for (let i = 1; i < words.length; i++) {
     const w = words[i] as Word;
+    // What follows `--` is an operand, whatever it looks like.
+    if (w.text === '--') break;
     if (names.includes(w.text)) return words[i + 1] ?? null;
     const eq = w.text.indexOf('=');
     if (eq !== -1 && names.includes(w.text.slice(0, eq))) return sliceWord(w, eq + 1);
@@ -1711,14 +1720,16 @@ function readCopy(program: string, words: readonly Word[]): Verdict {
   const sources = target ? given : given.slice(0, -1);
   const dest = target ?? given[given.length - 1];
   if (dest === undefined) return READS;
-  const local = sources.filter((s) => !isRemote(s));
+  // Only scp and rsync take a `host:path`: to the others a colon is part of a name.
+  const remote = (w: Word): boolean => (program === 'scp' || program === 'rsync') && isRemote(w);
+  const local = sources.filter((s) => !remote(s));
   // What is moved away is gone from where it was.
   const gone =
     program === 'mv' || (program === 'rsync' && hasFlag(words, /^--remove-source-files$/))
       ? trees(local, { gone: true })
       : [];
   // A copy to another machine writes nothing here.
-  if ((program === 'scp' || program === 'rsync') && isRemote(dest)) return writes(...gone);
+  if (remote(dest)) return writes(...gone);
   const recursive =
     program === 'mv' ||
     (program === 'cp' && hasOption(words, 'rRa', ['--recursive', '--archive'])) ||
@@ -1729,7 +1740,7 @@ function readCopy(program: string, words: readonly Word[]): Verdict {
     posix.basename(s.text) === '.' || (program === 'rsync' && s.text.endsWith('/'));
   const entries = sources.map((s) => ({
     name: s.dynamic ? '*' : pours(s) ? '.' : posix.basename(s.text),
-    from: s.dynamic || isRemote(s) ? null : s,
+    from: s.dynamic || remote(s) ? null : s,
   }));
   // `mv` and `ln` put a name in place; `cp` writes the file that is there, unless told to
   // remove it first.
@@ -1742,7 +1753,15 @@ function readCopy(program: string, words: readonly Word[]): Verdict {
     tree: recursive,
     entries,
     ...(replaces ? { replaces } : {}),
-    ...(program === 'ln' && hasOption(words, 'n', ['--no-dereference']) ? { noFollow: true } : {}),
+    // `ln -n` takes a destination that is a link to a folder as a name; not one written with a
+    // `/` after it, which goes into the folder all the same, and not with several sources,
+    // which only a folder takes.
+    ...(program === 'ln' &&
+    hasOption(words, 'n', ['--no-dereference']) &&
+    sources.length < 2 &&
+    !/\/\.?$/.test(dest.text)
+      ? { noFollow: true }
+      : {}),
   };
   // `--delete` removes from the destination what the source does not hold: the tree goes.
   if (hasFlag(words, /^--del(ete.*)?$/)) return writes(...gone, ...trees([dest]));
@@ -3640,7 +3659,7 @@ export interface ShellTarget {
   /**
    * The path is under a home directory that could not be placed here (`~name/x`, or any `~`
    * path when no home was given): it starts with the `~` the shell expands. A name that merely
-   * starts with `~` (`./~x`, `'~'/x`) is a path like any other.
+   * starts with `~` (`./~x`, `'~'/x`) is a path like any other, and is given as `./~x`.
    */
   unplaced: boolean;
   /** The path is a wildcard pattern. */
@@ -3738,9 +3757,9 @@ export interface InPlace {
 /** What reading a command may know about where it runs. Nothing is looked up here. */
 export interface ShellReadOptions {
   /**
-   * The user's home directory: `~`, `~/x` and `$HOME` are read as paths under it. Without it they
-   * stay as written (`~/x`). `~name/x` (another user's home) always stays as written, for the
-   * caller to place.
+   * The user's home directory: `~`, `~/x` and `$HOME` are read as paths under it (under `/` when
+   * it is empty, as the shell does). Without it they stay as written (`~/x`). `~name/x` (another
+   * user's home) always stays as written, for the caller to place.
    */
   home?: string;
   /** Root of the working tree, for `$(git rev-parse --show-toplevel)`. */
@@ -3772,6 +3791,13 @@ export interface ShellReadOptions {
    * `understoodOnly`, a line with such a write is one not read fully.
    */
   strays?: (write: InPlace) => boolean;
+  /**
+   * Whether a path (relative to where the command starts, or absolute) has a symbolic link among
+   * the parts of it that are there, the last one too. With `understoodOnly`, a line that names
+   * such a path after it has made something is one not read fully: the link may lead to what
+   * was made.
+   */
+  viaLink?: (path: string) => boolean;
   /**
    * The folder the line starts in, absolute: what the line makes and what it names later are
    * compared from there. Without it, a path told from that folder and an absolute one are not
@@ -4020,7 +4046,8 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
   const reading: Reading = {
     out: new Map(),
     limit: null,
-    home: options.home ?? null,
+    // Set and empty, the shell takes `~/x` as `/x`.
+    home: options.home === '' ? '/' : (options.home ?? null),
     top: options.top ?? null,
     timeUp: options.timeUp ?? (() => false),
     commands: 0,
@@ -4042,11 +4069,14 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     holds: options.understoodOnly && fully === true ? (options.holds ?? mayHold) : null,
     exact: options.understoodOnly === true && fully === true,
     strays: options.understoodOnly && fully === true ? (options.strays ?? null) : null,
+    viaLink: options.understoodOnly && fully === true ? (options.viaLink ?? null) : null,
     compared: 0,
     cwd: options.cwd ?? null,
     touched: new Set(),
     through: new Map(),
     wild: [],
+    unclimbed: [],
+    climbed: new Set(),
     epoch: 0,
     unmatched: false,
   };
@@ -4274,11 +4304,13 @@ const UNDERSTOOD_KEYWORDS = new Set(['if', 'then', 'elif', 'else']);
  */
 function mayMatchMade(pattern: string, made: readonly string[], late: () => boolean): boolean {
   if (made.length === 0) return false;
-  const parts = pattern.split('/');
+  // A name that starts with `~` is told as `./~…`: the `./` is no part of it.
+  const split = (path: string): string[] => path.replace(/^\.\/(?=~)/, '').split('/');
+  const parts = split(pattern);
   if (parts.includes('**')) return made.length > 0;
   return made.some((m) => {
     if (late()) return true;
-    const ms = m.split('/');
+    const ms = split(m);
     const n = Math.min(ms.length, parts.length);
     for (let i = 0; i < n; i++) if (!partNames(parts[i] as string, ms[i] as string)) return false;
     return true;
@@ -4780,6 +4812,8 @@ interface Reading {
   exact: boolean;
   /** Whether a write in place reaches a file elsewhere than its name says; null: not asked. */
   strays: ((write: InPlace) => boolean) | null;
+  /** Whether a path has a symbolic link among the parts of it that are there; null: not asked. */
+  viaLink: ((path: string) => boolean) | null;
   /** Comparisons made against what the line made, for asking the time now and then. */
   compared: number;
   /** The folder the line starts in, absolute; null when not known. */
@@ -4794,6 +4828,10 @@ interface Reading {
   through: Map<string, boolean>;
   /** The same for paths written with wildcards; `made` is false for ones only removed. */
   wild: { pattern: string; parts: string[]; made: boolean; link: boolean }[];
+  /** Folders a `mkdir -p` made, those above them not yet among `madeDirs`. */
+  unclimbed: string[];
+  /** Folders a `mkdir -p` made, with those above them: not gone up from a second time. */
+  climbed: Set<string>;
   /** Counts the changes to what the line has made. */
   epoch: number;
   /** A wildcard may match what an earlier command of the line makes. */
@@ -4807,6 +4845,7 @@ interface Reading {
  * shell uses when nothing matches.
  */
 function wordPattern(w: Word): { pattern: string; glob: boolean; classes: boolean } {
+  if (!/[*?[{]/.test(w.text)) return { pattern: w.text, glob: false, classes: false };
   let pattern = '';
   let glob = false;
   let classes = false;
@@ -4865,11 +4904,16 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       return null;
     }
     let fixed: string | null = null;
+    // The folder the path is told from, when it is not absolute or under a home that is known.
+    let base: string | null = null;
+    // The path starts with a `~` that stands for a home not placed here.
+    let homeless = false;
     if (text.startsWith(HERE) || text.startsWith(BACK)) {
-      const at = text.startsWith(HERE) ? from : previous;
-      if (at === null) return null;
-      fixed = posix.join(at, `./${text.slice(1)}`);
+      base = text.startsWith(HERE) ? from : previous;
+      if (base === null) return null;
+      fixed = posix.join(base, `./${text.slice(1)}`);
     } else if (text.startsWith(HOME)) {
+      homeless = r.home === null;
       fixed = r.home !== null ? posix.join(r.home, `./${text.slice(1)}`) : `~${text.slice(1)}`;
     } else if (text.startsWith(TOP)) {
       if (r.top === null) return null;
@@ -4879,24 +4923,37 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       const other = /^~([+-])(\/.*)?$/.exec(text);
       if (other) {
         // `~+` is the working directory, `~-` the one before it.
-        const at = other[1] === '+' ? from : previous;
-        if (at === null) return null;
-        fixed = posix.join(at, `./${other[2] ?? ''}`);
+        base = other[1] === '+' ? from : previous;
+        if (base === null) return null;
+        fixed = posix.join(base, `./${other[2] ?? ''}`);
       } else if (r.home !== null && text === '~') fixed = r.home;
       else if (r.home !== null && text.startsWith('~/')) fixed = posix.join(r.home, text.slice(2));
-      else fixed = text;
+      else {
+        homeless = true;
+        fixed = text;
+      }
     } else if (posix.isAbsolute(text)) {
       fixed = text;
-    }
+    } else base = from;
     const out = fixed ?? (from === null ? null : posix.join(from, text));
     if (out === null || MARKS.test(out)) return null;
     if (out.length > MAX_PATH_CHARS) {
       r.limit ??= `a path longer than ${MAX_PATH_CHARS} characters was not read`;
       return null;
     }
-    // A path under a home directory that could not be placed keeps its `~`.
+    // A path under a home directory that could not be placed keeps its `~`, and so does one
+    // told from a folder under such a home. A name that merely starts with `~` is told apart
+    // from them as `./~…`.
     const path = posix.normalize(out);
-    return path.length > 1 ? path.replace(/\/+$/, '') : path;
+    const tidy = path.length > 1 ? path.replace(/\/+$/, '') : path;
+    return tidy.startsWith('~') && !homeless && !(base?.startsWith('~') ?? false)
+      ? `./${tidy}`
+      : tidy;
+  };
+  /** A name under a placed folder, a name that starts with `~` kept apart from a home. */
+  const under = (folder: string, name: string): string => {
+    const path = posix.join(folder, name);
+    return path.startsWith('~') && !folder.startsWith('~') ? `./${path}` : path;
   };
   /**
    * Whether a word starts with a `~` the shell expands: the first character of the word as
@@ -4918,9 +4975,14 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   let folding = false;
   /** A placed path as told from the folder the line starts in. */
   const anchor = (path: string): string =>
-    r.cwd !== null && !posix.isAbsolute(path) && !path.startsWith('~')
-      ? posix.join(r.cwd, path)
-      : posix.normalize(path);
+    posix.isAbsolute(path) || path.startsWith('~')
+      ? posix.normalize(path)
+      : r.cwd === null
+        ? under('.', path)
+        : // A placed path that does not start with a `.` has nothing left to fold.
+          path.startsWith('.') || r.cwd === '/'
+          ? posix.join(r.cwd, path)
+          : `${r.cwd}/${path}`;
   /** The folders above a path, nearest first, as far as the text tells them. */
   const above = (at: string): string[] => {
     const out: string[] = [];
@@ -4930,6 +4992,27 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       if (up === '/' || up === '.') break;
     }
     return out;
+  };
+  /** The folder the line starts in, and those above it, were there before it ran. */
+  const wasThere = (p: string): boolean =>
+    p === '.' ||
+    p === '/' ||
+    (r.cwd !== null && (r.cwd === p || (r.cwd.startsWith(p) && r.cwd[p.length] === '/')));
+  /**
+   * Puts the folders above those a `mkdir -p` made among the folders made, as far as `above`
+   * goes. Done when a later command first asks, so that a line of many deep folders and nothing
+   * after them costs no more than its words; what is above a folder gone up from before was
+   * seen then.
+   */
+  const settle = (): void => {
+    for (const at of r.unclimbed.splice(0)) {
+      for (const p of [at, ...above(at)]) {
+        if (wasThere(p)) break;
+        const before = r.climbed.size;
+        if (r.climbed.add(p).size === before) break;
+        if (p !== at && !r.through.has(p)) r.madeDirs.add(p);
+      }
+    }
   };
   /**
    * Asked before each comparison against what the line made: true when there is no time left
@@ -5026,7 +5109,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   const lands = (dest: string, w: Word, entries: readonly { name: string }[]): string[] => {
     if (late()) return [dest];
     const inside = entries.map((e) => (e.name === '.' || e.name === '*' ? null : e.name));
-    const inner = inside.flatMap((name) => (name === null ? [] : [posix.join(dest, name)]));
+    const inner = inside.flatMap((name) => (name === null ? [] : [under(dest, name)]));
     if (inside.includes(null)) return [dest, ...inner];
     if (w.text.endsWith('/')) return inner;
     if (r.madeDirs.has(anchor(dest))) return linking ? [dest, ...inner] : inner;
@@ -5037,6 +5120,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   };
 
   const add = (item: Item, from: string | null = dir): void => {
+    if (r.unclimbed.length > 0) settle();
     if (r.out.size >= MAX_TARGETS) {
       r.limit ??= `more than ${MAX_TARGETS} write targets`;
       return;
@@ -5068,16 +5152,30 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       if (r.added.size < MAX_COMMANDS) r.added.add(same);
     }
     const { pattern, glob, classes } = wordPattern(w);
-    // A `[…]` class the shell cannot match stays in the name as written: both readings count.
-    const forms = classes
-      ? [
-          { text: pattern, glob },
-          { text: w.text, glob: false },
-        ]
-      : [{ text: pattern, glob }];
     const certain = item.certain ?? true;
     const only = item.only ?? null;
     const how = item.how ?? 'write';
+    // A wildcard in a name a command of a line read fully makes itself (`touch`, `mkdir`, a
+    // redirection, an output file): one that matches nothing stays in the name as written, and
+    // a file of that very name is made. A removal or a change of mode only takes what is there.
+    const makes =
+      r.exact &&
+      glob &&
+      certain &&
+      how === 'write' &&
+      item.gone !== true &&
+      item.entries === undefined &&
+      !item.pathspec &&
+      !item.pattern;
+    // So both readings count; as they do for a `[…]` class the shell cannot match, which stays
+    // in the name as written too.
+    const forms =
+      classes || makes
+        ? [
+            { text: pattern, glob },
+            { text: w.text, glob: false },
+          ]
+        : [{ text: pattern, glob }];
     // No more than are kept are placed.
     const entries = (item.entries ?? []).slice(0, MAX_ENTRIES).map((e) => ({
       name: e.name,
@@ -5093,11 +5191,30 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       if (path === null && from === null && !posix.isAbsolute(form.text)) {
         r.limit ??= 'a command runs in a folder the text does not tell';
       }
-      if (path === null || /^\/(dev|proc)\//.test(path)) continue;
+      if (path === null || SINKS.test(path)) continue;
+      // Any other path the system makes up leads where the text does not tell
+      // (`/proc/self/cwd`, `/proc/self/root`).
+      if (/^\/(dev|proc|sys)\//.test(path)) {
+        r.unmatched = true;
+        continue;
+      }
       if (r.exact) {
         // What the text shows as written is made; what may only change is as it was. A copy
         // into a folder makes what lands in it.
         const gone = item.gone === true || how === 'clean' || how === 'clean-ignored';
+        // A wildcard in the destination of a copy, move or link, or in a folder a command
+        // fills: where it matches a folder, what is brought is put inside it, and where it
+        // matches nothing, the name as written is made. Which, the text does not tell.
+        if (
+          form.glob &&
+          certain &&
+          !gone &&
+          !item.pathspec &&
+          !item.pattern &&
+          (item.entries !== undefined || how !== 'write')
+        ) {
+          r.unmatched = true;
+        }
         const made = !(gone || certain || item.whole)
           ? []
           : gone || item.entries === undefined
@@ -5113,22 +5230,35 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         ) {
           r.unmatched = true;
         }
+        // Once the line has made something, a `mkdir` folder too, a symbolic link that was
+        // there before may lead to it: a path with one among its parts, or one that leads
+        // nowhere yet, goes where the text does not tell.
+        if (
+          !item.pathspec &&
+          r.viaLink !== null &&
+          (r.through.size > 0 || r.madeDirs.size > 0 || r.wild.some((g) => g.made)) &&
+          [path, ...made].some((p) => r.viaLink?.(p))
+        ) {
+          r.unmatched = true;
+        }
         // The folder a command runs in, and the top of the tree, stay what they are: it is what
         // they hold that is made.
-        const stays = (p: string): boolean =>
-          anchor(p) === anchor(from === null || from === '' ? '.' : from) || anchor(p) === r.top;
+        const runsIn = anchor(from === null || from === '' ? '.' : from);
+        const stays = (p: string): boolean => {
+          const at = anchor(p);
+          return at === runsIn || at === r.top;
+        };
         // A file written in place is written wherever it is: one with another name, or behind
         // a link that leads nowhere yet, is not read here. A name taken away or given to
         // something else leaves the file be, and git puts a new file where it writes one of
         // its tree. A copy writes its destination, or what each source brings under its name.
         // A wildcard the shell matches against a symbolic link to a folder leads where the link
-        // does: for a folder on the way, whatever the command; for the last part, when what a
-        // copy, move or link brings lands in it, or a removal names it with a `/` after it.
+        // does: for a folder on the way, whatever the command; for the last part, when a removal
+        // names it with a `/` after it.
         if (r.strays !== null && form.glob && !item.pathspec && !item.pattern) {
           if (
             (wildFolder(w) && r.strays({ path: posix.dirname(path), glob: true, kind: 'link' })) ||
-            ((item.entries !== undefined || (gone && w.text.endsWith('/'))) &&
-              r.strays({ path, glob: true, kind: 'link' }))
+            (gone && w.text.endsWith('/') && r.strays({ path, glob: true, kind: 'link' }))
           ) {
             r.unmatched = true;
           }
@@ -5137,7 +5267,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           const glob = form.glob;
           const writes: InPlace[] =
             item.sample !== undefined
-              ? [{ path: posix.join(posix.dirname(path), item.sample), glob: true, kind: 'file' }]
+              ? [{ path: under(posix.dirname(path), item.sample), glob: true, kind: 'file' }]
               : how === 'land'
                 ? [{ path, glob, kind: 'land' }]
                 : how !== 'write'
@@ -5147,7 +5277,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
                     : [
                         { path, glob, kind: 'file' },
                         ...entries.map((e): InPlace => ({
-                          path: e.name === '.' || e.name === '*' ? path : posix.join(path, e.name),
+                          path: e.name === '.' || e.name === '*' ? path : under(path, e.name),
                           glob: glob || /[*?]/.test(e.name),
                           kind: 'copy',
                           from: e.source,
@@ -5157,7 +5287,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         }
         for (const p of made) {
           pending.push({
-            path: !gone && !form.glob && stays(p) ? posix.join(p, '*') : p,
+            path: !gone && !form.glob && stays(p) ? under(p, '*') : p,
             glob: form.glob || (!gone && stays(p)),
             kind: gone ? 'gone' : folding ? 'folder' : 'made',
             link: (linking || item.whole === true) && !gone && !folding,
@@ -5194,7 +5324,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       }
       r.out.set(key, {
         path,
-        unplaced: path.startsWith('~') && (tilde(w) || w.text.startsWith(HOME)),
+        unplaced: path.startsWith('~'),
         noFollow: item.noFollow ?? false,
         glob: form.glob,
         dotfiles: item.dotfiles ?? false,
@@ -5339,7 +5469,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       // holds counts as made, for the words of later commands.
       if (r.exact && (own || q.pathspecs.some((w) => /^:[(/!^]/.test(w.text)))) {
         const tree = top && r.top !== null ? r.top : base;
-        pending.push({ path: posix.join(tree, '*'), glob: true, kind: 'made', link: true });
+        pending.push({ path: under(tree, '*'), glob: true, kind: 'made', link: true });
       }
       for (const { w, magic } of given) {
         if (r.out.size >= MAX_TARGETS) {
@@ -5389,6 +5519,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
    * a folder is not known here, and the line is not read fully.
    */
   const intoMade = (items: readonly Item[], from: string | null): Item[] => {
+    if (r.unclimbed.length > 0) settle();
     if (r.touched.size === 0 && r.wild.length === 0) return [...items];
     const out: Item[] = [];
     for (const item of items) {
@@ -5753,6 +5884,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // its parents, under `-p`) is one, unless something else made that path before.
     const kept = r.touched.size + r.through.size + r.madeDirs.size + r.wild.length;
     let linked = false;
+    let withParents: boolean | null = null;
     for (const made of pending) {
       const at = anchor(made.path);
       if (r.touched.size + r.wild.length >= MAX_TARGETS * 4) {
@@ -5774,12 +5906,12 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       r.touched.add(at);
       if (made.kind === 'gone') continue;
       if (made.kind === 'folder') {
-        const parents = hasOption(words, 'p', ['--parents']) ? above(at) : [];
-        for (const p of [at, ...parents]) {
-          // The folder the line starts in, and those above it, were there before.
-          if (p === '.' || p === '/' || (r.cwd !== null && `${r.cwd}/`.startsWith(`${p}/`))) break;
-          if (!r.through.has(p)) r.madeDirs.add(p);
-        }
+        if (wasThere(at)) continue;
+        if (!r.through.has(at)) r.madeDirs.add(at);
+        // Under `-p` the folders above it are made too: put among the made ones when a later
+        // command first asks (see `settle`).
+        withParents ??= hasOption(words, 'p', ['--parents']);
+        if (withParents) r.unclimbed.push(at);
         continue;
       }
       // A plain file made where `mkdir` made a folder leaves the folder, if it is there.

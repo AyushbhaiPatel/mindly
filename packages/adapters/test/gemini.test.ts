@@ -192,16 +192,16 @@ describe('gemini render', () => {
     });
   });
 
-  it('shows the person that a line was not read fully, and nothing else of the context', () => {
+  it('shows the person what enforced rules warn about, and nothing else of the context', () => {
     const before = must(a.parse('BeforeTool', f('BeforeTool.run_shell_command')));
-    const unread = { context: '<ctx>could not read</ctx>', unreadWarning: 'could not read' };
+    const unread = { context: '<ctx>could not read</ctx>', enforcementWarning: 'could not read' };
     expect(out(a.render(before, result(unread)).stdout)).toEqual({
       systemMessage: 'could not read',
     });
     expect(out(a.render(before, result({ ...unread, userMessage: 'note' })).stdout)).toEqual({
       systemMessage: 'note\n\ncould not read',
     });
-    const long = out(a.render(before, result({ unreadWarning: 'x'.repeat(5000) })).stdout);
+    const long = out(a.render(before, result({ enforcementWarning: 'x'.repeat(5000) })).stdout);
     expect((long['systemMessage'] as string).length).toBe(2000);
     // A deny carries the context in its reason; an ask shows its reason.
     expect(
