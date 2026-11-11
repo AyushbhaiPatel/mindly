@@ -90,7 +90,7 @@ export function guarded(scopes: Record<string, string[]>) {
   return { dir, mindly, shell, git };
 }
 
-/** Every file under `dir` (outside .git) matching `test`, with content hash and mtime. */
+/** Every file under `dir` (outside .git) matching `test`, with content hash, mtime and mode. */
 function snapshot(dir: string, test: (rel: string) => boolean): Map<string, string> {
   const out = new Map<string, string>();
   const walk = (d: string) => {
@@ -103,7 +103,7 @@ function snapshot(dir: string, test: (rel: string) => boolean): Map<string, stri
         if (!test(rel)) continue;
         const st = statSync(p);
         const h = createHash('sha1').update(readFileSync(p)).digest('hex');
-        out.set(rel, `${h}:${st.mtimeMs}:${st.ino}`);
+        out.set(rel, `${h}:${st.mtimeMs}:${st.ino}:${st.mode}`);
       }
     }
   };

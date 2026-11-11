@@ -37,6 +37,7 @@ import type { CheckpointService } from '../features/checkpoints.js';
 import { commandKey, type MistakeService } from '../memory/mistakes.js';
 import {
   mayHold,
+  partNames,
   normalizeCommandLine,
   pathNamer,
   readShellWrites,
@@ -75,6 +76,11 @@ const MAX_RECORDED_PATHS = 50;
 const MAX_TREE_LOOKUPS = 16;
 /** Folders a shell command's `cd`s pass through that are checked for symbolic links. */
 const MAX_LINK_LOOKUPS = 256;
+/**
+ * Files and folders a shell command writes in place that are looked at for another name: an
+ * everyday folder (a build, the sources) is looked through whole, within the time there is.
+ */
+const MAX_NAME_LOOKUPS = 50_000;
 /** Files of one shell command that are checked again (decisions, exports) after it ran. */
 const MAX_SHELL_CHANGED = 20;
 /**
@@ -484,21 +490,15 @@ export class HookHandler {
     const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     // The programs of the line find their paths from the folder itself, whatever links the
-    // session's spelling of it goes through: paths are placed from there. The shell takes the
-    // `..` of a `cd` off its own spelling, which is this one unless a link is on its way, in the
-    // spelling given here or in a `PWD` the shell inherits that names the same folder.
-    const given = resolve(session);
-    const cwd = physical(given);
-    const inherited = process.env.PWD ?? '';
-    const logical =
-      cwd !== given ||
-      (isAbsolute(inherited) && resolve(inherited) !== cwd && physical(inherited) === cwd);
+    // session's spelling of it goes through: paths are placed from there.
+    const cwd = physical(resolve(session));
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
     // The command is read as text; where it runs, the home directory and the repository root
     // are handed in so `~`, `$HOME` and `$(git rev-parse --show-toplevel)` can be placed.
     // A `cd` through a symbolic link leads elsewhere than its text says. Asked of the disk a
     // bounded number of times; past that, or out of time, a path counts as one.
     let lookups = 0;
+    let looked = 0;
     const linked = (path: string): boolean => {
       if (path.startsWith('~')) return false;
       if (++lookups > MAX_LINK_LOOKUPS || timeUp()) return true;
@@ -526,9 +526,14 @@ export class HookHandler {
       isDir: (path) => canEnter(resolve(cwd, placeHome(path))),
       // A `CDPATH` the agent's shell inherits is the one this process has.
       cdpath: (process.env.CDPATH ?? '') !== '',
-      logical,
       cwd: toPosix(cwd),
       holds,
+      // A file with another name is written under both: looked for while there is time.
+      shared: (path, tree, glob) =>
+        otherNames(toPosix(resolve(cwd, placeHome(path))), tree, glob, () => {
+          looked++;
+          return looked > MAX_NAME_LOOKUPS || timeUp();
+        }),
     });
     let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
@@ -1436,6 +1441,65 @@ function physical(path: string): string {
     }
   }
   return path;
+}
+
+/**
+ * Whether a path a command writes in place is a regular file with another name as well (a link
+ * count above one), links on the way to it followed; with `tree`, whether a folder there holds
+ * one at any depth; with `glob`, whether a name its `*` and `?` match is, or holds, one. `out`
+ * is asked before each look: when there are too many to look at, the answer is yes.
+ */
+function otherNames(path: string, tree: boolean, glob: boolean, out: () => boolean): boolean {
+  /** A file there, or with `tree` anything under a folder there. */
+  const at = (target: string): boolean => {
+    if (out()) return true;
+    let stat;
+    try {
+      stat = statSync(target);
+    } catch {
+      // Nothing there: a new file is made, with one name.
+      return false;
+    }
+    if (stat.isFile()) return stat.nlink > 1;
+    if (!tree || !stat.isDirectory()) return false;
+    const entries = list(target);
+    return entries === null || entries.some((e) => !e.link && at(join(target, e.name)));
+  };
+  /** The names in a folder; null when they cannot all be looked at. */
+  const list = (dir: string): { name: string; link: boolean }[] | null => {
+    const names: { name: string; link: boolean }[] = [];
+    try {
+      const open = opendirSync(dir);
+      try {
+        for (let e = open.readSync(); e !== null; e = open.readSync()) {
+          if (out()) return null;
+          names.push({ name: e.name, link: e.isSymbolicLink() });
+        }
+      } finally {
+        open.closeSync();
+      }
+    } catch {
+      // Not a folder that can be read: the shell matches nothing in it either.
+      return [];
+    }
+    return names;
+  };
+  if (!glob) return at(path);
+  // Everything the pattern can match is under the folder before its first wildcard.
+  const parts = path.split('/');
+  const wild = parts.findIndex((x) => /[*?]/.test(x));
+  if (wild === -1) return at(path);
+  const match = (dir: string, rest: readonly string[]): boolean => {
+    const [part, ...more] = rest;
+    if (part === undefined) return at(dir);
+    if (!/[*?]/.test(part)) return match(join(dir, part), more);
+    const entries = list(dir);
+    return (
+      entries === null ||
+      entries.some((e) => partNames(part, e.name) && match(join(dir, e.name), more))
+    );
+  };
+  return match(parts.slice(0, wild).join('/') || '/', parts.slice(wild));
 }
 
 /** The deepest existing directory at or above `path`; null when there is none. */

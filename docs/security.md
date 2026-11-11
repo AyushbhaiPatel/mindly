@@ -86,7 +86,15 @@ memory, which is then injected into every other agent.
   command runs in and the top of the tree, only what they hold. The paths git is given in its
   own working tree are not held against what the line made: git does not follow a link there,
   it refuses the path or puts a folder in the link's place. The destination of `git mv` is
-  followed, and is held like any other. A copy,
+  followed, and is held like any other. A file that has another name as well (a hard link:
+  a link count above one when the command is checked) is written under every name it has. A
+  line that writes such a file in place, that is its content, mode, owner or times (a
+  redirection onto it, `cp` onto it or into the folder that holds it, `touch`, `chmod`, `chown`,
+  an output file of git), is not read fully. Nor is a recursive `chmod`, `chown` or copy over a
+  folder that holds such a file at any depth, or more files than can be looked at in the time
+  there is. Taking a name away or giving it to something else (`rm`, `mv` onto it, `ln -f`,
+  `cp --remove-destination`) leaves the file alone, and git puts a new file where it writes
+  one of its tree: those are read as before. A copy,
   move or link into a folder lands inside it under each source's name, and that name is what is
   made: a destination written with a `/` after it, a folder `mkdir` made earlier on the line, or
   a folder on disk (not a link to one) that the line has not written, removed or renamed. Any
@@ -109,13 +117,12 @@ memory, which is then injected into every other agent.
     no quotes around it;
   - it has exactly one operand, no option, and no redirection of its own;
   - the operand is plain text that names the folder as written: it does not start with `~` or
-    `-`, has no wildcard, has no `..` after a folder's name, and, when `CDPATH` is set and not
-    empty in Mindly's own environment, starts with `/`, `./` or `../`, so the shell does not
-    look for it elsewhere;
-  - a leading `..` (`cd ..`, `cd ../../x`) is read only when the session's folder is spelled
-    without a symbolic link, both as it is given to Mindly and in a `PWD` in Mindly's own
-    environment that names the same folder: the shell takes `..` off its own spelling of the
-    folder, while every other path is placed from the folder itself, links followed;
+    `-`, has no wildcard, and, when `CDPATH` is set and not empty in Mindly's own environment,
+    starts with `/` or `./`, so the shell does not look for it elsewhere;
+  - the operand has no `..` anywhere (`cd ..`, `cd ../x`, `cd a/../b`): the shell takes `..`
+    off its own spelling of the folder it is in, which may go through a symbolic link that
+    Mindly, given the folder itself, cannot see, while every other path is placed from the
+    folder itself, links followed;
   - the folder is there when the command is checked, is a directory, is not reached through a
     symbolic link in any part of the path, and can be entered (search permission);
   - everything after the `cd` is one chain of `&&` to the end of the line: no `;`, `||`, `&`,
