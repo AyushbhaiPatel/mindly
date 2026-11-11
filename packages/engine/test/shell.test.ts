@@ -1063,6 +1063,7 @@ describe('write targets of a shell command', () => {
     expect(read('rm src/generated/*.ts')).toEqual([
       {
         path: 'src/generated/*.ts',
+        unplaced: false,
         glob: true,
         dotfiles: false,
         nocase: false,
@@ -1346,6 +1347,16 @@ describe('write targets of a shell command', () => {
       'cd /srv/app && ls',
       "cd 'my folder' && ls",
       'cd sub && ls\n',
+      // A `#` that starts a word hides the rest of its line; inside a word or quotes it is
+      // a character like any other.
+      '# a comment',
+      '  # a comment after blanks\n# and another',
+      'echo a # b',
+      'git status # what changed; rm -rf $x',
+      'git status; # then nothing',
+      'git status && # then\ngit log',
+      'echo a#b "#c" \'# d\'',
+      'cd sub && ls # in there',
       // A pipe joins commands that run together or not at all.
       'cd sub && ls | head',
       'cd sub && git log --oneline | head -5 && pwd',
@@ -1496,8 +1507,10 @@ describe('write targets of a shell command', () => {
       'echo x <&3',
       'echo x >| f',
       'cat < file',
-      '# a comment',
-      'echo a # b',
+      // A comment hides nothing that is run after its line, nor a redirection's target.
+      'git status # then\nrm $x',
+      'echo x > # nowhere',
+      'echo "unclosed # not a comment',
       'printf -v x y',
       'test -v x',
       'git status;;',
@@ -1635,6 +1648,72 @@ describe('write targets of a shell command', () => {
     expect(onDisk('ln -s ../certs docs && rm -f docs/certs/x')).toBe(false);
     expect(onDisk('ln -sfn certs docs && rm -f docs/x', true)).toBe(false);
     expect(onDisk('rm -rf docs && ln -s certs docs && rm -f docs/x')).toBe(false);
+    // What a comment hides is not read; the line after it is.
+    expect(targets('# rm a.ts\nrm b.ts')).toEqual(['b.ts']);
+    expect(targets('rm a.ts # rm b.ts')).toEqual(['a.ts']);
+    expect(readShellWrites('cd sub && ls # x\nrm y', { understoodOnly: true }).understood).toBe(
+      false,
+    );
+    // A name that merely starts with `~` is a path like any other; one the shell expands to a
+    // home that is not known here is marked, and not placed.
+    const placed = (line: string) =>
+      readShellWrites(line).targets.map((t) => `${t.path}${t.unplaced ? ' unplaced' : ''}`);
+    expect(placed('rm -f ./~/k.pem')).toEqual(['~/k.pem']);
+    expect(placed("rm -f '~'/k.pem")).toEqual(['~/k.pem']);
+    expect(placed('rm -f ./~old.pem "~new.pem"')).toEqual(['~old.pem', '~new.pem']);
+    expect(placed('rm -f ~other/k.pem')).toEqual(['~other/k.pem unplaced']);
+    expect(placed('rm -f ~/k.pem')).toEqual(['~/k.pem unplaced']);
+    expect(readShellWrites('rm -f ~/k.pem', { home: '/home/u' }).targets[0]).toMatchObject({
+      path: '/home/u/k.pem',
+      unplaced: false,
+    });
+    expect(readShellWrites('cd ./~ && rm -f k.pem', { understoodOnly: true })).toMatchObject({
+      understood: true,
+      targets: [{ path: '~/k.pem', unplaced: false }],
+    });
+    // A wildcard the shell may match against a symbolic link leads where the link does: a
+    // folder on the way, whatever the command; the last part, for a write in place or a removal
+    // with a `/` after it.
+    const links: string[] = [];
+    const withLinks = (line: string) =>
+      readShellWrites(line, {
+        understoodOnly: true,
+        cwd: '/w',
+        strays: ({ path, kind }) => {
+          links.push(`${kind} ${path}`);
+          return kind === 'link' ? /^l\?k|^sub\/\*/.test(path) : path === 'l?k';
+        },
+      }).understood;
+    for (const [line, fully] of [
+      ['rm -f l?k/server.pem', false],
+      ['rm -f sub/*/server.pem', false],
+      ['cat l?k/server.pem > out.txt', true],
+      ['rm -rf l?k/', false],
+      ['rm -rf l?k', true],
+      ['rm -f *.tmp', true],
+      ['chmod 600 l?k', false],
+      ['echo x > l?k', false],
+      ['rm -rf packages/*/dist', true],
+      ["git checkout -- 'l?k/x'", true],
+    ] as const) {
+      expect(withLinks(line), line).toBe(fully);
+    }
+    links.length = 0;
+    withLinks('rm -rf packages/*/dist/*.js && rm -rf out/*/');
+    expect(links).toEqual(['link packages/*/dist', 'link out/*']);
+    // A pathspec git matches by rules of its own may name anything in its tree.
+    for (const [line, fully] of [
+      ["git checkout other -- ':(icase)LNK' && rm -f lnk/x", false],
+      ["git checkout other -- ':(glob)**/lnk' && rm -f lnk/x", false],
+      ["git restore -s other ':/lnk' && echo x > lnk/y", false],
+      ['git --icase-pathspecs checkout other -- LNK && rm -f lnk/x', false],
+      ["git --glob-pathspecs checkout other -- '**/lnk' && rm -f lnk/x", false],
+      ['git --literal-pathspecs checkout other -- lnk && rm -f other/x', false],
+      ['git checkout other -- lnk && rm -f other/x', true],
+      ["git checkout other -- ':(icase)LNK' && git status", true],
+    ] as const) {
+      expect(readShellWrites(line, { understoodOnly: true }).understood, line).toBe(fully);
+    }
     // A file with another name is written under both: a line that writes one in place is
     // not read fully. A name taken away, or given to something else, leaves the file be.
     const asked: string[] = [];
@@ -1686,6 +1765,7 @@ describe('write targets of a shell command', () => {
       'touch d*/f && cp a b && cp -r src/. out && git format-patch -o patches -1 && git clone u c',
     );
     expect(asked).toEqual([
+      'link d* glob',
       'file d*/f glob',
       'file b',
       'copy b/a from a',

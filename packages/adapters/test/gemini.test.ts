@@ -192,9 +192,22 @@ describe('gemini render', () => {
     });
   });
 
-  it('never emits allow, BeforeTool context, AfterAgent decisions or SessionEnd output', () => {
-    const before = must(a.parse('BeforeTool', f('BeforeTool.write_file')));
-    expect(a.render(before, result({ decision: 'allow', context: 'ctx' })).stdout).toBe('');
+  it('shows the person what a tool call is warned about, as the model cannot be told', () => {
+    const before = must(a.parse('BeforeTool', f('BeforeTool.run_shell_command')));
+    expect(
+      out(a.render(before, result({ context: 'could not read this command' })).stdout),
+    ).toEqual({ systemMessage: 'could not read this command' });
+    expect(
+      out(
+        a.render(before, result({ decision: 'allow', context: 'ctx', userMessage: 'note' })).stdout,
+      ),
+    ).toEqual({ systemMessage: 'note\n\nctx' });
+    const long = out(a.render(before, result({ context: 'x'.repeat(5000) })).stdout);
+    expect((long['systemMessage'] as string).length).toBe(2000);
+    expect(a.render(before, result({ decision: 'allow' })).stdout).toBe('');
+  });
+
+  it('never emits allow, AfterAgent decisions or SessionEnd output', () => {
     const stop = must(a.parse('AfterAgent', f('AfterAgent')));
     expect(a.render(stop, result({ context: 'ctx' })).stdout).toBe('');
     expect(out(a.render(stop, result({ userMessage: 'bye' })).stdout)).toEqual({

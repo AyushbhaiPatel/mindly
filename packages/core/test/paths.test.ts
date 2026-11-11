@@ -37,27 +37,16 @@ describe('resolveInsideRoot', () => {
     expect(() => resolveInsideRoot(root, 'a\0b')).toThrow(/NUL/);
   });
 
-  it('places a path where a write to it lands, links followed part by part', () => {
-    mkdirSync(join(root, 'certs', 'prod'), { recursive: true });
-    mkdirSync(join(root, 'sub'));
-    // A link to a file that is not there yet: the write makes that file.
-    symlinkSync('certs/new.pem', join(root, 'pending'));
-    expect(resolveInsideRoot(root, 'pending').rel).toBe('certs/new.pem');
-    symlinkSync('../certs/other.pem', join(root, 'sub', 'pending'));
-    expect(resolveInsideRoot(root, 'sub/pending').rel).toBe('certs/other.pem');
-    symlinkSync(join(outside, 'x'), join(root, 'out'));
-    expect(() => resolveInsideRoot(root, 'out')).toThrow(/outside/);
-    // `..` leaves the folder a link before it leads to, not the link's own folder.
-    symlinkSync('certs/prod', join(root, 'deep'));
-    expect(resolveInsideRoot(root, 'deep/../server.pem').rel).toBe('certs/server.pem');
-    expect(resolveInsideRoot(root, `${root}/deep/../new.pem`).rel).toBe('certs/new.pem');
-    expect(resolveInsideRoot(root, 'src/../src/a.ts').rel).toBe('src/a.ts');
-    expect(resolveInsideRoot(root, 'nosuch/../src/a.ts').rel).toBe('src/a.ts');
-    expect(() => resolveInsideRoot(root, 'escape/../x')).toThrow(/outside/);
-    // Links that go round lead nowhere: the system fails the write too.
-    symlinkSync('loop', join(root, 'loop'));
-    expect(() => resolveInsideRoot(root, 'loop')).toThrow(/too many symbolic links/);
-    expect(() => resolveInsideRoot(root, 'loop/x')).toThrow(/too many symbolic links/);
+  it('places a long path that is not there in time that grows with its length', () => {
+    const input = `${'b/'.repeat(1999)}f`;
+    expect(input.length).toBeGreaterThanOrEqual(3999);
+    let best = Infinity;
+    for (let k = 0; k < 5; k++) {
+      const started = performance.now();
+      expect(resolveInsideRoot(root, input).rel).toBe(input);
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(best).toBeLessThan(30);
   });
 });
 

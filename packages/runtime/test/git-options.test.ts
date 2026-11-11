@@ -4,9 +4,17 @@
 // pre-tool hook is asked; it must block or at least warn. The commands after them write no
 // covered file and must never be blocked.
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, normalize } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GIT_ENV, file, guarded, runInCopy } from './written.js';
 
@@ -100,6 +108,10 @@ const OLDPWD_INHERITED = works(
 /** GNU `cp -a` keeps two names of one file as one file; BSD `cp -a` (macOS) copies each. */
 const CP_KEEPS_NAMES = works(
   'd=$(mktemp -d) && mkdir "$d/a" && echo x > "$d/a/f" && ln "$d/a/f" "$d/a/g" && cp -a "$d/a/." "$d/b" && [ "$d/b/f" -ef "$d/b/g" ]; r=$?; rm -rf "$d"; exit $r',
+);
+/** GNU `cp` takes `--remove-destination`; BSD `cp` (macOS) does not. */
+const CP_REMOVES_DESTINATION = works(
+  'd=$(mktemp -d) && echo a > "$d/a" && echo b > "$d/b" && cp --remove-destination "$d/a" "$d/b"; r=$?; rm -rf "$d"; exit $r',
 );
 /** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
 const FIVE_HOME = `${HOOK} && mkdir -p 5 && printf '[core]\\n\\thooksPath = hk\\n' > 5/.gitconfig`;
@@ -1430,6 +1442,7 @@ const MANY = Array.from({ length: 32 }, (_, i) => `f${i + 1}`).join(' ');
 /** A folder whose name is a private-use character. */
 const PRIVATE = String.fromCharCode(0xe000);
 const inCerts = (rel: string) => rel.startsWith('certs/');
+const endsInPem = (rel: string) => rel.endsWith('.pem');
 /** Another name of the covered file, there before the line. */
 const OTHER_NAME = 'ln certs/server.pem f';
 /** A link to the covered folder, there before the line. */
@@ -2019,6 +2032,100 @@ const unsettled: {
     runs: CP_KEEPS_NAMES,
     cases: [{ name: 'format-patch -o', command: 'git format-patch -q -o out -1' }],
   },
+  {
+    title: 'a folder whose name is a literal ~',
+    scopes: ['**/*.pem'],
+    prep: "mkdir -p '~' && echo k > '~/k.pem'",
+    covered: endsInPem,
+    cases: [
+      { name: 'the folder removed, named from here', command: "rm -rf './~'" },
+      { name: 'the folder removed, quoted', command: "rm -rf '~'" },
+      { name: 'a file in it removed', command: 'rm -f ./~/k.pem' },
+      { name: 'a file in it removed, the name quoted', command: "rm -f '~'/k.pem" },
+      { name: 'files in it removed by a wildcard', command: 'rm -f ./~/*.pem' },
+      { name: 'a leading cd into it', command: 'cd ./~ && rm -f k.pem' },
+      {
+        name: 'a folder made and filled in it',
+        command: "mkdir -p './~/d' && touch './~/d/x.pem'",
+      },
+      { name: 'git sent into it', command: "git -C './~' diff --output=n.pem v1" },
+    ],
+  },
+  {
+    title: 'a link under a folder whose name is a literal ~',
+    scopes: ['certs/**'],
+    prep: "mkdir -p '~' && ln -s ../certs '~/lk'",
+    covered: inCerts,
+    cases: [
+      { name: 'rm through it', command: 'rm -f ./~/lk/server.pem' },
+      { name: 'rm through it, the name quoted', command: 'rm -f "~"/lk/server.pem' },
+      { name: 'a redirection through it', command: 'echo x > ./~/lk/new.pem' },
+    ],
+  },
+  {
+    title: 'a file whose name starts with ~',
+    scopes: ['**/*.pem'],
+    prep: "echo k > '~old.pem'",
+    covered: endsInPem,
+    cases: [
+      { name: 'removed, named from here', command: 'rm -f ./~old.pem' },
+      { name: 'removed, quoted', command: "rm -f '~old.pem'" },
+      { name: 'a redirection', command: "echo x > '~new.pem'" },
+      { name: 'touch', command: 'touch ./~new.pem' },
+      { name: 'a copy', command: "cp a.txt './~new.pem'" },
+      { name: 'the output of git', command: 'git diff --output=./~n.pem v1' },
+    ],
+  },
+  {
+    title: 'a wildcard that matches a symbolic link to a folder',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub && ln -s certs lnk && ln -s ../certs sub/lk && ln -s . dot',
+    covered: inCerts,
+    cases: [
+      { name: 'rm through the link', command: 'rm -f l?k/server.pem' },
+      { name: 'rm through a link in a folder', command: 'rm -f sub/*/server.pem' },
+      { name: 'rm through a link to the folder itself', command: 'rm -f d*/certs/server.pem' },
+      { name: 'rm of what the link holds', command: 'rm -rf l?k/' },
+      { name: 'a copy through the link', command: 'cp a.txt l?k/server.pem' },
+      { name: 'a mode changed through the link', command: 'chmod 600 l?k/server.pem' },
+    ],
+  },
+  {
+    title:
+      'a link git checks out by a pathspec it matches by its own rules, then a path through it',
+    scopes: ['certs/**'],
+    prep: 'git checkout -qb other && ln -s certs lnk2 && git add lnk2 && git commit -qm link && git checkout -q main',
+    covered: inCerts,
+    cases: [
+      {
+        name: 'letter case folded',
+        command: "git checkout other -- ':(icase)LNK2' && rm -f lnk2/server.pem",
+      },
+      {
+        name: 'a glob across folders',
+        command: "git checkout other -- ':(glob)**/lnk2' && rm -f lnk2/server.pem",
+      },
+      {
+        name: 'letter case folded for all',
+        command: 'git --icase-pathspecs checkout other -- LNK2 && rm -f lnk2/server.pem',
+      },
+      {
+        name: 'globs for all',
+        command: "git --glob-pathspecs checkout other -- '**/lnk2' && rm -f lnk2/server.pem",
+      },
+      { name: 'restore', command: "git restore -s other ':(icase)LNK2' && echo x > lnk2/new.pem" },
+    ],
+  },
+  {
+    title: 'git writes a patch file onto a link of its name',
+    scopes: ['certs/**'],
+    prep: 'mkdir out && ln -s ../certs/server.pem out/0001-a.txt.patch && ln -s certs/server.pem 0001-a.txt.patch',
+    covered: inCerts,
+    cases: [
+      { name: 'in the folder it is given', command: 'git format-patch -q -1 -o out' },
+      { name: 'in the folder it runs in', command: 'git format-patch -q -1' },
+    ],
+  },
 ];
 
 describe('lines whose paths nothing settles are never let through in silence', () => {
@@ -2172,6 +2279,234 @@ describe('a line not read fully is warned about whatever is there', () => {
       g.mindly.close();
     }
   });
+});
+
+/** What is at a path, a link not followed: its kind, and where it points or what it holds. */
+const whatIs = (path: string): string => {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch {
+    return 'nothing';
+  }
+  if (st.isSymbolicLink()) return `link to ${readlinkSync(path)}`;
+  return st.isFile() ? `file ${readFileSync(path, 'utf8')}` : 'folder';
+};
+
+/** A scratch copy of a repository. */
+const copyOf = (dir: string): string => {
+  const copy = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-copy-')));
+  execFileSync('cp', ['-a', `${dir}/.`, copy]);
+  return copy;
+};
+
+describe('a covered name that is a symbolic link', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUpWithFile(
+      ['certs/**'],
+      'mkdir other && echo o > other/file && echo b > b.txt && ln -s ../other/file certs/cur.pem && ln -s ../other/nothere certs/dang.pem',
+    );
+  });
+  afterAll(() => g.mindly.close());
+
+  for (const [command, name] of [
+    ['rm -f certs/dang.pem', 'certs/dang.pem'],
+    ['mv b.txt certs/dang.pem', 'certs/dang.pem'],
+    ['ln -sf ../a.txt certs/dang.pem', 'certs/dang.pem'],
+    ['rm -f certs/cur.pem', 'certs/cur.pem'],
+    ['mv b.txt certs/cur.pem', 'certs/cur.pem'],
+    ['ln -sf ../a.txt certs/cur.pem', 'certs/cur.pem'],
+  ] as const) {
+    it(`is not taken away or given to something else: ${command}`, async () => {
+      const copy = copyOf(g.dir);
+      const before = whatIs(join(copy, name));
+      execFileSync('bash', ['-c', command], { cwd: copy, env: GIT_ENV });
+      expect(whatIs(join(copy, name)), `\`${command}\` changes ${name}`).not.toBe(before);
+      expect(verdictOf(await g.shell(command)), `hook on \`${command}\``).toBe('deny');
+    });
+  }
+
+  (CP_REMOVES_DESTINATION ? it : it.skip)(
+    'is not replaced by cp --remove-destination',
+    async () => {
+      const command = 'cp --remove-destination a.txt certs/dang.pem';
+      const copy = copyOf(g.dir);
+      execFileSync('bash', ['-c', command], { cwd: copy, env: GIT_ENV });
+      expect(whatIs(join(copy, 'certs/dang.pem'))).toBe('file a\n');
+      expect(verdictOf(await g.shell(command))).toBe('deny');
+    },
+  );
+
+  it('is not written through when it leads to nothing', async () => {
+    // The write would make `other/nothere`, which no rule covers: the name is what is covered.
+    expect(verdictOf(await g.shell('echo x > certs/dang.pem'))).toBe('warn');
+  });
+});
+
+describe('a path an editing tool reports', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(async () => {
+    g = setUp(
+      ['config/**'],
+      `mkdir -p vendor/pkg config a && echo c > config/app.json && ln -s vendor/pkg deep && ln -s ${realpathSync(tmpdir())} out && ln -s config/new.json pending && ln -s round round`,
+    );
+    await g.shell('true');
+  });
+  afterAll(() => g.mindly.close());
+  const write = (path: string) =>
+    g.mindly.hooks.handle({
+      agentKind: 'claude-code',
+      event: 'pre_tool',
+      externalSessionId: 'edits',
+      cwd: g.dir,
+      transcriptPath: null,
+      startSource: null,
+      prompt: null,
+      lastMessage: null,
+      tool: {
+        name: 'Write',
+        writes: true,
+        shell: false,
+        edits: [{ path, addedText: 'x\n', removedText: '', wholeFile: true }],
+        command: null,
+        failed: false,
+        outputExcerpt: null,
+      },
+    });
+
+  it('is blocked by its plain path', async () => {
+    expect((await write(join(g.dir, 'config/app.json'))).decision).toBe('deny');
+  });
+
+  for (const tail of ['deep/../config/app.json', 'out/../config/app.json']) {
+    it(`is placed as its text folds, with .. after a link: <root>/${tail}`, async () => {
+      const copy = copyOf(g.dir);
+      // What the tool does: fold the path as text, then write.
+      writeFileSync(normalize(`${copy}/${tail}`), 'x\n');
+      expect(readFileSync(join(copy, 'config/app.json'), 'utf8'), 'the covered file').toBe('x\n');
+      expect((await write(`${g.dir}/${tail}`)).decision, 'the hook').toBe('deny');
+    });
+  }
+
+  it('is placed as the system takes it too, with .. after a link', async () => {
+    // Taken off the folder the link leads to, the path is `vendor/app.json`... and with the
+    // link into the covered folder, the covered file.
+    execFileSync('bash', ['-c', 'mkdir -p config/sub && ln -s config/sub into'], { cwd: g.dir });
+    expect((await write(`${g.dir}/into/../app.json`)).decision).toBe('deny');
+  });
+
+  it('is let through with a .. and no link, where nothing is covered', async () => {
+    const r = await write(`${g.dir}/a/../b.txt`);
+    expect(r.decision).toBeNull();
+    expect(r.context ?? '').not.toContain('enforced');
+  });
+
+  it('is placed where a link that leads to nothing would make the file', async () => {
+    expect((await write(join(g.dir, 'pending'))).decision).toBe('deny');
+  });
+
+  it('is refused through a link that cannot be followed', async () => {
+    const r = await write(join(g.dir, 'round'));
+    expect(r.decision).toBe('deny');
+    expect(r.reason).toContain('symbolic link Mindly cannot follow');
+  });
+});
+
+describe('a comment on a line', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    // Nothing the rule covers is there.
+    g = setUp(['secrets/**', 'certs/**']);
+  });
+  afterAll(() => g.mindly.close());
+
+  for (const command of ['# only a comment', 'git status # what changed', 'ls -la # list']) {
+    it(`is not a reason to warn: ${command}`, async () => {
+      expect(runInCopy(g.dir, command, () => true).written).toEqual([]);
+      const r = await g.shell(command);
+      expect(r.decision).toBeNull();
+      expect(r.context ?? '').not.toContain('enforced');
+    });
+  }
+
+  it('hides nothing on the line after it', async () => {
+    const command = '# tidy up\nrm -f certs/server.pem';
+    expect(runInCopy(g.dir, command, inCerts).written).toEqual(['certs/server.pem']);
+    expect(verdictOf(await g.shell(command))).toBe('deny');
+  });
+});
+
+describe('lines that stay read fully', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUpWithFile(['certs/**'], 'echo t > y.tmp && ln -s y.tmp x.tmp');
+  });
+  afterAll(() => g.mindly.close());
+
+  for (const command of [
+    // A link the wildcard matches is only removed.
+    'rm -f *.tmp',
+    // Nothing is written through the path with `..`.
+    'cat src/../a.txt',
+  ]) {
+    it(command, async () => {
+      expect(runInCopy(g.dir, command, inCerts).written).toEqual([]);
+      const r = await g.shell(command);
+      expect(r.decision).toBeNull();
+      expect(r.context ?? '').not.toContain('enforced');
+    });
+  }
+});
+
+describe('the warning for a line not read fully is handed to every kind of agent', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUp(['certs/**']);
+  });
+  afterAll(() => g.mindly.close());
+  const native: Record<string, string> = {
+    'claude-code': 'PreToolUse',
+    codex: 'PreToolUse',
+    cursor: 'beforeShellExecution',
+    gemini: 'BeforeTool',
+  };
+
+  for (const kind of Object.keys(native)) {
+    it(kind, async () => {
+      const { getAdapter, HOOK_AGENT_KINDS } = await import('../../adapters/src/index.js');
+      expect([...HOOK_AGENT_KINDS].sort()).toEqual(Object.keys(native).sort());
+      const result = await g.shell('npm test > certs/out.log');
+      expect(result.decision).toBeNull();
+      expect(result.context ?? '').toContain('could not read this command fully');
+      const adapter = getAdapter(kind);
+      if (adapter === null) throw new Error(`no adapter for ${kind}`);
+      const rendered = adapter.render(
+        {
+          agentKind: kind as (typeof HOOK_AGENT_KINDS)[number],
+          event: 'pre_tool',
+          nativeEvent: native[kind] as string,
+          externalSessionId: 'kinds',
+          cwd: g.dir,
+          transcriptPath: null,
+          startSource: null,
+          prompt: null,
+          lastMessage: null,
+          tool: {
+            name: 'Bash',
+            writes: false,
+            shell: true,
+            edits: [],
+            command: 'npm test > certs/out.log',
+            failed: false,
+            outputExcerpt: null,
+          },
+        },
+        result,
+      );
+      expect(rendered.stdout, `what ${kind} is handed`).toContain('could not read this command');
+    });
+  }
 });
 
 describe('a session in a folder reached through a link', () => {
@@ -2365,6 +2700,33 @@ describe('git commands read without false warnings or slow reading', () => {
       }
     } finally {
       g.mindly.close();
+    }
+  });
+
+  it('a copy of many files to a deep new folder is answered in good time, and never in silence', async () => {
+    for (const files of [30, 500]) {
+      const g = setUp(
+        ['certs/**'],
+        `mkdir big2 && for i in $(seq 1 ${files}); do echo $i > big2/f$i; done`,
+      );
+      try {
+        await g.shell('true');
+        const deep = Array.from({ length: 1900 }, () => 'a').join('/');
+        const command = `cp -r big2 ${deep}; rm -f certs/server.pem`;
+        expect(command.length).toBeLessThan(4096);
+        let best = Infinity;
+        let said: Verdict = 'allow';
+        for (let k = 0; k < 2; k++) {
+          const t0 = performance.now();
+          said = verdictOf(await g.shell(command));
+          best = Math.min(best, performance.now() - t0);
+        }
+        expect(said, `${files} files`).toBe('deny');
+        // 200 ms is the aim; the bound leaves room for a busy runner.
+        expect(best, `${files} files`).toBeLessThan(500);
+      } finally {
+        g.mindly.close();
+      }
     }
   });
 

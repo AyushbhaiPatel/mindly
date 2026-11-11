@@ -38,9 +38,15 @@ memory, which is then injected into every other agent.
 - An `enforce` rule is applied to every path a tool call reports, and to the files a shell
   command's text shows it writes. Files on the deny-list can be protected this way too: their
   names are matched against the rule, but they are still never read and nothing about them is
-  stored. A path is placed where a write to it lands: symbolic links are followed part by part,
-  a `..` leaves the folder a link before it leads to, and a link to a file that is not there
-  yet stands for that file, never for its own name. Reading a command is not a sandbox: a program can write a file its command line never
+  stored. A write is checked at the name it is given (its folder resolved, the name itself not
+  followed) and, when that name is a symbolic link, where the link leads: a rule that covers
+  either blocks it, so a covered name that is a link cannot be removed or replaced, and a link
+  to a covered file cannot be written through. A path a tool call reports with a `..` after a
+  folder's name is checked both as its text folds, which is how editing tools take it, and as
+  the system takes it, off the folder a link before it leads to. A tool call that writes
+  through a link to a file that is not there is checked where that file would be made, the
+  links followed by hand at most eight times, and refused when that does not settle it.
+  Reading a command is not a sandbox: a program can write a file its command line never
   names. A line whose paths depend on what runs (a variable, a pipe into anything but a filter,
   a `cd` other than a leading one) is not read fully and is warned about, as described below,
   and a command too long to read to its end (200,000 characters, 500 write targets) is answered
@@ -87,7 +93,10 @@ memory, which is then injected into every other agent.
   and the top of the tree, only what they hold. A git command that may change the tree as a
   whole (a switch, a merge, a pull, a reset, a stash, a patch applied) makes whatever that tree
   holds: after it, a path given to another program there is not read fully
-  (`git pull && rm -f certs/server.pem`, `git checkout other && echo x > link`). The paths git is given in its
+  (`git pull && rm -f certs/server.pem`, `git checkout other && echo x > link`). A pathspec git matches by
+  rules of its own (`:(icase)…`, `:(glob)…`, `:/…`, or any under `--icase-pathspecs`,
+  `--glob-pathspecs` or `--literal-pathspecs`) may name anything in the tree, and a command
+  that writes by one makes whatever the tree holds in the same way. The paths git is given in its
   own working tree are not held against what the line made: git does not follow a link there,
   it refuses the path or puts a folder in the link's place. The destination of `git mv` is
   followed, and is held like any other; and a folder git is sent to or pointed at (`-C`,
@@ -105,8 +114,8 @@ memory, which is then injected into every other agent.
   looks only at what it lands on: the name of each source there, and under it the names a
   source folder holds (for `src/.`, the names `src` holds), where a symbolic link is written
   through and counts too; the rest of the destination is not looked at. A folder git fills
-  with files of its own naming (`format-patch -o`) is looked at for files of such names right
-  in it. A
+  with files of its own naming (`format-patch`, with `-o` or where it runs) is looked at for
+  files of such names right in it, and a symbolic link of such a name counts. A
   folder with more in it than can be looked at in the time there is counts as holding one.
   Taking a name away or giving it to something else (`rm`, `mv` onto it, `ln -f`,
   `cp --remove-destination`) leaves the file alone, and git puts a new file where it writes
@@ -118,7 +127,12 @@ memory, which is then injected into every other agent.
   a folder, and the line is not read fully. The rest of a line read fully is: words of plain characters
   (`*` and `?` included, unless they may match what an earlier command of the line makes; a
   part of a path with more than three runs of `*` is taken to match anything; a copy or move of
-  more than 64 sources is not read fully),
+  more than 64 sources is not read fully; a wildcard that may match a symbolic link is not read
+  fully where the link would be followed: for a folder on the way to what is written, and for
+  the last part when the command writes in place there or removes it with a `/` after it, while
+  `rm -f *.tmp` on a link only removes the link),
+  a comment (from a `#` that starts a word to the end of its line, which is dropped; what is on
+  the next line is read),
   single-quoted text, double-quoted text
   without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a plain
   path (`>`, `>>`, `2>`, `&>`), `2>&1`, `</dev/null`; a pipe into `head`, `tail`, `grep`, `wc` or
@@ -165,7 +179,9 @@ memory, which is then injected into every other agent.
   names the enforced rules (five of them, and how many more), those first that cover something
   the line names or may reach, with what of that is covered. The write guards (a split's
   ownership of files) are asked about the whole tree and only warn. The first 32 paths it names
-  are placed one by one, as possible writes only, to say which covered paths it names. Nothing of it is asked of git. Lines
+  are placed one by one, as possible writes only, to say which covered paths it names. Where
+  the agent takes context before a tool runs, the warning goes to the model; Gemini takes none
+  there, so on Gemini it is shown to the person instead. Nothing of it is asked of git. Lines
   that now warn this way include any line with `$VAR` or `$(…)`, a loop or a function, a test
   run through a package manager, `npx`, a pipe into `sort` or `xargs`, `sed`, `find`, strict
   shell options, `export`, `source`, `[[ … ]]`, and a shell given code.

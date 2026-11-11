@@ -14,12 +14,19 @@ import { parseClaudeStyle } from '../shared/claude-style.js';
 import { hookCommand, isMindlyHookCommand, MCP_SERVER_NAME, mcpLaunch } from '../shared/command.js';
 import { cloneJson, readConfigText, stepIfChanged } from '../shared/config-files.js';
 import { detectAgent } from '../shared/detect.js';
-import { contextText, jsonOutput, reasonText, SILENT, userMessageText } from '../shared/event.js';
+import {
+  contextText,
+  jsonOutput,
+  MAX_NOTICE_CHARS,
+  reasonText,
+  SILENT,
+  userMessageText,
+} from '../shared/event.js';
 import type { HookSpec } from '../shared/json-hooks.js';
 import { addGroupedHooks, removeGroupedHooks } from '../shared/json-hooks.js';
 import type { PlanMode } from '../shared/plan.js';
 import { validateInstallOptions } from '../shared/plan.js';
-import { isRecord, readString } from '../shared/payload.js';
+import { capText, isRecord, readString } from '../shared/payload.js';
 import { buildTool } from '../shared/tools.js';
 import {
   editJsoncArrayItem,
@@ -124,7 +131,8 @@ function parseGemini(nativeEvent: string, payload: unknown): NormalizedHookEvent
 /**
  * Renders a result as Gemini CLI hook JSON. Gemini reads `hookSpecificOutput.additionalContext`
  * on SessionStart, BeforeAgent and AfterTool only. BeforeTool has no context channel, so a deny
- * folds the context into the reason the model sees. Decisions are top-level `decision` /
+ * folds the context into the reason the model sees, and without a deny the context (a warning
+ * about the call) goes to the person as the `systemMessage`. Decisions are top-level `decision` /
  * `reason`; `allow` is never emitted so Gemini's own confirmations still apply, and AfterAgent
  * never gets a decision (a deny there would force a retry turn).
  */
@@ -144,6 +152,10 @@ function renderGemini(event: NormalizedHookEvent, result: HookResult): RenderedH
         out['reason'] = reasonText(result);
         // Gemini shows the systemMessage in its confirmation prompt.
         notice ??= reasonText(result);
+      }
+      // What the model cannot be told before the tool runs, the person is.
+      if (result.decision !== 'deny' && context !== null) {
+        notice = capText(notice === null ? context : `${notice}\n\n${context}`, MAX_NOTICE_CHARS);
       }
     } else if (context !== null && event.event !== 'stop') {
       out['hookSpecificOutput'] = {

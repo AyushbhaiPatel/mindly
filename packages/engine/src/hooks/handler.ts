@@ -4,11 +4,12 @@ import {
   existsSync,
   lstatSync,
   opendirSync,
+  readlinkSync,
   realpathSync,
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import {
   EMPTY_HOOK_RESULT,
   deniedPathTest,
@@ -417,6 +418,42 @@ export class HookHandler {
   }
 
   /**
+   * The places a write to a path may change (see {@link writePlaces}), each located: where the
+   * path leads, and the name itself when that is a symbolic link.
+   */
+  private async locateAll(
+    project: ProjectContext,
+    treeRoot: string,
+    places: readonly { at: string; name?: string }[],
+    trees: TreeLookups | null,
+  ): Promise<(Located | 'unknown')[]> {
+    const found: (Located | 'unknown')[] = [];
+    const deny = this.k.config.redaction.denyPaths;
+    for (const place of places) {
+      if (place.name === undefined) {
+        const at = await this.locate(project, treeRoot, place.at, trees);
+        if (at !== null) found.push(at);
+        continue;
+      }
+      // The name as it is written in its folder: the folder is resolved, the name is not.
+      const dir = await this.locate(project, treeRoot, place.at, trees);
+      if (dir === null) continue;
+      if (dir === 'unknown') {
+        found.push(dir);
+        continue;
+      }
+      const rel = dir.rel === '' ? place.name : `${dir.rel}/${place.name}`;
+      found.push({
+        ...dir,
+        rel,
+        abs: join(dir.abs, place.name),
+        own: dir.own && !isDeniedPath(rel, deny),
+      });
+    }
+    return found;
+  }
+
+  /**
    * Resolves agent-reported paths for the checks before a write (see `locate`). Anything outside
    * the project is dropped; paths that could not be placed are counted, never passed as fine.
    */
@@ -425,18 +462,34 @@ export class HookHandler {
     cwd: string,
     paths: readonly string[],
     trees: TreeLookups | null = { roots: [], dirs: new Map() },
-  ): Promise<{ paths: CheckedPath[]; unchecked: number; unsafe: number }> {
+    /** Before a write: every place the write may change, not only where the path leads. */
+    everyPlace = false,
+  ): Promise<{ paths: CheckedPath[]; unchecked: number; unsafe: number; lost: number }> {
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
     const out: CheckedPath[] = [];
     const seen = new Set<string>();
     // What does not fit is counted as not checked, never dropped as fine.
     let unchecked = Math.max(0, paths.length - MAX_CHECKED_PATHS);
     let unsafe = 0;
+    let lost = 0;
     for (const p of paths.slice(0, MAX_CHECKED_PATHS)) {
       if (typeof p !== 'string' || p.length === 0) continue;
       // A path that cannot be placed safely is never passed over as outside the project.
       if (hasUnsafeChars(p) || p.length > 4096) {
         unsafe++;
+        continue;
+      }
+      if (everyPlace) {
+        // Not folded here: a `..` after a link is placed both as text and as the system does.
+        const places = writePlaces(isAbsolute(p) ? p : `${cwd}/${p}`);
+        if (places.lost) lost++;
+        for (const found of await this.locateAll(project, treeRoot, places.places, trees)) {
+          if (found === 'unknown') unchecked++;
+          else if (found.rel !== '' && !seen.has(found.abs)) {
+            seen.add(found.abs);
+            out.push({ rel: found.rel, abs: found.abs, own: found.own });
+          }
+        }
         continue;
       }
       const found = await this.locate(
@@ -451,7 +504,7 @@ export class HookHandler {
       seen.add(found.abs);
       out.push({ rel: found.rel, abs: found.abs, own: found.own });
     }
-    return { paths: out, unchecked, unsafe };
+    return { paths: out, unchecked, unsafe, lost };
   }
 
   /**
@@ -505,7 +558,6 @@ export class HookHandler {
     let lookups = 0;
     let looked = 0;
     const linked = (path: string): boolean => {
-      if (path.startsWith('~')) return false;
       if (++lookups > MAX_LINK_LOOKUPS || timeUp()) return true;
       try {
         return lstatSync(resolve(cwd, path)).isSymbolicLink();
@@ -644,8 +696,36 @@ export class HookHandler {
       };
       // Another user's home (`~name`) is wherever the system says: not placed by guessing. A
       // line that names one is not read fully, and is warned about as a whole.
-      if (t.path.startsWith('~')) continue;
+      if (t.unplaced) continue;
       const path = isAbsolute(t.path) ? t.path : resolve(cwd, t.path);
+      /** The name itself, when it is a symbolic link, besides where it leads. */
+      const named = async (target: string): Promise<void> => {
+        // The first is the path itself, placed already.
+        const others = writePlaces(target).places.slice(1);
+        for (const found of await this.locateAll(project, treeRoot, others, late ? null : trees)) {
+          if (found === 'unknown') into.unchecked++;
+          else file(found);
+        }
+      };
+      /** What a source brings, under where it lands; within the time there is. */
+      const brings = async (dest: string, brought: readonly string[]): Promise<void> => {
+        // Under a folder that is not there, nothing is: each lands by its name below it.
+        const base = exists(dest) ? null : await place(dest);
+        for (const rel of brought) {
+          if (timeUp()) {
+            limit ??= 'no time was left to place all it writes';
+            return;
+          }
+          if (base === null) file(await place(join(dest, rel)));
+          // Put together as text: the folder is placed, and what is under it is not there.
+          else
+            file({
+              ...base,
+              rel: base.rel === '' ? toPosix(rel) : `${base.rel}/${toPosix(rel)}`,
+              abs: `${base.abs}${sep}${rel}`,
+            });
+        }
+      };
       if (t.glob) {
         // Everything the pattern can match is under the directory before its first wildcard.
         const segments = toPosix(path).split('/');
@@ -684,6 +764,7 @@ export class HookHandler {
         if (!directory) {
           const at = await place(path);
           file(at);
+          await named(path);
           const source = t.sources[0] ?? null;
           const from = source === null || source.startsWith('~') ? null : resolve(cwd, source);
           // A source that is a directory brings what it holds; one that is not here (made
@@ -691,7 +772,7 @@ export class HookHandler {
           if (t.tree && (from === null || isDirectory(from) || !exists(from))) {
             const brought = from === null ? null : entriesUnder(from, timeUp);
             if (brought === null) landing(at);
-            else for (const rel of brought) file(await place(join(path, rel)));
+            else await brings(path, brought);
           }
           continue;
         }
@@ -707,7 +788,7 @@ export class HookHandler {
           }
           const brought = from !== null && t.tree ? entriesUnder(from, timeUp) : null;
           if (brought !== null) {
-            for (const rel of brought) file(await place(join(dest, rel)));
+            await brings(dest, brought);
             continue;
           }
           // A source that is not here to look at: its own name lands, and what it holds is
@@ -734,6 +815,7 @@ export class HookHandler {
         continue;
       }
       file(at);
+      await named(path);
       // A whole tree is written when the text says so; a path merely given to a program counts
       // as a tree only when it is a directory.
       if (t.tree && (t.certain || directory)) scope(at, ['**']);
@@ -923,12 +1005,16 @@ export class HookHandler {
         paths: checked,
         unchecked,
         unsafe,
+        lost,
       } = await this.checkedPaths(
         project,
         evt.cwd,
         tool.edits.map((e) => e.path),
+        undefined,
+        true,
       );
       if (unsafe > 0) return unsafeDenial();
+      if (lost > 0) return lostDenial(lost);
       // A patch too large to report in full is refused: the files that were cut are unknown.
       if (unchecked > 0 || tool.editsCut === true) {
         return uncheckedDenial(unchecked, tool.editsCut === true);
@@ -1545,7 +1631,7 @@ function physical(path: string): string {
   let current = path;
   for (let i = 0; i < 256; i++) {
     try {
-      return join(realpathSync(current), ...rest);
+      return join(realpathSync.native(current), ...rest);
     } catch {
       const parent = dirname(current);
       if (parent === current) break;
@@ -1569,7 +1655,8 @@ function writesElsewhere(
 ): boolean {
   /** Whether a name that is not there is behind a link that cannot be followed. */
   const nowhere = (target: string): boolean => {
-    for (let at = target, i = 0; i < 256; i++) {
+    // As many steps up as the path has parts, at most.
+    for (let at = target; ;) {
       try {
         // The nearest name that is there: a link, if nothing is where it leads.
         return lstatSync(at).isSymbolicLink() && !existsSync(at);
@@ -1579,7 +1666,6 @@ function writesElsewhere(
         at = up;
       }
     }
-    return true;
   };
   /** A file written under this name. */
   const file = (target: string): boolean => {
@@ -1659,6 +1745,9 @@ function writesElsewhere(
         return isDirectory(target) ? under(target, true, false) : nowhere(target);
       case 'copy':
         return over(target, write.from, true);
+      case 'link':
+        // Asked of the names a wildcard matches, below.
+        return false;
     }
   };
   // Everything the pattern can match is under the folder before its first wildcard.
@@ -1670,12 +1759,69 @@ function writesElsewhere(
     if (part === undefined) return at(dir);
     if (!/[*?]/.test(part)) return match(join(dir, part), more);
     const entries = list(dir);
+    // A symbolic link the part may match is followed by a write in place, and by a removal of
+    // what it holds: where that leads is not looked for.
     return (
       entries === null ||
-      entries.some((e) => partNames(part, e.name) && match(join(dir, e.name), more))
+      entries.some((e) => partNames(part, e.name) && (e.link || match(join(dir, e.name), more)))
     );
   };
   return match(parts.slice(0, wild).join('/') || '/', parts.slice(wild));
+}
+
+/** Symbolic links followed by hand to where a write through one that leads nowhere lands. */
+const MAX_LINKS_FOLLOWED = 8;
+
+/**
+ * The places a write to a path may change, for the checks before it. `at` alone: a path to
+ * locate, links followed. With `name`: that name in the folder `at`, the name itself not
+ * followed.
+ *
+ * A path is placed as its text folds, which is how editing tools take it; with a `..` after a
+ * named part it is also placed as the system takes it, off the folder a link before the `..`
+ * leads to. Where the name it comes to is a symbolic link, the name itself counts besides where
+ * it leads: taking it away or putting something in its place changes the name, a write in place
+ * changes what it leads to. A link that leads to nothing is followed by hand, a few times; `lost`
+ * when that does not settle where it leads.
+ */
+function writePlaces(raw: string): {
+  places: { at: string; name?: string }[];
+  lost: boolean;
+} {
+  const places: { at: string; name?: string }[] = [];
+  let lost = false;
+  let named = false;
+  const back = raw.split(/[\\/]/).some((part) => {
+    if (part === '..') return named;
+    if (part !== '' && part !== '.') named = true;
+    return false;
+  });
+  /** Whether a name is a symbolic link; with `nowhere`, one that leads to nothing. */
+  const linkAt = (path: string, nowhere = false): boolean => {
+    try {
+      return lstatSync(path).isSymbolicLink() && (!nowhere || !existsSync(path));
+    } catch {
+      return false;
+    }
+  };
+  for (const path of back ? [resolve(raw), physical(raw)] : [resolve(raw)]) {
+    places.push({ at: path });
+    if (!linkAt(path)) continue;
+    places.push({ at: dirname(path), name: basename(path) });
+    if (existsSync(path)) continue;
+    // It leads to nothing: where a write through it would make a file.
+    try {
+      let at = path;
+      for (let i = 0; i < MAX_LINKS_FOLLOWED && linkAt(at, true); i++) {
+        at = resolve(dirname(at), readlinkSync(at));
+      }
+      if (linkAt(at, true)) lost = true;
+      else places.push({ at });
+    } catch {
+      lost = true;
+    }
+  }
+  return { places, lost };
 }
 
 /** The deepest existing directory at or above `path`; null when there is none. */
@@ -1703,6 +1849,15 @@ function unsafeDenial(): HookResult {
     decision: 'deny',
     reason:
       'Mindly refused this call: a path it writes contains control or bidi characters (or is too long), so it cannot be checked against the project rules. Use the plain file name.',
+  };
+}
+
+/** A write through symbolic links that could not be followed to where it lands. */
+function lostDenial(count: number): HookResult {
+  return {
+    ...EMPTY_HOOK_RESULT,
+    decision: 'deny',
+    reason: `Mindly could not check ${count === 1 ? 'a path' : `${count} of the paths`} this call writes: ${count === 1 ? 'it goes' : 'they go'} through a symbolic link Mindly cannot follow to where it leads, so the write cannot be checked against the project rules. Write the file by its own path.`,
   };
 }
 
