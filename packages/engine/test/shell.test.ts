@@ -1476,6 +1476,13 @@ describe('write targets of a shell command', () => {
     for (const line of ['cd ./a && ls', 'cd ../a && ls', 'cd /a && ls', 'cd .. && ls', 'ls a']) {
       expect(understoodLine(line, { cdpath: true }), line).toBe(true);
     }
+    // Where the shell may spell its folder through a link, its `..` is not the folder's parent.
+    for (const line of ['cd .. && ls', 'cd ../a && ls', 'cd ./../a && ls']) {
+      expect(understoodLine(line, { logical: true }), line).toBe(false);
+    }
+    for (const line of ['cd a && ls', 'cd ./a/b && ls', 'cd /a && ls', 'rm ../a']) {
+      expect(understoodLine(line, { logical: true }), line).toBe(true);
+    }
     // An `mv` of the folder the line runs in, or of one above it: what follows runs elsewhere.
     for (const [line, fully] of [
       ['cd a/b && mv ../../a ../../c && touch x', false],
@@ -1489,9 +1496,73 @@ describe('write targets of a shell command', () => {
       ['mv a b && mv c d', true],
       ['mkdir -p out && mv out/a b', true],
       ['echo x > tmp && mv tmp a', true],
+      // A path through something made earlier on the line may lead anywhere.
+      ['ln -s certs l && rm -f l/x', false],
+      ['ln -s certs l && echo x > l/y', false],
+      ['ln -s certs l && touch l/', false],
+      ['cd sub && ln -s ../certs l && rm -f l/x', false],
+      ['cp -r a b && rm b/x', false],
+      ['mv a b && rm b/x', false],
+      ['git checkout v1 -- l && rm -f l/x', false],
+      // git does not follow a link in its tree: its own pathspecs lead where they say.
+      ['ln -s certs l && git checkout v1 -- l/x', true],
+      ['ln -s certs l && git rm -q l/x', true],
+      ['ln -s certs l && git mv a l/', false],
+      ['echo x > f && rm f/y', false],
+      ['touch f && cat f/y > out', true],
+      ['cp -a l/* . && rm -f k/x', false],
+      // A write onto what a command that may make a link made goes where the link leads.
+      ['ln -s certs/k f && echo x > f', false],
+      ['ln certs/k f && echo x > f', false],
+      ['ln certs/k f && chmod 600 f', false],
+      ['cp -a l f && echo x > f', false],
+      ['mv a b && echo x >> b', false],
+      ['echo a > f && echo b >> f && chmod 755 f', true],
+      ['touch f && rm f', true],
+      ['cp a b && chmod 755 b', true],
+      // A folder `mkdir` made is one, unless something else made that path.
+      ['mkdir -p out/a && touch out/a/x && rm -f y', true],
+      ['mkdir build && cp a.txt build/a.txt', true],
+      ['rm -rf d && mkdir d && cp a d/a', true],
+      ['mkdir d && chmod 755 d && cp a d/x', true],
+      ['mkdir d && rmdir d && ln -s certs d && rm -f d/x', false],
+      ['rm -rf d && ln -s certs d && mkdir d; rm -f d/x', false],
+      ['ln -s certs d; mkdir -p d/e; rm -f d/x', false],
+      ['mkdir d && ln -s ../certs d && rm -f d/certs/x', false],
+      ['mkdir d && cp a d && cp b d', true],
+      ['mkdir d && mv a d/ && mv b d/', true],
+      ['mkdir d && mv a d && mv b d', false],
+      // A destination written with a `/` is a folder: what lands in it is made, not the folder.
+      ['cp a d/ && echo x > d/y', true],
+      ['cp a d/ && echo x >> d/a', true],
+      ['ln -s ../certs d/ && rm -f d/certs/x', false],
+      // What lands on a name a command that may make a link made may go through it.
+      ['cp -P l d/ && cp -r x/l d/', false],
+      ['cp a d/ && cp b d/', true],
+      // What is only removed, or changed in mode, is not made.
+      ['rm -rf d && touch d/x', true],
+      ['chmod -R 755 d && rm d/x', true],
     ] as const) {
       expect(readShellWrites(line, { understoodOnly: true }).understood, line).toBe(fully);
     }
+    // A path told from the folder the line starts in and an absolute one are the same place.
+    const from = (line: string) =>
+      readShellWrites(line, { understoodOnly: true, cwd: '/w', top: '/w' }).understood;
+    expect(from('ln -s certs /w/l && rm -f l/x')).toBe(false);
+    expect(from('ln -s certs l && rm -f /w/l/x')).toBe(false);
+    expect(from('ln -s certs /v/l && rm -f l/x')).toBe(true);
+    // A folder on disk that the line has not touched takes what is copied into it.
+    const onDisk = (line: string, linked = false) =>
+      readShellWrites(line, {
+        understoodOnly: true,
+        cwd: '/w',
+        isDir: (path) => path === 'docs',
+        linked: () => linked,
+      }).understood;
+    expect(onDisk('cp a docs && echo x > docs/y')).toBe(true);
+    expect(onDisk('ln -s ../certs docs && rm -f docs/certs/x')).toBe(false);
+    expect(onDisk('ln -sfn certs docs && rm -f docs/x', true)).toBe(false);
+    expect(onDisk('rm -rf docs && ln -s certs docs && rm -f docs/x')).toBe(false);
     expect(mayHold('/w/a', '/w/a/b')).toBe(true);
     expect(mayHold('/w/a/b', '/w/a/b')).toBe(true);
     expect(mayHold('/w/?', '/w/a/b')).toBe(true);

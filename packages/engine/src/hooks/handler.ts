@@ -468,7 +468,7 @@ export class HookHandler {
    */
   private async shellWrites(
     project: ProjectContext,
-    cwd: string,
+    session: string,
     command: string,
     ownTreeOnly = false,
     timeUp: () => boolean = () => false,
@@ -483,6 +483,16 @@ export class HookHandler {
   }> {
     const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
+    // The programs of the line find their paths from the folder itself, whatever links the
+    // session's spelling of it goes through: paths are placed from there. The shell takes the
+    // `..` of a `cd` off its own spelling, which is this one unless a link is on its way, in the
+    // spelling given here or in a `PWD` the shell inherits that names the same folder.
+    const given = resolve(session);
+    const cwd = physical(given);
+    const inherited = process.env.PWD ?? '';
+    const logical =
+      cwd !== given ||
+      (isAbsolute(inherited) && resolve(inherited) !== cwd && physical(inherited) === cwd);
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
     // The command is read as text; where it runs, the home directory and the repository root
     // are handed in so `~`, `$HOME` and `$(git rev-parse --show-toplevel)` can be placed.
@@ -500,13 +510,11 @@ export class HookHandler {
     };
     // An `mv` of the folder the commands run in, or of one above it, takes them elsewhere than
     // the text says. Both are compared as they are on disk, links followed.
-    let at: string | null = null;
     const holds = (path: string, dir: string): boolean => {
       if (++lookups > MAX_LINK_LOOKUPS || timeUp()) return true;
-      at ??= physical(cwd);
       return mayHold(
-        toPosix(physical(resolve(at, placeHome(path)))),
-        toPosix(physical(resolve(at, placeHome(dir)))),
+        toPosix(physical(resolve(cwd, placeHome(path)))),
+        toPosix(physical(resolve(cwd, placeHome(dir)))),
       );
     };
     const reading = readShellWrites(command, {
@@ -518,6 +526,8 @@ export class HookHandler {
       isDir: (path) => canEnter(resolve(cwd, placeHome(path))),
       // A `CDPATH` the agent's shell inherits is the one this process has.
       cdpath: (process.env.CDPATH ?? '') !== '',
+      logical,
+      cwd: toPosix(cwd),
       holds,
     });
     let limit = reading.limit;

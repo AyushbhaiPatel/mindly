@@ -1173,6 +1173,13 @@ interface Item {
   how?: ShellTarget['how'];
   /** What lands inside the path when it is a directory, and where each comes from. */
   entries?: { name: string; from: Word | null }[];
+  /** The path is taken away (removed, or moved elsewhere), not made. */
+  gone?: boolean;
+  /**
+   * A path git is given in its working tree. git does not follow a link there: it refuses the
+   * path or puts a folder in the link's place, so such a path leads where its text says.
+   */
+  pathspec?: boolean;
   /** The path is a pattern the program expands itself, whatever the quoting. */
   pattern?: boolean;
   dotfiles?: boolean;
@@ -1306,7 +1313,7 @@ function classify(
       return readFind(words);
     case 'rm': {
       const recursive = hasOption(words, 'rR', ['--recursive']);
-      return writes(...(recursive ? trees(args) : files(args)));
+      return writes(...(recursive ? trees(args, { gone: true }) : files(args, { gone: true })));
     }
     case 'rimraf':
     case 'trash':
@@ -1315,8 +1322,9 @@ function classify(
     case 'del-cli':
       return writes(...trees(args));
     case 'unlink':
-    case 'shred':
     case 'rmdir':
+      return writes(...files(args, { gone: true }));
+    case 'shred':
     case 'touch':
     case 'mkdir':
     case 'tee':
@@ -1669,7 +1677,7 @@ function readCopy(program: string, words: readonly Word[]): Verdict {
   // What is moved away is gone from where it was.
   const gone =
     program === 'mv' || (program === 'rsync' && hasFlag(words, /^--remove-source-files$/))
-      ? trees(local)
+      ? trees(local, { gone: true })
       : [];
   // A copy to another machine writes nothing here.
   if ((program === 'scp' || program === 'rsync') && isRemote(dest)) return writes(...gone);
@@ -2063,6 +2071,21 @@ function makesLinks(words: readonly Word[]): boolean {
       'tag',
     ].includes(gitCommand(words).rest[0]?.text ?? '')
   );
+}
+
+/**
+ * Whether a command may make a link of either kind where it writes: a symbolic one, or another
+ * name for a file that is there (`ln`, `cp -l`), through which a later write reaches that file.
+ */
+function makesAnyLink(words: readonly Word[]): boolean {
+  const first = words[0];
+  if (first === undefined || first.dynamic) return false;
+  const name = programName(first);
+  if (name === 'ln') return true;
+  if (name === 'cp' && words.some((w) => /^-[^-]*l/.test(w.text) || /^--li/.test(w.text))) {
+    return true;
+  }
+  return makesLinks(words);
 }
 
 /** Safe builtins whose options may set a variable or run a command, given as any word. */
@@ -3056,7 +3079,7 @@ function readGit(
       const entries = under(sources).map((s) => ({ name: posix.basename(s.text), from: s }));
       return settingsChange
         ? named([...sources, dest])
-        : writes(...trees(under(sources)), { word: to, tree: true, entries });
+        : writes(...trees(under(sources), { gone: true }), { word: to, tree: true, entries });
     }
     case 'clean': {
       if (gitHas(p, 'n', ['--dry-run'])) return named([]);
@@ -3256,6 +3279,17 @@ export interface ShellReadOptions {
    * `../` may land in one of them, and is not read.
    */
   cdpath?: boolean;
+  /**
+   * The shell may spell the folder it is in through a symbolic link, where the caller places
+   * paths from the folder itself: a `cd` to `..` goes by the shell's spelling, and is not read.
+   */
+  logical?: boolean;
+  /**
+   * The folder the line starts in, absolute: what the line makes and what it names later are
+   * compared from there. Without it, a path told from that folder and an absolute one are not
+   * compared.
+   */
+  cwd?: string;
   /**
    * Whether a path `mv` takes away (placed like `dir`, its `*` and `?` kept) may be the folder
    * `dir` or one above it. With `understoodOnly`, a line that moves the folder its commands run
@@ -3494,7 +3528,9 @@ function readCode(source: string): CodeFinding {
  * in both directions, so a read is not blocked and a plain write is not missed.
  */
 export function readShellWrites(command: string, options: ShellReadOptions = {}): ShellReading {
-  const fully = options.understoodOnly ? understanding(command, options.cdpath ?? false) : true;
+  const fully = options.understoodOnly
+    ? understanding(command, options.cdpath ?? false, options.logical ?? false)
+    : true;
   const reading: Reading = {
     out: new Map(),
     limit: null,
@@ -3516,6 +3552,12 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     madeDirs: new Set(),
     isDir: fully === true ? (options.isDir ?? null) : null,
     holds: options.understoodOnly && fully === true ? (options.holds ?? mayHold) : null,
+    exact: options.understoodOnly === true && fully === true,
+    cwd: options.cwd ?? null,
+    touched: new Set(),
+    through: new Map(),
+    wild: [],
+    epoch: 0,
     unmatched: false,
   };
   collectTargets(command, '', 0, reading);
@@ -3755,27 +3797,41 @@ function mayMatchMade(pattern: string, made: readonly string[]): boolean {
 export function mayHold(path: string, dir: string): boolean {
   if (path.startsWith('~') || dir.startsWith('~')) return true;
   if (posix.isAbsolute(path) !== posix.isAbsolute(dir)) return true;
-  const parts = (p: string): string[] =>
-    posix
-      .normalize(p)
-      .split('/')
-      .filter((x) => x !== '' && x !== '.');
+  return partsHold(pathParts(path), pathParts(dir));
+}
+
+/** The parts of a path, `.` and empty ones left out. */
+const pathParts = (p: string): string[] =>
+  posix
+    .normalize(p)
+    .split('/')
+    .filter((x) => x !== '' && x !== '.');
+
+/** The parts of a path against those of a folder, for {@link mayHold}. */
+function partsHold(ps: readonly string[], ds: readonly string[]): boolean {
   const climb = (xs: readonly string[]): number => {
     const at = xs.findIndex((x) => x !== '..');
     return at === -1 ? xs.length : at;
   };
-  const ps = parts(path);
-  const ds = parts(dir);
   if (climb(ps) > climb(ds)) return true;
   if (ps.length > ds.length) return false;
-  return ps.every((p, i) => {
-    if (!/[*?]/.test(p)) return p === ds[i];
-    const re = p
+  return ps.every((p, i) => (/[*?]/.test(p) ? partPattern(p).test(ds[i] as string) : p === ds[i]));
+}
+
+/** One part of a path with `*` and `?`, as a pattern; the last few are kept. */
+const PART_PATTERNS = new Map<string, RegExp>();
+function partPattern(part: string): RegExp {
+  let re = PART_PATTERNS.get(part);
+  if (re === undefined) {
+    if (PART_PATTERNS.size >= 2048) PART_PATTERNS.clear();
+    const text = part
       .replace(/[.+^${}()|[\]\\]/g, '\\$&')
       .replace(/\*+/g, '.*')
       .replace(/\?/g, '.');
-    return new RegExp(`^${re}$`, 's').test(ds[i] as string);
-  });
+    re = new RegExp(`^${text}$`, 's');
+    PART_PATTERNS.set(part, re);
+  }
+  return re;
 }
 
 /** How many of a program's words are operands, not options or their values. */
@@ -3837,8 +3893,11 @@ function optionsReadFully(table: ReadFully, args: readonly PlainWord[]): boolean
  * a few thousand commands) makes it a line not read fully. One pass over the text. `cdpath`: the
  * shell's `CDPATH` lists folders, and only a `cd` it does not search for there is read.
  */
-export function understoodLine(command: string, options: { cdpath?: boolean } = {}): boolean {
-  return understanding(command, options.cdpath ?? false) === true;
+export function understoodLine(
+  command: string,
+  options: { cdpath?: boolean; logical?: boolean } = {},
+): boolean {
+  return understanding(command, options.cdpath ?? false, options.logical ?? false) === true;
 }
 
 /**
@@ -3848,20 +3907,26 @@ export function understoodLine(command: string, options: { cdpath?: boolean } = 
 const PRIVATE_USE = /[\uE000-\uF8FF\uFDD0-\uFDEF\uFFFE\uFFFF\uDB80-\uDBFF]/;
 
 /** Whether a line is read fully; when it is not for its size alone, why (a limit). */
-function understanding(command: string, cdpath: boolean): true | false | string {
+function understanding(command: string, cdpath: boolean, logical: boolean): true | false | string {
   if (command.length > MAX_COMMAND_CHARS)
     return `only the first ${MAX_COMMAND_CHARS} characters were read`;
   if (PRIVATE_USE.test(command)) return false;
   const said = { tooMany: false };
-  if (scanLine(command, said, cdpath)) return true;
+  if (scanLine(command, said, cdpath, logical)) return true;
   return said.tooMany ? `more than ${MAX_UNDERSTOOD_COMMANDS} commands` : false;
 }
 
 /**
  * The one pass of {@link understoodLine}; `said.tooMany`: it stopped for the count alone.
- * `searched`: the shell's `CDPATH` lists folders.
+ * `searched`: the shell's `CDPATH` lists folders. `logical`: the shell may spell the folder it
+ * is in through a link.
  */
-function scanLine(command: string, said: { tooMany: boolean }, searched: boolean): boolean {
+function scanLine(
+  command: string,
+  said: { tooMany: boolean },
+  searched: boolean,
+  logical: boolean,
+): boolean {
   // Each command, whether a pipe feeds it, and whether `&&` follows it.
   const commands: { words: PlainWord[]; piped: boolean; and: boolean }[] = [];
   // Separators other than `&&` (`;`, a line end, `||`, a pipe) and redirections read so far, and
@@ -4046,7 +4111,7 @@ function scanLine(command: string, said: { tooMany: boolean }, searched: boolean
     ends === 0 &&
     lead.words.length === 2 &&
     to !== undefined &&
-    namesFolder(to.text, searched) &&
+    namesFolder(to.text, searched, logical) &&
     commands.every((cmd, at) => at === 0 || understoodCommand(cmd.words, cmd.piped))
   );
 }
@@ -4055,13 +4120,15 @@ function scanLine(command: string, said: { tooMany: boolean }, searched: boolean
  * Whether the operand of a leading `cd` names the folder it enters as written: no `~` or `-` at
  * its start (`~-`, `~user`, an option), no wildcard, no `..` after a folder's name (the shell
  * fails `a/nosuch/..` where the text says `a`), and, when `CDPATH` lists folders, a start of
- * `/`, `./` or `../`, which the shell does not search for there.
+ * `/`, `./` or `../`, which the shell does not search for there. The shell takes `..` off its
+ * own spelling of the folder it is in: with `logical`, that may not be the folder's parent, and
+ * no `..` is read.
  */
-function namesFolder(text: string, searched: boolean): boolean {
+function namesFolder(text: string, searched: boolean, logical: boolean): boolean {
   if (text === '' || /^[~-]/.test(text) || /[*?[\]]/.test(text)) return false;
   let named = false;
   for (const part of text.split('/')) {
-    if (part === '..' && named) return false;
+    if (part === '..' && (named || logical)) return false;
     if (part !== '' && part !== '.' && part !== '..') named = true;
   }
   return !searched || /^(\/|\.\.?(\/|$))/.test(text);
@@ -4172,12 +4239,28 @@ interface Reading {
   linksMade: boolean;
   /** Paths earlier commands of the line write, as placed. */
   made: string[];
-  /** Folders earlier commands of the line make (`mkdir`), as placed. */
+  /** Folders earlier commands of the line make (`mkdir`), told from `cwd`. */
   madeDirs: Set<string>;
   /** Whether a path, placed as targets are, is a folder on disk; null when not asked. */
   isDir: ((path: string) => boolean) | null;
   /** Whether a path may be a folder or one above it, both placed as targets are; null: not asked. */
   holds: ((path: string, dir: string) => boolean) | null;
+  /** The line is read fully so far: what it makes is kept, and later paths are held against it. */
+  exact: boolean;
+  /** The folder the line starts in, absolute; null when not known. */
+  cwd: string | null;
+  /** Every path earlier commands of the line wrote, removed ones too, told from `cwd`. */
+  touched: Set<string>;
+  /**
+   * Paths earlier commands of the line made (created, replaced, moved into place), other than
+   * folders `mkdir` made: what is there is not known. True for one made by a command that may
+   * make a link.
+   */
+  through: Map<string, boolean>;
+  /** The same for paths written with wildcards; `made` is false for ones only removed. */
+  wild: { pattern: string; parts: string[]; made: boolean; link: boolean }[];
+  /** Counts the changes to what the line has made. */
+  epoch: number;
   /** A wildcard may match what an earlier command of the line makes. */
   unmatched: boolean;
 }
@@ -4283,6 +4366,78 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   /** Whether a word starts with a `~` the shell expands (written outside quotes). */
   const tilde = (w: Word): boolean => w.text.startsWith('~') && w.mask.startsWith('u');
 
+  // What the command being read makes, kept until it ends: its own words are not held against it.
+  let pending: { path: string; glob: boolean; kind: 'made' | 'gone' | 'folder'; link: boolean }[] =
+    [];
+  // The command being read may make a link where it writes; it is `mkdir`.
+  let linking = false;
+  let folding = false;
+  /** A placed path as told from the folder the line starts in. */
+  const anchor = (path: string): string =>
+    r.cwd !== null && !posix.isAbsolute(path) && !path.startsWith('~')
+      ? posix.join(r.cwd, path)
+      : posix.normalize(path);
+  /** The folders above a path, nearest first, as far as the text tells them. */
+  const above = (at: string): string[] => {
+    const out: string[] = [];
+    for (let up = posix.dirname(at); out.length < 256; up = posix.dirname(up)) {
+      if (up === at || up === '..' || up.endsWith('/..') || up.startsWith('~')) break;
+      out.push(up);
+      if (up === '/' || up === '.') break;
+    }
+    return out;
+  };
+  /** Whether a pattern an earlier command wrote may name a path, in parts, or a folder above it. */
+  const mayName = (g: { pattern: string; parts: string[] }, at: string, parts: string[]): boolean =>
+    !g.pattern.startsWith('~') &&
+    !at.startsWith('~') &&
+    posix.isAbsolute(g.pattern) === posix.isAbsolute(at) &&
+    partsHold(g.parts, parts);
+  /**
+   * Whether a path goes through something an earlier command of the line made, other than a
+   * folder `mkdir` made: a link, for all the text tells, so where the path leads is not known.
+   * It does when what was made is a folder above it, or is the path itself written with a `/`
+   * after it; with `onto`, also when it is the path itself and may be a link, which a write
+   * follows.
+   */
+  const leadsAway = (path: string, slash: boolean, onto: boolean): boolean => {
+    if (r.through.size === 0 && r.wild.length === 0) return false;
+    const at = anchor(path);
+    const own = r.through.get(at);
+    if (own !== undefined && (slash || (onto && own))) return true;
+    if (above(at).some((up) => r.through.has(up))) return true;
+    if (r.wild.length === 0) return false;
+    const parts = pathParts(at);
+    const up = parts.slice(0, -1);
+    return r.wild.some((g) => g.made && mayName(g, at, slash || (onto && g.link) ? parts : up));
+  };
+  /** Whether an earlier command of the line wrote a path or a folder above it, in any way. */
+  const stale = (path: string): boolean => {
+    const at = anchor(path);
+    if (r.touched.has(at) || above(at).some((up) => r.touched.has(up))) return true;
+    if (r.wild.length === 0) return false;
+    const parts = pathParts(at);
+    return r.wild.some((g) => mayName(g, at, parts));
+  };
+  /**
+   * What a copy, move or link into `dest` makes. Written with a `/` after it, or a folder on
+   * disk that the line has not touched, the destination is a folder and each source lands in it
+   * under its own name. A folder `mkdir` made earlier on the line is one too, unless the
+   * `mkdir` did not run: then a command that may make a link makes the destination itself.
+   * Anything else is made itself, and so is a folder that a source is poured into.
+   */
+  const lands = (dest: string, w: Word, entries: readonly { name: string }[]): string[] => {
+    const inside = entries.map((e) => (e.name === '.' || e.name === '*' ? null : e.name));
+    const inner = inside.flatMap((name) => (name === null ? [] : [posix.join(dest, name)]));
+    if (inside.includes(null)) return [dest, ...inner];
+    if (w.text.endsWith('/')) return inner;
+    if (r.madeDirs.has(anchor(dest))) return linking ? [dest, ...inner] : inner;
+    if (r.isDir !== null && !stale(dest) && r.isDir(dest) && !(r.linked?.(dest) ?? false)) {
+      return inner;
+    }
+    return [dest];
+  };
+
   const add = (item: Item, from: string | null = dir): void => {
     if (r.out.size >= MAX_TARGETS) {
       r.limit ??= `more than ${MAX_TARGETS} write targets`;
@@ -4294,12 +4449,12 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // The same word, given the same way from the same place, adds nothing new: a long line of
     // repeats is read in the time of one.
     if (item.entries === undefined) {
-      const flags = `${item.tree ? 't' : ''}${item.certain === false ? 'u' : ''}${item.ifExists ? 'e' : ''}${item.pattern ? 'p' : ''}${item.dotfiles ? 'd' : ''}${item.nocase ? 'c' : ''}`;
+      const flags = `${item.tree ? 't' : ''}${item.certain === false ? 'u' : ''}${item.ifExists ? 'e' : ''}${item.pattern ? 'p' : ''}${item.dotfiles ? 'd' : ''}${item.nocase ? 'c' : ''}${item.gone ? 'g' : ''}${linking ? 'l' : ''}${folding ? 'f' : ''}`;
       const kinds = item.touches
         ? `${item.touches.tracked ? 't' : ''}${item.touches.untracked ? 'u' : ''}${item.touches.ignored ? 'i' : ''}`
         : '-';
       // What earlier commands made is part of it: a wildcard may match it now (`ln -s` between).
-      const same = `${r.made.length}\0${from === null ? '\u0001' : from}\0${previous === null ? '\u0001' : previous}\0${w.text}\0${w.mask}\0${flags}\0${item.how ?? ''}\0${kinds}\0${item.only?.join('/') ?? '\u0001'}`;
+      const same = `${r.made.length}:${r.epoch}\0${from === null ? '\u0001' : from}\0${previous === null ? '\u0001' : previous}\0${w.text}\0${w.mask}\0${flags}\0${item.how ?? ''}\0${kinds}\0${item.only?.join('/') ?? '\u0001'}`;
       if (r.added.has(same)) return;
       if (r.added.size < MAX_COMMANDS) r.added.add(same);
     }
@@ -4330,6 +4485,38 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         r.limit ??= 'a command runs in a folder the text does not tell';
       }
       if (path === null || /^\/(dev|proc)\//.test(path)) continue;
+      if (r.exact) {
+        // What the text shows as written is made; what may only change is as it was. A copy
+        // into a folder makes what lands in it.
+        const gone = item.gone === true || how === 'clean' || how === 'clean-ignored';
+        const made = !(gone || certain)
+          ? []
+          : gone || item.entries === undefined
+            ? [path]
+            : lands(path, w, item.entries);
+        // Where a path through something the line made leads is not known; nor is where what
+        // lands on such a thing goes, or what a source read through it brings.
+        if (
+          !item.pathspec &&
+          (leadsAway(path, w.text.endsWith('/'), true) ||
+            made.some((p) => p !== path && leadsAway(p, false, true)) ||
+            entries.some((e) => e.source !== null && leadsAway(e.source, false, false)))
+        ) {
+          r.unmatched = true;
+        }
+        // The folder a command runs in, and the top of the tree, stay what they are: it is what
+        // they hold that is made.
+        const stays = (p: string): boolean =>
+          anchor(p) === anchor(from === null || from === '' ? '.' : from) || anchor(p) === r.top;
+        for (const p of made) {
+          pending.push({
+            path: !gone && !form.glob && stays(p) ? posix.join(p, '*') : p,
+            glob: form.glob || (!gone && stays(p)),
+            kind: gone ? 'gone' : folding ? 'folder' : 'made',
+            link: linking && !gone && !folding,
+          });
+        }
+      }
       const touches = item.touches ?? null;
       const kinds = touches
         ? `${touches.tracked ? 't' : ''}${touches.untracked ? 'u' : ''}${touches.ignored ? 'i' : ''}`
@@ -4461,7 +4648,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
    * a folder is not known here, and the line is not read fully.
    */
   const intoMade = (items: readonly Item[], from: string | null): Item[] => {
-    if (r.made.length === 0) return [...items];
+    if (r.touched.size === 0 && r.wild.length === 0) return [...items];
     const out: Item[] = [];
     for (const item of items) {
       const dest =
@@ -4470,7 +4657,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         out.push(item);
         continue;
       }
-      if (r.madeDirs.has(dest)) {
+      if (r.madeDirs.has(anchor(dest))) {
         // `mkdir` may have failed, or not run: the destination itself is written too.
         out.push(item);
         for (const e of item.entries ?? []) {
@@ -4487,16 +4674,19 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         }
         continue;
       }
-      if (r.made.some((m) => m === dest || dest.startsWith(`${m}/`))) r.unmatched = true;
+      // Written earlier on the line in another way (made, or removed and perhaps still there):
+      // whether it is a folder now is not known.
+      const at = anchor(dest);
+      const parts = r.wild.length > 0 ? pathParts(at) : [];
+      if (r.touched.has(at) || r.wild.some((g) => mayName(g, at, parts))) r.unmatched = true;
       out.push(item);
     }
     return out;
   };
   /**
    * What an `mv` (or `git mv`) takes away. With the folder the line runs in, or one above it,
-   * gone elsewhere, the commands after it run where the text does not tell. Nor does it tell
-   * what is under a path an earlier command of the line made (other than a folder `mkdir`
-   * made), which may be a link to anywhere. Either way the line is not read fully.
+   * gone elsewhere, the commands after it run where the text does not tell: the line is not
+   * read fully.
    */
   const movesFrom = (sources: readonly Word[], from: string | null): void => {
     if (r.holds === null || from === null) return;
@@ -4504,10 +4694,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       if (w.dynamic) continue;
       const source = place(w.text, tilde(w), from);
       if (source === null) continue;
-      if (
-        r.holds(source, from) ||
-        r.made.some((m) => source.startsWith(`${m}/`) && !r.madeDirs.has(m))
-      ) {
+      if (r.holds(source, from)) {
         r.unmatched = true;
         return;
       }
@@ -4553,6 +4740,9 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     const { chdir } = runs;
     let { words } = runs;
     const here = chdir ? enter(chdir, at) : at;
+    // A redirection makes a file, or writes the one that is there.
+    linking = false;
+    folding = false;
     for (const red of cmd.redirects) if (red.op.startsWith('>')) add({ word: red.target }, here);
     // A builtin, an expansion or a word that may set what git runs with, anywhere on the line,
     // counts for every git command on it (see `commandTaints`).
@@ -4647,6 +4837,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       collectTargets(code, from, depth + 1, r);
     // `mv` and `git mv` take folders away: asked about only on a line read fully.
     const program = words[0] !== undefined && !words[0].dynamic ? programName(words[0]) : '';
+    linking = r.exact && makesAnyLink(words);
+    folding = verdict.kind === 'writes' && program === 'mkdir';
     const moves =
       r.holds !== null &&
       (program === 'mv' || (program === 'git' && gitCommand(words).rest[0]?.text === 'mv'));
@@ -4760,6 +4952,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
                   certain: false,
                   how,
                   touches: ANY_FILE,
+                  pathspec: true,
                 },
                 base,
               );
@@ -4783,7 +4976,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
                   dotfiles: true,
                   nocase: verdict.nocase || magic.icase,
                   // `git rm` only removes tracked files.
-                  ...(p.tracked ? { touches: TRACKED_FILES } : {}),
+                  ...(p.tracked ? { touches: TRACKED_FILES, gone: true } : {}),
+                  pathspec: true,
                 },
                 base,
               );
@@ -4834,14 +5028,48 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       r.made = [...r.out.values()].map((t) => t.path).slice(0, MAX_TARGETS);
     }
     made = r.out.size;
-    if (verdict.kind === 'writes' && words[0] !== undefined && programName(words[0]) === 'mkdir') {
-      for (const item of verdict.items) {
-        const at = item.word.dynamic ? null : place(item.word.text, tilde(item.word), here);
-        for (let p = at; p !== null && p !== '' && p !== '.' && p !== '/'; p = posix.dirname(p)) {
-          if (r.madeDirs.size < MAX_TARGETS) r.madeDirs.add(p);
-          if (!hasOption(words, 'p', ['--parents'])) break;
-        }
+    // What this command made is there for the words of later ones. A folder `mkdir` makes (with
+    // its parents, under `-p`) is one, unless something else made that path before.
+    const kept = r.touched.size + r.through.size + r.madeDirs.size + r.wild.length;
+    let linked = false;
+    for (const made of pending) {
+      const at = anchor(made.path);
+      if (r.touched.size + r.wild.length >= MAX_TARGETS * 4) {
+        // More than are kept: what later words go through is not known.
+        r.unmatched = true;
+        break;
       }
+      const { link } = made;
+      if (made.glob) {
+        if (
+          !r.wild.some(
+            (g) => g.pattern === at && g.made === (made.kind !== 'gone') && g.link === link,
+          )
+        ) {
+          r.wild.push({ pattern: at, parts: pathParts(at), made: made.kind !== 'gone', link });
+        }
+        continue;
+      }
+      r.touched.add(at);
+      if (made.kind === 'gone') continue;
+      if (made.kind === 'folder') {
+        const parents = hasOption(words, 'p', ['--parents']) ? above(at) : [];
+        for (const p of [at, ...parents]) {
+          // The folder the line starts in, and those above it, were there before.
+          if (p === '.' || p === '/' || (r.cwd !== null && `${r.cwd}/`.startsWith(`${p}/`))) break;
+          if (!r.through.has(p)) r.madeDirs.add(p);
+        }
+        continue;
+      }
+      // A plain file made where `mkdir` made a folder leaves the folder, if it is there.
+      if (!link && r.madeDirs.has(at)) continue;
+      if (r.through.get(at) !== true && (link || !r.through.has(at))) linked = true;
+      r.through.set(at, link || r.through.get(at) === true);
+      r.madeDirs.delete(at);
+    }
+    pending = [];
+    if (linked || kept !== r.touched.size + r.through.size + r.madeDirs.size + r.wild.length) {
+      r.epoch++;
     }
   }
 }
