@@ -79,11 +79,12 @@ export interface HookResult {
   /** Short notice to show the human user (not the model), when the agent supports it. */
   userMessage: string | null;
   /**
-   * pre_tool only: the warning that a shell line could not be read fully, as plain text. It is
-   * part of `context` too; an agent that takes no context before a tool runs shows this to the
-   * person instead.
+   * pre_tool only: what the call is warned about under rules the user marked as enforced, as
+   * plain text on one line: a covered file it names or may reach, a shell line that could not be
+   * read fully or to its end, a file with another name. It is part of `context` too; an agent
+   * that takes no context before a tool runs shows this to the person instead.
    */
-  unreadWarning?: string | null;
+  enforcementWarning?: string | null;
 }
 
 export const EMPTY_HOOK_RESULT: HookResult = Object.freeze({

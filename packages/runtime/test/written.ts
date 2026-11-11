@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   statSync,
   writeFileSync,
@@ -101,9 +102,14 @@ function snapshot(dir: string, test: (rel: string) => boolean): Map<string, stri
       else {
         const rel = relative(dir, p);
         if (!test(rel)) continue;
-        const st = statSync(p);
-        const h = createHash('sha1').update(readFileSync(p)).digest('hex');
-        out.set(rel, `${h}:${st.mtimeMs}:${st.ino}:${st.mode}`);
+        try {
+          const st = statSync(p);
+          const h = createHash('sha1').update(readFileSync(p)).digest('hex');
+          out.set(rel, `${h}:${st.mtimeMs}:${st.ino}:${st.mode}`);
+        } catch {
+          // A link that leads to nothing, to itself or to a folder: told by where it points.
+          out.set(rel, `link:${readlinkSync(p)}`);
+        }
       }
     }
   };

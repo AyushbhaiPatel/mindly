@@ -46,10 +46,13 @@ memory, which is then injected into every other agent.
   the system takes it, off the folder a link before it leads to. A tool call that writes
   through a link to a file that is not there is checked where that file would be made, the
   links followed by hand at most eight times, each from the folder it is really in, and refused
-  when that does not settle it. A tool call onto a regular file that has another name as well
+  when that does not settle it, or when such a link's own target has a `..` after a folder's
+  name. A tool call onto a regular file that has another name as well
   (a hard link) is blocked when an enforced rule names that very file by a plain path (the
   first 32 rules are looked at); otherwise it is warned about, with the enforced rules named,
-  as the name does not tell whether a rule covers the file under its other name.
+  as the name does not tell whether a rule covers the file under its other name. The link
+  count is looked at for every path the call reports, one outside the project too, since its
+  other name may be inside.
   Reading a command is not a sandbox: a program can write a file its command line never
   names. A line whose paths depend on what runs (a variable, a pipe into anything but a filter,
   a `cd` other than a leading one) is not read fully and is warned about, as described below,
@@ -105,14 +108,25 @@ memory, which is then injected into every other agent.
   it refuses the path or puts a folder in the link's place. The destination of `git mv` is
   followed, and is held like any other; and a folder git is sent to or pointed at (`-C`,
   `--work-tree`, `--git-dir`) that is, or is reached through, something the line made is not
-  read fully. A path the text does not settle makes the line not read fully as well: a `..`
+  read fully. A symbolic link that was there before the line ran may lead to what the line
+  makes, which comparing the text does not show (`lnk` leads to `d/a`, and the line runs
+  `ln -s ../../certs d/a/sub; rm -f lnk/sub/server.pem`; or `sl` leads to `secrets`, which is
+  not there until `mkdir secrets && mv b.txt sl/k`). So once a line has made anything, a folder
+  `mkdir` made included, a later path it writes, removes or lands something on that has a
+  symbolic link among the parts of it that are there, or is one that leads nowhere, makes the
+  line not read fully; the paths git is given in its own tree are left out, as above.
+  A path the text does not settle makes the line not read fully as well: a `..`
   after a folder's name in any path written or copied from (`rm -f deep/../server.pem`: the
   system takes `..` off the folder a link before it leads to; a leading `../..` is placed from
   the folder the session is in), and a word that starts with a `~` the shell expands to
   anything but the user's own home (`~-`, `~+`, `~name`). A `~` is one the shell expands only
   as the first character of a word with nothing quoted, not even an empty string, before the
   first `/`, and not after the `=` of an option; any other is a name (`~''/x`, `./~/x`,
-  `--output=~/x`). A file that has another name as well (a hard link:
+  `--output=~/x`), and is held against what the line made like any other name. When `HOME` is
+  set and empty, `~/x` is `/x`, as the shell takes it. A path under `/proc`, `/dev` or `/sys`
+  leads where the system says (`/proc/self/cwd` is the folder the command runs in): one that
+  is written, other than `/dev/null`, `/dev/zero`, `/dev/stdout`, `/dev/stderr`, `/dev/tty`
+  and `/dev/fd/N`, makes the line not read fully. A file that has another name as well (a hard link:
   a link count above one when the command is checked) is written under every name it has, and
   a write onto a symbolic link that leads to a file that is not there makes that file. A line
   that writes such a name in place, that is its content, mode, owner or times (a redirection
@@ -127,7 +141,10 @@ memory, which is then injected into every other agent.
   Taking a name away or giving it to something else (`rm`, `mv` onto it, `ln -f`,
   `cp --remove-destination`) leaves the file alone, and git puts a new file where it writes
   one of its tree: those are read as before. With `ln -n`, a destination
-  that is a link to a folder is the name itself, not the folder. A copy,
+  that is a link to a folder is the name itself, not the folder, unless it is written with a
+  `/` or `/.` after it or there is more than one source. What follows `--` is an operand,
+  whatever it looks like (`ln -sf -- -n dir` links a file named `-n`), and a colon in a name
+  given to `mv` or `cp` is part of the name. A copy,
   move or link into a folder lands inside it under each source's name, and that name is what is
   made and what is checked (the name itself, and where it leads when it is a link): a destination written with a `/` after it, a folder `mkdir` made earlier on the line, or
   a folder on disk (not a link to one) that the line has not written, removed or renamed. Any
@@ -135,10 +152,19 @@ memory, which is then injected into every other agent.
   a folder, and the line is not read fully. The rest of a line read fully is: words of plain characters
   (`*` and `?` included, unless they may match what an earlier command of the line makes; a
   part of a path with more than three runs of `*` is taken to match anything; a copy or move of
-  more than 64 sources is not read fully; a wildcard that may match a symbolic link is not read
+  more than 64 sources is not read fully; a wildcard that matches nothing stays in the
+  name as written, so in a name a command makes itself (the target of `touch` or `mkdir`, of a
+  redirection, an output file of git) it is read both ways, as what it matches and as the name
+  itself: `touch certs/zz*` makes a file of that very name and is blocked when a rule covers
+  it, and so is `echo x > certs/*.pem` when the wildcard matches a covered file. A wildcard in
+  the destination of `cp`, `mv` or `ln`, in any part of it, or in a folder git fills, is not
+  read fully: where it matches a folder, what is copied, moved or linked is put inside it
+  (`cp b.txt cert?/`). A wildcard in what is removed, or changed in mode or owner, only takes
+  what is there and is read as written (`rm -f */*.pem`, `rm -rf */dist`), except that one
+  which may match a symbolic link is not read
   fully where the link would be followed: a link to a folder, for a folder on the way to what
   is written (a plain part after the wildcard that is such a link counts too) and for a last
-  part that a copy, move or link puts things in or that is removed with a `/` after it; any
+  part that is removed with a `/` after it; any
   link, for a last part the command writes in place. A link to a file among the folders
   `*/dist` expands in changes nothing, and `rm -f *.tmp` on a link only removes the link),
   a comment (from a `#` that starts a word to the end of its line, which is dropped; what is on
@@ -190,9 +216,15 @@ memory, which is then injected into every other agent.
   the line names or may reach, with what of that is covered. The write guards (a split's
   ownership of files) are asked about the whole tree and only warn. The first 32 paths it names
   are placed one by one, as possible writes only, to say which covered paths it names. Where
-  the agent takes context before a tool runs, the warning goes to the model; Gemini takes none
-  there, so on Gemini this warning, and nothing else of the context, is shown to the person
-  instead. Nothing of it is asked of git. Lines
+  the agent takes context before a tool runs, the warning goes to the model. Gemini takes none
+  there, so on Gemini the person is shown, in place of the context, what the call is warned
+  about under enforced rules, as plain text with the rules named without markup characters:
+  this warning; the warning that a line read fully names or may reach a covered file (a git
+  command that may change the tree, a `chmod`), or that the search for one could not finish;
+  the notice that a command was not read to its end or that time ran out; the notice that
+  paths outside the working tree were not checked; and the warning that a tool call writes a
+  file with another name. Reference context for the model (memory, other sessions' work) is
+  still dropped there. Nothing of it is asked of git. Lines
   that now warn this way include any line with `$VAR` or `$(…)`, a loop or a function, a test
   run through a package manager, `npx`, a pipe into `sort` or `xargs`, `sed`, `find`, strict
   shell options, `export`, `source`, `[[ … ]]`, and a shell given code.
@@ -201,12 +233,17 @@ memory, which is then injected into every other agent.
   without a word. It does not guarantee a block. A line Mindly cannot place exactly is warned
   about and runs, and that includes a line that would have been blocked had the uncertain part
   not been on it: `rm -f certs/server.pem` is blocked, `git pull && rm -f certs/server.pem`
-  is warned about. The uncertain parts are a symbolic link in a wildcard's way, a path through
-  something the line made earlier (a link, a copy, what git changed), a file that has two
-  names, a path the text does not settle, and whatever makes the line one not read fully in
+  is warned about. The uncertain parts are a symbolic link in a wildcard's way, a wildcard in
+  the destination of a copy, move or link, a path through something the line made earlier (a link, a copy,
+  what git changed), a symbolic link that was there in a path named after the line has made
+  something, a file that has two names, a path the text does not settle or the system makes
+  up, and whatever makes the line one not read fully in
   the first place. Such a line is also warned about when it turns out to write nothing
   covered: `npm test`, `git checkout main && rm -rf dist`, `chmod -R` over a folder of hard
-  links. Both are the known cost of warning rather than guessing.
+  links, `cp config.json packages/*/`, and a line that makes a folder and then names a path
+  under `node_modules/pkg` where a package manager made that a link. A copy to a wildcard that
+  does match a covered file (`cp b.txt certs/*.pem`) is warned about too, not blocked. Both
+  are the known cost of warning rather than guessing.
 
 - A shell tool call is read as a shell line, and when its text holds a patch, the files the patch
   names are possible writes besides. Only a call bash would run nothing of, `apply_patch` given a
