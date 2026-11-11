@@ -38,15 +38,22 @@ describe('resolveInsideRoot', () => {
   });
 
   it('places a long path that is not there in time that grows with its length', () => {
-    const input = `${'b/'.repeat(1999)}f`;
-    expect(input.length).toBeGreaterThanOrEqual(3999);
-    let best = Infinity;
-    for (let k = 0; k < 5; k++) {
-      const started = performance.now();
-      expect(resolveInsideRoot(root, input).rel).toBe(input);
-      best = Math.min(best, performance.now() - started);
-    }
-    expect(best).toBeLessThan(30);
+    const best = (parts: number): number => {
+      const input = `${'b/'.repeat(parts)}f`;
+      let fastest = Infinity;
+      for (let k = 0; k < 5; k++) {
+        const started = performance.now();
+        expect(resolveInsideRoot(root, input).rel).toBe(input);
+        fastest = Math.min(fastest, performance.now() - started);
+      }
+      return fastest;
+    };
+    // Four times the parts may take four times as long, give or take; a walk that starts over
+    // at each part takes sixteen. Measured against the shorter path, so a slow machine passes.
+    const short = best(500);
+    const long = best(2000);
+    expect(long).toBeLessThan(Math.max(8 * short, 5));
+    expect(long).toBeLessThan(250);
   });
 });
 
