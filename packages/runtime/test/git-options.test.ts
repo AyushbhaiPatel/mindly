@@ -1789,7 +1789,7 @@ const strays: {
   {
     name: 'the mode of a folder that holds another name of a covered file changed',
     prep: 'mkdir -p dir/deep && ln certs/server.pem dir/deep/f',
-    command: 'chmod -R 600 dir',
+    command: 'chmod -R 700 dir',
     runs: CP_KEEPS_NAMES,
   },
   {
