@@ -576,14 +576,23 @@ export class HookHandler {
     };
     /** For each name looked at: whether it is a symbolic link; null when it is not there. */
     const links = new Map<string, boolean | null>();
+    /** Folders that are there with no symbolic link on the way to them. */
+    const clear = new Set<string>();
     const start = toPosix(cwd);
     // The folder the line runs in is told as it is on disk, so no link is above it: a path
     // under it is looked at from there, any other from the root, down to the first part that
     // is not there.
     const viaLink = (path: string): boolean => {
       const abs = toPosix(resolve(cwd, path));
-      const from = abs.startsWith(`${start}/`) ? start.length : 0;
+      const folder = abs.slice(0, Math.max(abs.lastIndexOf('/'), 0));
+      const from = clear.has(folder)
+        ? folder.length
+        : abs.startsWith(`${start}/`)
+          ? start.length
+          : 0;
       for (let end = abs.indexOf('/', from + 1); ; end = abs.indexOf('/', end + 1)) {
+        // The last part is reached: every folder above it is there, and no link.
+        if (end === -1 && folder !== '') clear.add(folder);
         const at = end === -1 ? abs : abs.slice(0, end);
         let link = links.get(at);
         if (link === undefined) {
@@ -629,17 +638,16 @@ export class HookHandler {
     });
     let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
-    /** Folders that are not there, each placed once. */
+    /** Folders that names are placed under, each placed once. */
     const missing = new Map<string, Located | 'unknown' | null>();
     const seen = new Set<string>();
     let late = false;
     for (const t of reading.targets) {
-      // Out of time: paths are still placed (without looking up other working trees), but not
-      // copies, whose sources would have to be listed. Searching what they hold is bounded
-      // apart, and reports what it did not get to.
-      const simple = t.entries.length === 0;
+      // Out of time: what is left is not placed, and the line is told it was not read to its
+      // end. Searching what the placed paths hold is bounded apart, and reports what it did
+      // not get to.
       if (!late && timeUp()) late = true;
-      if (late && !simple) {
+      if (late) {
         limit ??= 'no time was left to place all it writes';
         continue;
       }
@@ -665,7 +673,7 @@ export class HookHandler {
             const up = nearestThere(dir);
             let from = missing.get(up);
             if (from === undefined) {
-              from = await this.locate(project, treeRoot, up, late ? null : trees);
+              from = await this.locate(project, treeRoot, up, trees);
               missing.set(up, from);
             }
             const rest = dir.slice(up.length).replace(/^[\\/]+/, '');
@@ -678,7 +686,23 @@ export class HookHandler {
           if (at === 'unknown') into.unchecked++;
           return at === null || at === 'unknown' ? null : this.under(at, basename(abs));
         }
-        const found = await this.locate(project, treeRoot, abs, late ? null : trees);
+        // A name in a folder that is there is placed under the folder too, which is placed
+        // once however many names the line gives in it: a name that is not there, or one that
+        // following would not change.
+        if (dir !== abs && (!exists(abs) || asSpelled(abs))) {
+          let at = missing.get(dir);
+          if (at === undefined) {
+            at = await this.locate(project, treeRoot, dir, trees);
+            missing.set(dir, at);
+          }
+          if (at === 'unknown') {
+            into.unchecked++;
+            return null;
+          }
+          // A folder outside the project may still hold the top of one of its trees.
+          if (at !== null) return this.under(at, basename(abs));
+        }
+        const found = await this.locate(project, treeRoot, abs, trees);
         if (found === 'unknown') into.unchecked++;
         return found === 'unknown' ? null : found;
       };
@@ -721,7 +745,7 @@ export class HookHandler {
       const named = async (target: string): Promise<void> => {
         // The first is the path itself, placed already.
         const others = writePlaces(target).places.slice(1);
-        for (const found of await this.locateAll(project, treeRoot, others, late ? null : trees)) {
+        for (const found of await this.locateAll(project, treeRoot, others, trees)) {
           if (found === 'unknown') into.unchecked++;
           else file(found);
         }
@@ -816,6 +840,11 @@ export class HookHandler {
           // not known.
           if (name !== '.') file(await place(dest));
           if (t.tree || name === '.') landing(await place(dest));
+        }
+        // `ln -s` makes a link under the name of each source as written, there or not: a
+        // wildcard that matches nothing stays in the name.
+        for (const name of t.asWritten ? t.entries : []) {
+          if (/[*?]/.test(name)) file(await place(join(path, name)));
         }
         continue;
       }
@@ -2058,6 +2087,18 @@ function exists(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether a name that is there is the name the system has for it: no symbolic link, written in
+ * plain characters, and with no other letter case of it there too, as there is on a file system
+ * that ignores case. Such a name is where its folder is, under itself.
+ */
+function asSpelled(path: string): boolean {
+  const name = basename(path);
+  if (!/^[\x20-\x7e]+$/.test(name) || isLink(path)) return false;
+  const other = name === name.toLowerCase() ? name.toUpperCase() : name.toLowerCase();
+  return other === name || !exists(join(dirname(path), other));
 }
 
 /** Files one hook call hands to the write guards in place of the patterns that name them. */

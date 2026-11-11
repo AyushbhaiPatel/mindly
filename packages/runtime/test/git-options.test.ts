@@ -125,6 +125,10 @@ const CP_REMOVES_DESTINATION = works(
 const LN_TARGET = works(
   'd=$(mktemp -d) && mkdir "$d/b" && ln -s -t "$d/b" x && [ -L "$d/b/x" ] && [ ! -L "$d/b/-t" ]; r=$?; rm -rf "$d"; exit $r',
 );
+/** GNU `cp` takes `-t`; BSD `cp` (macOS) does not. */
+const CP_TARGET = works(
+  'd=$(mktemp -d) && mkdir "$d/b" && touch "$d/a" && cp -t "$d/b" "$d/a" && [ -e "$d/b/a" ]; r=$?; rm -rf "$d"; exit $r',
+);
 /** `ln -n` given a link to a folder with a `/` after it puts the new name in the folder. */
 const LN_N_SLASH = works(
   'd=$(mktemp -d) && mkdir "$d/t" && ln -s t "$d/l" && ln -sfn x "$d/l/" && [ -L "$d/t/x" ]; r=$?; rm -rf "$d"; exit $r',
@@ -2368,6 +2372,113 @@ const unsettled: {
     covered: endsInPem,
     cases: [{ name: 'mv', command: 'mv k:1.pem x.txt' }],
   },
+  {
+    title: 'a copy into a covered folder, of what the line wrote before it',
+    scopes: ['certs/**'],
+    prep: 'mkdir out',
+    covered: inCerts,
+    cases: [
+      {
+        name: 'a wildcard that matches the file made',
+        command: 'echo x > n.key && cp *.key certs/',
+      },
+      { name: 'the same, no / after the folder', command: 'echo x > n.key && cp *.key certs' },
+      { name: 'another name for it', command: 'echo x > n.key && ln *.key certs/' },
+      { name: 'after touch and a ;', command: 'touch n.key; cp n* certs/' },
+      {
+        name: 'the content of a folder the line wrote into',
+        command: 'echo x > out/n.key && cp -r out/. certs/',
+      },
+      { name: 'that folder itself', command: 'echo x > out/n.key && cp -r out certs/' },
+      { name: 'its files by a wildcard', command: 'echo x > out/n.key && cp out/* certs/' },
+      {
+        name: 'a folder the line made, by a wildcard',
+        command: 'mkdir zq && echo x > zq/n.key && cp -r z* certs/',
+      },
+    ],
+  },
+  {
+    title: 'a copy with -t into a covered folder, of what the line wrote before it',
+    scopes: ['certs/**'],
+    covered: inCerts,
+    runs: CP_TARGET,
+    cases: [{ name: 'cp -t', command: 'echo x > n.key && cp -t certs *.key' }],
+  },
+  {
+    title: 'a copy of a folder the line made and filled, under a rule by name',
+    scopes: ['conf/*.json'],
+    prep: 'mkdir conf && echo r > conf/README',
+    covered: (rel) => /^conf\/[^/]*\.json$/.test(rel),
+    cases: [
+      { name: 'its content', command: 'mkdir st && echo x > st/app.json && cp -r st/. conf/' },
+      {
+        name: 'its files by a wildcard',
+        command: 'mkdir st && echo x > st/app.json && cp st/* conf/',
+      },
+    ],
+  },
+  {
+    title: 'a copy from a link the line made, or through a link that was there to one',
+    scopes: ['**/*.pem'],
+    prep: 'mkdir -p pems out d/a && echo k > pems/k.pem && ln -s d/a lnk',
+    covered: endsInPem,
+    cases: [
+      { name: 'the link with /. after it', command: 'ln -s pems pp; cp -r pp/. out/' },
+      { name: 'the link with / after it', command: 'ln -s pems pp; cp -r pp/ out/' },
+      { name: 'the link followed by -L', command: 'ln -s pems pp; cp -rL pp out/' },
+      {
+        name: 'through an old link, the content',
+        command: 'ln -s ../../pems d/a/sub; cp -r lnk/sub/. out/',
+      },
+      {
+        name: 'through an old link, by a wildcard',
+        command: 'ln -s ../../pems d/a/sub; cp lnk/sub/* out/',
+      },
+    ],
+  },
+  {
+    title: 'a symbolic link to a wildcard that matches nothing, made in a covered folder',
+    scopes: ['certs/**'],
+    prep: 'mkdir shared',
+    covered: inCerts,
+    cases: [
+      { name: 'into the folder', command: 'ln -s shared/*.pem certs/' },
+      { name: 'from inside it', command: 'cd certs && ln -s ../shared/*.pem .' },
+    ],
+  },
+  {
+    title: 'a symbolic link to a wildcard that matches nothing, the folder given by -t',
+    scopes: ['certs/**'],
+    covered: inCerts,
+    runs: LN_TARGET,
+    cases: [{ name: 'ln -s -t', command: 'ln -s -t certs nothing*' }],
+  },
+  {
+    title: 'a wildcard in a folder git is sent to or fills',
+    scopes: ['certs/**'],
+    prep: 'echo u > certs/untracked.pem',
+    covered: inCerts,
+    cases: [
+      { name: 'git -C, a file removed', command: 'git -C cert? rm -q -f server.pem' },
+      { name: 'git -C, a file cleaned', command: 'git -C cert? clean -fxq untracked.pem' },
+      { name: 'git -C, an output file', command: 'git -C cert? diff --output=server.pem' },
+      { name: 'patches written to it', command: 'git format-patch -1 -o cert?' },
+      { name: 'the long option', command: 'git format-patch -1 --output-directory c*s' },
+    ],
+  },
+  {
+    title: 'a mode or a name after -- that starts with a dash',
+    scopes: ['**/*.pem'],
+    prep: 'echo o > ./-old.pem',
+    covered: endsInPem,
+    cases: [
+      { name: 'the mode of a covered file', command: 'chmod -- -w certs/server.pem' },
+      { name: 'the mode of all a folder holds', command: 'chmod -R -- -w certs' },
+      { name: 'a covered file removed', command: 'rm -- -old.pem' },
+      { name: 'a covered file made', command: 'touch -- -new.pem' },
+      { name: 'a mode, then such a name', command: 'chmod 600 -- -old.pem' },
+    ],
+  },
 ];
 
 describe('lines whose paths nothing settles are never let through in silence', () => {
@@ -2765,6 +2876,37 @@ describe('a link to a file in the folder a wildcard for a folder expands in', ()
   });
 });
 
+describe('a file the line made, copied by its name', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUpWithFile(['certs/**']);
+  });
+  afterAll(() => g.mindly.close());
+
+  for (const [command, written] of [
+    ['echo x > n.key && cp n.key certs/', ['certs/n.key']],
+    ['echo x > n.key && mv n.key certs/', ['certs/n.key']],
+    ['mkdir d && cp -r d certs/', ['certs/d']],
+  ] as const) {
+    it(`is placed by that name, and blocked in a covered folder: ${command}`, async () => {
+      const copy = copyOf(g.dir);
+      execFileSync('bash', ['-c', command], { cwd: copy, env: GIT_ENV });
+      for (const made of written) expect(whatIs(join(copy, made)), made).not.toBe('nothing');
+      expect(verdictOf(await g.shell(command))).toBe('deny');
+    });
+  }
+
+  it('a symbolic link to a wildcard that matches nothing is blocked there too', async () => {
+    expect(verdictOf(await g.shell('ln -s nothing/*.pem certs/'))).toBe('deny');
+    expect(verdictOf(await g.shell('ln -s nothing/*.pem out/'))).toBe('allow');
+  });
+
+  it('a change of mode is warned about with the mode before or after --', async () => {
+    expect(verdictOf(await g.shell('chmod a-w certs/server.pem'))).toBe('warn');
+    expect(verdictOf(await g.shell('chmod -- -w certs/server.pem'))).toBe('warn');
+  });
+});
+
 describe('a wildcard in a name a command makes itself', () => {
   let g: ReturnType<typeof setUp>;
   beforeAll(() => {
@@ -2955,11 +3097,23 @@ describe('a comment on a line', () => {
 describe('lines that stay read fully', () => {
   let g: ReturnType<typeof setUp>;
   beforeAll(() => {
-    g = setUpWithFile(['certs/**'], 'echo t > y.tmp && ln -s y.tmp x.tmp');
+    g = setUpWithFile(
+      ['certs/**'],
+      'echo t > y.tmp && ln -s y.tmp x.tmp && echo f > ./-f && mkdir scripts && echo s > scripts/build.sh',
+    );
   });
   afterAll(() => g.mindly.close());
 
   for (const command of [
+    // A folder made, then a copy into it; a copy of a folder the line has not written.
+    'mkdir -p dist && cp a.txt dist/',
+    'cp -r src out',
+    // A file the line made, moved by its name; what a folder `mkdir -p` found there, moved.
+    'echo x > n.txt && mv n.txt m.txt',
+    'mkdir -p src && cp src/a.ts b.ts',
+    // A name after `--`, and a mode, where nothing is covered.
+    'rm -- -f',
+    'chmod +x scripts/build.sh',
     // A link the wildcard matches is only removed.
     'rm -f *.tmp',
     // Nothing is written through the path with `..`.
@@ -3451,6 +3605,35 @@ describe('git commands read without false warnings or slow reading', () => {
       }
     } finally {
       g.mindly.close();
+    }
+  });
+
+  it('names in a very deep folder that is there are placed in good time', async () => {
+    const deep = `c1/${'a/'.repeat(1800)}`;
+    const g = setUp(['certs/**'], `mkdir -p ${deep}`);
+    try {
+      await g.shell('true');
+      const twelve = Array.from({ length: 12 }, (_, i) => `${deep}f${i}`).join(' ');
+      for (const [name, command, want] of [
+        ['twelve names removed', `rm -f ${twelve}`, 'allow'],
+        ['a folder made, then twelve names removed', `mkdir zz && rm -f ${twelve}`, 'allow'],
+        ['the same, then a covered file', `mkdir zz && rm -f ${twelve} certs/server.pem`, 'deny'],
+      ] as const) {
+        expect(command.length, name).toBeLessThan(200_000);
+        let best = Infinity;
+        let said: Verdict = 'warn';
+        for (let k = 0; k < 3; k++) {
+          const t0 = performance.now();
+          said = verdictOf(await g.shell(command));
+          best = Math.min(best, performance.now() - t0);
+        }
+        expect(said, name).toBe(want);
+        // 200 ms is the aim; the bound leaves room for a busy runner.
+        expect(best, name).toBeLessThan(500);
+      }
+    } finally {
+      g.mindly.close();
+      execFileSync('rm', ['-rf', 'c1'], { cwd: g.dir });
     }
   });
 

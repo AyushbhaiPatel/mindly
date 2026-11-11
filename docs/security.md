@@ -56,7 +56,8 @@ memory, which is then injected into every other agent.
   Reading a command is not a sandbox: a program can write a file its command line never
   names. A line whose paths depend on what runs (a variable, a pipe into anything but a filter,
   a `cd` other than a leading one) is not read fully and is warned about, as described below,
-  and a command too long to read to its end (200,000 characters, 500 write targets) is answered
+  and a command too long to read to its end (200,000 characters, 500 write targets), or one
+  whose paths could not all be placed in the time there is, is answered
   with a warning that the rest was not checked. A patch with more files than are reported in one
   call is refused.
 - git commands are read the same way. One counts as only looking, or only moving refs and the
@@ -107,7 +108,8 @@ memory, which is then injected into every other agent.
   own working tree are not held against what the line made: git does not follow a link there,
   it refuses the path or puts a folder in the link's place. The destination of `git mv` is
   followed, and is held like any other; and a folder git is sent to or pointed at (`-C`,
-  `--work-tree`, `--git-dir`) that is, or is reached through, something the line made is not
+  `--work-tree`, `--git-dir`) that is, or is reached through, something the line made, or that
+  is written with a wildcard outside quotes (`git -C cert? rm -f server.pem`), is not
   read fully. A symbolic link that was there before the line ran may lead to what the line
   makes, which comparing the text does not show (`lnk` leads to `d/a`, and the line runs
   `ln -s ../../certs d/a/sub; rm -f lnk/sub/server.pem`; or `sl` leads to `secrets`, which is
@@ -143,13 +145,28 @@ memory, which is then injected into every other agent.
   one of its tree: those are read as before. With `ln -n`, a destination
   that is a link to a folder is the name itself, not the folder, unless it is written with a
   `/` or `/.` after it or there is more than one source. What follows `--` is an operand,
-  whatever it looks like (`ln -sf -- -n dir` links a file named `-n`), and a colon in a name
+  whatever it looks like (`ln -sf -- -n dir` links a file named `-n`, `chmod -- -w file` takes
+  `-w` for the mode, `rm -- -old.pem` removes a file of that name), and a colon in a name
   given to `mv` or `cp` is part of the name. A copy,
   move or link into a folder lands inside it under each source's name, and that name is what is
   made and what is checked (the name itself, and where it leads when it is a link): a destination written with a `/` after it, a folder `mkdir` made earlier on the line, or
   a folder on disk (not a link to one) that the line has not written, removed or renamed. Any
   other destination is made itself; one written earlier on the line in any way may or may not be
-  a folder, and the line is not read fully. The rest of a line read fully is: words of plain characters
+  a folder, and the line is not read fully. What a source brings is looked up on disk when the
+  command is checked, which is before the line runs. So a source the line has written by then
+  makes the line not read fully: one with a wildcard that may match what an earlier command
+  made (`echo x > n.key && cp *.key certs/`); one whose content is brought (a recursive copy, a
+  move, a source with `/` or `/.` after it) that is, lies under, or holds something the line
+  wrote (`echo x > out/n.key && cp -r out certs/`, `ln -s pems pp; cp -r pp/. out/`); and, once
+  the line has made anything, one with a symbolic link among the parts of it that are there.
+  A source named in full and copied without its content lands under its own name whatever it
+  is, and so does a file the line made by a command that makes no link, or a folder `mkdir`
+  made and nothing was put in: `echo x > n.key && cp n.key certs/` is read fully, and blocked.
+  A folder `mkdir` made is not counted as written for what lies under it, which was there
+  before (`mkdir -p out && mv out/a b`). `ln -s` makes a link under the name of each source
+  as written, whether or not the source is there, so a source with a wildcard that matches
+  nothing lands under that very name as well (`ln -s shared/*.pem certs/` makes
+  `certs/*.pem`). The rest of a line read fully is: words of plain characters
   (`*` and `?` included, unless they may match what an earlier command of the line makes; a
   part of a path with more than three runs of `*` is taken to match anything; a copy or move of
   more than 64 sources is not read fully; a wildcard that matches nothing stays in the
@@ -157,7 +174,8 @@ memory, which is then injected into every other agent.
   redirection, an output file of git) it is read both ways, as what it matches and as the name
   itself: `touch certs/zz*` makes a file of that very name and is blocked when a rule covers
   it, and so is `echo x > certs/*.pem` when the wildcard matches a covered file. A wildcard in
-  the destination of `cp`, `mv` or `ln`, in any part of it, or in a folder git fills, is not
+  the destination of `cp`, `mv` or `ln`, in any part of it, or in a folder git fills (a clone,
+  the folder `format-patch` writes its files to), is not
   read fully: where it matches a folder, what is copied, moved or linked is put inside it
   (`cp b.txt cert?/`). A wildcard in what is removed, or changed in mode or owner, only takes
   what is there and is read as written (`rm -f */*.pem`, `rm -rf */dist`), except that one
@@ -236,11 +254,13 @@ memory, which is then injected into every other agent.
   is warned about. The uncertain parts are a symbolic link in a wildcard's way, a wildcard in
   the destination of a copy, move or link, a path through something the line made earlier (a link, a copy,
   what git changed), a symbolic link that was there in a path named after the line has made
-  something, a file that has two names, a path the text does not settle or the system makes
+  something, a source of a copy that the line wrote before the copy, a file that has two
+  names, a path the text does not settle or the system makes
   up, and whatever makes the line one not read fully in
   the first place. Such a line is also warned about when it turns out to write nothing
   covered: `npm test`, `git checkout main && rm -rf dist`, `chmod -R` over a folder of hard
-  links, `cp config.json packages/*/`, and a line that makes a folder and then names a path
+  links, `cp config.json packages/*/`, `touch a.txt && cp *.txt backup/`,
+  `cp -r src out && cp -r out out2`, and a line that makes a folder and then names a path
   under `node_modules/pkg` where a package manager made that a link. A copy to a wildcard that
   does match a covered file (`cp b.txt certs/*.pem`) is warned about too, not blocked. Both
   are the known cost of warning rather than guessing.

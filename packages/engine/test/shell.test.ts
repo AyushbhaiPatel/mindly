@@ -1038,6 +1038,7 @@ describe('write targets of a shell command', () => {
         path: 'src/generated/*.ts',
         unplaced: false,
         noFollow: false,
+        asWritten: false,
         glob: true,
         dotfiles: false,
         nocase: false,
@@ -1930,6 +1931,91 @@ describe('write targets of a shell command', () => {
       'a/b',
       'a/b/x.txt',
     ]);
+  });
+
+  it('holds the sources of a copy against what the line wrote', () => {
+    const fully = (line: string, links: readonly string[] = []) =>
+      readShellWrites(line, {
+        understoodOnly: true,
+        cwd: '/w',
+        viaLink: (path) => links.some((l) => path === l || path.startsWith(`${l}/`)),
+      }).understood;
+    for (const [line, read] of [
+      // A wildcard that may match what the line made.
+      ['echo x > n.key && cp *.key certs/', false],
+      ['echo x > n.key && cp -t certs *.key', false],
+      ['echo x > n.key && ln *.key certs/', false],
+      ['touch n.key; cp n* certs/', false],
+      ['mkdir zq && echo x > zq/n.key && cp -r z* certs/', false],
+      ['echo x > n.key && cp *.txt certs/', true],
+      // A folder the line wrote into, copied with what it holds.
+      ['echo x > out/n.key && cp -r out/. certs/', false],
+      ['echo x > out/n.key && cp -r out certs/', false],
+      ['echo x > out/n.key && cp out/* certs/', false],
+      ['echo x > out/n.key && mv out certs/', false],
+      ['mkdir -p a/b && cp -r a x/', false],
+      ['echo x > out/n.key && cp -r src certs/', true],
+      ['echo x > out/n.key && cp -r out/sub certs/', true],
+      // What the line made, copied with what it holds or leads to.
+      ['ln -s pems pp; cp -r pp/. out/', false],
+      ['ln -s pems pp; cp -r pp/ out/', false],
+      ['ln -s pems pp; cp -rL pp out/', false],
+      ['cp -r a b && cp -r b c', false],
+      ['rm -rf out && cp -r out x/', false],
+      // A file the line made, or a folder `mkdir` made, brings its name and no more.
+      ['echo x > n.key && cp n.key certs/', true],
+      ['echo x > n.key && mv n.key certs/', true],
+      ['touch n.key && ln n.key certs/', true],
+      ['mkdir d && cp -r d certs/', true],
+      ['ln -s pems pp; cp pp out/', true],
+      // What a folder `mkdir -p` found there is as it was.
+      ['mkdir -p out && mv out/a b', true],
+      ['mkdir -p out && cp -r out/a b', true],
+      ['mkdir -p dist && cp a.txt dist/', true],
+      ['cp -r src out', true],
+    ] as const) {
+      expect(fully(line), line).toBe(read);
+    }
+    // Once the line has made something, a link that was there may lead to it.
+    expect(fully('ln -s ../../pems d/a/sub; cp -r lnk/sub/. out/', ['lnk'])).toBe(false);
+    expect(fully('ln -s ../../pems d/a/sub; cp lnk/sub/* out/', ['lnk'])).toBe(false);
+    expect(fully('mkdir tmp && cp lnk/a.txt tmp/', ['lnk'])).toBe(false);
+    expect(fully('cp lnk/a.txt tmp/', ['lnk'])).toBe(true);
+    // `ln -s` makes a link under each source's name as written, there or not.
+    const written = (line: string) =>
+      readShellWrites(line).targets.map(
+        (t) => `${t.path} <- ${t.entries.join(',')}${t.asWritten ? ' (as written)' : ''}`,
+      );
+    expect(written('ln -s shared/*.pem certs/')).toEqual(['certs <- *.pem (as written)']);
+    expect(written('ln -s -t certs nothing*')).toEqual(['certs <- nothing* (as written)']);
+    expect(written('ln shared/*.pem certs/')).toEqual(['certs <- *.pem']);
+    expect(written('cp shared/*.pem certs/')).toEqual(['certs <- *.pem']);
+    // A wildcard in a folder git is sent to, or fills with files of its own naming.
+    for (const [line, read] of [
+      ['git -C cert? rm -q -f server.pem', false],
+      ['git -C cert? status', false],
+      ['git --work-tree=cert? checkout -- x', false],
+      ['git --git-dir=.gi? status', false],
+      ['git format-patch -1 -o cert?', false],
+      ['git format-patch -1 --output-directory c*s', false],
+      ["git -C 'cert?' status", true],
+      ['git -C certs status', true],
+      ['git format-patch -1 -o patches', true],
+    ] as const) {
+      expect(readShellWrites(line, { understoodOnly: true }).understood, line).toBe(read);
+    }
+    // What follows `--` is an operand: a mode, or a name, that starts with a dash.
+    const paths = (line: string) => readShellWrites(line).targets.map((t) => t.path);
+    expect(paths('chmod -- -w certs/server.pem')).toEqual(['certs/server.pem']);
+    expect(paths('chmod -R -- -w certs')).toEqual(['certs']);
+    expect(paths('chmod 600 -- -old.pem')).toEqual(['-old.pem']);
+    expect(paths('chown -- root -old.pem')).toEqual(['-old.pem']);
+    expect(paths('rm -- -old.pem -f')).toEqual(['-old.pem', '-f']);
+    expect(paths('rm -f -- -old.pem')).toEqual(['-old.pem']);
+    expect(paths('touch -- -new.pem')).toEqual(['-new.pem']);
+    expect(paths('mkdir -p -- -d')).toEqual(['-d']);
+    expect(paths('rmdir -- -d')).toEqual(['-d']);
+    expect(paths('chmod +x scripts/build.sh')).toEqual(['scripts/build.sh']);
   });
 
   it('answers a line of 200,000 characters of any shape in good time', () => {
