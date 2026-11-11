@@ -87,6 +87,14 @@ const SCRIPT_C = works('script -qec true /dev/null');
 const CD_CHECKS_DOTDOT = works(
   'd=$(mktemp -d) && mkdir "$d/a" && cd "$d" && ! cd a/nosuch/.. 2>/dev/null; r=$?; rm -rf "$d"; exit $r',
 );
+/** GNU `cp -a` copies a folder its owner cannot search; BSD `cp -a` (macOS) fails on one. */
+const CP_CLOSED_FOLDER = works(
+  'd=$(mktemp -d) && mkdir -p "$d/a/s" && chmod 600 "$d/a/s" && cp -a "$d/a/." "$d/b"; r=$?; chmod -R u+rwx "$d"; rm -rf "$d"; exit $r',
+);
+/** A newer bash keeps the `OLDPWD` it inherits, for `cd ~-`; bash 3.2 (macOS) starts without one. */
+const OLDPWD_INHERITED = works(
+  'd=$(mktemp -d) && mkdir "$d/s" && cd "$d/s" && [ "$(OLDPWD=.. bash -c \'cd ~- 2>/dev/null && pwd -P\')" = "$(cd .. && pwd -P)" ]; r=$?; cd /; rm -rf "$d"; exit $r',
+);
 /** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
 const FIVE_HOME = `${HOOK} && mkdir -p 5 && printf '[core]\\n\\thooksPath = hk\\n' > 5/.gitconfig`;
 /** A program run instead of git once `git` is hashed to it. */
@@ -1385,7 +1393,7 @@ const strays: {
   env?: Record<string, string>;
   /** Only where the tests do not run as root, which enters any folder. */
   notRoot?: boolean;
-  /** False where the command cannot run as it does elsewhere: only asked. */
+  /** False where the command, or the copy it runs in, cannot be had as elsewhere: only asked. */
   runs?: boolean;
 }[] = [
   // A path named after the first few: a covered file that is not there yet.
@@ -1483,6 +1491,7 @@ const strays: {
     prep: 'mkdir sub && chmod 600 sub',
     command: 'cd sub && ls; rm -f certs/server.pem',
     notRoot: true,
+    runs: CP_CLOSED_FOLDER,
   },
   // A leading cd that lands elsewhere than its operand says.
   {
@@ -1491,6 +1500,7 @@ const strays: {
     cwd: 'sub',
     env: { OLDPWD: '..' },
     command: 'cd ~- && rm -f certs/server.pem',
+    runs: OLDPWD_INHERITED,
   },
   {
     name: 'a leading cd to a name CDPATH finds elsewhere',
@@ -1549,7 +1559,10 @@ describe('lines whose cd, moved folder or number of paths the text does not sett
       const kept = shells.map((env) => ({ ...env }));
       for (const env of shells) Object.assign(env, c.env ?? {});
       try {
-        const done = runInCopy(g.dir, c.command, c.covered ?? inCerts, c.cwd ?? '');
+        const done =
+          (c.runs ?? true)
+            ? runInCopy(g.dir, c.command, c.covered ?? inCerts, c.cwd ?? '')
+            : { written: [], output: 'not run here' };
         if (c.runs ?? true) {
           expect(
             done.written.length,
