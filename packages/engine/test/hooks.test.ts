@@ -629,7 +629,7 @@ describe('hook flow', () => {
     expect(found.context).toContain('could not read this command fully');
   });
 
-  it('still places plain paths when the time for the rest has run out', async () => {
+  it('places nothing more when its time has run out, and says so', async () => {
     const { root, mindly } = setup();
     const ctx = await mindly.projects.resolve(root);
     mindly.memory.remember({
@@ -644,17 +644,25 @@ describe('hook flow', () => {
     });
     const shell = (command: string) =>
       mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
-    // A clock that has always run out: the heavy part is not placed, the plain path is.
+    const command = `rm -rf ${Array.from({ length: 50 }, (_, i) => `dir${i}/*`).join(' ')} certs/a.pem`;
+    // A clock that has always run out: no path is placed, however plain, and the line is told
+    // it was not read to its end.
     let t = 0;
     const clock = vi.spyOn(performance, 'now').mockImplementation(() => (t += 10_000));
     try {
-      const command = `rm -rf ${Array.from({ length: 50 }, (_, i) => `dir${i}/*`).join(' ')} certs/a.pem`;
       const r = await shell(command);
-      expect(r.decision).toBe('deny');
-      expect(r.reason).toContain('certs/a.pem');
+      expect(r.decision).toBeNull();
+      expect(r.context).toContain(
+        'did not read this whole command (no time was left to place all it writes)',
+      );
+      expect(r.enforcementWarning).toContain('no time was left to place all it writes');
     } finally {
       clock.mockRestore();
     }
+    // With time, the plain path at its end is placed and blocked.
+    const r = await shell(command);
+    expect(r.decision).toBe('deny');
+    expect(r.reason).toContain('certs/a.pem');
   });
 
   it('answers within its time, and says what it did not get to', async () => {
@@ -672,10 +680,13 @@ describe('hook flow', () => {
     });
     const shell = (command: string) =>
       mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
-    // A clock that has always run out: what is not searched is not cleared, and the agent is
+    // A clock that runs out once the folder is placed (it is asked when the budget is set, and
+    // once before the path is placed): what is not searched is not cleared, and the agent is
     // told so.
-    let t = 0;
-    const clock = vi.spyOn(performance, 'now').mockImplementation(() => (t += 10_000));
+    let asked = 0;
+    const clock = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => (++asked <= 2 ? 0 : asked * 10_000));
     try {
       const r = await shell('rm -rf certs');
       expect(r.decision).toBeNull();

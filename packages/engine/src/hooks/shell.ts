@@ -1146,6 +1146,13 @@ const optionWords = (words: readonly Word[]): Word[] => {
   const end = words.findIndex((w, i) => i > 0 && w.text === '--');
   return words.slice(1, end === -1 ? undefined : end);
 };
+/** A program's operands: the words before a `--` that are no options, and all that follow it. */
+const operands = (words: readonly Word[]): Word[] => {
+  const end = words.findIndex((w, i) => i > 0 && w.text === '--');
+  return end === -1
+    ? plainArgs(words)
+    : [...plainArgs(words.slice(0, end)), ...words.slice(end + 1)];
+};
 const hasFlag = (words: readonly Word[], re: RegExp): boolean =>
   optionWords(words).some((w) => isFlag(w) && re.test(w.text));
 
@@ -1206,6 +1213,11 @@ interface Item {
   gone?: boolean;
   /** A destination that is a link to a folder is the name itself, not the folder (`ln -n`). */
   noFollow?: boolean;
+  /**
+   * Each source lands under its name as written, there or not (`ln -s`): one with a wildcard
+   * that matches nothing makes a link of that very name.
+   */
+  asWritten?: boolean;
   /**
    * The name is given to something else (a rename onto it, a new link in its place): a file
    * that was there is not written, and stays as it is under any other name it has.
@@ -1360,7 +1372,8 @@ function classify(
       return readFind(words);
     case 'rm': {
       const recursive = hasOption(words, 'rR', ['--recursive']);
-      return writes(...(recursive ? trees(args, { gone: true }) : files(args, { gone: true })));
+      const given = operands(words);
+      return writes(...(recursive ? trees(given, { gone: true }) : files(given, { gone: true })));
     }
     case 'rimraf':
     case 'trash':
@@ -1370,7 +1383,7 @@ function classify(
       return writes(...trees(args));
     case 'unlink':
     case 'rmdir':
-      return writes(...files(args, { gone: true }));
+      return writes(...files(operands(words), { gone: true }));
     case 'shred':
     case 'touch':
     case 'mkdir':
@@ -1383,15 +1396,16 @@ function classify(
       // Compressors replace the file they are given, unless they write to standard output.
       if (/zip|^xz$|^bz/.test(program) && hasOption(words, 'ctl', ['--stdout', '--test', '--list']))
         return READS;
-      return writes(...files(args));
+      return writes(...files(operands(words)));
     case 'truncate':
       return writes(...files(argsWithout(words, ['-s', '--size', '-r', '--reference'])));
     case 'chmod':
     case 'chown':
     case 'chgrp': {
       // A change of mode or owner leaves the content alone: worth a warning, not a block. The
-      // first plain argument is the mode or owner.
-      const targets = args.slice(1);
+      // first operand is the mode or owner, also when it stands after `--` and starts with a
+      // dash (`chmod -- -w file`).
+      const targets = operands(words).slice(1);
       return writes(
         ...(hasOption(words, 'R', ['--recursive'])
           ? trees(targets, { certain: false })
@@ -1762,6 +1776,7 @@ function readCopy(program: string, words: readonly Word[]): Verdict {
     !/\/\.?$/.test(dest.text)
       ? { noFollow: true }
       : {}),
+    ...(program === 'ln' && hasOption(words, 's', ['--symbolic']) ? { asWritten: true } : {}),
   };
   // `--delete` removes from the destination what the source does not hold: the tree goes.
   if (hasFlag(words, /^--del(ete.*)?$/)) return writes(...gone, ...trees([dest]));
@@ -3657,6 +3672,11 @@ export interface ShellTarget {
   /** For a copy: a destination that is a link to a folder is the name itself (`ln -n`). */
   noFollow: boolean;
   /**
+   * For a copy: a source lands under its name as written whether or not it is there (`ln -s`),
+   * so an entry with a wildcard that matches nothing lands under that very name.
+   */
+  asWritten: boolean;
+  /**
    * The path is under a home directory that could not be placed here (`~name/x`, or any `~`
    * path when no home was given): it starts with the `~` the shell expands. A name that merely
    * starts with `~` (`./~x`, `'~'/x`) is a path like any other, and is given as `./~x`.
@@ -4742,6 +4762,7 @@ function unreadLine(top: string | null): ShellReading {
         path: top ?? '.',
         unplaced: false,
         noFollow: false,
+        asWritten: false,
         glob: false,
         dotfiles: false,
         nocase: false,
@@ -5100,6 +5121,62 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     return r.wild.some((g) => mayName(g, at, parts));
   };
   /**
+   * Whether what a source of a copy, move or link brings may differ, when the command runs,
+   * from what is on disk before the line does. It may when the source has a wildcard that may
+   * match something an earlier command wrote; when a link that was there is among its parts
+   * and the line has made something; and, for a source whose content is brought (a recursive
+   * copy, a move, one written with `/` or `/.` after it) or is found by a wildcard, when it is
+   * or lies under something the line wrote, or holds something the line wrote. A file the line
+   * made by a command that makes no link, or an empty folder `mkdir` made, brings its own name
+   * and nothing else; so does any source named in full that is copied without its content.
+   */
+  const remade = (
+    e: { name: string; source: string | null; word: Word | null },
+    item: Item,
+  ): boolean => {
+    if (e.source === null || e.word === null) return false;
+    const wild = wordPattern(e.word).glob;
+    if (wild && mayMatchMade(e.source, r.made, late)) return true;
+    if (r.touched.size === 0 && r.wild.length === 0) return false;
+    if (
+      r.viaLink !== null &&
+      (r.through.size > 0 || r.madeDirs.size > 0 || r.wild.some((g) => g.made)) &&
+      r.viaLink(e.source)
+    ) {
+      return true;
+    }
+    if (!wild && !item.tree && !/\/\.?$/.test(e.word.text)) return false;
+    const at = anchor(e.source);
+    // Something the line wrote lies under it.
+    const parts = pathParts(at);
+    const below = `${at === '/' ? '' : at}/`;
+    for (const m of r.touched) {
+      if (late() || m.startsWith(below)) return true;
+    }
+    if (
+      r.wild.some(
+        (g) =>
+          late() ||
+          (posix.isAbsolute(g.pattern) === posix.isAbsolute(at) &&
+            g.parts.length > parts.length &&
+            parts.every((part, i) => partNames(g.parts[i] as string, part))),
+      )
+    ) {
+      return true;
+    }
+    // It lies under something the line wrote. A folder `mkdir` made does not count: what it
+    // holds was there before, or was written by the line and counts itself.
+    const ups = above(at);
+    const inside =
+      ups.length < MAX_DEPTH_ABOVE
+        ? ups.some((up) => r.touched.has(up) && !r.madeDirs.has(up))
+        : hasAbove(at, r.touched);
+    if (inside || r.wild.some((g) => mayName(g, at, parts))) return true;
+    // It was written by the line itself: a plain file, or a folder `mkdir` made with nothing
+    // in it, brings its own name and no more.
+    return r.touched.has(at) && !(r.through.get(at) === false || r.madeDirs.has(at));
+  };
+  /**
    * What a copy, move or link into `dest` makes. Written with a `/` after it, or a folder on
    * disk that the line has not touched, the destination is a folder and each source lands in it
    * under its own name. A folder `mkdir` made earlier on the line is one too, unless the
@@ -5165,6 +5242,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       how === 'write' &&
       item.gone !== true &&
       item.entries === undefined &&
+      item.sample === undefined &&
       !item.pathspec &&
       !item.pattern;
     // So both readings count; as they do for a `[…]` class the shell cannot match, which stays
@@ -5180,7 +5258,13 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     const entries = (item.entries ?? []).slice(0, MAX_ENTRIES).map((e) => ({
       name: e.name,
       source: e.from === null || e.from.dynamic ? null : place(e.from.text, tilde(e.from), from),
+      word: e.from,
     }));
+    // What a source brings is looked up on disk as it is before the line runs: not so for one
+    // the line has made or written into by then.
+    if (r.exact && entries.some((e) => e.source !== null && e.word !== null && remade(e, item))) {
+      r.unmatched = true;
+    }
     for (const form of forms) {
       const path = place(form.text, tilde(w), from);
       // A wildcard the shell matches against what is there when it runs: one that may match
@@ -5211,7 +5295,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           !gone &&
           !item.pathspec &&
           !item.pattern &&
-          (item.entries !== undefined || how !== 'write')
+          (item.entries !== undefined || item.sample !== undefined || how !== 'write')
         ) {
           r.unmatched = true;
         }
@@ -5326,6 +5410,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         path,
         unplaced: path.startsWith('~'),
         noFollow: item.noFollow ?? false,
+        asWritten: item.asWritten ?? false,
         glob: form.glob,
         dotfiles: item.dotfiles ?? false,
         nocase: item.nocase ?? false,
@@ -5726,7 +5811,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       ] as const) {
         if (w === null || w.dynamic) continue;
         const at = enter(w, from);
-        if (at === null || elsewhere(w, at)) r.unmatched = true;
+        // A wildcard there is matched by the shell against what is on disk when it runs.
+        if (at === null || elsewhere(w, at) || wordPattern(w).glob) r.unmatched = true;
       }
     }
     /** The words of a verdict's items that an `mv` takes away: those nothing lands in. */
