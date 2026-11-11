@@ -69,11 +69,32 @@ memory, which is then injected into every other agent.
   `rmdir -p`), as does `ln` with a single operand. An `mv` or `git mv` that takes
   away the folder the commands run in (the session's own, or the one a leading `cd` entered)
   or a folder above it, by name or by a wildcard that may match it, makes the line not read
-  fully, as does one that moves something from under a path made earlier on the line, other than
-  a folder `mkdir` made: the commands after it run where the text does not tell. A copy, move or
-  link into a folder `mkdir` made earlier on the line lands inside it, and its own name is
-  written too; into anything else made earlier on the line, whether it is a folder is not known,
-  and the line is not read fully. The rest of a line read fully is: words of plain characters
+  fully: the commands after it run where the text does not tell. So does any later word that
+  names a path going through something the line made earlier. What a command created, replaced
+  or moved into place (a link, the destination of a copy or a move, a redirection target, a file
+  `touch` made, a path git wrote by name) may be a link to anywhere, whatever program made it: a
+  path with it as a folder above, or the thing itself written with a `/` after it, leads where
+  the text does not tell (`ln -s certs lnk && rm -f lnk/server.pem`). A write onto the very path
+  made by a command that may make a link of either kind (`ln`, `cp` with `-a`, `-R`, `-P`, `-l`
+  or `-s`, `mv`, git) may reach another file through it (`ln certs/server.pem f && echo x > f`),
+  and the line is not read fully either. The one exception is a folder `mkdir` made on the line,
+  with its parents under `-p`: paths under it are read as written, unless something else made
+  that path first (`ln -s certs d; mkdir d`), or a command that may make a link is given it as
+  its destination without a `/` after it. What is only removed (`rm`, `rmdir`, the source of a
+  move), or may only change (a mode or owner, the tree as a whole where that is a possible
+  write of a git command, warned about as described above), is not made; nor are the folder a
+  command runs in and the top of the tree, only what they hold. A git command that
+  writes the tree where it runs makes what that tree holds: after it, a path another program
+  is given there is not read fully (`git checkout other && rm -f lnk/x`), and nothing of the
+  line is asked of git. The paths git is given in its
+  own working tree are not held against what the line made: git does not follow a link there,
+  it refuses the path or puts a folder in the link's place. The destination of `git mv` is
+  followed, and is held like any other. A copy,
+  move or link into a folder lands inside it under each source's name, and that name is what is
+  made: a destination written with a `/` after it, a folder `mkdir` made earlier on the line, or
+  a folder on disk (not a link to one) that the line has not written, removed or renamed. Any
+  other destination is made itself; one written earlier on the line in any way may or may not be
+  a folder, and the line is not read fully. The rest of a line read fully is: words of plain characters
   (`*` and `?` included, unless they may match what an earlier command of the line makes),
   single-quoted text, double-quoted text
   without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a plain
@@ -91,9 +112,13 @@ memory, which is then injected into every other agent.
     no quotes around it;
   - it has exactly one operand, no option, and no redirection of its own;
   - the operand is plain text that names the folder as written: it does not start with `~` or
-    `-`, has no wildcard, has no `..` after a folder's name (a leading `../..` is fine), and,
-    when `CDPATH` is set and not empty in Mindly's own environment, starts with `/`, `./` or
-    `../`, so the shell does not look for it elsewhere;
+    `-`, has no wildcard, has no `..` after a folder's name, and, when `CDPATH` is set and not
+    empty in Mindly's own environment, starts with `/`, `./` or `../`, so the shell does not
+    look for it elsewhere;
+  - a leading `..` (`cd ..`, `cd ../../x`) is read only when the session's folder is spelled
+    without a symbolic link, both as it is given to Mindly and in a `PWD` in Mindly's own
+    environment that names the same folder: the shell takes `..` off its own spelling of the
+    folder, while every other path is placed from the folder itself, links followed;
   - the folder is there when the command is checked, is a directory, is not reached through a
     symbolic link in any part of the path, and can be entered (search permission);
   - everything after the `cd` is one chain of `&&` to the end of the line: no `;`, `||`, `&`,

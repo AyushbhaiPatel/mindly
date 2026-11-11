@@ -87,6 +87,14 @@ const SCRIPT_C = works('script -qec true /dev/null');
 const CD_CHECKS_DOTDOT = works(
   'd=$(mktemp -d) && mkdir "$d/a" && cd "$d" && ! cd a/nosuch/.. 2>/dev/null; r=$?; rm -rf "$d"; exit $r',
 );
+/** GNU `cp -a` copies a folder its owner cannot search; BSD `cp -a` (macOS) fails on one. */
+const CP_CLOSED_FOLDER = works(
+  'd=$(mktemp -d) && mkdir -p "$d/a/s" && chmod 600 "$d/a/s" && cp -a "$d/a/." "$d/b"; r=$?; chmod -R u+rwx "$d"; rm -rf "$d"; exit $r',
+);
+/** A newer bash keeps the `OLDPWD` it inherits, for `cd ~-`; bash 3.2 (macOS) starts without one. */
+const OLDPWD_INHERITED = works(
+  'd=$(mktemp -d) && mkdir "$d/s" && cd "$d/s" && [ "$(OLDPWD=.. bash -c \'cd ~- 2>/dev/null && pwd -P\')" = "$(cd .. && pwd -P)" ]; r=$?; cd /; rm -rf "$d"; exit $r',
+);
 /** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
 const FIVE_HOME = `${HOOK} && mkdir -p 5 && printf '[core]\\n\\thooksPath = hk\\n' > 5/.gitconfig`;
 /** A program run instead of git once `git` is hashed to it. */
@@ -833,6 +841,28 @@ const quiet: { name: string; prep?: string; command: string }[] = [
     prep: 'mkdir -p sub && touch sub/a',
     command: 'cd sub && mv a b',
   },
+  {
+    name: 'a copy into a folder made on the line',
+    command: 'mkdir build && cp src/a.ts build/a.ts',
+  },
+  {
+    name: 'a folder removed, made again and filled',
+    prep: 'mkdir dist',
+    command: 'rm -rf dist && mkdir dist && cp src/a.ts dist/a.ts',
+  },
+  {
+    name: 'copies into a folder on disk, then a file in it changed',
+    prep: 'mkdir docs && echo t > docs/notes.md',
+    command: 'cp src/a.ts docs/ && echo more >> docs/notes.md',
+  },
+  {
+    name: 'a file written twice, then its mode changed',
+    command: 'echo a > run.sh && echo b >> run.sh && chmod 755 run.sh',
+  },
+  {
+    name: 'a folder made on the line, its mode changed, then filled',
+    command: 'mkdir d && chmod 755 d && cp src/a.ts d/a.ts',
+  },
   { name: 'a test of the diff', command: 'if git diff --quiet; then echo ok; fi' },
 ];
 
@@ -1014,6 +1044,18 @@ cases.push(
     scopes: ['certs/**'],
     prep: 'mkdir sub',
     command: 'cd sub && rm -f ../certs/server.pem',
+    want: ['deny'],
+  },
+  {
+    name: 'a covered file removed after a folder made and filled on the line',
+    scopes: ['certs/**'],
+    command: 'mkdir -p out/a && touch out/a/x.txt && rm -f certs/server.pem',
+    want: ['deny'],
+  },
+  {
+    name: 'a file written, then moved onto a covered one',
+    scopes: ['certs/**'],
+    command: 'echo x > tmp && mv tmp certs/server.pem',
     want: ['deny'],
   },
   {
@@ -1364,6 +1406,13 @@ const MANY = Array.from({ length: 32 }, (_, i) => `f${i + 1}`).join(' ');
 /** A folder whose name is a private-use character. */
 const PRIVATE = String.fromCharCode(0xe000);
 const inCerts = (rel: string) => rel.startsWith('certs/');
+/** A link to the covered folder, there before the line. */
+const OLD_LINK = 'ln -s certs old';
+/** A branch `other` whose tree holds a link `lnk` to the covered folder. */
+const LINK_IN_REVISION =
+  'git checkout -qb other && ln -s certs lnk && git add lnk && git commit -qm link && git checkout -q main';
+/** A folder `a/b`, and a link `lnk` to it. */
+const LINK_TO_FOLDER = 'mkdir -p a/b && ln -s a/b lnk';
 /** A tracked folder `a/b` and an empty folder `x` beside it. */
 const NESTED = 'mkdir -p a/b x && touch a/b/f && git add a && git commit -qm nested';
 
@@ -1386,7 +1435,7 @@ const strays: {
   env?: Record<string, string>;
   /** Only where the tests do not run as root, which enters any folder. */
   notRoot?: boolean;
-  /** False where the command cannot run as it does elsewhere: only asked. */
+  /** False where the command, or the copy it runs in, cannot be had as elsewhere: only asked. */
   runs?: boolean;
 }[] = [
   // A path named after the first few: a covered file that is not there yet.
@@ -1484,6 +1533,7 @@ const strays: {
     prep: 'mkdir sub && chmod 600 sub',
     command: 'cd sub && ls; rm -f certs/server.pem',
     notRoot: true,
+    runs: CP_CLOSED_FOLDER,
   },
   // A leading cd that lands elsewhere than its operand says.
   {
@@ -1492,6 +1542,7 @@ const strays: {
     cwd: 'sub',
     env: { OLDPWD: '..' },
     command: 'cd ~- && rm -f certs/server.pem',
+    runs: OLDPWD_INHERITED,
   },
   {
     name: 'a leading cd to a name CDPATH finds elsewhere',
@@ -1538,6 +1589,137 @@ const strays: {
     covered: (rel) => rel.endsWith('.pem'),
     command: 'ln -s .. up && mv up/sub ../certs/ && rm -f ../server.pem',
   },
+  // A path through something made earlier on the line: a link, for all the text tells.
+  {
+    name: 'a covered file removed through a link made on the line',
+    command: 'ln -s certs lnk && rm -f lnk/server.pem',
+  },
+  {
+    name: 'a covered file made through a link made on the line',
+    command: 'ln -s certs lnk && touch lnk/new.pem',
+  },
+  {
+    name: 'a redirection through a link made on the line',
+    command: 'ln -s certs lnk && echo x > lnk/server.pem',
+  },
+  {
+    name: 'a copy through a link made on the line',
+    command: 'ln -s certs lnk; cp src/a.ts lnk/server.pem',
+  },
+  {
+    name: 'a link made in a folder, then a path through it',
+    prep: 'mkdir sub',
+    command: 'ln -s ../certs sub/lnk && rm -f sub/lnk/server.pem',
+  },
+  {
+    name: 'a link made after a leading cd, then a path through it',
+    prep: 'mkdir sub',
+    command: 'cd sub && ln -s ../certs l && rm -f l/server.pem',
+  },
+  {
+    name: 'a link made into a folder on disk, under the name of what it points to',
+    prep: 'mkdir sub',
+    command: 'ln -s ../certs sub && rm -f sub/certs/server.pem',
+  },
+  {
+    name: 'a link that replaces a link on disk',
+    prep: 'ln -s src l',
+    command: 'ln -sfn certs l && rm -f l/server.pem',
+  },
+  // A write onto what may be a link, of either kind, goes to the file it stands for.
+  {
+    name: 'a redirection onto a link to a covered file made on the line',
+    command: 'ln -s certs/server.pem f && echo x > f',
+  },
+  {
+    name: 'a copy onto a link to a covered file made on the line',
+    command: 'ln -s certs/server.pem f && cp src/a.ts f',
+  },
+  {
+    name: 'a redirection onto another name of a covered file made on the line',
+    command: 'ln certs/server.pem f && echo x > f',
+  },
+  {
+    name: 'a redirection onto another name of a covered file made in a folder on disk',
+    prep: 'mkdir sub',
+    command: 'ln certs/server.pem sub && echo x > sub/server.pem',
+  },
+  // A link copied, moved or checked out on the line.
+  {
+    name: 'a link copied with cp -a, then a path through the copy',
+    prep: OLD_LINK,
+    command: 'cp -a old l2 && rm -f l2/server.pem',
+  },
+  {
+    name: 'a link copied with cp -R, then a path through the copy',
+    prep: OLD_LINK,
+    command: 'cp -R old l2 && rm -f l2/server.pem',
+  },
+  {
+    name: 'a link copied with cp -P, then a path through the copy',
+    prep: OLD_LINK,
+    command: 'cp -P old l2 && rm -f l2/server.pem',
+  },
+  {
+    name: 'a link moved, then a path through its new name',
+    prep: OLD_LINK,
+    command: 'mv old l2 && rm -f l2/server.pem',
+  },
+  {
+    name: 'a link checked out of another revision, then a path through it',
+    prep: LINK_IN_REVISION,
+    command: 'git checkout other -- lnk && rm -f lnk/server.pem',
+  },
+  // A folder `mkdir` made is a folder only while nothing else made that path.
+  {
+    name: 'a folder made and removed, then a link of its name',
+    command: 'mkdir d && rmdir d && ln -s certs d && rm -f d/server.pem',
+  },
+  {
+    name: 'a folder on disk removed, then a link of its name',
+    prep: 'mkdir d',
+    command: 'rm -rf d && ln -s certs d && rm -f d/server.pem',
+  },
+  {
+    name: 'a folder on disk removed by a wildcard, then a link of its name',
+    prep: 'mkdir sub',
+    command: 'rm -rf su? && ln -s certs sub && rm -f sub/server.pem',
+  },
+  {
+    name: 'a link, then a mkdir of its name that fails',
+    command: 'ln -s certs d; mkdir d; rm -f d/server.pem',
+  },
+  {
+    name: 'a link, then a mkdir -p of its name',
+    command: 'ln -s certs d; mkdir -p d; rm -f d/server.pem',
+  },
+  {
+    name: 'a link, then a mkdir -p of a folder through it',
+    command: 'ln -s certs d && mkdir -p d/e && touch d/e/k.pem',
+  },
+  {
+    name: 'a link made into a folder made on the line',
+    command: 'mkdir d && ln -s ../certs d && rm -f d/certs/server.pem',
+  },
+  {
+    name: 'a mkdir that never runs, then a link moved to its name',
+    prep: OLD_LINK,
+    command: 'false && mkdir d; mv old d; rm -f d/server.pem',
+  },
+  // The shell is in a folder the session reached through a link: its `cd ..` and the paths its
+  // programs are given part ways there.
+  {
+    name: 'a leading cd to .. from a folder reached through a link',
+    prep: LINK_TO_FOLDER,
+    cwd: 'lnk',
+    command: 'cd .. && rm -f ../certs/server.pem',
+  },
+  {
+    name: 'a leading cd to ../.. from a folder reached through a link',
+    prep: LINK_TO_FOLDER,
+    cwd: 'lnk',
+    command: 'cd ../.. && rm -f certs/server.pem',
+  },
 ];
 
 describe('lines whose cd, moved folder or number of paths the text does not settle are warned about', () => {
@@ -1550,7 +1732,10 @@ describe('lines whose cd, moved folder or number of paths the text does not sett
       const kept = shells.map((env) => ({ ...env }));
       for (const env of shells) Object.assign(env, c.env ?? {});
       try {
-        const done = runInCopy(g.dir, c.command, c.covered ?? inCerts, c.cwd ?? '');
+        const done =
+          (c.runs ?? true)
+            ? runInCopy(g.dir, c.command, c.covered ?? inCerts, c.cwd ?? '')
+            : { written: [], output: 'not run here' };
         if (c.runs ?? true) {
           expect(
             done.written.length,
@@ -1574,6 +1759,55 @@ describe('lines whose cd, moved folder or number of paths the text does not sett
       }
     });
   }
+});
+
+describe('a session in a folder reached through a link', () => {
+  const certs = (rel: string) => rel.startsWith('certs/');
+
+  it('places the paths of a line from the folder itself', async () => {
+    const g = setUp(['certs/**'], LINK_TO_FOLDER);
+    try {
+      const command = 'rm -f ../../certs/server.pem';
+      expect(runInCopy(g.dir, command, certs, 'lnk').written).toEqual(['certs/server.pem']);
+      expect(verdictOf(await g.shell(command, join(g.dir, 'lnk')))).toBe('deny');
+      // By the link's own name it is the folder beside the link that is meant, as the shell
+      // finds it.
+      expect(runInCopy(g.dir, 'rm -f ../certs/server.pem', certs, 'lnk').written).toEqual([]);
+      expect(verdictOf(await g.shell('rm -f ../certs/server.pem', join(g.dir, 'lnk')))).toBe(
+        'allow',
+      );
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('does not follow a cd to .. when PWD spells the folder through the link', async () => {
+    const g = setUp(['certs/**'], LINK_TO_FOLDER);
+    const kept = process.env.PWD;
+    try {
+      const command = 'cd .. && rm -f certs/server.pem';
+      // A shell that came to the folder through the link goes back to where the link is.
+      const done = runInCopy(g.dir, `cd ../../lnk && ${command}`, certs, 'a/b');
+      expect(done.written, done.output).toEqual(['certs/server.pem']);
+      process.env.PWD = join(g.dir, 'lnk');
+      expect(verdictOf(await g.shell(command, join(g.dir, 'a/b')))).toBe('warn');
+    } finally {
+      if (kept === undefined) Reflect.deleteProperty(process.env, 'PWD');
+      else process.env.PWD = kept;
+      g.mindly.close();
+    }
+  });
+
+  it('follows a cd to .. from a folder spelled without a link', async () => {
+    const g = setUp(['certs/**'], 'mkdir -p a/b');
+    try {
+      const command = 'cd .. && rm -f ../certs/server.pem';
+      expect(runInCopy(g.dir, command, certs, 'a/b').written).toEqual(['certs/server.pem']);
+      expect(verdictOf(await g.shell(command, join(g.dir, 'a/b')))).toBe('deny');
+    } finally {
+      g.mindly.close();
+    }
+  });
 });
 
 describe('git commands read without false warnings or slow reading', () => {

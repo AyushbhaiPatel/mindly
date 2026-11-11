@@ -11,6 +11,8 @@
 //   should not stop a later command from being asked;
 // - what git itself is changed into on the line: an exported `GIT_DIR`, `.git` written
 //   in place, `.gitignore` rewritten.
+import { symlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { file, guarded, pem, runInCopy } from './written.js';
 
@@ -252,6 +254,20 @@ const cases: {
     command: () => 'git rebase -q --signoff main',
     writes: ['certs/server.pem'],
     want: 'deny',
+  },
+  {
+    // What a switch brings may be a link: a path another program is given after it is not read.
+    name: 'a switch that brings a link to the covered folder, then files removed through it',
+    prepare: (g) => {
+      g.git('checkout', '-q', '-b', 'linked');
+      symlinkSync('certs', join(g.dir, 'lnk'));
+      g.git('add', 'lnk');
+      g.git('commit', '-qm', 'link');
+      g.git('checkout', '-q', 'main');
+    },
+    command: () => 'git checkout -q linked && rm -f lnk/*',
+    writes: ['certs/server.pem'],
+    want: 'warn',
   },
   {
     name: 'tag -a -m (annotate) read as a listing; switch after it should deny',
