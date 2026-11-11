@@ -935,11 +935,18 @@ describe('hook flow', () => {
       process.env['HOME'] = dirname(root);
       for (const command of [
         `rm ~/${name}/src/generated/api.ts`,
-        `cd ~/${name} && rm src/generated/api.ts`,
-        `cd ~ && rm -rf ${name}/src`,
         `echo x > ~/${name}/src/generated/new.ts`,
       ]) {
         expect((await shell(command)).decision, command).toBe('deny');
+      }
+      // Where a `cd` to a `~` lands is not followed: a warning, not a block.
+      for (const command of [
+        `cd ~/${name} && rm src/generated/api.ts`,
+        `cd ~ && rm -rf ${name}/src`,
+      ]) {
+        const r = await shell(command);
+        expect(r.decision, command).toBeNull();
+        expect(r.context, command).toContain('could not read this command fully');
       }
       // A subshell is not read fully: a warning, not a block.
       const sub = await shell(`(cd /tmp && ls); rm src/generated/api.ts`);
@@ -950,7 +957,9 @@ describe('hook flow', () => {
       // Another user's home is taken to sit next to this one.
       process.env['HOME'] = join(dirname(root), 'someone');
       expect((await shell(`rm ~${name}/src/generated/api.ts`)).decision).toBe('deny');
-      expect((await shell(`cd ~${name} && rm -rf src`)).decision).toBe('deny');
+      const other = await shell(`cd ~${name} && rm -rf src`);
+      expect(other.decision).toBeNull();
+      expect(other.context).toContain('could not read this command fully');
     } finally {
       if (home === undefined) delete process.env['HOME'];
       else process.env['HOME'] = home;

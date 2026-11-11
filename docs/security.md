@@ -66,14 +66,14 @@ memory, which is then injected into every other agent.
   `pwd`, `exit`, and `test` and `[` without `-v` or `-R`. Each of the file tools is read
   with the options it is known to take; any other option, or a long option abbreviated, makes the
   line one not read fully (`cp -b`, `cp --parents`, `cp -T`, `mv -T`, `rm --rec`, `touch -r`,
-  `rmdir -p`), as does `ln` with a single operand. Where a `cd` lands is not followed: only a
-  line that starts with exactly one `cd <folder> &&`, to a folder that is there when the command
-  is checked and not reached through a symbolic link, is read, the rest of it running in that
-  folder or not at all. Any other `cd`, `pushd` or `popd` makes the line not read fully: one
-  later on the line, after `;`, `||` or another `&&`, inside `if`, a second one, and one with
-  options or more than one operand. A copy, move or link into a folder `mkdir` made earlier on
-  the line lands inside it, and its own name is written too; into anything else made earlier on
-  the line, whether it is a folder is not known, and the line is not read fully. The rest of a line read fully is: words of plain characters
+  `rmdir -p`), as does `ln` with a single operand. An `mv` or `git mv` that takes
+  away the folder the commands run in (the session's own, or the one a leading `cd` entered)
+  or a folder above it, by name or by a wildcard that may match it, makes the line not read
+  fully, as does one that moves something from under a path made earlier on the line, other than
+  a folder `mkdir` made: the commands after it run where the text does not tell. A copy, move or
+  link into a folder `mkdir` made earlier on the line lands inside it, and its own name is
+  written too; into anything else made earlier on the line, whether it is a folder is not known,
+  and the line is not read fully. The rest of a line read fully is: words of plain characters
   (`*` and `?` included, unless they may match what an earlier command of the line makes),
   single-quoted text, double-quoted text
   without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a plain
@@ -83,7 +83,23 @@ memory, which is then injected into every other agent.
   author, pager or editor); `env` with no option of its own in front of a program; and `if`,
   `then`, `elif`, `else` and `fi`. On such a line the paths a command names, the files git writes
   its output to and the folders it fills are blocked when a rule covers them, and what may change
-  the whole tree is a warning, as described above.
+  the whole tree is a warning, as described above. Where a `cd` lands is not followed. A line
+  with a `cd`, `pushd` or `popd` is read fully only when all of this holds, and what follows
+  the `cd` then runs in that folder or not at all:
+  - the first thing on the line is the bare word `cd`: no command before it, no redirection
+    (`>x || cd …`), no assignment, no `env`, `command`, `builtin`, `sudo` or other launcher, and
+    no quotes around it;
+  - it has exactly one operand, no option, and no redirection of its own;
+  - the operand is plain text that names the folder as written: it does not start with `~` or
+    `-`, has no wildcard, has no `..` after a folder's name (a leading `../..` is fine), and,
+    when `CDPATH` is set and not empty in Mindly's own environment, starts with `/`, `./` or
+    `../`, so the shell does not look for it elsewhere;
+  - the folder is there when the command is checked, is a directory, is not reached through a
+    symbolic link in any part of the path, and can be entered (search permission);
+  - everything after the `cd` is one chain of `&&` to the end of the line: no `;`, `||`, `&`,
+    pipe or line end between commands, so nothing runs when the `cd` fails;
+  - there is no other `cd`, `pushd` or `popd` on the line. `cd` as a word given to another
+    program (`echo cd`, `git log cd`) is not one.
 - Anything else is not read fully: any other program (`sort`, `uniq`, `awk`, `sed`, `rg`,
   `find`, `tar`, interpreters such as `python`, `node`, `ruby` and `perl`, `npx`, `tsc` and other
   compilers, package managers, formatters, test runners, anything not known here), a program by
@@ -91,13 +107,18 @@ memory, which is then injected into every other agent.
   `OLDPWD`, `CDPATH` or any other upper-case variable, a variable or a substitution (`$VAR`,
   `$(…)`, a backtick), a backslash, a subshell or group, a function, a loop, a here-document or
   here-string, a process substitution, code fed to a shell (`bash -c`, `| sh`), any other
-  builtin (`export`, `set`, `source`, `read`, `[[`, …), any `cd` but a leading one, a `[…]`
-  class or `{a,b}`, `!`, a background `&`, and more than 4,000 commands. Such a line is never blocked, and never let
+  builtin (`export`, `set`, `source`, `read`, `[[`, …), any `cd` but the leading one described
+  above, a `[…]` class or `{a,b}`, `!`, a background `&`, a private-use character or a
+  noncharacter anywhere on the line (U+E000 to U+F8FF, U+FDD0 to U+FDEF, U+FFFE, U+FFFF and the
+  private-use planes), and more than 4,000 commands. Such a line is never blocked, and never let
   through without a word. It may write the whole tree: whenever a file an enforced rule covers is
   present in the project, or a folder a rule's scope names is there, it gets one warning that names the
   rule and what it covers; the write guards (a split's ownership of files) are asked the same
-  way and only warn. The paths it names are read as far as the time allows, as possible writes
-  only, so a folder it makes and fills is warned about too. Nothing of it is asked of git. Lines
+  way and only warn. The first 32 paths it names are placed one by one, as possible writes
+  only, so a folder it makes and fills, or a covered file it creates, is warned about too. When
+  it names more than that, or part of it was not read for its paths, it gets a warning that it
+  may write any file, naming every enforced rule not already warned about, whether or not a
+  file the rule covers is there yet. Nothing of it is asked of git. Lines
   that now warn this way include any line with `$VAR` or `$(…)`, a loop or a function, a test
   run through a package manager, `npx`, a pipe into `sort` or `xargs`, `sed`, `find`, strict
   shell options, `export`, `source`, `[[ … ]]`, and a shell given code.
