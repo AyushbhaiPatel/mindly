@@ -1,4 +1,4 @@
-import { MindlyError, sanitizeForContext, sanitizeLine } from '@mindly/core';
+import { MindlyError, cutMiddle, sanitizeForContext, sanitizeLine } from '@mindly/core';
 import { styleFor, type CliIo, type Style } from './io.js';
 import { screenFor, type Screen } from './present/terminal.js';
 
@@ -74,10 +74,7 @@ export function clean(text: string | null | undefined, max = 200): string {
  * so both ends stay readable.
  */
 export function cleanEntry(text: string | null | undefined, max = 400): string {
-  const line = clean(text, 100_000);
-  if (line.length <= max) return line;
-  const head = Math.floor((max - 1) / 3);
-  return `${line.slice(0, head)}…${line.slice(line.length - (max - 1 - head))}`;
+  return cutMiddle(clean(text, 100_000), max);
 }
 
 /** Multi-line variant of {@link clean}. */

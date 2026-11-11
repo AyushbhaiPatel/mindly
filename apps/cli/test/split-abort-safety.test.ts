@@ -790,6 +790,20 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     expect(kept).toContain('mindly split abort --yes --discard');
   });
 
+  it('cuts a long held path between characters, never inside one', async () => {
+    const sb = await splitSandbox(() => {});
+    const page = partDir(sb, 'page');
+    const rel = `${'a'.repeat(132)}😀${'b'.repeat(100)}/${'c'.repeat(200)}`;
+    repoAt(join(page, rel));
+    const r = await cli(sb, ['split', 'abort', '--yes', '--json']);
+    expect(r.code).toBe(1);
+    const why = jsonOf<Aborted>(r).keptBecause[page] ?? '';
+    expect(why).toContain('…');
+    expect(why).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+    );
+  });
+
   it('lists what holds a part in full before asking', async () => {
     const sb = await splitSandbox(fourFixtures);
     const r = await cli(sb, ['split', 'abort'], { answers: ['n'] });

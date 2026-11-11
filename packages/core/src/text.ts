@@ -70,3 +70,28 @@ export function normalizeLine(line: string): string {
 export function fingerprint(...parts: readonly (string | number | null | undefined)[]): string {
   return sha256(parts.map((p) => String(p ?? '')).join('\u0000')).slice(0, 32);
 }
+
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/**
+ * Shortens `line` to at most `max` UTF-16 units by taking its middle out: the first third stays,
+ * then `…`, then the end. Both cuts fall between characters as a reader sees them, never inside
+ * a surrogate pair nor between a letter and the marks joined to it, so each side stays whole
+ * text (a side may come out a little shorter for that).
+ */
+export function cutMiddle(line: string, max: number): string {
+  if (line.length <= max) return line;
+  if (max <= 1) return max <= 0 ? '' : '…';
+  const head = Math.floor((max - 1) / 3);
+  const tailFrom = line.length - (max - 1 - head);
+  let headEnd = 0;
+  let tailStart = line.length;
+  for (const { index } of GRAPHEMES.segment(line)) {
+    if (index <= head) headEnd = index;
+    if (index >= tailFrom) {
+      tailStart = index;
+      break;
+    }
+  }
+  return `${line.slice(0, headEnd)}…${line.slice(tailStart)}`;
+}

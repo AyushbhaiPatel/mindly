@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
+  cutMiddle,
   fingerprint,
   globsMayOverlap,
   invalidInput,
@@ -1666,9 +1667,7 @@ function describeHeld(held: readonly string[]): string {
     .slice(0, 3)
     .map((p) => {
       if (p === '' || p === '.') return "the worktree's own folder";
-      const line = sanitizeLine(p, 100_000);
-      if (line.length <= 400) return line;
-      return `${line.slice(0, 133)}…${line.slice(line.length - 266)}`;
+      return cutMiddle(sanitizeLine(p, 100_000), 400);
     })
     .join(', ');
 }

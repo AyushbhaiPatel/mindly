@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { defaultUserConfig, ProjectConfigSchema } from '../src/config.js';
 import { codename, isUuid, parseCodename, uuidv7 } from '../src/ids.js';
-import { sanitizeForContext, truncate } from '../src/text.js';
+import { cutMiddle, sanitizeForContext, truncate } from '../src/text.js';
 
 describe('uuidv7', () => {
   it('produces valid, strictly increasing ids', () => {
@@ -71,6 +71,37 @@ describe('sanitizeForContext', () => {
   it('caps length', () => {
     expect(sanitizeForContext('x'.repeat(100), 10)).toHaveLength(10);
     expect(truncate('hello', 3)).toBe('he…');
+  });
+});
+
+describe('cutMiddle', () => {
+  it('leaves a short line alone and keeps both ends of a long one', () => {
+    expect(cutMiddle('short', 10)).toBe('short');
+    const cut = cutMiddle(`${'a'.repeat(300)}${'b'.repeat(300)}`, 100);
+    expect(cut).toBe(`${'a'.repeat(33)}…${'b'.repeat(66)}`);
+    expect(cutMiddle('abcdef', 1)).toBe('…');
+    expect(cutMiddle('abcdef', 0)).toBe('');
+  });
+
+  it('cuts between characters, never inside one', () => {
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    // An emoji across the end of the kept start, and one across the start of the kept end.
+    const head = cutMiddle(`${'a'.repeat(32)}😀${'b'.repeat(300)}`, 100);
+    expect(head).not.toMatch(lone);
+    expect(head.startsWith(`${'a'.repeat(32)}…`)).toBe(true);
+    const tail = cutMiddle(`${'a'.repeat(300)}😀${'b'.repeat(65)}`, 100);
+    expect(tail).not.toMatch(lone);
+    expect(tail.endsWith(`…${'b'.repeat(65)}`)).toBe(true);
+    // A letter and its accent stay together or go together.
+    const marked = cutMiddle(`${'a'.repeat(300)}e\u0301${'b'.repeat(65)}`, 100);
+    expect(marked).not.toMatch(/…\p{M}/u);
+    // An emoji made of several joined ones is one character.
+    const family = '👨‍👩‍👧‍👦';
+    const joined = cutMiddle(`${'a'.repeat(30)}${family}${'b'.repeat(300)}`, 100);
+    expect(joined).not.toMatch(lone);
+    expect(joined.includes(family) || !joined.includes('👨')).toBe(true);
+    for (const max of [2, 3, 50, 99, 100, 101])
+      expect(cutMiddle(`${family.repeat(40)}`, max).length).toBeLessThanOrEqual(max);
   });
 });
 
