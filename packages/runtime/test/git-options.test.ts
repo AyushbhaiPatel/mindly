@@ -2483,6 +2483,81 @@ const unsettled: {
       { name: 'a mode, then such a name', command: 'chmod 600 -- -old.pem' },
     ],
   },
+  {
+    title: 'a folder filled by a copy of everything in another, then copied with its content',
+    scopes: ['conf/*.json'],
+    prep: 'mkdir -p conf stage tpl && echo r > conf/README && echo j > tpl/app.json',
+    covered: (rel) => /^conf\/[^/]*\.json$/.test(rel),
+    cases: [
+      { name: 'into the folder', command: 'cp tpl/* stage && cp -r stage/. conf/' },
+      { name: 'with a / after it', command: 'cp tpl/* stage/ && cp -r stage/. conf' },
+      { name: 'with -p, then a ;', command: 'cp -p tpl/* stage; cp -r stage/. conf/' },
+      {
+        name: 'after a leading cd',
+        command: 'cd conf && cp ../tpl/* ../stage && cp -r ../stage/. .',
+      },
+      { name: 'the file named', command: 'cp tpl/app.json stage && cp -r stage/. conf/' },
+      { name: 'by another wildcard', command: 'cp tpl/*.json stage && cp -r stage/. conf/' },
+    ],
+  },
+  {
+    title: 'a folder filled by cp -t, then copied with its content',
+    scopes: ['conf/*.json'],
+    prep: 'mkdir -p conf stage tpl && echo r > conf/README && echo j > tpl/app.json',
+    covered: (rel) => /^conf\/[^/]*\.json$/.test(rel),
+    runs: CP_TARGET,
+    cases: [{ name: 'cp -t, then cp -a', command: 'cp -t stage tpl/* && cp -a stage/. conf/' }],
+  },
+  {
+    title: 'written through a link that was there, then named by where the link leads',
+    scopes: ['certs/**', 'conf/*.json'],
+    prep: 'mkdir -p conf stage && echo r > conf/README && ln -s stage current && echo b > b.txt',
+    covered: (rel) => rel.startsWith('certs/') || /^conf\/[^/]*\.json$/.test(rel),
+    cases: [
+      {
+        name: 'a link made through it, a covered file removed',
+        command: 'ln -s ../certs current/x && rm -f stage/x/server.pem',
+      },
+      { name: 'a file made', command: 'ln -s ../certs current/x && touch stage/x/new.pem' },
+      { name: 'a redirection', command: 'ln -s ../certs current/x; echo k > stage/x/new.pem' },
+      { name: 'a copy into it', command: 'ln -s ../certs current/x && cp a.txt stage/x/' },
+      {
+        name: 'a file written through it, the folder copied',
+        command: 'echo x > current/app.json && cp -r stage/. conf/',
+      },
+      { name: 'copied by a wildcard', command: 'echo x > current/app.json && cp stage/* conf/' },
+      { name: 'moved by a wildcard', command: 'cp a.txt current/app.json && mv stage/* conf/' },
+      {
+        name: 'the other order',
+        command: 'ln -s ../certs stage/x && rm -f current/x/server.pem',
+      },
+    ],
+  },
+  {
+    title: 'what a copy brings: links it follows, folders found by a wildcard, names with a dot',
+    scopes: ['**/*.pem', '**/.env*'],
+    prep: [
+      'mkdir -p out docs secret pkg/a/keys big',
+      'echo k > secret/k.pem && echo k > pkg/a/keys/k.pem',
+      'ln -s ../secret docs/latest',
+      'echo e > .env && echo e > .env.local',
+      // More files than are placed one by one.
+      '(cd big && seq 1 2100 | xargs touch && echo k > k.pem)',
+    ].join(' && '),
+    covered: (rel) => rel.endsWith('.pem') || /(^|\/)\.env(\.|$)/.test(rel),
+    cases: [
+      { name: 'cp -L through a link inside the source', command: 'cp -rL docs out/' },
+      { name: 'the same, its content', command: 'cp -rL docs/. out/' },
+      { name: 'a wildcard in a folder of the source', command: 'cp -r */a/keys out/' },
+      { name: 'in a folder in the middle', command: 'cp -r pkg/*/keys out/' },
+      { name: 'with /. after it', command: 'cp -r pkg/*/keys/. out/' },
+      { name: 'a folder of more than 2,000 files', command: 'cp -r big out/' },
+      { name: 'its content', command: 'cp -r big/. out/' },
+      { name: 'a wildcard that starts with a dot', command: 'cp .env* out/' },
+      { name: 'with a second dot', command: 'cp .env.* out/' },
+      { name: 'another name for such a file', command: 'ln .env.l* out/' },
+    ],
+  },
 ];
 
 describe('lines whose paths nothing settles are never let through in silence', () => {
@@ -2911,6 +2986,175 @@ describe('a file the line made, copied by its name', () => {
   });
 });
 
+describe('a linked worktree kept inside the main checkout', () => {
+  const WT = 'trees/w1';
+  const NEST = [
+    "echo 'trees/' > .gitignore && git add -A && git commit -qm ignore",
+    `git worktree add -q ${WT}`,
+    // `gen/` is on the worktree's branch only; one tracked file changed, one not tracked.
+    `cd ${WT} && mkdir gen && echo 1 > gen/out.ts && git add -A && git commit -qm gen`,
+    'echo 2 > gen/out.ts && echo u > gen/untracked.ts',
+  ].join(' && ');
+  /** In a copy of the repository: points the copied worktree and repository at each other. */
+  const OWN_WORKTREE = [
+    `printf 'gitdir: %s/.git/worktrees/w1\\n' "$PWD" > ${WT}/.git`,
+    `printf '%s/${WT}/.git\\n' "$PWD" > .git/worktrees/w1/gitdir`,
+  ].join(' && ');
+  const inside = (command: string) => `${OWN_WORKTREE} && cd ${WT} && ${command}`;
+
+  describe('a rule for a folder both checkouts hold', () => {
+    let g: ReturnType<typeof setUp>;
+    beforeAll(() => {
+      g = setUp(['certs/**'], NEST);
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of [
+      'rm -rf *',
+      'rm -rf c*',
+      'rm -f c*/*.pem',
+      'mv c* ../',
+      'touch */*.pem',
+    ]) {
+      it(`reaches a wildcard at the top of the worktree: ${command}`, async () => {
+        const real = runInCopy(g.dir, command, (rel) => rel.startsWith(`${WT}/certs/`), WT);
+        expect(real.written, 'the real run writes covered files').not.toEqual([]);
+        expect(verdictOf(await g.shell(command, join(g.dir, WT)))).not.toBe('allow');
+      });
+    }
+
+    it('blocks the same wildcards in the main checkout, and in a worktree beside it', async () => {
+      expect(verdictOf(await g.shell('rm -rf *'))).toBe('deny');
+      expect(verdictOf(await g.shell('rm -rf c*'))).toBe('deny');
+      const beside = `${g.dir}-beside`;
+      g.git('worktree', 'add', '-q', beside);
+      expect(verdictOf(await g.shell('rm -rf *', beside))).toBe('deny');
+      expect(verdictOf(await g.shell('rm -rf c*', beside))).toBe('deny');
+    });
+
+    it('blocks a path named in full in the nested worktree', async () => {
+      expect(verdictOf(await g.shell('rm -rf certs', join(g.dir, WT)))).toBe('deny');
+      expect(verdictOf(await g.shell('rm -f certs/server.pem', join(g.dir, WT)))).toBe('deny');
+    });
+  });
+
+  describe('a rule for a folder only the worktree holds', () => {
+    let g: ReturnType<typeof setUp>;
+    const inGen = (rel: string) => rel.startsWith(`${WT}/gen/`);
+    beforeAll(() => {
+      g = setUp(['gen/**'], NEST);
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of ['rm -rf g*', 'rm -f */out.ts', 'echo x > g*/out.ts', 'chmod -R 600 *']) {
+      it(`reaches a wildcard at the top of the worktree: ${command}`, async () => {
+        expect(runInCopy(g.dir, command, inGen, WT).written, 'the real run').not.toEqual([]);
+        expect(verdictOf(await g.shell(command, join(g.dir, WT)))).not.toBe('allow');
+      });
+    }
+
+    for (const command of [
+      'git reset --hard -q',
+      'git checkout -- .',
+      'git restore .',
+      'git stash -q',
+      'git clean -fdxq',
+    ]) {
+      it(`reaches a git command that may change the whole tree: ${command}`, async () => {
+        expect(runInCopy(g.dir, inside(command), inGen).written, 'the real run').not.toEqual([]);
+        expect(verdictOf(await g.shell(command, join(g.dir, WT)))).not.toBe('allow');
+      });
+    }
+
+    it('blocks a path named in full', async () => {
+      expect(verdictOf(await g.shell('rm -rf gen', join(g.dir, WT)))).toBe('deny');
+      expect(verdictOf(await g.shell('git restore gen', join(g.dir, WT)))).toBe('deny');
+    });
+  });
+
+  describe('a rule for the folder the worktrees are kept in', () => {
+    let g: ReturnType<typeof setUp>;
+    // What the rule is there for: the files beside the worktrees, not the worktrees.
+    const beside = (rel: string) => rel.startsWith('trees/') && !rel.startsWith(`${WT}/`);
+    beforeAll(() => {
+      g = setUp(
+        ['trees/**'],
+        [
+          "echo 'trees/' > .gitignore && git add -A && git commit -qm ignore",
+          "mkdir -p trees && echo '{}' > trees/settings.json",
+          `git worktree add -q ${WT}`,
+          `cd ${WT} && echo l > a.log && mkdir dist && echo d > dist/x.js`,
+        ].join(' && '),
+      );
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of [
+      'rm -f *.log',
+      'rm -rf dist*',
+      'touch *.txt',
+      'mv *.log dist/',
+      'rm -f a.log',
+      'rm -rf dist',
+    ]) {
+      it(`does not reach a harmless line in the worktree: ${command}`, async () => {
+        expect(runInCopy(g.dir, command, beside, WT).written, 'the real run').toEqual([]);
+        expect(verdictOf(await g.shell(command, join(g.dir, WT)))).toBe('allow');
+      });
+    }
+  });
+});
+
+describe('the folders mkdir -p makes on the way', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUp(['certs/*', '**/*.pem'], 'mkdir out');
+  });
+  afterAll(() => g.mindly.close());
+
+  for (const [command, made] of [
+    ['mkdir -p certs/new/sub', 'certs/new'],
+    ['mkdir -p -- certs/new/sub', 'certs/new'],
+    ['mkdir -p out/a/dir.pem/b', 'out/a/dir.pem'],
+    ['mkdir -p certs/new', 'certs/new'],
+    ['mkdir out/dir.pem', 'out/dir.pem'],
+  ] as const) {
+    it(`are written too, and blocked at a covered name: ${command}`, async () => {
+      const copy = copyOf(g.dir);
+      execFileSync('bash', ['-c', command], { cwd: copy, env: GIT_ENV });
+      expect(whatIs(join(copy, made)), `the real run makes ${made}`).toBe('folder');
+      expect(verdictOf(await g.shell(command))).toBe('deny');
+    });
+  }
+
+  it('are nothing to warn about where no rule covers them', async () => {
+    const r = await g.shell('mkdir -p out/a/b && touch out/a/b/x');
+    expect(r.decision).toBeNull();
+    expect(r.context ?? '').not.toContain('enforced');
+  });
+});
+
+describe('what a copy brings, named in full', () => {
+  it('is blocked where a rule covers it', async () => {
+    const g = setUp(
+      ['**/*.pem', '**/.env*'],
+      'mkdir -p out secret pkg/a/keys big && echo k > secret/k.pem && echo k > pkg/a/keys/k.pem && echo e > .env.local && echo k > big/k.pem',
+    );
+    try {
+      for (const command of [
+        'cp -r secret out/',
+        'cp -r pkg/a/keys out/',
+        'cp .env.local out/',
+        'cp big/* out/',
+      ]) {
+        expect(verdictOf(await g.shell(command)), command).toBe('deny');
+      }
+    } finally {
+      g.mindly.close();
+    }
+  });
+});
+
 describe('a wildcard in a name a command makes itself', () => {
   let g: ReturnType<typeof setUp>;
   beforeAll(() => {
@@ -3115,6 +3359,8 @@ describe('lines that stay read fully', () => {
     // A file the line made, moved by its name; what a folder `mkdir -p` found there, moved.
     'echo x > n.txt && mv n.txt m.txt',
     'mkdir -p src && cp src/a.ts b.ts',
+    'cp a.txt dist/',
+    'rm -rf packages/*/dist',
     // A name after `--`, and a mode, where nothing is covered.
     'rm -- -f',
     'chmod +x scripts/build.sh',
@@ -3612,6 +3858,50 @@ describe('git commands read without false warnings or slow reading', () => {
     }
   });
 
+  describe('a tree of 36,000 files under twelve enforced rules', () => {
+    let g: ReturnType<typeof guarded>;
+    beforeAll(() => {
+      const rules: Record<string, string[]> = { [RULE]: ['certs/**', '**/*.pem'] };
+      for (let i = 1; i < 12; i++) {
+        rules[`Rule number ${i} is kept`] = [`area${i}/**`, `**/*.gen${i}.ts`, `conf${i}/*.json`];
+      }
+      g = guarded(rules);
+      file(g.dir, 'certs/server.pem', 'k1\n');
+      g.git('add', '-A');
+      g.git('commit', '-q', '-m', 'base');
+      // 24 packages of 1,500 files each, 500 to a folder.
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          'for p in $(seq 1 24); do for d in src lib test; do mkdir -p packages/p$p/$d; (cd packages/p$p/$d && seq 1 500 | sed "s/$/.ts/" | xargs touch); done; done; mkdir backup',
+        ],
+        { cwd: g.dir, env: GIT_ENV },
+      );
+    }, 120_000);
+    afterAll(() => g.mindly.close());
+
+    for (const command of [
+      'cp -r packages/* backup/',
+      'mv packages/* backup/',
+      'rm -rf packages/*',
+    ]) {
+      it(`is answered in good time: ${command}`, async () => {
+        await g.shell('true');
+        let best = Infinity;
+        let said: Verdict = 'warn';
+        for (let k = 0; k < 3; k++) {
+          const t0 = performance.now();
+          said = verdictOf(await g.shell(command));
+          best = Math.min(best, performance.now() - t0);
+        }
+        expect(said).toBe('allow');
+        // 200 ms is the aim; the bound leaves room for a busy runner.
+        expect(best).toBeLessThan(500);
+      }, 60_000);
+    }
+  });
+
   it.skipIf(!DEEP_FOLDER)(
     'names in a very deep folder that is there are placed in good time',
     async () => {
@@ -3659,10 +3949,11 @@ describe('git commands read without false warnings or slow reading', () => {
           'deny',
         ],
         ['50 redirections', fifty.map((p) => `echo x > ${p}`).join('; '), 'allow'],
+        // More folders made on the way than are placed: told so, in time.
         [
           '400 folders, each 240 deep',
           `mkdir -p ${Array.from({ length: 400 }, (_, i) => `m${i}/${shallow}x`).join(' ')}`,
-          'allow',
+          'warn',
         ],
       ] as const) {
         expect(command.length, name).toBeLessThan(200_000);

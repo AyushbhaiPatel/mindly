@@ -1216,6 +1216,10 @@ interface Item {
    * that matches nothing makes a link of that very name.
    */
   asWritten?: boolean;
+  /** A copy that follows the symbolic links it finds in its sources (`cp -L`, `-H`). */
+  follows?: boolean;
+  /** The folders above the path that are not there are made too (`mkdir -p`). */
+  parents?: boolean;
   /**
    * The name is given to something else (a rename onto it, a new link in its place): a file
    * that was there is not written, and stays as it is under any other name it has.
@@ -1393,7 +1397,12 @@ function classify(
       // Compressors replace the file they are given, unless they write to standard output.
       if (/zip|^xz$|^bz/.test(program) && hasOption(words, 'ctl', ['--stdout', '--test', '--list']))
         return READS;
-      return writes(...files(operands(words)));
+      return writes(
+        ...files(
+          operands(words),
+          program === 'mkdir' && hasOption(words, 'p', ['--parents']) ? { parents: true } : {},
+        ),
+      );
     case 'truncate':
       return writes(...files(argsWithout(words, ['-s', '--size', '-r', '--reference'])));
     case 'chmod':
@@ -1774,6 +1783,7 @@ function readCopy(program: string, words: readonly Word[]): Verdict {
       ? { noFollow: true }
       : {}),
     ...(program === 'ln' && hasOption(words, 's', ['--symbolic']) ? { asWritten: true } : {}),
+    ...(program === 'cp' && hasOption(words, 'LH', ['--dereference']) ? { follows: true } : {}),
   };
   // `--delete` removes from the destination what the source does not hold: the tree goes.
   if (hasFlag(words, /^--del(ete.*)?$/)) return writes(...gone, ...trees([dest]));
@@ -3271,6 +3281,10 @@ export interface ShellTarget {
    * so an entry with a wildcard that matches nothing lands under that very name.
    */
   asWritten: boolean;
+  /** For a copy: the symbolic links found in its sources are followed (`cp -L`, `-H`). */
+  follows: boolean;
+  /** The folders above the path that are not there are made, and so written, too (`mkdir -p`). */
+  parents: boolean;
   /**
    * The path is under a home directory that could not be placed here (`~name/x`, or any `~`
    * path when no home was given): it starts with the `~` the shell expands. A name that merely
@@ -3681,6 +3695,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     touched: new Set(),
     through: new Map(),
     wild: [],
+    viaOld: false,
     unclimbed: [],
     climbed: new Set(),
     epoch: 0,
@@ -4333,6 +4348,8 @@ function unreadLine(top: string | null): ShellReading {
         unplaced: false,
         noFollow: false,
         asWritten: false,
+        follows: false,
+        parents: false,
         glob: false,
         dotfiles: false,
         nocase: false,
@@ -4411,6 +4428,11 @@ interface Reading {
   through: Map<string, boolean>;
   /** The same for paths written with wildcards; `made` is false for ones only removed. */
   wild: { pattern: string; parts: string[]; made: boolean; link: boolean }[];
+  /**
+   * An earlier command made something at a path with a symbolic link that was there among its
+   * parts: where it is, by any other spelling, the text does not tell.
+   */
+  viaOld: boolean;
   /** Folders a `mkdir -p` made, those above them not yet among `madeDirs`. */
   unclimbed: string[];
   /** Folders a `mkdir -p` made, with those above them: not gone up from a second time. */
@@ -4556,6 +4578,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   // The command being read may make a link where it writes; it is `mkdir`.
   let linking = false;
   let folding = false;
+  // The command being read makes something at a path with a link that was there among its parts.
+  let throughOld = false;
   /** A placed path as told from the folder the line starts in. */
   const anchor = (path: string): string =>
     posix.isAbsolute(path) || path.startsWith('~')
@@ -4698,6 +4722,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   ): boolean => {
     if (e.source === null || e.word === null) return false;
     const wild = wordPattern(e.word).glob;
+    // The content of a source found by a wildcard in a folder on its way is not looked up.
+    if (wildFolder(e.word) && (item.tree || /\/\.?$/.test(e.word.text))) return true;
     if (wild && mayMatchMade(e.source, r.made, late)) return true;
     if (r.touched.size === 0 && r.wild.length === 0) return false;
     if (
@@ -4707,7 +4733,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     ) {
       return true;
     }
-    if (!wild && !item.tree && !/\/\.?$/.test(e.word.text)) return false;
+    const deep = item.tree || /\/\.?$/.test(e.word.text);
+    if (!wild && !deep) return false;
     const at = anchor(e.source);
     // Something the line wrote lies under it.
     const parts = pathParts(at);
@@ -4878,15 +4905,21 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         }
         // Once the line has made something, a `mkdir` folder too, a symbolic link that was
         // there before may lead to it: a path with one among its parts, or one that leads
-        // nowhere yet, goes where the text does not tell.
+        // nowhere yet, goes where the text does not tell. And what a command makes at such a
+        // path is somewhere the text does not tell: what later commands write is not held
+        // against it, and is not read.
+        const earlier = r.through.size > 0 || r.madeDirs.size > 0 || r.wild.some((g) => g.made);
+        const makesNow = !gone && !folding && made.length > 0;
         if (
           !item.pathspec &&
           r.viaLink !== null &&
-          (r.through.size > 0 || r.madeDirs.size > 0 || r.wild.some((g) => g.made)) &&
+          (earlier || makesNow) &&
           [path, ...made].some((p) => r.viaLink?.(p))
         ) {
-          r.unmatched = true;
+          if (earlier) r.unmatched = true;
+          if (makesNow) throughOld = true;
         }
+        if (r.viaOld && !item.pathspec) r.unmatched = true;
         // The folder a command runs in, and the top of the tree, stay what they are: it is what
         // they hold that is made.
         const runsIn = anchor(from === null || from === '' ? '.' : from);
@@ -4939,6 +4972,18 @@ function collectTargets(command: string, startDir: string | null, depth: number,
             link: (linking || item.whole === true) && !gone && !folding,
           });
         }
+        // A destination that may be a folder the copy fills (a recursive copy, several sources,
+        // one found by a wildcard or poured in) holds names not known: it is written into,
+        // never a plain file the line made.
+        if (
+          item.entries !== undefined &&
+          made.includes(path) &&
+          (item.tree ||
+            entries.length > 1 ||
+            entries.some((e) => e.name === '.' || /[*?]/.test(e.name)))
+        ) {
+          pending.push({ path: under(path, '*'), glob: true, kind: 'made', link: linking });
+        }
       }
       const touches = item.touches ?? null;
       const kinds = touches
@@ -4972,6 +5017,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         unplaced: path.startsWith('~'),
         noFollow: item.noFollow ?? false,
         asWritten: item.asWritten ?? false,
+        follows: item.follows ?? false,
+        parents: item.parents ?? false,
         glob: form.glob,
         dotfiles: item.dotfiles ?? false,
         nocase: item.nocase ?? false,
@@ -5536,6 +5583,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       r.madeDirs.delete(at);
     }
     pending = [];
+    if (throughOld) r.viaOld = true;
+    throughOld = false;
     if (linked || kept !== r.touched.size + r.through.size + r.madeDirs.size + r.wild.length) {
       r.epoch++;
     }

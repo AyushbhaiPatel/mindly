@@ -14,6 +14,7 @@ import {
   EMPTY_HOOK_RESULT,
   globToRegExp,
   hasUnsafeChars,
+  deniedPathTest,
   isDeniedPath,
   matchesAnyGlob,
   redactText,
@@ -95,8 +96,15 @@ const PRE_TOOL_BUDGET_MS = 900;
 const PRE_TOOL_SHARE = 0.6;
 /** Wildcard segments one written pattern may have; a deeper one counts as its whole directory. */
 const MAX_PATTERN_SEGMENTS = 16;
-/** Entries listed in the sources of one copy to see what it brings. */
-const MAX_SOURCE_ENTRIES = 2000;
+/** Files one source brings that are placed one by one in a folder that is not there. */
+const MAX_PLACED_ENTRIES = 2000;
+/** Most folders above what `mkdir -p` names that one call places as made. */
+const MAX_PARENTS = 256;
+/**
+ * Entries listed in one source of a copy to see what it brings, within the time there is. A
+ * source with more cannot be listed, and what it brings is not known.
+ */
+const MAX_SOURCE_ENTRIES = 50_000;
 
 /** A path a tool is about to write, as rules and guards see it. */
 interface CheckedPath {
@@ -125,6 +133,11 @@ interface Writes {
   scopes: WrittenScope[];
   /** Directories in which files of unknown names are put (an archive unpacked, a copy). */
   landings: Located[];
+  /**
+   * Files a copy brings to a folder that is not there, too many to place one by one: the
+   * folder, and their names under it. Held against the rules by name.
+   */
+  bulk?: { at: Located; names: readonly string[] }[];
   /** Paths that may be in the project but could not be placed (see {@link MAX_TREE_LOOKUPS}). */
   unchecked: number;
   /** Paths refused as unsafe to place: control or bidi characters, or far too long. */
@@ -210,6 +223,7 @@ export type WriteGuard = (
  */
 export class HookHandler {
   private readonly guards: WriteGuard[] = [];
+  private deniedTest: ((rel: string) => boolean) | null = null;
 
   constructor(
     private readonly k: Kernel,
@@ -423,8 +437,14 @@ export class HookHandler {
       ...dir,
       rel,
       abs: `${dir.abs}${sep}${name}`,
-      own: dir.own && (onTheWay || !isDeniedPath(rel, this.k.config.redaction.denyPaths)),
+      own: dir.own && (onTheWay || !this.denied(rel)),
     };
+  }
+
+  /** Whether a path is on the deny-list; its patterns are compiled once. */
+  private denied(rel: string): boolean {
+    this.deniedTest ??= deniedPathTest(this.k.config.redaction.denyPaths);
+    return this.deniedTest(rel);
   }
 
   /**
@@ -546,7 +566,14 @@ export class HookHandler {
     limit: string | null;
     understood: boolean;
   }> {
-    const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
+    const certain: Writes = {
+      paths: [],
+      scopes: [],
+      landings: [],
+      bulk: [],
+      unchecked: 0,
+      unsafe: 0,
+    };
     const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     // The programs of the line find their paths from the folder itself, whatever links the
     // session's spelling of it goes through: paths are placed from there.
@@ -641,6 +668,10 @@ export class HookHandler {
     /** Folders that names are placed under, each placed once. */
     const missing = new Map<string, Located | 'unknown' | null>();
     const seen = new Set<string>();
+    // What a copy brings could not be found out: the line is not one read fully after all.
+    let unsure = false;
+    // Folders above what `mkdir -p` names that were placed as made, each once.
+    const parents = new Set<string>();
     let late = false;
     for (const t of reading.targets) {
       // Out of time: what is left is not placed, and the line is told it was not read to its
@@ -689,7 +720,10 @@ export class HookHandler {
         // A name in a folder that is there is placed under the folder too, which is placed
         // once however many names the line gives in it: a name that is not there, or one that
         // following would not change.
-        if (dir !== abs && (!exists(abs) || asSpelled(abs))) {
+        // Not the top of a working tree, which is no part of the tree its folder is in: a
+        // linked worktree kept inside the main checkout is placed as its own tree.
+        const there = exists(abs);
+        if (dir !== abs && (!there || (asSpelled(abs) && !exists(join(abs, '.git'))))) {
           let at = missing.get(dir);
           if (at === undefined) {
             at = await this.locate(project, treeRoot, dir, trees);
@@ -699,8 +733,10 @@ export class HookHandler {
             into.unchecked++;
             return null;
           }
-          // A folder outside the project may still hold the top of one of its trees.
-          if (at !== null) return this.under(at, basename(abs));
+          // A name that is there is put under its folder only in the session's own tree.
+          if (at !== null && (!there || at.root === treeRoot)) {
+            return this.under(at, basename(abs));
+          }
         }
         const found = await this.locate(project, treeRoot, abs, trees);
         if (found === 'unknown') into.unchecked++;
@@ -750,10 +786,30 @@ export class HookHandler {
           else file(found);
         }
       };
+      /**
+       * The files a source folder brings; null when it is no folder. One that cannot be listed
+       * in full (too many names, no leave to read it, no time left), or that holds a symbolic
+       * link when the copy follows them, brings what is not known: the line is not read fully.
+       */
+      const listed = (from: string): string[] | null => {
+        const brought = entriesUnder(from, timeUp, () => {
+          if (t.follows) unsure = true;
+        });
+        if (brought === null && isDirectory(from)) {
+          unsure = true;
+          if (timeUp()) limit ??= 'no time was left to place all it writes';
+        }
+        return brought;
+      };
       /** What a source brings, under where it lands; within the time there is. */
       const brings = async (dest: string, brought: readonly string[]): Promise<void> => {
         // Under a folder that is not there, nothing is: each lands by its name below it.
         const base = exists(dest) ? null : await place(dest);
+        // Too many to place one by one, and nothing is where they land: kept by name.
+        if (base !== null && brought.length > MAX_PLACED_ENTRIES && t.certain) {
+          certain.bulk?.push({ at: base, names: brought });
+          return;
+        }
         for (const rel of brought) {
           if (timeUp()) {
             limit ??= 'no time was left to place all it writes';
@@ -812,7 +868,7 @@ export class HookHandler {
           // A source that is a directory brings what it holds; one that is not here (made
           // earlier in the same command, or given by a variable) may be either.
           if (t.tree && (from === null || isDirectory(from) || !exists(from))) {
-            const brought = from === null ? null : entriesUnder(from, timeUp);
+            const brought = from === null ? null : listed(from);
             if (brought === null) landing(at);
             else await brings(path, brought);
           }
@@ -820,6 +876,9 @@ export class HookHandler {
         }
         for (const [name, from] of copied(t, cwd, timeUp)) {
           if (name === null) {
+            // Names that could not be found out: what lands is not known.
+            unsure = true;
+            if (timeUp()) limit ??= 'no time was left to place all it writes';
             landing(await place(path));
             continue;
           }
@@ -831,7 +890,7 @@ export class HookHandler {
             file(await place(dest));
             continue;
           }
-          const brought = from !== null && t.tree ? entriesUnder(from, timeUp) : null;
+          const brought = from !== null && t.tree ? listed(from) : null;
           if (brought !== null) {
             await brings(dest, brought);
             continue;
@@ -861,6 +920,17 @@ export class HookHandler {
       }
       file(at);
       await named(path);
+      // `mkdir -p` makes the folders above the one it names that are not there: each is
+      // written too, as many as are placed.
+      for (let up = dirname(path); t.parents && up !== dirname(up); up = dirname(up)) {
+        if (parents.has(up) || exists(up)) break;
+        if (parents.size >= MAX_PARENTS) {
+          limit ??= `more than ${MAX_PARENTS} folders made on the way`;
+          break;
+        }
+        parents.add(up);
+        file(await place(up));
+      }
       // A whole tree is written when the text says so; a path merely given to a program counts
       // as a tree only when it is a directory.
       if (t.tree && (t.certain || directory)) scope(at, ['**']);
@@ -868,7 +938,7 @@ export class HookHandler {
     // What the text shows as written is not also reported as a mere possibility.
     const sure = new Set(certain.paths.map((p) => p.abs));
     possible.paths = possible.paths.filter((p) => !sure.has(p.abs));
-    return { certain, possible, limit, understood: reading.understood };
+    return { certain, possible, limit, understood: reading.understood && !unsure };
   }
 
   /** The rules the user marked as enforced that have a scope. */
@@ -898,13 +968,37 @@ export class HookHandler {
     search: ScopeSearch,
     /** For possible writes: a folder a rule names, there under this root, is reached. */
     root: string | null = null,
-  ): { deny: RuleHit | null; warn: RuleHit[] } {
+    /** Asked now and then while paths are matched: true when there is no time left. */
+    timeUp: () => boolean = () => false,
+  ): { deny: RuleHit | null; warn: RuleHit[]; cut: boolean } {
     const warn: RuleHit[] = [];
+    let cut = false;
     for (const rule of rules) {
       const globs = rule.scope.paths;
-      const covers = writes.paths
-        .filter((p) => matchesAnyGlob(p.rel, globs, p.nocase ? { nocase: true } : {}))
-        .map((p) => p.rel);
+      // A copy may bring thousands of paths: each rule's patterns are compiled once, and the
+      // matching stops when the time is up, which the caller says.
+      const plain = globsTest(globs, false);
+      let folded: ((rel: string) => boolean) | null = null;
+      const covers: string[] = [];
+      for (let i = 0; i < writes.paths.length && !cut; i++) {
+        if ((i & 1023) === 1023 && timeUp()) cut = true;
+        const p = writes.paths[i] as Writes['paths'][number];
+        if (p.nocase ? (folded ??= globsTest(globs, true))(p.rel) : plain(p.rel)) {
+          covers.push(p.rel);
+        }
+      }
+      for (const b of writes.bulk ?? []) {
+        // Only the patterns that can match under the folder are tried on its names.
+        const reaching = globsReaching(landingScope(b.at), globs);
+        if (reaching.length === 0) continue;
+        const names = globsTest(reaching, false);
+        const prefix = b.at.rel === '' ? '' : `${b.at.rel}/`;
+        for (let i = 0; i < b.names.length && !cut && covers.length < 5; i++) {
+          if ((i & 1023) === 1023 && timeUp()) cut = true;
+          const name = toPosix(b.names[i] as string);
+          if (names(name, prefix)) covers.push(`${prefix}${name}`);
+        }
+      }
       const maybe: string[] = [];
       const unsearched: string[] = [];
       let wholeTree = false;
@@ -953,13 +1047,13 @@ export class HookHandler {
       if (covers.length > 0) {
         // `x` and `x/**` are one thing to the reader.
         const named = covers.filter((c) => !(c.endsWith('/**') && covers.includes(c.slice(0, -3))));
-        return { deny: { rule, covers: [...new Set(named)] }, warn };
+        return { deny: { rule, covers: [...new Set(named)] }, warn, cut };
       }
       if (maybe.length > 0) warn.push({ rule, covers: [...new Set(maybe)] });
       if (unsearched.length > 0)
         warn.push({ rule, covers: [...new Set(unsearched)], unfinished: true, wholeTree });
     }
-    return { deny: null, warn };
+    return { deny: null, warn, cut };
   }
 
   private ruleDenial(hit: RuleHit, context: string | null): HookResult {
@@ -1175,8 +1269,8 @@ export class HookHandler {
         project,
         session,
         [],
-        [...certain.landings, ...possible.landings].map((l) =>
-          l.rel === '' ? '**' : `${l.rel}/**`,
+        [...certain.landings, ...possible.landings, ...(certain.bulk ?? []).map((b) => b.at)].map(
+          (l) => (l.rel === '' ? '**' : `${l.rel}/**`),
         ),
       );
       soft.warnings.push(...landed.warnings);
@@ -1191,12 +1285,18 @@ export class HookHandler {
           enforced.map((m) => ({ scope, globs: globsReaching(scope, m.scope.paths) })),
         ),
       );
-      const rules = this.enforcedRules(enforced, certain, search);
+      const late = (): boolean => performance.now() > until;
+      const rules = this.enforcedRules(enforced, certain, search, null, late);
       const rule = rules.deny;
       // What may change the whole tree (a line not read fully, a git command that brings files
       // back) also warns when a folder a rule names is there, whatever it holds. What a command
       // certainly writes is decided by the covered files that exist.
-      const softRules = rule ? null : this.enforcedRules(enforced, possible, search, project.root);
+      const softRules = rule
+        ? null
+        : this.enforcedRules(enforced, possible, search, project.root, late);
+      // Out of time while the paths were held against the rules: the rest was not checked.
+      const stopped =
+        limit ?? (rules.cut || softRules?.cut ? 'no time was left to check all it writes' : null);
       if (mistakes.length > 0 || pending.length > 0 || rule) {
         const recorded = certain.paths.filter((p) => p.own).map((p) => p.rel);
         this.appendToolEvent(pid, session, 'tool.before', {
@@ -1265,10 +1365,10 @@ export class HookHandler {
             `${possible.unchecked} of the paths this command names lie outside this working tree and were not checked against the project's rules.`,
         );
       }
-      if (limit !== null) {
+      if (stopped !== null) {
         warn(
           () =>
-            `Mindly did not read this whole command (${limit}); the part it did not read was not checked against the project's rules. Do not use it to change files a rule protects.`,
+            `Mindly did not read this whole command (${stopped}); the part it did not read was not checked against the project's rules. Do not use it to change files a rule protects.`,
         );
       }
       const sections = [
@@ -1652,6 +1752,45 @@ const plainTitle = (m: Memory): string => sanitizeLine(m.title, 160).replace(/[<
 function withEnforcementWarning(result: HookResult, warnings: readonly string[]): HookResult {
   const text = sanitizeLine(warnings.join(' '), 2000);
   return text === '' ? result : { ...result, enforcementWarning: text };
+}
+
+/**
+ * `matchesAnyGlob` for many paths: each pattern is compiled once, and the text every match ends
+ * with is compared before its expression is run. A pattern without a slash matches the last
+ * segment anywhere, as it does there. With `under`, the path is `rel` under that folder (given
+ * with its `/`).
+ */
+function globsTest(
+  globs: readonly string[],
+  nocase: boolean,
+): (rel: string, under?: string) => boolean {
+  const opts = nocase ? { nocase: true } : {};
+  let tests: { anywhere: boolean; re: RegExp; tail: string }[];
+  try {
+    tests = globs.map((g) => {
+      const last = g.slice(g.lastIndexOf('/') + 1);
+      // (None for a pattern with groups or classes: a group may hold a `/`.)
+      const tail = /[[{]/.test(g) ? '' : last.slice(last.search(/[^*?]*$/));
+      return {
+        anywhere: !g.includes('/'),
+        re: globToRegExp(g.includes('/') ? g.replace(/^\.\//, '') : g, opts),
+        tail: nocase ? tail.toLowerCase() : tail,
+      };
+    });
+  } catch {
+    // A pattern that does not compile is left to the one-path test.
+    return (rel) => matchesAnyGlob(rel, globs, opts);
+  }
+  return (rel, under = '') => {
+    const end = nocase ? rel.toLowerCase() : rel;
+    // The whole path is put together only for a pattern its end fits.
+    let path: string | null = null;
+    return tests.some((t) => {
+      if (t.tail !== '' && !end.endsWith(t.tail)) return false;
+      path ??= `${under}${rel}`.replace(/^\.\//, '');
+      return t.re.test(t.anywhere ? path.slice(path.lastIndexOf('/') + 1) : path);
+    });
+  };
 }
 
 /** Two context blocks as one text; null when both are empty. */
@@ -2184,7 +2323,12 @@ function isFile(path: string): boolean {
  * entry by entry so a very wide directory stops at the bound. Null when it is not a directory
  * that can be listed in full: what it brings is then not known.
  */
-function entriesUnder(dir: string, timeUp: () => boolean): string[] | null {
+function entriesUnder(
+  dir: string,
+  timeUp: () => boolean,
+  /** Called for a symbolic link found in it: listed as a name, not looked through. */
+  link: () => void = () => {},
+): string[] | null {
   if (!isDirectory(dir)) return null;
   const out: string[] = [];
   const queue = [''];
@@ -2203,6 +2347,7 @@ function entriesUnder(dir: string, timeUp: () => boolean): string[] | null {
         if (e === null) break;
         if (--left < 0 || ((left & 127) === 0 && timeUp())) return null;
         const child = rel === '' ? e.name : `${rel}/${e.name}`;
+        if (e.isSymbolicLink()) link();
         if (e.isDirectory()) {
           if (e.name !== '.git') queue.push(child);
         } else out.push(child);
@@ -2264,8 +2409,10 @@ function copied(
           out.push([null, null]);
           break;
         }
-        // A shell's wildcard does not stand for a leading dot.
-        if (!e.name.startsWith('.') && match.test(e.name)) out.push([e.name, join(parent, e.name)]);
+        // A shell's wildcard does not stand for a leading dot; a pattern that starts with one
+        // names it.
+        if ((name.startsWith('.') || !e.name.startsWith('.')) && match.test(e.name))
+          out.push([e.name, join(parent, e.name)]);
       }
     } finally {
       handle.closeSync();
