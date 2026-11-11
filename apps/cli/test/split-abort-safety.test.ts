@@ -804,6 +804,18 @@ describe('split abort never deletes git data in a worktree, short of a discard',
     );
   });
 
+  it('keeps the start of a held path whose first two folders read as one character', async () => {
+    const sb = await splitSandbox(() => {});
+    const page = partDir(sb, 'page');
+    const rel = `${'\u0600'.repeat(127)}/${'\u0301'.repeat(127)}/${'c'.repeat(200)}/${'d'.repeat(100)}`;
+    repoAt(join(page, rel));
+    const r = await cli(sb, ['split', 'abort', '--yes', '--json']);
+    expect(r.code).toBe(1);
+    const why = jsonOf<Aborted>(r).keptBecause[page] ?? '';
+    expect(why).toContain('deletes: ');
+    expect(why).not.toContain('deletes: …');
+  });
+
   it('lists what holds a part in full before asking', async () => {
     const sb = await splitSandbox(fourFixtures);
     const r = await cli(sb, ['split', 'abort'], { answers: ['n'] });

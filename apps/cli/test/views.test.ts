@@ -743,4 +743,30 @@ describe('split listing', () => {
     expect(line).not.toMatch(/…\p{M}/u);
     expect(line).toContain(label);
   });
+
+  it('keeps the start of a long path whose first two folders read as one character', () => {
+    // Two folder names a file system takes: 127 Arabic number signs, which join what follows,
+    // then 127 accents. With the `/` between them they are one character of 255 units.
+    const p = `${'\u0600'.repeat(127)}/${'\u0301'.repeat(127)}/${'b'.repeat(300)}${label}`;
+    const line = unmergedLine({ part: 'p', title: 'P', paths: [], held: [p] });
+    expect(line).toContain(label);
+    expect(line).not.toContain('stays: …');
+  });
+
+  it('keeps the end of a long path that ends in one long character', () => {
+    const p = `files in the uninitialised submodule folder ${'a'.repeat(200)}/e${'\u0301'.repeat(300)}`;
+    const line = unmergedLine({ part: 'p', title: 'P', paths: [], held: [p] });
+    expect(line.endsWith('…')).toBe(false);
+  });
+
+  it('still names a path that is one long character', () => {
+    const line = unmergedLine({
+      part: 'p',
+      title: 'P',
+      paths: [],
+      held: [`e${'\u0301'.repeat(500)}`, 'vendor/x'],
+    });
+    expect(line).not.toContain('stays: …, vendor/x');
+    expect(line).toContain('vendor/x');
+  });
 });
