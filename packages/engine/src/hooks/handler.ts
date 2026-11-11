@@ -1,4 +1,12 @@
-import { existsSync, lstatSync, opendirSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  lstatSync,
+  opendirSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import {
@@ -28,6 +36,7 @@ import { LIVE_WINDOW_MS, type ChangedFile, type EngineBus, type Kernel } from '.
 import type { CheckpointService } from '../features/checkpoints.js';
 import { commandKey, type MistakeService } from '../memory/mistakes.js';
 import {
+  mayHold,
   normalizeCommandLine,
   pathNamer,
   readShellWrites,
@@ -464,7 +473,14 @@ export class HookHandler {
     ownTreeOnly = false,
     timeUp: () => boolean = () => false,
     understoodOnly = false,
-  ): Promise<{ certain: Writes; possible: Writes; limit: string | null; understood: boolean }> {
+  ): Promise<{
+    certain: Writes;
+    possible: Writes;
+    limit: string | null;
+    understood: boolean;
+    /** A line not read fully names more paths than were placed: it may write any file. */
+    unlisted: boolean;
+  }> {
     const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
@@ -482,13 +498,27 @@ export class HookHandler {
         return false;
       }
     };
+    // An `mv` of the folder the commands run in, or of one above it, takes them elsewhere than
+    // the text says. Both are compared as they are on disk, links followed.
+    let at: string | null = null;
+    const holds = (path: string, dir: string): boolean => {
+      if (++lookups > MAX_LINK_LOOKUPS || timeUp()) return true;
+      at ??= physical(cwd);
+      return mayHold(
+        toPosix(physical(resolve(at, placeHome(path)))),
+        toPosix(physical(resolve(at, placeHome(dir)))),
+      );
+    };
     const reading = readShellWrites(command, {
       home: toPosix(homedir()),
       top: toPosix(treeRoot),
       timeUp,
       linked,
       understoodOnly,
-      isDir: (path) => isDirectory(resolve(cwd, placeHome(path))),
+      isDir: (path) => canEnter(resolve(cwd, placeHome(path))),
+      // A `CDPATH` the agent's shell inherits is the one this process has.
+      cdpath: (process.env.CDPATH ?? '') !== '',
+      holds,
     });
     let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
@@ -642,7 +672,13 @@ export class HookHandler {
     // What the text shows as written is not also reported as a mere possibility.
     const sure = new Set(certain.paths.map((p) => p.abs));
     possible.paths = possible.paths.filter((p) => !sure.has(p.abs));
-    return { certain, possible, limit, understood: reading.understood };
+    return {
+      certain,
+      possible,
+      limit,
+      understood: reading.understood,
+      unlisted: reading.unlisted,
+    };
   }
 
   /** The rules the user marked as enforced that have a scope. */
@@ -842,7 +878,7 @@ export class HookHandler {
       // Only a line Mindly reads fully is checked exactly, and only such a line is ever blocked.
       // Any other stands for a possible write of the whole tree: a warning when a file an
       // enforced rule covers is there.
-      const { certain, possible, limit, understood } = await this.shellWrites(
+      const { certain, possible, limit, understood, unlisted } = await this.shellWrites(
         project,
         evt.cwd,
         tool.command,
@@ -945,7 +981,8 @@ export class HookHandler {
             (h) => !h.unfinished || h.wholeTree === true,
           )
         : [];
-      for (const hit of [...rules.warn, ...mayApply].slice(0, 5)) {
+      const told = [...rules.warn, ...mayApply].slice(0, 5);
+      for (const hit of told) {
         warnings.push(
           hit.unfinished
             ? `Mindly could not search all of ${names(hit)} for files covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
@@ -953,6 +990,18 @@ export class HookHandler {
               ? `Mindly could not read this command fully; it may write ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
               : `This command names ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change it without asking the user.`,
         );
+      }
+      // A line not read fully that names more paths than were placed: any of the others may be a
+      // file a rule covers that is not there yet. Every enforced rule not named above is named.
+      if (unlisted) {
+        const others = enforced.filter((m) => !told.some((hit) => hit.rule.id === m.id));
+        if (others.length > 0) {
+          const titles = others.slice(0, 5).map((m) => `"${m.title}"`);
+          const more = others.length > 5 ? ` and ${others.length - 5} more` : '';
+          warnings.push(
+            `Mindly could not read this command fully, and not all the paths it names were checked; it may write any file, including files covered by ${others.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${titles.join(', ')}${more}. Do not change such files without asking the user.`,
+          );
+        }
       }
       if (possible.unchecked > 0) {
         warnings.push(
@@ -1346,6 +1395,37 @@ function isDirectory(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Whether a path is a folder a `cd` can enter: there, and searchable by this user. */
+function canEnter(path: string): boolean {
+  if (!isDirectory(path)) return false;
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A path with the symbolic links on its way followed, as far as it is there: what is not there
+ * (a name with a wildcard, a file not made yet) stays as written under the part that is.
+ */
+function physical(path: string): string {
+  const rest: string[] = [];
+  let current = path;
+  for (let i = 0; i < 256; i++) {
+    try {
+      return join(realpathSync(current), ...rest);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) break;
+      rest.unshift(basename(current));
+      current = parent;
+    }
+  }
+  return path;
 }
 
 /** The deepest existing directory at or above `path`; null when there is none. */

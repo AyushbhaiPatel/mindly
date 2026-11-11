@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { isLiteralScope, patternsMayOverlap } from '../src/hooks/scope.js';
 import {
+  mayHold,
   mentionsPath,
   namesPathOrParent,
   normalizeCommandLine,
@@ -1311,7 +1312,14 @@ describe('write targets of a shell command', () => {
       "git commit -qm 'run git status first'",
       'msg=fix; git commit -m fix',
       'LANG=C git status -s',
-      'cd sub && git status; pwd',
+      'cd sub && git status && pwd',
+      'cd ./a/b && rm -rf dist && mkdir dist > log.txt 2>&1',
+      'cd ../.. && ls',
+      'cd /srv/app && ls',
+      "cd 'my folder' && ls",
+      'cd sub && ls\n',
+      // `cd` as a word given to another program is not a `cd`.
+      'echo cd sub; git log cd',
       'if git diff --quiet; then echo ok; else echo changed; fi',
       'git log --oneline | head -5 | grep fix',
       'git log > log.txt 2>&1',
@@ -1332,9 +1340,50 @@ describe('write targets of a shell command', () => {
     for (const line of [
       'echo $HOME',
       'git commit -m "$msg"',
-      // Only a leading `cd <folder> &&` is read.
+      // Only a `cd <folder>` that is the first thing on the line, with nothing but `&&` between
+      // the commands after it, is read.
       'cd a; ls',
       'cd a',
+      'cd sub && git status; pwd',
+      'cd sub && ls\nrm x',
+      'cd sub && ls || true',
+      'cd sub && ls | head',
+      'cd sub && if true; then ls; fi',
+      'ls; cd a && ls',
+      '>x || cd a && ls',
+      '> x && cd a && ls',
+      '2>/dev/null || cd a && ls',
+      '</dev/null || cd a && ls',
+      '2>&1 || cd a && ls',
+      'cd a > x && ls',
+      '\ncd a && ls',
+      'x=1 cd a && ls',
+      "'cd' a && ls",
+      'env cd a && ls',
+      'env x=1 cd a; ls',
+      'command cd a && ls',
+      'builtin cd a && ls',
+      'sudo cd a && ls',
+      'if cd a; then ls; fi',
+      // An operand that does not name its folder as written.
+      'cd ~ && ls',
+      'cd ~/a && ls',
+      'cd ~- && ls',
+      'cd ~+ && ls',
+      'cd ~user && ls',
+      'cd a/nosuch/.. && ls',
+      'cd a/../b && ls',
+      'cd ./a/.. && ls',
+      'cd a* && ls',
+      'cd a? && ls',
+      "cd '' && ls",
+      'cd -- a && ls',
+      // A character the reader keeps for its own marks, or any other in private use.
+      'cd \ue000 && ls',
+      'rm \ue000/x',
+      "echo '\uf8ff'",
+      'ls \ufdd0 \uffff',
+      'ls \u{10fffd}',
       'ls && cd a && ls',
       'cd a && cd b && ls',
       'cd a b && ls',
@@ -1420,6 +1469,35 @@ describe('write targets of a shell command', () => {
     ]) {
       expect(understoodLine(line), line).toBe(false);
     }
+    // With a `CDPATH` in the shell, a bare name may be found in one of its folders.
+    for (const line of ['cd a && ls', 'cd a/b && ls']) {
+      expect(understoodLine(line, { cdpath: true }), line).toBe(false);
+    }
+    for (const line of ['cd ./a && ls', 'cd ../a && ls', 'cd /a && ls', 'cd .. && ls', 'ls a']) {
+      expect(understoodLine(line, { cdpath: true }), line).toBe(true);
+    }
+    // An `mv` of the folder the line runs in, or of one above it: what follows runs elsewhere.
+    for (const [line, fully] of [
+      ['cd a/b && mv ../../a ../../c && touch x', false],
+      ['cd a && mv ../a ../c && touch x', false],
+      ['cd a && mv ../? ../c && touch x', false],
+      ['cd a/b && git mv ../../a ../../c && touch x', false],
+      ['mv ../a ../c && touch x', false],
+      ['ln -s .. up && mv up/a c && touch x', false],
+      ['cd a && mv b ../c && touch x', true],
+      ['cd a && mv * ../c', true],
+      ['mv a b && mv c d', true],
+      ['mkdir -p out && mv out/a b', true],
+      ['echo x > tmp && mv tmp a', true],
+    ] as const) {
+      expect(readShellWrites(line, { understoodOnly: true }).understood, line).toBe(fully);
+    }
+    expect(mayHold('/w/a', '/w/a/b')).toBe(true);
+    expect(mayHold('/w/a/b', '/w/a/b')).toBe(true);
+    expect(mayHold('/w/?', '/w/a/b')).toBe(true);
+    expect(mayHold('/w/a/b/c', '/w/a/b')).toBe(false);
+    expect(mayHold('/w/c', '/w/a/b')).toBe(false);
+    expect(mayHold('/w/a/*', '/w/a')).toBe(false);
     // A copy into a folder made earlier on the line lands inside it.
     const into = readShellWrites('mkdir vendor && cp src/a.ts vendor', { understoodOnly: true });
     expect(into.understood).toBe(true);
@@ -1431,11 +1509,27 @@ describe('write targets of a shell command', () => {
     const unread = readShellWrites('rm $(cat list)', { top: '/w', understoodOnly: true });
     expect(unread.understood).toBe(false);
     expect(unread.targets).toMatchObject([{ path: '/w', tree: true, certain: false }]);
+    expect(unread.unlisted).toBe(false);
+    // The first few paths it names are kept; with more, it says that some are not listed.
+    const few = Array.from({ length: 32 }, (_, i) => `f${i}`).join(' ');
+    const read = (line: string) => readShellWrites(line, { top: '/w', understoodOnly: true });
+    expect(read(`touch ${few}; echo "$x" > f0`).unlisted).toBe(false);
+    const more = read(`touch ${few}; echo "$x" > .env`);
+    expect(more.unlisted).toBe(true);
+    expect(more.targets.map((t) => t.path)).not.toContain('.env');
+    // A part of it that was not read for its paths counts the same.
+    expect(read(`${'true; '.repeat(2001)}echo "$x" > .env`).unlisted).toBe(true);
+    // A character of the reader's own marks, written in the line, is not one of them.
+    expect(readShellWrites('rm \ue000/x').targets).toEqual([]);
+    expect(readShellWrites('rm "$PWD/x"').targets.map((t) => t.path)).toEqual(['x']);
   });
 
   it('answers a line of 200,000 characters of any shape in good time', () => {
     for (const unit of [
       'mkdir x && cd x && ',
+      'echo cd ',
+      'x cd ',
+      'git log cd ',
       'xargs -i ',
       'echo $(x) ',
       'a[$(b)] ',
@@ -1469,6 +1563,7 @@ describe('write targets of a shell command', () => {
       targets: [expect.anything()],
       limit: null,
       understood: true,
+      unlisted: false,
     });
     const many = Array.from({ length: 700 }, (_, i) => `rm f${i}.ts`).join('; ');
     const cut = readShellWrites(many);

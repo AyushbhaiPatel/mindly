@@ -4,6 +4,7 @@
 // pre-tool hook is asked; it must block or at least warn. The commands after them write no
 // covered file and must never be blocked.
 import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { GIT_ENV, file, guarded, runInCopy } from './written.js';
 
@@ -82,6 +83,10 @@ const LN_LONG = works('d=$(mktemp -d) && ln --sy "$d" "$d/l" && rm -rf "$d"');
 const CASE_IN_SUBST = works('[ "$(case x in x) echo ok;; esac)" = ok ]');
 /** util-linux `script` takes `-c`; BSD `script` (macOS) does not. */
 const SCRIPT_C = works('script -qec true /dev/null');
+/** bash fails a `cd` through a folder that is not there and `..`; a shell that does not is not asked. */
+const CD_CHECKS_DOTDOT = works(
+  'd=$(mktemp -d) && mkdir "$d/a" && cd "$d" && ! cd a/nosuch/.. 2>/dev/null; r=$?; rm -rf "$d"; exit $r',
+);
 /** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
 const FIVE_HOME = `${HOOK} && mkdir -p 5 && printf '[core]\\n\\thooksPath = hk\\n' > 5/.gitconfig`;
 /** A program run instead of git once `git` is hashed to it. */
@@ -813,6 +818,21 @@ const quiet: { name: string; prep?: string; command: string }[] = [
   { name: 'submodule status', command: 'git submodule status' },
   { name: 'status after a shell variable', command: 'msg=fix; git status' },
   { name: 'status in a folder', prep: 'mkdir -p sub', command: 'cd sub && git status' },
+  {
+    name: 'a build folder removed in a folder',
+    prep: 'mkdir -p sub/dist',
+    command: 'cd sub && rm -rf dist',
+  },
+  {
+    name: 'a chain of commands in a folder named from here',
+    prep: 'mkdir -p sub/dist',
+    command: 'cd ./sub && rm -rf dist && mkdir dist && git status',
+  },
+  {
+    name: 'files renamed in a folder',
+    prep: 'mkdir -p sub && touch sub/a',
+    command: 'cd sub && mv a b',
+  },
   { name: 'a test of the diff', command: 'if git diff --quiet; then echo ok; fi' },
 ];
 
@@ -993,6 +1013,13 @@ cases.push(
     scopes: ['certs/**'],
     prep: 'mkdir sub',
     command: 'cd sub && rm -f ../certs/server.pem',
+    want: ['deny'],
+  },
+  {
+    name: 'a leading cd, a path named from it, and the line end',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    command: 'cd sub && rm -f ../certs/server.pem\n',
     want: ['deny'],
   },
 );
@@ -1331,6 +1358,223 @@ describe('lines not read fully, and code the shell does not run, are never block
   }
 });
 
+/** Thirty-two paths: as many as a line not read fully has placed one by one. */
+const MANY = Array.from({ length: 32 }, (_, i) => `f${i + 1}`).join(' ');
+/** A folder whose name is a private-use character. */
+const PRIVATE = String.fromCharCode(0xe000);
+const inCerts = (rel: string) => rel.startsWith('certs/');
+/** A tracked folder `a/b` and an empty folder `x` beside it. */
+const NESTED = 'mkdir -p a/b x && touch a/b/f && git add a && git commit -qm nested';
+
+/**
+ * Lines that write a covered file where the text does not tell which: a `cd` that is not the
+ * first thing on the line, fails, or lands elsewhere than its operand says; the folder the line
+ * runs in moved away; a path named after more of them than are placed one by one. None is read
+ * fully, and each is warned about.
+ */
+const strays: {
+  name: string;
+  scopes?: string[];
+  prep?: string;
+  command: string;
+  /** The files the rule covers; those under `certs/` unless given. */
+  covered?: (rel: string) => boolean;
+  /** Where the session's shell is, under the project. */
+  cwd?: string;
+  /** Variables the agent's shell inherited, and the hook with it. */
+  env?: Record<string, string>;
+  /** Only where the tests do not run as root, which enters any folder. */
+  notRoot?: boolean;
+  /** False where the command cannot run as it does elsewhere: only asked. */
+  runs?: boolean;
+}[] = [
+  // A path named after the first few: a covered file that is not there yet.
+  {
+    name: 'a new .env named after thirty-two other paths',
+    scopes: ['.env'],
+    covered: (rel) => rel === '.env',
+    command: `touch ${MANY}; echo "KEY=$USER" > .env`,
+  },
+  {
+    name: 'a new key file named after thirty-two other paths, the rule by extension',
+    scopes: ['**/*.key'],
+    covered: (rel) => rel.endsWith('.key'),
+    command: `touch ${MANY}; echo "$USER" > certs/new.key`,
+  },
+  {
+    name: 'the one file of a rule named after thirty-two other paths',
+    scopes: ['certs/server.key'],
+    covered: (rel) => rel.endsWith('.key'),
+    command: `rm -f ${MANY} && echo $(date) > certs/server.key`,
+  },
+  {
+    name: 'a rule folder that is not there, made and filled after thirty-two other paths',
+    prep: 'git rm -rq certs && git commit -qm gone',
+    command: `touch ${MANY}; mkdir certs && echo "$USER" > certs/new.pem`,
+  },
+  {
+    name: 'a new .env named after more commands than are read for their paths',
+    scopes: ['.env'],
+    covered: (rel) => rel === '.env',
+    command: `${'true; '.repeat(2001)}echo "KEY=$USER" > .env`,
+  },
+  // A command of redirections only comes before the cd: the cd is not the first on the line.
+  {
+    name: 'a cd after a redirection that succeeds and ||',
+    prep: 'mkdir sub',
+    command: '>x || cd sub && rm -f certs/server.pem',
+  },
+  {
+    name: 'a cd after a redirection that fails and &&',
+    prep: 'mkdir sub',
+    command: '> nosuch/x && cd sub && true; rm -f certs/server.pem',
+  },
+  {
+    name: 'a cd after 2>/dev/null and ||',
+    prep: 'mkdir sub',
+    command: '2>/dev/null || cd sub && rm -f certs/server.pem',
+  },
+  {
+    name: 'a cd after </dev/null and ||',
+    prep: 'mkdir sub',
+    command: '</dev/null || cd sub && rm -f certs/server.pem',
+  },
+  {
+    name: 'a cd after 2>&1 and ||',
+    prep: 'mkdir sub',
+    command: '2>&1 || cd sub && rm -f certs/server.pem',
+  },
+  // `env cd` runs a program, if there is one: the shell stays where it was.
+  {
+    name: 'a cd run by env',
+    prep: 'mkdir sub',
+    command: 'env cd sub; rm -f certs/server.pem',
+  },
+  {
+    name: 'a cd run by env, then && and ;',
+    prep: 'mkdir sub',
+    command: 'env cd sub && true; rm -f certs/server.pem',
+  },
+  {
+    name: 'a cd run by env after an assignment',
+    prep: 'mkdir sub',
+    command: 'env x=1 cd sub; rm -f certs/server.pem',
+  },
+  // A leading cd that fails though the folder its text comes to is there.
+  {
+    name: 'a leading cd through a folder that is not there and ..',
+    prep: 'mkdir sub',
+    command: 'cd sub/nosuch/.. && true; rm -f certs/server.pem',
+    runs: CD_CHECKS_DOTDOT,
+  },
+  {
+    name: 'a leading cd through a missing folder and .. to a folder beside it',
+    prep: 'mkdir sub',
+    command: 'cd nosuch/../sub && true; rm -f certs/server.pem',
+    runs: CD_CHECKS_DOTDOT,
+  },
+  {
+    name: 'a leading cd through a file and ..',
+    prep: 'mkdir sub && touch sub/f',
+    command: 'cd sub/f/.. && true; rm -f certs/server.pem',
+  },
+  {
+    name: 'a leading cd to a folder that cannot be entered',
+    prep: 'mkdir sub && chmod 600 sub',
+    command: 'cd sub && ls; rm -f certs/server.pem',
+    notRoot: true,
+  },
+  // A leading cd that lands elsewhere than its operand says.
+  {
+    name: 'a leading cd to ~-, the folder the shell was in before',
+    prep: 'mkdir sub',
+    cwd: 'sub',
+    env: { OLDPWD: '..' },
+    command: 'cd ~- && rm -f certs/server.pem',
+  },
+  {
+    name: 'a leading cd to a name CDPATH finds elsewhere',
+    prep: 'mkdir -p sub certs/sub',
+    env: { CDPATH: 'certs' },
+    command: 'cd sub && rm -f ../server.pem',
+  },
+  {
+    name: 'a leading cd to a folder named by a private-use character',
+    prep: `mkdir ${PRIVATE}`,
+    command: `cd ${PRIVATE} && rm -f ../certs/server.pem`,
+  },
+  // The folder the commands run in is moved: what follows runs where the text does not tell.
+  {
+    name: 'the folder a cd entered moved into the covered folder',
+    prep: 'mkdir sub',
+    command: 'cd sub && mv ../sub ../certs/ && rm -f ../server.pem',
+  },
+  {
+    name: 'the folder a cd entered moved by a wildcard',
+    prep: 'mkdir sub',
+    command: 'cd sub && mv ../su? ../certs/ && rm -f ../server.pem',
+  },
+  {
+    name: 'a folder above the one a cd entered moved into the covered folder',
+    prep: 'mkdir -p a/b',
+    command: 'cd a/b && mv ../../a ../../certs && touch new.pem',
+  },
+  {
+    name: 'the folder the session is in moved into the covered folder',
+    prep: 'mkdir sub',
+    cwd: 'sub',
+    command: 'mv ../sub ../certs/ && rm -f ../server.pem',
+  },
+  {
+    name: 'a folder above the one a cd entered moved by git mv',
+    prep: NESTED,
+    command: 'cd a/b && git mv ../../a ../../x/ && rm -f ../../../certs/server.pem',
+  },
+  {
+    name: 'the folder the session is in moved through a link made on the line',
+    prep: 'mkdir sub',
+    cwd: 'sub',
+    covered: (rel) => rel.endsWith('.pem'),
+    command: 'ln -s .. up && mv up/sub ../certs/ && rm -f ../server.pem',
+  },
+];
+
+describe('lines whose cd, moved folder or number of paths the text does not settle are warned about', () => {
+  for (const c of strays) {
+    const run = c.notRoot && process.getuid?.() === 0 ? it.skip : it;
+    run(c.name, async () => {
+      const g = setUp(c.scopes ?? ['certs/**'], c.prep);
+      // The variables are set for the command as it really runs and for the hook, then put back.
+      const shells: Record<string, string | undefined>[] = [GIT_ENV, process.env];
+      const kept = shells.map((env) => ({ ...env }));
+      for (const env of shells) Object.assign(env, c.env ?? {});
+      try {
+        const done = runInCopy(g.dir, c.command, c.covered ?? inCerts, c.cwd ?? '');
+        if (c.runs ?? true) {
+          expect(
+            done.written.length,
+            `\`${c.command.slice(0, 200)}\` writes a covered file; ${done.output}`,
+          ).toBeGreaterThan(0);
+        }
+        const r = await g.shell(c.command, join(g.dir, c.cwd ?? ''));
+        expect(
+          verdictOf(r),
+          `hook on \`${c.command.slice(0, 200)}\` (writes ${done.written.join(', ')}): ${r.reason ?? ''}`,
+        ).toBe('warn');
+      } finally {
+        shells.forEach((env, i) => {
+          for (const k of Object.keys(c.env ?? {})) {
+            const was = kept[i]?.[k];
+            if (was === undefined) Reflect.deleteProperty(env, k);
+            else env[k] = was;
+          }
+        });
+        g.mindly.close();
+      }
+    });
+  }
+});
+
 describe('git commands read without false warnings or slow reading', () => {
   it('lines of 200,000 characters of any shape are answered in good time', async () => {
     const g = setUp(PEM);
@@ -1369,6 +1613,33 @@ describe('git commands read without false warnings or slow reading', () => {
       }
       // 200 ms is the aim; the bound leaves room for a busy runner.
       expect(best).toBeLessThan(500);
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('a line of 200,000 characters that only names cd is answered well inside its time', async () => {
+    const g = setUp(PEM);
+    try {
+      await g.shell('true');
+      for (const [unit, want] of [
+        ['echo cd ', 'allow'],
+        ['git log cd ', 'allow'],
+        // A program not known here: the line is not read fully.
+        ['x cd ', 'warn'],
+      ] as const) {
+        const command = unit.repeat(Math.floor(199_000 / unit.length));
+        let best = Infinity;
+        let said: Verdict = 'deny';
+        for (let k = 0; k < 3; k++) {
+          const t0 = performance.now();
+          said = verdictOf(await g.shell(command));
+          best = Math.min(best, performance.now() - t0);
+        }
+        expect(said, unit).toBe(want);
+        // 200 ms is the aim; the bound leaves room for a busy runner.
+        expect(best, unit).toBeLessThan(500);
+      }
     } finally {
       g.mindly.close();
     }

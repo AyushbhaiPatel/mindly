@@ -703,8 +703,12 @@ function parse(
     w.dynamic = true;
     w.dynamicAt ??= w.text.length;
   };
-  const put = (text: string, quoted: boolean): void => {
+  // A character written in the line that the reader keeps for its marks: the word that holds
+  // it is not one of them, and where it leads is not known here.
+  const marked = MARKS.test(src);
+  const put = (text: string, quoted: boolean, mark = false): void => {
     const w = cur();
+    if (marked && !mark && MARKS.test(text)) unknownValue();
     w.text += text;
     w.mask += (quoted ? 'q' : 'u').repeat(text.length);
   };
@@ -768,8 +772,8 @@ function parse(
   /** A substitution: the few whose value is known become a mark, the rest are read later. */
   const substitution = (code: string, quoted: boolean): void => {
     const what = code.trim().replace(/\s+/g, ' ');
-    if (what === 'pwd') put(HERE, quoted);
-    else if (what === 'git rev-parse --show-toplevel') put(TOP, quoted);
+    if (what === 'pwd') put(HERE, quoted, true);
+    else if (what === 'git rev-parse --show-toplevel') put(TOP, quoted, true);
     else {
       current.nested.push(code);
       unknownValue();
@@ -822,9 +826,9 @@ function parse(
       return i + 1;
     }
     const name = m[1] ?? m[2];
-    if (name === 'PWD') put(HERE, quoted);
-    else if (name === 'HOME') put(HOME, quoted);
-    else if (name === 'OLDPWD') put(BACK, quoted);
+    if (name === 'PWD') put(HERE, quoted, true);
+    else if (name === 'HOME') put(HOME, quoted, true);
+    else if (name === 'OLDPWD') put(BACK, quoted, true);
     else unknownValue();
     return i + m[0].length;
   };
@@ -3214,6 +3218,11 @@ export interface ShellReading {
    * read: its one target is the whole working tree, a possible write.
    */
   understood: boolean;
+  /**
+   * A line not read fully names paths that are not among the targets (more than are kept, or a
+   * part of it that was not read): it may write a file of any name.
+   */
+  unlisted: boolean;
 }
 
 /** What reading a command may know about where it runs. Nothing is looked up here. */
@@ -3237,10 +3246,23 @@ export interface ShellReadOptions {
    */
   linked?: (path: string) => boolean;
   /**
-   * Whether a path (relative to where the command starts, or absolute) is a folder on disk. With
-   * `understoodOnly`, a leading `cd` to one that is not there makes the line one not read fully.
+   * Whether a path (relative to where the command starts, or absolute) is a folder on disk that
+   * can be entered. With `understoodOnly`, a leading `cd` to one that is not makes the line one
+   * not read fully.
    */
   isDir?: (path: string) => boolean;
+  /**
+   * The shell's `CDPATH` lists folders: a `cd` to a name that does not start with `/`, `./` or
+   * `../` may land in one of them, and is not read.
+   */
+  cdpath?: boolean;
+  /**
+   * Whether a path `mv` takes away (placed like `dir`, its `*` and `?` kept) may be the folder
+   * `dir` or one above it. With `understoodOnly`, a line that moves the folder its commands run
+   * in, or one above it, is one not read fully. Without it the two are compared as text (see
+   * {@link mayHold}).
+   */
+  holds?: (path: string, dir: string) => boolean;
   /**
    * Read only a line Mindly reads fully; any other stands for a possible write of the whole
    * working tree, never a certain one.
@@ -3472,7 +3494,7 @@ function readCode(source: string): CodeFinding {
  * in both directions, so a read is not blocked and a plain write is not missed.
  */
 export function readShellWrites(command: string, options: ShellReadOptions = {}): ShellReading {
-  const fully = options.understoodOnly ? understanding(command) : true;
+  const fully = options.understoodOnly ? understanding(command, options.cdpath ?? false) : true;
   const reading: Reading = {
     out: new Map(),
     limit: null,
@@ -3493,6 +3515,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     made: [],
     madeDirs: new Set(),
     isDir: fully === true ? (options.isDir ?? null) : null,
+    holds: options.understoodOnly && fully === true ? (options.holds ?? mayHold) : null,
     unmatched: false,
   };
   collectTargets(command, '', 0, reading);
@@ -3506,7 +3529,8 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     const unread = unreadLine(options.top ?? null);
     // What it names may be written, and files of names not known here may land in it (`mkdir
     // vendor && cp x v*/`).
-    // The first few only: they add to a warning the whole tree gets anyway.
+    // The first few only are placed. With more of them, or with a part of the line that was not
+    // read for them, the line may write a file of any name, and says so.
     const named = [...reading.out.values()]
       .slice(0, MAX_UNREAD_TARGETS)
       .flatMap((t) => [
@@ -3519,12 +3543,14 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
       ...unread,
       targets: [...named, ...unread.targets],
       limit: typeof fully === 'string' ? fully : null,
+      unlisted: reading.out.size > MAX_UNREAD_TARGETS || reading.limit !== null,
     };
   }
   return {
     targets: [...reading.out.values()],
     limit: reading.limit,
     understood: true,
+    unlisted: false,
   };
 }
 
@@ -3678,8 +3704,8 @@ const READ_FULLY: Readonly<Record<string, ReadFully>> = {
   grep: { any: true, refuse: /^-[^-]*[rRd]|^--(recursive|dereference-recursive|directories)/ },
   echo: { any: true },
   printf: { any: true, refuse: /^-[^-]*v/ },
-  // Builtins that change nothing git runs with while their words are plain text.
-  cd: {},
+  // Builtins that change nothing git runs with while their words are plain text. `cd` is not
+  // one of them: only a leading one is read (see `scanLine`).
   true: { any: true },
   false: { any: true },
   ':': { any: true },
@@ -3717,6 +3743,38 @@ function mayMatchMade(pattern: string, made: readonly string[]): boolean {
     const n = Math.min(ms.length, res.length);
     for (let i = 0; i < n; i++) if (!(res[i] as RegExp).test(ms[i] as string)) return false;
     return true;
+  });
+}
+
+/**
+ * Whether a path, its `*` and `?` matched as the shell matches them, may name the folder `dir`
+ * or one above it. Both are absolute, or both are told from the same folder; where the text does
+ * not let them be compared (one of each, a `~`, a path that climbs above where `dir` is told
+ * from), it may.
+ */
+export function mayHold(path: string, dir: string): boolean {
+  if (path.startsWith('~') || dir.startsWith('~')) return true;
+  if (posix.isAbsolute(path) !== posix.isAbsolute(dir)) return true;
+  const parts = (p: string): string[] =>
+    posix
+      .normalize(p)
+      .split('/')
+      .filter((x) => x !== '' && x !== '.');
+  const climb = (xs: readonly string[]): number => {
+    const at = xs.findIndex((x) => x !== '..');
+    return at === -1 ? xs.length : at;
+  };
+  const ps = parts(path);
+  const ds = parts(dir);
+  if (climb(ps) > climb(ds)) return true;
+  if (ps.length > ds.length) return false;
+  return ps.every((p, i) => {
+    if (!/[*?]/.test(p)) return p === ds[i];
+    const re = p
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*+/g, '.*')
+      .replace(/\?/g, '.');
+    return new RegExp(`^${re}$`, 's').test(ds[i] as string);
   });
 }
 
@@ -3770,30 +3828,47 @@ function optionsReadFully(table: ReadFully, args: readonly PlainWord[]): boolean
  * `$`, backtick or backslash; `&&`, `||`, `;` and line ends between commands; `>`, `>>`, `2>`,
  * `&>` to a plain path, `2>&1`, `</dev/null`; a pipe into `head`, `tail`, `grep`, `wc` or `cat`;
  * assignments by the shell's rules, to lower-case variables or harmless upper-case ones (`LANG`,
- * `TZ`); `env` with no option of its own; and the keywords of `if`. Anything else (a `$`, a
- * backtick, a backslash, parentheses, braces, a `[…]` class, `!`, a here-document or
+ * `TZ`); `env` with no option of its own; the keywords of `if`; and `cd <folder>` as the first
+ * thing on the line when all that follows it is joined by `&&` (see `scanLine`). Anything else
+ * (a `$`, a backtick, a backslash, parentheses, braces, a `[…]` class, `!`, a here-document or
  * here-string, a process substitution, a background `&`, a function, a loop, any other builtin,
- * any other program or option, a program given by its path, an assignment to `HOME`, `PWD`,
- * `CDPATH` or another variable a program reads, more than a few thousand commands) makes it a line
- * not read fully. One pass over the text.
+ * any other `cd`, any other program or option, a program given by its path, an assignment to
+ * `HOME`, `PWD`, `CDPATH` or another variable a program reads, a private-use character, more than
+ * a few thousand commands) makes it a line not read fully. One pass over the text. `cdpath`: the
+ * shell's `CDPATH` lists folders, and only a `cd` it does not search for there is read.
  */
-export function understoodLine(command: string): boolean {
-  return understanding(command) === true;
+export function understoodLine(command: string, options: { cdpath?: boolean } = {}): boolean {
+  return understanding(command, options.cdpath ?? false) === true;
 }
 
+/**
+ * Private-use characters and noncharacters: no file name in good use holds one, and the reader
+ * keeps the first few for its own marks.
+ */
+const PRIVATE_USE = /[\uE000-\uF8FF\uFDD0-\uFDEF\uFFFE\uFFFF\uDB80-\uDBFF]/;
+
 /** Whether a line is read fully; when it is not for its size alone, why (a limit). */
-function understanding(command: string): true | false | string {
+function understanding(command: string, cdpath: boolean): true | false | string {
   if (command.length > MAX_COMMAND_CHARS)
     return `only the first ${MAX_COMMAND_CHARS} characters were read`;
+  if (PRIVATE_USE.test(command)) return false;
   const said = { tooMany: false };
-  if (scanLine(command, said)) return true;
+  if (scanLine(command, said, cdpath)) return true;
   return said.tooMany ? `more than ${MAX_UNDERSTOOD_COMMANDS} commands` : false;
 }
 
-/** The one pass of {@link understoodLine}; `said.tooMany`: it stopped for the count alone. */
-function scanLine(command: string, said: { tooMany: boolean }): boolean {
+/**
+ * The one pass of {@link understoodLine}; `said.tooMany`: it stopped for the count alone.
+ * `searched`: the shell's `CDPATH` lists folders.
+ */
+function scanLine(command: string, said: { tooMany: boolean }, searched: boolean): boolean {
   // Each command, whether a pipe feeds it, and whether `&&` follows it.
   const commands: { words: PlainWord[]; piped: boolean; and: boolean }[] = [];
+  // Separators other than `&&` (`;`, a line end, `||`, a pipe) and redirections read so far, and
+  // whether the first command ended with none of either before it or in it.
+  let breaks = 0;
+  let redirections = 0;
+  let leads = false;
   let words: PlainWord[] = [];
   let piped = false;
   let text = '';
@@ -3818,7 +3893,11 @@ function scanLine(command: string, said: { tooMany: boolean }): boolean {
     if (!endWord()) return false;
     // `a ; ; b`, `| x`: an empty command between separators is a syntax the reader does not take.
     if (words.length === 0 && (nextPiped || piped)) return false;
-    if (words.length > 0) commands.push({ words, piped, and });
+    if (words.length > 0) {
+      if (commands.length === 0) leads = breaks === 0 && redirections === 0;
+      commands.push({ words, piped, and });
+    }
+    if (!and) breaks++;
     // More than are read in good time is not read exactly.
     if (commands.length > MAX_UNDERSTOOD_COMMANDS) {
       said.tooMany = true;
@@ -3832,7 +3911,10 @@ function scanLine(command: string, said: { tooMany: boolean }): boolean {
   let target: 'any' | 'null' | null = null;
   // `*` and `?` are read as the shell matches them, against the files that exist.
   const plainChar = /[A-Za-z0-9_./:@=+,%^~*?-]/;
-  const s = command;
+  // The line ends where its text does: blanks and line ends after it separate nothing.
+  let end = command.length;
+  while (end > 0 && ' \t\n'.includes(command[end - 1] as string)) end--;
+  const s = command.slice(0, end);
   for (let i = 0; i < s.length; i++) {
     const c = s[i] as string;
     if (c === ' ' || c === '\t') {
@@ -3882,6 +3964,7 @@ function scanLine(command: string, said: { tooMany: boolean }): boolean {
       }
       if (c === '&' && s[i + 1] === '>') {
         // `&>file`, `&>>file`.
+        redirections++;
         if (!endWord()) return false;
         i += s[i + 2] === '>' ? 2 : 1;
         target = 'any';
@@ -3894,6 +3977,7 @@ function scanLine(command: string, said: { tooMany: boolean }): boolean {
     }
     if (c === '>' || c === '<') {
       if (target !== null) return false;
+      redirections++;
       // A file descriptor written right before it (`2>`) is part of the redirection.
       if (open && !quoted && /^\d+$/.test(text)) {
         text = '';
@@ -3945,35 +4029,43 @@ function scanLine(command: string, said: { tooMany: boolean }): boolean {
   }
   if (target !== null && !endTarget()) return false;
   if (!endCommand(false)) return false;
-  // Where a `cd` lands is not followed: only one at the start, to a folder, followed by `&&`
-  // (the rest runs there or not at all), is read. Any other `cd`, `pushd` or `popd` is not.
-  return commands.every((cmd, at) => {
-    const first = cmd.words[0];
-    const moves = cmd.words.some(
-      (w, k) =>
-        ['cd', 'pushd', 'popd'].includes(w.text) &&
-        cmd.words.slice(0, k).every((x) => UNDERSTOOD_KEYWORDS.has(x.text) || assignment(x)),
-    );
-    if (moves) {
-      const operand = cmd.words[1];
-      return (
-        at === 0 &&
-        cmd.and &&
-        first?.text === 'cd' &&
-        cmd.words.length === 2 &&
-        operand !== undefined &&
-        !operand.text.startsWith('-')
-      );
-    }
-    return understoodCommand(cmd.words, cmd.piped);
-  });
+  // The end of the line is not a separator.
+  const ends = breaks - 1;
+  // Where a `cd` lands is not followed. Only one that is the first thing on the line is read, to
+  // a folder named as it is written, when all that follows is joined by `&&`: the rest runs in
+  // that folder or not at all. Any other `cd`, `pushd` or `popd` is a program not read here.
+  const lead = commands[0];
+  const cd = lead?.words[0];
+  if (lead === undefined || cd === undefined || cd.text !== 'cd' || cd.quoted) {
+    return commands.every((cmd) => understoodCommand(cmd.words, cmd.piped));
+  }
+  const to = lead.words[1];
+  return (
+    leads &&
+    lead.and &&
+    ends === 0 &&
+    lead.words.length === 2 &&
+    to !== undefined &&
+    namesFolder(to.text, searched) &&
+    commands.every((cmd, at) => at === 0 || understoodCommand(cmd.words, cmd.piped))
+  );
 }
 
-/** Whether a word is an assignment by the shell's rules: a name and `=` outside quotes. */
-const assignment = (w: PlainWord): boolean => {
-  const m = /^[A-Za-z_][A-Za-z0-9_]*\+?=/.exec(w.text);
-  return m !== null && (w.quoteAt === -1 || w.quoteAt >= m[0].length);
-};
+/**
+ * Whether the operand of a leading `cd` names the folder it enters as written: no `~` or `-` at
+ * its start (`~-`, `~user`, an option), no wildcard, no `..` after a folder's name (the shell
+ * fails `a/nosuch/..` where the text says `a`), and, when `CDPATH` lists folders, a start of
+ * `/`, `./` or `../`, which the shell does not search for there.
+ */
+function namesFolder(text: string, searched: boolean): boolean {
+  if (text === '' || /^[~-]/.test(text) || /[*?[\]]/.test(text)) return false;
+  let named = false;
+  for (const part of text.split('/')) {
+    if (part === '..' && named) return false;
+    if (part !== '' && part !== '.' && part !== '..') named = true;
+  }
+  return !searched || /^(\/|\.\.?(\/|$))/.test(text);
+}
 
 /** Whether a simple command of plain words is one the reader takes as the shell does. */
 function understoodCommand(all: readonly PlainWord[], piped: boolean): boolean {
@@ -4042,6 +4134,7 @@ function unreadLine(top: string | null): ShellReading {
     ],
     limit: null,
     understood: false,
+    unlisted: false,
   };
 }
 
@@ -4083,6 +4176,8 @@ interface Reading {
   madeDirs: Set<string>;
   /** Whether a path, placed as targets are, is a folder on disk; null when not asked. */
   isDir: ((path: string) => boolean) | null;
+  /** Whether a path may be a folder or one above it, both placed as targets are; null: not asked. */
+  holds: ((path: string, dir: string) => boolean) | null;
   /** A wildcard may match what an earlier command of the line makes. */
   unmatched: boolean;
 }
@@ -4397,6 +4492,27 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     }
     return out;
   };
+  /**
+   * What an `mv` (or `git mv`) takes away. With the folder the line runs in, or one above it,
+   * gone elsewhere, the commands after it run where the text does not tell. Nor does it tell
+   * what is under a path an earlier command of the line made (other than a folder `mkdir`
+   * made), which may be a link to anywhere. Either way the line is not read fully.
+   */
+  const movesFrom = (sources: readonly Word[], from: string | null): void => {
+    if (r.holds === null || from === null) return;
+    for (const w of sources) {
+      if (w.dynamic) continue;
+      const source = place(w.text, tilde(w), from);
+      if (source === null) continue;
+      if (
+        r.holds(source, from) ||
+        r.made.some((m) => source.startsWith(`${m}/`) && !r.madeDirs.has(m))
+      ) {
+        r.unmatched = true;
+        return;
+      }
+    }
+  };
   let before: SimpleCommand | null = null;
   // Where the shell was before the last `cd`, for the command after `cd … ||`: that one runs
   // only when the `cd` failed.
@@ -4529,6 +4645,11 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     /** Code this command runs: a shell's, git's own, or this shell's (`eval`, `trap`). */
     const nested = (code: string, from: string | null): void =>
       collectTargets(code, from, depth + 1, r);
+    // `mv` and `git mv` take folders away: asked about only on a line read fully.
+    const program = words[0] !== undefined && !words[0].dynamic ? programName(words[0]) : '';
+    const moves =
+      r.holds !== null &&
+      (program === 'mv' || (program === 'git' && gitCommand(words).rest[0]?.text === 'mv'));
     const judge = (verdict: Verdict): void => {
       switch (verdict.kind) {
         case 'reads':
@@ -4568,6 +4689,12 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           break;
         }
         case 'writes':
+          if (moves) {
+            movesFrom(
+              verdict.items.filter((item) => item.entries === undefined).map((item) => item.word),
+              here,
+            );
+          }
           for (const item of intoMade(verdict.items, here)) add(item, here);
           break;
         case 'unread':
@@ -4585,6 +4712,12 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           const where = gitWhere(verdict, here);
           if (where === null) break;
           const { at, base, top } = where;
+          if (moves) {
+            movesFrom(
+              verdict.paths.map((p) => p.word),
+              base,
+            );
+          }
           const how = verdict.how ?? 'write';
           const possibly = (kinds: FileKinds): void => wholeTree(verdict, where, kinds);
           if (verdict.whole !== null) possibly(verdict.whole);
