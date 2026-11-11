@@ -4,6 +4,8 @@
 // pre-tool hook is asked; it must block or at least warn. The commands after them write no
 // covered file and must never be blocked.
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { GIT_ENV, file, guarded, runInCopy } from './written.js';
@@ -94,6 +96,10 @@ const CP_CLOSED_FOLDER = works(
 /** A newer bash keeps the `OLDPWD` it inherits, for `cd ~-`; bash 3.2 (macOS) starts without one. */
 const OLDPWD_INHERITED = works(
   'd=$(mktemp -d) && mkdir "$d/s" && cd "$d/s" && [ "$(OLDPWD=.. bash -c \'cd ~- 2>/dev/null && pwd -P\')" = "$(cd .. && pwd -P)" ]; r=$?; cd /; rm -rf "$d"; exit $r',
+);
+/** GNU `cp -a` keeps two names of one file as one file; BSD `cp -a` (macOS) copies each. */
+const CP_KEEPS_NAMES = works(
+  'd=$(mktemp -d) && mkdir "$d/a" && echo x > "$d/a/f" && ln "$d/a/f" "$d/a/g" && cp -a "$d/a/." "$d/b" && [ "$d/b/f" -ef "$d/b/g" ]; r=$?; rm -rf "$d"; exit $r',
 );
 /** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
 const FIVE_HOME = `${HOOK} && mkdir -p 5 && printf '[core]\\n\\thooksPath = hk\\n' > 5/.gitconfig`;
@@ -859,6 +865,23 @@ const quiet: { name: string; prep?: string; command: string }[] = [
     name: 'a file written twice, then its mode changed',
     command: 'echo a > run.sh && echo b >> run.sh && chmod 755 run.sh',
   },
+  { name: 'a new file written', command: 'echo x > new.txt' },
+  { name: 'a file with one name added to', command: 'echo x >> src/a.ts' },
+  {
+    name: 'another name of a covered file removed',
+    prep: 'ln certs/server.pem f',
+    command: 'rm -f f',
+  },
+  {
+    name: 'another name of a covered file given to another file',
+    prep: 'ln certs/server.pem f',
+    command: 'mv src/a.ts f',
+  },
+  {
+    name: 'another name of a covered file made a link',
+    prep: 'ln certs/server.pem f',
+    command: 'ln -sf src/a.ts f',
+  },
   {
     name: 'a folder made on the line, its mode changed, then filled',
     command: 'mkdir d && chmod 755 d && cp src/a.ts d/a.ts',
@@ -1406,6 +1429,8 @@ const MANY = Array.from({ length: 32 }, (_, i) => `f${i + 1}`).join(' ');
 /** A folder whose name is a private-use character. */
 const PRIVATE = String.fromCharCode(0xe000);
 const inCerts = (rel: string) => rel.startsWith('certs/');
+/** Another name of the covered file, there before the line. */
+const OTHER_NAME = 'ln certs/server.pem f';
 /** A link to the covered folder, there before the line. */
 const OLD_LINK = 'ln -s certs old';
 /** A branch `other` whose tree holds a link `lnk` to the covered folder. */
@@ -1706,6 +1731,79 @@ const strays: {
     prep: OLD_LINK,
     command: 'false && mkdir d; mv old d; rm -f d/server.pem',
   },
+  // A file that has another name is written under both: here the other name is a covered file.
+  {
+    name: 'a redirection onto another name of a covered file',
+    prep: OTHER_NAME,
+    command: 'echo x > f',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'a redirection that adds to another name of a covered file',
+    prep: OTHER_NAME,
+    command: 'echo x >> f',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'a copy onto another name of a covered file',
+    prep: OTHER_NAME,
+    command: 'cp src/a.ts f',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'a forced copy onto another name of a covered file',
+    prep: OTHER_NAME,
+    command: 'cp -f src/a.ts f',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'a copy into a folder that holds another name of a covered file',
+    prep: 'mkdir dir && ln certs/server.pem dir/a.ts',
+    command: 'cp src/a.ts dir/',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'a folder copied over one that holds another name of a covered file',
+    prep: 'mkdir -p dir/src && ln certs/server.pem dir/src/a.ts',
+    command: 'cp -r src dir/',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'the mode of another name of a covered file changed',
+    prep: OTHER_NAME,
+    command: 'chmod 600 f',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'the time of another name of a covered file changed',
+    prep: OTHER_NAME,
+    command: 'touch f',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'a redirection onto another name of a covered file after a leading cd',
+    prep: 'mkdir sub && ln certs/server.pem sub/f',
+    command: 'cd sub && echo x > f',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'the mode of a folder that holds another name of a covered file changed',
+    prep: 'mkdir -p dir/deep && ln certs/server.pem dir/deep/f',
+    command: 'chmod -R 600 dir',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'the mode of another name of a covered file changed by a wildcard',
+    prep: 'mkdir dir && ln certs/server.pem dir/f',
+    command: 'chmod 600 dir/*',
+    runs: CP_KEEPS_NAMES,
+  },
+  {
+    name: 'the output of git written onto another name of a covered file',
+    prep: OTHER_NAME,
+    command: 'git diff --output=f v1',
+    runs: CP_KEEPS_NAMES,
+  },
   // The shell is in a folder the session reached through a link: its `cd ..` and the paths its
   // programs are given part ways there.
   {
@@ -1781,29 +1879,65 @@ describe('a session in a folder reached through a link', () => {
     }
   });
 
-  it('does not follow a cd to .. when PWD spells the folder through the link', async () => {
+  it('does not follow a cd to .. in a shell that came to the folder through the link', async () => {
     const g = setUp(['certs/**'], LINK_TO_FOLDER);
-    const kept = process.env.PWD;
     try {
       const command = 'cd .. && rm -f certs/server.pem';
-      // A shell that came to the folder through the link goes back to where the link is.
+      // The shell goes back to where the link is; the session is given the folder itself.
       const done = runInCopy(g.dir, `cd ../../lnk && ${command}`, certs, 'a/b');
       expect(done.written, done.output).toEqual(['certs/server.pem']);
-      process.env.PWD = join(g.dir, 'lnk');
       expect(verdictOf(await g.shell(command, join(g.dir, 'a/b')))).toBe('warn');
     } finally {
-      if (kept === undefined) Reflect.deleteProperty(process.env, 'PWD');
-      else process.env.PWD = kept;
       g.mindly.close();
     }
   });
 
-  it('follows a cd to .. from a folder spelled without a link', async () => {
+  it('does not follow a cd to .. from a folder spelled without a link either', async () => {
     const g = setUp(['certs/**'], 'mkdir -p a/b');
     try {
       const command = 'cd .. && rm -f ../certs/server.pem';
       expect(runInCopy(g.dir, command, certs, 'a/b').written).toEqual(['certs/server.pem']);
-      expect(verdictOf(await g.shell(command, join(g.dir, 'a/b')))).toBe('deny');
+      expect(verdictOf(await g.shell(command, join(g.dir, 'a/b')))).toBe('warn');
+    } finally {
+      g.mindly.close();
+    }
+  });
+});
+
+describe('a leading cd to a folder given in full', () => {
+  it('is followed inside the project', async () => {
+    const g = setUp(['certs/**'], 'mkdir -p sub/dist');
+    try {
+      const sub = join(g.dir, 'sub');
+      expect(verdictOf(await g.shell(`cd ${sub} && rm -rf dist`))).toBe('allow');
+      expect(verdictOf(await g.shell(`cd ${sub} && rm -f ../certs/server.pem`))).toBe('deny');
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('is followed outside the project, where nothing is covered', async () => {
+    const g = setUp(['certs/**']);
+    try {
+      const outside = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-outside-')));
+      const command = `cd ${outside} && rm -rf certs x`;
+      expect(runInCopy(g.dir, command, (rel) => rel.startsWith('certs/')).written).toEqual([]);
+      expect(verdictOf(await g.shell(command))).toBe('allow');
+      // A path that leads back into the project is still found.
+      expect(verdictOf(await g.shell(`cd ${outside} && rm -f ${g.dir}/certs/server.pem`))).toBe(
+        'deny',
+      );
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('is not followed through a link', async () => {
+    const g = setUp(['certs/**'], LINK_TO_FOLDER);
+    try {
+      const command = `cd ${g.dir}/lnk && rm -f ../../certs/server.pem`;
+      expect(runInCopy(g.dir, command, (rel) => rel.startsWith('certs/')).written).toEqual([]);
+      expect(verdictOf(await g.shell(command))).toBe('warn');
     } finally {
       g.mindly.close();
     }

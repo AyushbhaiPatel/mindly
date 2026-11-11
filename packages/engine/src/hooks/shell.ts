@@ -1178,6 +1178,11 @@ interface Item {
   /** The path is taken away (removed, or moved elsewhere), not made. */
   gone?: boolean;
   /**
+   * The name is given to something else (a rename onto it, a new link in its place): a file
+   * that was there is not written, and stays as it is under any other name it has.
+   */
+  replaces?: boolean;
+  /**
    * A path git is given in its working tree. git does not follow a link there: it refuses the
    * path or puts a folder in the link's place, so such a path leads where its text says.
    */
@@ -1696,7 +1701,13 @@ function readCopy(program: string, words: readonly Word[]): Verdict {
     name: s.dynamic ? '*' : pours(s) ? '.' : posix.basename(s.text),
     from: s.dynamic || isRemote(s) ? null : s,
   }));
-  const item: Item = { word: dest, tree: recursive, entries };
+  // `mv` and `ln` put a name in place; `cp` writes the file that is there, unless told to
+  // remove it first.
+  const replaces =
+    program === 'mv' ||
+    program === 'ln' ||
+    (program === 'cp' && hasFlag(words, /^--remove-destination$/));
+  const item: Item = { word: dest, tree: recursive, entries, ...(replaces ? { replaces } : {}) };
   // `--delete` removes from the destination what the source does not hold: the tree goes.
   if (hasFlag(words, /^--del(ete.*)?$/)) return writes(...gone, ...trees([dest]));
   return writes(...gone, item);
@@ -3285,7 +3296,12 @@ function readGit(
       const [to] = under([dest]) as [Word];
       const entries = under(sources).map((s) => ({ name: posix.basename(s.text), from: s }));
       return done(
-        writes(...trees(under(sources), { gone: true }), { word: to, tree: true, entries }),
+        writes(...trees(under(sources), { gone: true }), {
+          word: to,
+          tree: true,
+          entries,
+          replaces: true,
+        }),
       );
     }
     case 'clean': {
@@ -3687,15 +3703,17 @@ export interface ShellReadOptions {
    */
   isDir?: (path: string) => boolean;
   /**
-   * The shell's `CDPATH` lists folders: a `cd` to a name that does not start with `/`, `./` or
-   * `../` may land in one of them, and is not read.
+   * The shell's `CDPATH` lists folders: a `cd` to a name that does not start with `/` or `./`
+   * may land in one of them, and is not read.
    */
   cdpath?: boolean;
   /**
-   * The shell may spell the folder it is in through a symbolic link, where the caller places
-   * paths from the folder itself: a `cd` to `..` goes by the shell's spelling, and is not read.
+   * Whether a path (placed like targets; with `glob`, its `*` and `?` kept) is, or with `tree`
+   * holds, a file that has another name as well: a hard link. With `understoodOnly`, a line
+   * that writes such a file in place (its content, mode, owner or times) is one not read fully,
+   * as the write reaches the file under its other name too.
    */
-  logical?: boolean;
+  shared?: (path: string, tree: boolean, glob: boolean) => boolean;
   /**
    * The folder the line starts in, absolute: what the line makes and what it names later are
    * compared from there. Without it, a path told from that folder and an absolute one are not
@@ -3940,9 +3958,7 @@ function readCode(source: string): CodeFinding {
  * in both directions, so a read is not blocked and a plain write is not missed.
  */
 export function readShellWrites(command: string, options: ShellReadOptions = {}): ShellReading {
-  const fully = options.understoodOnly
-    ? understanding(command, options.cdpath ?? false, options.logical ?? false)
-    : true;
+  const fully = options.understoodOnly ? understanding(command, options.cdpath ?? false) : true;
   const reading: Reading = {
     out: new Map(),
     limit: null,
@@ -3967,6 +3983,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     isDir: fully === true ? (options.isDir ?? null) : null,
     holds: options.understoodOnly && fully === true ? (options.holds ?? mayHold) : null,
     exact: options.understoodOnly === true && fully === true,
+    shared: options.understoodOnly && fully === true ? (options.shared ?? null) : null,
     cwd: options.cwd ?? null,
     touched: new Set(),
     through: new Map(),
@@ -4245,6 +4262,11 @@ function partsHold(ps: readonly string[], ds: readonly string[]): boolean {
   return ps.every((p, i) => (/[*?]/.test(p) ? partPattern(p).test(ds[i] as string) : p === ds[i]));
 }
 
+/** Whether a name is one a part of a path names, its `*` and `?` matched as the shell does. */
+export function partNames(part: string, name: string): boolean {
+  return /[*?]/.test(part) ? partPattern(part).test(name) : part === name;
+}
+
 /** One part of a path with `*` and `?`, as a pattern; the last few are kept. */
 const PART_PATTERNS = new Map<string, RegExp>();
 function partPattern(part: string): RegExp {
@@ -4320,11 +4342,8 @@ function optionsReadFully(table: ReadFully, args: readonly PlainWord[]): boolean
  * a few thousand commands) makes it a line not read fully. One pass over the text. `cdpath`: the
  * shell's `CDPATH` lists folders, and only a `cd` it does not search for there is read.
  */
-export function understoodLine(
-  command: string,
-  options: { cdpath?: boolean; logical?: boolean } = {},
-): boolean {
-  return understanding(command, options.cdpath ?? false, options.logical ?? false) === true;
+export function understoodLine(command: string, options: { cdpath?: boolean } = {}): boolean {
+  return understanding(command, options.cdpath ?? false) === true;
 }
 
 /**
@@ -4334,26 +4353,20 @@ export function understoodLine(
 const PRIVATE_USE = /[\uE000-\uF8FF\uFDD0-\uFDEF\uFFFE\uFFFF\uDB80-\uDBFF]/;
 
 /** Whether a line is read fully; when it is not for its size alone, why (a limit). */
-function understanding(command: string, cdpath: boolean, logical: boolean): true | false | string {
+function understanding(command: string, cdpath: boolean): true | false | string {
   if (command.length > MAX_COMMAND_CHARS)
     return `only the first ${MAX_COMMAND_CHARS} characters were read`;
   if (PRIVATE_USE.test(command)) return false;
   const said = { tooMany: false };
-  if (scanLine(command, said, cdpath, logical)) return true;
+  if (scanLine(command, said, cdpath)) return true;
   return said.tooMany ? `more than ${MAX_UNDERSTOOD_COMMANDS} commands` : false;
 }
 
 /**
  * The one pass of {@link understoodLine}; `said.tooMany`: it stopped for the count alone.
- * `searched`: the shell's `CDPATH` lists folders. `logical`: the shell may spell the folder it
- * is in through a link.
+ * `searched`: the shell's `CDPATH` lists folders.
  */
-function scanLine(
-  command: string,
-  said: { tooMany: boolean },
-  searched: boolean,
-  logical: boolean,
-): boolean {
+function scanLine(command: string, said: { tooMany: boolean }, searched: boolean): boolean {
   // Each command, whether a pipe feeds it, and whether `&&` follows it.
   const commands: { words: PlainWord[]; piped: boolean; and: boolean }[] = [];
   // Separators other than `&&` (`;`, a line end, `||`, a pipe) and redirections read so far, and
@@ -4538,27 +4551,22 @@ function scanLine(
     ends === 0 &&
     lead.words.length === 2 &&
     to !== undefined &&
-    namesFolder(to.text, searched, logical) &&
+    namesFolder(to.text, searched) &&
     commands.every((cmd, at) => at === 0 || understoodCommand(cmd.words, cmd.piped))
   );
 }
 
 /**
  * Whether the operand of a leading `cd` names the folder it enters as written: no `~` or `-` at
- * its start (`~-`, `~user`, an option), no wildcard, no `..` after a folder's name (the shell
- * fails `a/nosuch/..` where the text says `a`), and, when `CDPATH` lists folders, a start of
- * `/`, `./` or `../`, which the shell does not search for there. The shell takes `..` off its
- * own spelling of the folder it is in: with `logical`, that may not be the folder's parent, and
- * no `..` is read.
+ * its start (`~-`, `~user`, an option), no wildcard, no `..` anywhere, and, when `CDPATH` lists
+ * folders, a start of `/` or `./`, which the shell does not search for there. The shell takes
+ * `..` off its own spelling of the folder it is in, which may go through a link the caller
+ * cannot see, and fails `a/nosuch/..` where the text says `a`.
  */
-function namesFolder(text: string, searched: boolean, logical: boolean): boolean {
+function namesFolder(text: string, searched: boolean): boolean {
   if (text === '' || /^[~-]/.test(text) || /[*?[\]]/.test(text)) return false;
-  let named = false;
-  for (const part of text.split('/')) {
-    if (part === '..' && (named || logical)) return false;
-    if (part !== '' && part !== '.' && part !== '..') named = true;
-  }
-  return !searched || /^(\/|\.\.?(\/|$))/.test(text);
+  if (text.split('/').includes('..')) return false;
+  return !searched || /^(\/|\.(\/|$))/.test(text);
 }
 
 /** Whether a simple command of plain words is one the reader takes as the shell does. */
@@ -4685,6 +4693,8 @@ interface Reading {
   holds: ((path: string, dir: string) => boolean) | null;
   /** The line is read fully so far: what it makes is kept, and later paths are held against it. */
   exact: boolean;
+  /** Whether a path is, or holds, a file with another name; null when not asked. */
+  shared: ((path: string, tree: boolean, glob: boolean) => boolean) | null;
   /** The folder the line starts in, absolute; null when not known. */
   cwd: string | null;
   /** Every path earlier commands of the line wrote, removed ones too, told from `cwd`. */
@@ -4946,6 +4956,23 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         // they hold that is made.
         const stays = (p: string): boolean =>
           anchor(p) === anchor(from === null || from === '' ? '.' : from) || anchor(p) === r.top;
+        // A file written in place is written under every name it has: one with another name
+        // is not read here. A name taken away or given to something else leaves the file be,
+        // and git puts a new file where it writes one of its tree.
+        if (
+          r.shared !== null &&
+          !gone &&
+          !folding &&
+          !item.replaces &&
+          !item.pathspec &&
+          how === 'write' &&
+          // A copy writes its destination, or what is there under each source's name.
+          [path, ...(item.entries ?? []).map((e) => posix.join(path, e.name))].some((p) =>
+            r.shared?.(p, item.tree ?? false, form.glob || /[*?]/.test(p)),
+          )
+        ) {
+          r.unmatched = true;
+        }
         for (const p of made) {
           pending.push({
             path: !gone && !form.glob && stays(p) ? posix.join(p, '*') : p,

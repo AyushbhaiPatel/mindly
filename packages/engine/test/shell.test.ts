@@ -1342,7 +1342,6 @@ describe('write targets of a shell command', () => {
       'LANG=C git status -s',
       'cd sub && git status && pwd',
       'cd ./a/b && rm -rf dist && mkdir dist > log.txt 2>&1',
-      'cd ../.. && ls',
       'cd /srv/app && ls',
       "cd 'my folder' && ls",
       'cd sub && ls\n',
@@ -1402,6 +1401,12 @@ describe('write targets of a shell command', () => {
       'cd a/nosuch/.. && ls',
       'cd a/../b && ls',
       'cd ./a/.. && ls',
+      // The shell takes `..` off its own spelling of the folder it is in.
+      'cd .. && ls',
+      'cd ../.. && ls',
+      'cd ../a && ls',
+      'cd ./../a && ls',
+      'cd /a/.. && ls',
       'cd a* && ls',
       'cd a? && ls',
       "cd '' && ls",
@@ -1501,15 +1506,8 @@ describe('write targets of a shell command', () => {
     for (const line of ['cd a && ls', 'cd a/b && ls']) {
       expect(understoodLine(line, { cdpath: true }), line).toBe(false);
     }
-    for (const line of ['cd ./a && ls', 'cd ../a && ls', 'cd /a && ls', 'cd .. && ls', 'ls a']) {
+    for (const line of ['cd ./a && ls', 'cd ./a/b && ls', 'cd /a && ls', 'cd . && ls', 'ls a']) {
       expect(understoodLine(line, { cdpath: true }), line).toBe(true);
-    }
-    // Where the shell may spell its folder through a link, its `..` is not the folder's parent.
-    for (const line of ['cd .. && ls', 'cd ../a && ls', 'cd ./../a && ls']) {
-      expect(understoodLine(line, { logical: true }), line).toBe(false);
-    }
-    for (const line of ['cd a && ls', 'cd ./a/b && ls', 'cd /a && ls', 'rm ../a']) {
-      expect(understoodLine(line, { logical: true }), line).toBe(true);
     }
     // An `mv` of the folder the line runs in, or of one above it: what follows runs elsewhere.
     for (const [line, fully] of [
@@ -1591,6 +1589,49 @@ describe('write targets of a shell command', () => {
     expect(onDisk('ln -s ../certs docs && rm -f docs/certs/x')).toBe(false);
     expect(onDisk('ln -sfn certs docs && rm -f docs/x', true)).toBe(false);
     expect(onDisk('rm -rf docs && ln -s certs docs && rm -f docs/x')).toBe(false);
+    // A file with another name is written under both: a line that writes one in place is
+    // not read fully. A name taken away, or given to something else, leaves the file be.
+    const asked: string[] = [];
+    const withNames = (line: string) =>
+      readShellWrites(line, {
+        understoodOnly: true,
+        cwd: '/w',
+        isDir: (path) => path === 'dir',
+        shared: (path, tree, glob) => {
+          asked.push(`${path}${tree ? ' tree' : ''}${glob ? ' glob' : ''}`);
+          return path === 'f' || path === 'sub/f' || path === 'dir/f' || (tree && path === 'dir');
+        },
+      }).understood;
+    for (const [line, fully] of [
+      ['echo x > f', false],
+      ['echo x >> f', false],
+      ['cp a.txt f', false],
+      ['cp -f a.txt f', false],
+      ['touch f', false],
+      ['chmod 600 f', false],
+      ['chown me f', false],
+      ['cd sub && echo x > f', false],
+      ['chmod -R 600 dir', false],
+      ['chown -R me dir', false],
+      ['cp f dir', false],
+      ['cp -r a dir/', false],
+      ['git diff --output=f HEAD', false],
+      // Not in place.
+      ['rm -f f', true],
+      ['mv a.txt f', true],
+      ['ln -sf a.txt f', true],
+      ['ln -f a.txt f', true],
+      ['cp --remove-destination a.txt f', true],
+      ['git checkout v1 -- f', true],
+      ['chmod 600 dir', true],
+      ['echo x > new.txt', true],
+      ['cat f', true],
+    ] as const) {
+      expect(withNames(line), line).toBe(fully);
+    }
+    asked.length = 0;
+    withNames('touch d*/f && cp a b');
+    expect(asked).toEqual(['d*/f glob', 'b', 'b/a']);
     expect(mayHold('/w/a', '/w/a/b')).toBe(true);
     expect(mayHold('/w/a/b', '/w/a/b')).toBe(true);
     expect(mayHold('/w/?', '/w/a/b')).toBe(true);
