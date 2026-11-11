@@ -133,6 +133,10 @@ const CP_TARGET = works(
 const LN_N_SLASH = works(
   'd=$(mktemp -d) && mkdir "$d/t" && ln -s t "$d/l" && ln -sfn x "$d/l/" && [ -L "$d/t/x" ]; r=$?; rm -rf "$d"; exit $r',
 );
+/** Linux makes a folder 1,800 levels deep; macOS stops at a path of 1,024 bytes. */
+const DEEP_FOLDER = works(
+  `d=$(mktemp -d) && cd "$d" && mkdir -p c1/${'a/'.repeat(1800)}; r=$?; cd /; rm -rf "$d"; exit $r`,
+);
 /** Linux gives each process its folder and its root as links under `/proc/self`. */
 const PROC_SELF = existsSync('/proc/self/cwd') && existsSync('/proc/self/root');
 /** A home directory `5` (the value arithmetic gives HOME) whose settings run the hook. */
@@ -3632,34 +3636,37 @@ describe('git commands read without false warnings or slow reading', () => {
     }
   });
 
-  it('names in a very deep folder that is there are placed in good time', async () => {
-    const deep = `c1/${'a/'.repeat(1800)}`;
-    const g = setUp(['certs/**'], `mkdir -p ${deep}`);
-    try {
-      await g.shell('true');
-      const twelve = Array.from({ length: 12 }, (_, i) => `${deep}f${i}`).join(' ');
-      for (const [name, command, want] of [
-        ['twelve names removed', `rm -f ${twelve}`, 'allow'],
-        ['a folder made, then twelve names removed', `mkdir zz && rm -f ${twelve}`, 'allow'],
-        ['the same, then a covered file', `mkdir zz && rm -f ${twelve} certs/server.pem`, 'deny'],
-      ] as const) {
-        expect(command.length, name).toBeLessThan(200_000);
-        let best = Infinity;
-        let said: Verdict = 'warn';
-        for (let k = 0; k < 3; k++) {
-          const t0 = performance.now();
-          said = verdictOf(await g.shell(command));
-          best = Math.min(best, performance.now() - t0);
+  it.skipIf(!DEEP_FOLDER)(
+    'names in a very deep folder that is there are placed in good time',
+    async () => {
+      const deep = `c1/${'a/'.repeat(1800)}`;
+      const g = setUp(['certs/**'], `mkdir -p ${deep}`);
+      try {
+        await g.shell('true');
+        const twelve = Array.from({ length: 12 }, (_, i) => `${deep}f${i}`).join(' ');
+        for (const [name, command, want] of [
+          ['twelve names removed', `rm -f ${twelve}`, 'allow'],
+          ['a folder made, then twelve names removed', `mkdir zz && rm -f ${twelve}`, 'allow'],
+          ['the same, then a covered file', `mkdir zz && rm -f ${twelve} certs/server.pem`, 'deny'],
+        ] as const) {
+          expect(command.length, name).toBeLessThan(200_000);
+          let best = Infinity;
+          let said: Verdict = 'warn';
+          for (let k = 0; k < 3; k++) {
+            const t0 = performance.now();
+            said = verdictOf(await g.shell(command));
+            best = Math.min(best, performance.now() - t0);
+          }
+          expect(said, name).toBe(want);
+          // 200 ms is the aim; the bound leaves room for a busy runner.
+          expect(best, name).toBeLessThan(500);
         }
-        expect(said, name).toBe(want);
-        // 200 ms is the aim; the bound leaves room for a busy runner.
-        expect(best, name).toBeLessThan(500);
+      } finally {
+        g.mindly.close();
+        execFileSync('rm', ['-rf', 'c1'], { cwd: g.dir });
       }
-    } finally {
-      g.mindly.close();
-      execFileSync('rm', ['-rf', 'c1'], { cwd: g.dir });
-    }
-  });
+    },
+  );
 
   it('many different folders that are not there are placed in good time', async () => {
     const g = setUp(['certs/**']);
