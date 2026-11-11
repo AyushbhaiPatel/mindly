@@ -36,6 +36,7 @@ import { LIVE_WINDOW_MS, type ChangedFile, type EngineBus, type Kernel } from '.
 import type { CheckpointService } from '../features/checkpoints.js';
 import { commandKey, type MistakeService } from '../memory/mistakes.js';
 import {
+  type InPlace,
   mayHold,
   partNames,
   normalizeCommandLine,
@@ -484,8 +485,6 @@ export class HookHandler {
     possible: Writes;
     limit: string | null;
     understood: boolean;
-    /** A line not read fully names more paths than were placed: it may write any file. */
-    unlisted: boolean;
   }> {
     const certain: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
     const possible: Writes = { paths: [], scopes: [], landings: [], unchecked: 0, unsafe: 0 };
@@ -512,10 +511,7 @@ export class HookHandler {
     // the text says. Both are compared as they are on disk, links followed.
     const holds = (path: string, dir: string): boolean => {
       if (++lookups > MAX_LINK_LOOKUPS || timeUp()) return true;
-      return mayHold(
-        toPosix(physical(resolve(cwd, placeHome(path)))),
-        toPosix(physical(resolve(cwd, placeHome(dir)))),
-      );
+      return mayHold(toPosix(physical(resolve(cwd, path))), toPosix(physical(resolve(cwd, dir))));
     };
     const reading = readShellWrites(command, {
       home: toPosix(homedir()),
@@ -523,17 +519,25 @@ export class HookHandler {
       timeUp,
       linked,
       understoodOnly,
-      isDir: (path) => canEnter(resolve(cwd, placeHome(path))),
+      isDir: (path) => canEnter(resolve(cwd, path)),
       // A `CDPATH` the agent's shell inherits is the one this process has.
       cdpath: (process.env.CDPATH ?? '') !== '',
       cwd: toPosix(cwd),
       holds,
-      // A file with another name is written under both: looked for while there is time.
-      shared: (path, tree, glob) =>
-        otherNames(toPosix(resolve(cwd, placeHome(path))), tree, glob, () => {
-          looked++;
-          return looked > MAX_NAME_LOOKUPS || timeUp();
-        }),
+      // A file with another name is written under both, and a link that leads nowhere yet
+      // is written through: looked for while there is time.
+      strays: (write) =>
+        writesElsewhere(
+          {
+            ...write,
+            path: toPosix(resolve(cwd, write.path)),
+            from: write.from == null ? null : resolve(cwd, write.from),
+          },
+          () => {
+            looked++;
+            return looked > MAX_NAME_LOOKUPS || timeUp();
+          },
+        ),
     });
     let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
@@ -596,7 +600,10 @@ export class HookHandler {
       const landing = (at: Located | null): void => {
         if (at !== null) into.landings.push(at);
       };
-      const path = isAbsolute(t.path) ? t.path : resolve(cwd, placeHome(t.path));
+      // Another user's home (`~name`) is wherever the system says: not placed by guessing. A
+      // line that names one is not read fully, and is warned about as a whole.
+      if (t.path.startsWith('~')) continue;
+      const path = isAbsolute(t.path) ? t.path : resolve(cwd, t.path);
       if (t.glob) {
         // Everything the pattern can match is under the directory before its first wildcard.
         const segments = toPosix(path).split('/');
@@ -636,7 +643,7 @@ export class HookHandler {
           const at = await place(path);
           file(at);
           const source = t.sources[0] ?? null;
-          const from = source === null ? null : resolve(cwd, placeHome(source));
+          const from = source === null || source.startsWith('~') ? null : resolve(cwd, source);
           // A source that is a directory brings what it holds; one that is not here (made
           // earlier in the same command, or given by a variable) may be either.
           if (t.tree && (from === null || isDirectory(from) || !exists(from))) {
@@ -687,13 +694,7 @@ export class HookHandler {
     // What the text shows as written is not also reported as a mere possibility.
     const sure = new Set(certain.paths.map((p) => p.abs));
     possible.paths = possible.paths.filter((p) => !sure.has(p.abs));
-    return {
-      certain,
-      possible,
-      limit,
-      understood: reading.understood,
-      unlisted: reading.unlisted,
-    };
+    return { certain, possible, limit, understood: reading.understood };
   }
 
   /** The rules the user marked as enforced that have a scope. */
@@ -893,7 +894,7 @@ export class HookHandler {
       // Only a line Mindly reads fully is checked exactly, and only such a line is ever blocked.
       // Any other stands for a possible write of the whole tree: a warning when a file an
       // enforced rule covers is there.
-      const { certain, possible, limit, understood, unlisted } = await this.shellWrites(
+      const { certain, possible, limit, understood } = await this.shellWrites(
         project,
         evt.cwd,
         tool.command,
@@ -996,27 +997,33 @@ export class HookHandler {
             (h) => !h.unfinished || h.wholeTree === true,
           )
         : [];
-      const told = [...rules.warn, ...mayApply].slice(0, 5);
-      for (const hit of told) {
-        warnings.push(
-          hit.unfinished
-            ? `Mindly could not search all of ${names(hit)} for files covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
-            : !understood
-              ? `Mindly could not read this command fully; it may write ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
-              : `This command names ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change it without asking the user.`,
-        );
-      }
-      // A line not read fully that names more paths than were placed: any of the others may be a
-      // file a rule covers that is not there yet. Every enforced rule not named above is named.
-      if (unlisted) {
-        const others = enforced.filter((m) => !told.some((hit) => hit.rule.id === m.id));
-        if (others.length > 0) {
-          const titles = others.slice(0, 5).map((m) => `"${m.title}"`);
-          const more = others.length > 5 ? ` and ${others.length - 5} more` : '';
+      if (understood) {
+        for (const hit of [...rules.warn, ...mayApply].slice(0, 5)) {
           warnings.push(
-            `Mindly could not read this command fully, and not all the paths it names were checked; it may write any file, including files covered by ${others.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${titles.join(', ')}${more}. Do not change such files without asking the user.`,
+            hit.unfinished
+              ? `Mindly could not search all of ${names(hit)} for files covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change such files without asking the user.`
+              : `This command names ${names(hit)}, covered by a project rule the user marked as enforced: "${hit.rule.title}". Do not change it without asking the user.`,
           );
         }
+      } else if (enforced.length > 0) {
+        // A line not read fully may write any file, one that is not there yet too: it is told
+        // so whatever is there, once, with every enforced rule named (those that cover
+        // something it names or may reach first) and what of that is covered.
+        const hits = [...rules.warn, ...mayApply];
+        const reached = new Set(hits.map((hit) => hit.rule.id));
+        const ordered = [
+          ...enforced.filter((m) => reached.has(m.id)),
+          ...enforced.filter((m) => !reached.has(m.id)),
+        ];
+        const titles = ordered.slice(0, 5).map((m) => `"${m.title}"`);
+        const more = ordered.length > 5 ? ` and ${ordered.length - 5} more` : '';
+        // What could not be searched is not said to be covered.
+        const covered = [...new Set(hits.flatMap((hit) => (hit.unfinished ? [] : hit.covers)))]
+          .slice(0, 5)
+          .map((x) => sanitizeLine(x, 160));
+        warnings.push(
+          `Mindly could not read this command fully; it may write any file, including files covered by ${ordered.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${titles.join(', ')}${more}.${covered.length > 0 ? ` Of what it names or may reach, ${covered.join(', ')} ${covered.length === 1 ? 'is' : 'are'} covered.` : ''} Do not change such files without asking the user.`,
+        );
       }
       if (possible.unchecked > 0) {
         warnings.push(
@@ -1444,36 +1451,49 @@ function physical(path: string): string {
 }
 
 /**
- * Whether a path a command writes in place is a regular file with another name as well (a link
- * count above one), links on the way to it followed; with `tree`, whether a folder there holds
- * one at any depth; with `glob`, whether a name its `*` and `?` match is, or holds, one. `out`
- * is asked before each look: when there are too many to look at, the answer is yes.
+ * Whether a write in place reaches a file elsewhere than its name says: a regular file with
+ * another name as well (a link count above one, links on the way to it followed), or a name
+ * behind a symbolic link that leads nowhere (the write makes the file the link points to).
+ * What is looked at is what the write lands on, as {@link InPlace} tells. `out` is asked before
+ * each look: when there are too many to look at, the answer is yes.
  */
-function otherNames(path: string, tree: boolean, glob: boolean, out: () => boolean): boolean {
-  /** A file there, or with `tree` anything under a folder there. */
-  const at = (target: string): boolean => {
-    if (out()) return true;
-    let stat;
-    try {
-      stat = statSync(target);
-    } catch {
-      // Nothing there: a new file is made, with one name.
-      return false;
+function writesElsewhere(
+  write: { path: string; glob: boolean; kind: InPlace['kind']; from: string | null },
+  out: () => boolean,
+): boolean {
+  /** Whether a name that is not there is behind a link that cannot be followed. */
+  const nowhere = (target: string): boolean => {
+    for (let at = target, i = 0; i < 256; i++) {
+      try {
+        // The nearest name that is there: a link, if nothing is where it leads.
+        return lstatSync(at).isSymbolicLink() && !existsSync(at);
+      } catch {
+        const up = dirname(at);
+        if (up === at) return false;
+        at = up;
+      }
     }
-    if (stat.isFile()) return stat.nlink > 1;
-    if (!tree || !stat.isDirectory()) return false;
-    const entries = list(target);
-    return entries === null || entries.some((e) => !e.link && at(join(target, e.name)));
+    return true;
+  };
+  /** A file written under this name. */
+  const file = (target: string): boolean => {
+    if (out()) return true;
+    try {
+      const stat = statSync(target);
+      return stat.isFile() && stat.nlink > 1;
+    } catch {
+      return nowhere(target);
+    }
   };
   /** The names in a folder; null when they cannot all be looked at. */
-  const list = (dir: string): { name: string; link: boolean }[] | null => {
-    const names: { name: string; link: boolean }[] = [];
+  const list = (dir: string): { name: string; link: boolean; folder: boolean }[] | null => {
+    const names: { name: string; link: boolean; folder: boolean }[] = [];
     try {
       const open = opendirSync(dir);
       try {
         for (let e = open.readSync(); e !== null; e = open.readSync()) {
           if (out()) return null;
-          names.push({ name: e.name, link: e.isSymbolicLink() });
+          names.push({ name: e.name, link: e.isSymbolicLink(), folder: e.isDirectory() });
         }
       } finally {
         open.closeSync();
@@ -1484,11 +1504,61 @@ function otherNames(path: string, tree: boolean, glob: boolean, out: () => boole
     }
     return names;
   };
-  if (!glob) return at(path);
+  /**
+   * Everything under a folder; `links`: a link in it counts (a copy writes through one, a
+   * change of mode or owner passes it by). `deep`: the folders in it too.
+   */
+  const under = (dir: string, links: boolean, deep: boolean): boolean => {
+    const entries = list(dir);
+    if (entries === null) return true;
+    return entries.some((e) => {
+      const at = join(dir, e.name);
+      if (e.link) return links;
+      return e.folder ? deep && under(at, links, deep) : file(at);
+    });
+  };
+  /** What a copy of `from` writes at `target`, and under it for a folder. */
+  const over = (target: string, from: string | null, top: boolean): boolean => {
+    if (out()) return true;
+    let there;
+    try {
+      there = lstatSync(target);
+    } catch {
+      // Not there: made new, unless a link above it leads nowhere.
+      return nowhere(target);
+    }
+    // A link under what the copy lands on is written through.
+    if (there.isSymbolicLink() && !top) return true;
+    let source;
+    try {
+      source = from === null ? null : statSync(from);
+    } catch {
+      source = null;
+    }
+    if (source !== null && !source.isDirectory()) return file(target);
+    if (!isDirectory(target)) return file(target);
+    // What a source that cannot be looked at brings is not known: anything there may be hit.
+    if (source === null || from === null) return under(target, true, true);
+    const brought = list(from);
+    if (brought === null) return true;
+    return brought.some((e) => over(join(target, e.name), join(from, e.name), false));
+  };
+  const at = (target: string): boolean => {
+    switch (write.kind) {
+      case 'file':
+        return file(target);
+      case 'tree':
+        return isDirectory(target) ? under(target, false, true) : file(target);
+      case 'land':
+        return isDirectory(target) ? under(target, true, false) : nowhere(target);
+      case 'copy':
+        return over(target, write.from, true);
+    }
+  };
   // Everything the pattern can match is under the folder before its first wildcard.
-  const parts = path.split('/');
-  const wild = parts.findIndex((x) => /[*?]/.test(x));
-  if (wild === -1) return at(path);
+  const parts = write.path.split('/');
+  const wild = write.glob ? parts.findIndex((x) => /[*?]/.test(x)) : -1;
+  if (wild === -1) return at(write.path);
   const match = (dir: string, rest: readonly string[]): boolean => {
     const [part, ...more] = rest;
     if (part === undefined) return at(dir);
@@ -1538,15 +1608,6 @@ function uncheckedDenial(count: number, cut: boolean): HookResult {
       ? 'Mindly could not check this call: it changes more files than are reported at once. Make the change in smaller steps.'
       : `Mindly could not check ${count} of the paths this call writes: they lie outside this working tree, in more different places than it looks up at once, or the call writes too many files. Make the change in smaller steps.`,
   };
-}
-
-/**
- * `~name/x` as a path next to the user's own home directory (where other users' homes are);
- * anything else unchanged. `~` and `~/x` were already placed by the shell reading.
- */
-function placeHome(path: string): string {
-  const m = /^~([^/]+)(\/.*)?$/.exec(path);
-  return m ? join(dirname(homedir()), m[1] as string, m[2] ?? '') : path;
 }
 
 /**
@@ -1711,7 +1772,7 @@ function copied(
   const out: [string | null, string | null][] = [];
   t.entries.forEach((name, i) => {
     const source = t.sources[i] ?? null;
-    const from = source === null ? null : resolve(cwd, placeHome(source));
+    const from = source === null || source.startsWith('~') ? null : resolve(cwd, source);
     if (name === '*' && from === null) {
       out.push([null, null]);
       return;

@@ -4,10 +4,10 @@
 // pre-tool hook is asked; it must block or at least warn. The commands after them write no
 // covered file and must never be blocked.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GIT_ENV, file, guarded, runInCopy } from './written.js';
 
 const RULE = 'Certificates are issued by hand';
@@ -341,7 +341,8 @@ const cases: {
   {
     name: 'bisect run',
     command: 'git bisect start HEAD v1 && git bisect run rm certs/server.pem',
-    want: ['deny'],
+    // `bisect start` may change the tree: what is run after it is not read fully.
+    want: ['warn'],
   },
   // Variables set by code run in this shell, or read into it.
   {
@@ -1858,6 +1859,320 @@ describe('lines whose cd, moved folder or number of paths the text does not sett
   }
 });
 
+/** As `setUp`, with a tracked `a.txt` besides. */
+const setUpWithFile = (scopes: string[], prep = '') =>
+  setUp(
+    scopes,
+    ['echo a > a.txt && git add a.txt && git commit -qm a.txt', ...(prep ? [prep] : [])].join(
+      ' && ',
+    ),
+  );
+
+/**
+ * A branch `other` with a link `envl` to `.env`; a stash and two patches that each bring a link
+ * to it too; and a link `dl` on disk. Nothing is at `.env` yet.
+ */
+const LINKS_TO_A_NEW_FILE = [
+  'mkdir sub',
+  'git checkout -qb other && ln -s .env envl && git add envl && git commit -qm link',
+  'git checkout -q main && git format-patch -q -1 other --stdout > m.patch',
+  'ln -s .env sl && git add sl && git stash -q',
+  'ln -s .env pl && git add pl && git diff --cached > p.patch && git rm -qf --cached pl && rm pl',
+  'ln -s .env dl',
+].join(' && ');
+
+/**
+ * Lines that write a covered file where nothing the hook is told settles it: a covered file that
+ * is not there yet, made through what the line made; a link on disk that leads to a file that is
+ * not there; a `..` after a link; a `~` that is not the user's own home; git sent to a folder the
+ * line made. Each is warned about or blocked, never let through in silence. One scratch
+ * repository serves each group.
+ */
+const unsettled: {
+  title: string;
+  scopes: string[];
+  prep?: string;
+  covered: (rel: string) => boolean;
+  /** Variables the agent's shell inherited, and the hook with it. */
+  env?: Record<string, string>;
+  /** False where the commands cannot run as they do elsewhere: only asked. */
+  runs?: boolean;
+  cases: { name: string; command: string; cwd?: string }[];
+}[] = [
+  {
+    title: 'a covered file that is not there yet, made through what the line made',
+    scopes: ['.env'],
+    prep: LINKS_TO_A_NEW_FILE,
+    covered: (rel) => rel === '.env',
+    cases: [
+      {
+        name: 'a link made on the line, then a redirection onto it',
+        command: 'ln -s .env l && echo x > l',
+      },
+      { name: 'a link made on the line, then touch', command: 'ln -s .env l && touch l' },
+      {
+        name: 'a link made after a leading cd',
+        command: 'cd sub && ln -s ../.env l && echo x > l',
+      },
+      { name: 'a link to nothing copied with cp -P', command: 'cp -P dl l && echo x > l' },
+      { name: 'a link to nothing moved', command: 'mv dl l && echo x > l' },
+      {
+        name: 'a link git checked out by name',
+        command: 'git checkout other -- envl && echo x > envl',
+      },
+      { name: 'a link a switch brought', command: 'git checkout -q other && echo x > envl' },
+      { name: 'a link a merge brought', command: 'git merge -q other && echo x > envl' },
+      { name: 'a link a stash brought back', command: 'git stash pop -q && echo x > sl' },
+      { name: 'a link a patch applied brought', command: 'git apply p.patch && echo x > pl' },
+      { name: 'a link a mailed patch brought', command: 'git am -q m.patch && echo x > envl' },
+      { name: 'a redirection to a variable set on the line', command: 'out=.env; echo x > $out' },
+      {
+        name: 'a redirection in a loop over the name',
+        command: 'for f in .env; do echo x > "$f"; done',
+      },
+    ],
+  },
+  {
+    title: 'a rule folder that is not there yet, made through a link made on the line',
+    scopes: ['secrets/**'],
+    covered: (rel) => rel.startsWith('secrets/'),
+    cases: [
+      { name: 'mkdir and touch', command: 'ln -s . d && mkdir d/secrets && touch d/secrets/k' },
+    ],
+  },
+  {
+    title: 'a write through a link on disk that leads to a file that is not there',
+    scopes: ['certs/**'],
+    prep: 'ln -s certs/new.pem dl',
+    covered: inCerts,
+    cases: [
+      { name: 'touch', command: 'touch dl' },
+      { name: 'a redirection', command: 'echo x > dl' },
+      { name: 'the output of git', command: 'git diff --output=dl v1' },
+    ],
+  },
+  {
+    title: 'a path with .. after a link',
+    scopes: ['certs/**'],
+    prep: 'mkdir -p certs/prod sub && ln -s certs/prod deep && ln -s ../certs sub/lk',
+    covered: inCerts,
+    cases: [
+      { name: 'rm through a link on disk', command: 'rm -f deep/../server.pem' },
+      { name: 'touch through a link on disk', command: 'touch deep/../new.pem' },
+      { name: 'a redirection through a link on disk', command: 'echo x > deep/../server.pem' },
+      { name: 'a copy into the folder above a link on disk', command: 'cp a.txt deep/..' },
+      { name: 'rm through a link in a folder', command: 'rm -f sub/lk/../certs/server.pem' },
+      { name: 'rm after a leading cd', command: 'cd sub && rm -f lk/../certs/server.pem' },
+      {
+        name: 'rm through a link made on the line',
+        command: 'ln -s certs/prod l && rm -f l/../server.pem',
+      },
+      {
+        name: 'a copy above a link made on the line',
+        command: 'ln -s certs/prod l && cp a.txt l/..',
+      },
+    ],
+  },
+  {
+    title: 'an operand under ~-, the folder the shell was in before',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    covered: inCerts,
+    env: { OLDPWD: '..' },
+    runs: OLDPWD_INHERITED,
+    cases: [
+      { name: 'rm', command: 'rm -f ~-/certs/server.pem', cwd: 'sub' },
+      { name: 'a redirection', command: 'echo x > ~-/certs/new.pem', cwd: 'sub' },
+    ],
+  },
+  {
+    title: 'git sent to a working tree that is a link made on the line',
+    scopes: ['certs/**'],
+    prep: 'mkdir sub',
+    covered: inCerts,
+    cases: [
+      {
+        name: 'checkout of a path',
+        command: 'ln -s . d && git --work-tree=d checkout v1 -- certs/server.pem',
+      },
+      { name: 'rm of a path', command: 'ln -s . d && git --work-tree=d rm -q certs/server.pem' },
+      {
+        name: 'checkout into the covered folder',
+        command: 'ln -s certs l && git --work-tree=l checkout v1 -- .',
+      },
+    ],
+  },
+  {
+    title: 'a folder copied over one that holds a link to another name of a covered file',
+    scopes: ['certs/**'],
+    prep: 'ln certs/server.pem f && mkdir -p dir2/src && ln -s ../../f dir2/src/a.ts',
+    covered: inCerts,
+    runs: CP_KEEPS_NAMES,
+    cases: [{ name: 'cp -r', command: 'cp -r src dir2/' }],
+  },
+  {
+    title: 'git fills a folder that holds another name of a covered file',
+    scopes: ['certs/**'],
+    prep: 'mkdir out && ln certs/server.pem out/0001-a.txt.patch',
+    covered: inCerts,
+    runs: CP_KEEPS_NAMES,
+    cases: [{ name: 'format-patch -o', command: 'git format-patch -q -o out -1' }],
+  },
+];
+
+describe('lines whose paths nothing settles are never let through in silence', () => {
+  for (const group of unsettled) {
+    describe(group.title, () => {
+      let g: ReturnType<typeof setUp>;
+      const shells: Record<string, string | undefined>[] = [GIT_ENV, process.env];
+      let kept: Record<string, string | undefined>[] = [];
+      beforeAll(() => {
+        g = setUpWithFile(group.scopes, group.prep);
+        kept = shells.map((env) => ({ ...env }));
+        for (const env of shells) Object.assign(env, group.env ?? {});
+      });
+      afterAll(() => {
+        shells.forEach((env, i) => {
+          for (const k of Object.keys(group.env ?? {})) {
+            const was = kept[i]?.[k];
+            if (was === undefined) Reflect.deleteProperty(env, k);
+            else env[k] = was;
+          }
+        });
+        g.mindly.close();
+      });
+      for (const c of group.cases) {
+        it(`${c.name}: ${c.command}`, async () => {
+          if (group.runs ?? true) {
+            const done = runInCopy(g.dir, c.command, group.covered, c.cwd ?? '');
+            expect(
+              done.written.length,
+              `\`${c.command}\` writes a covered file; ${done.output}`,
+            ).toBeGreaterThan(0);
+          }
+          const r = await g.shell(c.command, join(g.dir, c.cwd ?? ''));
+          expect(verdictOf(r), `hook on \`${c.command}\``).not.toBe('allow');
+        });
+      }
+    });
+  }
+
+  /** A user whose home is `/`, so `~name/<absolute path>` is that path; none on some machines. */
+  const rootHomed = (() => {
+    try {
+      const line = readFileSync('/etc/passwd', 'utf8')
+        .split('\n')
+        .find((l) => l.split(':')[5] === '/');
+      return line?.split(':')[0] ?? null;
+    } catch {
+      return null;
+    }
+  })();
+  (rootHomed === null ? it.skip : it)(
+    'a covered file named from the home of a user whose home is /',
+    async () => {
+      const g = setUp(['certs/**']);
+      try {
+        const copy = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-other-home-')));
+        execFileSync('cp', ['-a', `${g.dir}/.`, copy]);
+        const line = (dir: string) => `rm -f ~${rootHomed}${dir}/certs/server.pem`;
+        execFileSync('bash', ['-c', line(copy)], { cwd: copy, env: GIT_ENV });
+        expect(existsSync(join(copy, 'certs/server.pem')), 'the real run removes it').toBe(false);
+        expect(verdictOf(await g.shell(line(g.dir)))).toBe('warn');
+      } finally {
+        g.mindly.close();
+      }
+    },
+  );
+});
+
+describe('a recursive copy beside files with two names that no rule covers', () => {
+  /** Two names of one file, as a package manager leaves all over node_modules. */
+  const PAIR =
+    'mkdir -p node_modules/.store node_modules/pkg evil/certs tpl && echo x > node_modules/.store/i.js && ln node_modules/.store/i.js node_modules/pkg/i.js && echo k9 > evil/certs/server.pem && echo t > tpl/t.txt';
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUp(['certs/**'], PAIR);
+  });
+  afterAll(() => g.mindly.close());
+
+  it('is blocked when it lands on a covered file: cp -r evil/certs .', async () => {
+    const command = 'cp -r evil/certs .';
+    expect(runInCopy(g.dir, command, inCerts).written).toEqual(['certs/server.pem']);
+    expect(verdictOf(await g.shell('cp -r evil/certs/. certs'))).toBe('deny');
+    expect(verdictOf(await g.shell(command))).toBe('deny');
+  });
+
+  it('is let through when it lands on nothing covered: cp -r tpl/. .', async () => {
+    const command = 'cp -r tpl/. .';
+    expect(runInCopy(g.dir, command, inCerts).written).toEqual([]);
+    expect(verdictOf(await g.shell(command))).toBe('allow');
+  });
+});
+
+describe('a leading cd, then a pipe into a filter', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUp(['certs/**'], 'mkdir sub');
+  });
+  afterAll(() => g.mindly.close());
+
+  it('runs nothing of the pipe when the cd fails', () => {
+    const failing = 'cd nosuch && echo x | tee certs/new.pem';
+    expect(runInCopy(g.dir, failing, inCerts).written).toEqual([]);
+  });
+
+  for (const command of [
+    'cd src && grep -n y a.ts | head',
+    'cd sub && git log --oneline | head -5',
+    'cd src && cat a.ts | grep -n y | wc -l && git status',
+  ]) {
+    it(`is let through: ${command}`, async () => {
+      expect(runInCopy(g.dir, command, inCerts).written).toEqual([]);
+      expect(verdictOf(await g.shell(command))).toBe('allow');
+    });
+  }
+
+  it('is not read fully with a ; after the pipe', async () => {
+    const command = 'cd nosuch && git log --oneline | head -5; rm -f certs/server.pem';
+    expect(runInCopy(g.dir, command, inCerts).written).toEqual(['certs/server.pem']);
+    expect(verdictOf(await g.shell(command))).toBe('warn');
+  });
+});
+
+describe('a line not read fully is warned about whatever is there', () => {
+  it('names every enforced rule, once, with what it names that is covered', async () => {
+    const g = guarded({
+      'Certificates are issued by hand': ['certs/**'],
+      'Env files are edited by hand': ['.env'],
+      'Secrets stay out of the tree': ['secrets/**'],
+    });
+    try {
+      file(g.dir, 'certs/server.pem', 'k\n');
+      const r = await g.shell('npm test > certs/out.log');
+      expect(r.decision).toBeNull();
+      const told = (r.context ?? '').split('\n').filter((l) => l.includes('could not read'));
+      expect(told).toHaveLength(1);
+      for (const title of [
+        'Certificates are issued by hand',
+        'Env files are edited by hand',
+        'Secrets stay out of the tree',
+      ]) {
+        expect(told[0]).toContain(title);
+      }
+      expect(told[0]).toContain('certs/out.log');
+      // Nothing a rule covers is there, and nothing is named: still told.
+      const bare = await g.shell('npm test');
+      expect(bare.context ?? '').toContain('could not read this command fully');
+      expect(bare.context ?? '').toContain('Env files are edited by hand');
+      // A line read fully that touches nothing covered is not.
+      expect((await g.shell('rm -rf dist')).context ?? '').not.toContain('enforced');
+    } finally {
+      g.mindly.close();
+    }
+  });
+});
+
 describe('a session in a folder reached through a link', () => {
   const certs = (rel: string) => rel.startsWith('certs/');
 
@@ -2007,6 +2322,45 @@ describe('git commands read without false warnings or slow reading', () => {
         expect(said, unit).toBe(want);
         // 200 ms is the aim; the bound leaves room for a busy runner.
         expect(best, unit).toBeLessThan(500);
+      }
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('lines that hold what the line made against many names or stars are answered in good time', async () => {
+    const g = setUp(['certs/**'], 'echo a > a.txt');
+    try {
+      await g.shell('true');
+      const stars = `${'*a'.repeat(11)}*b`;
+      const long = 'a'.repeat(32);
+      const globs = Array.from({ length: 480 }, (_, i) => `t*${i}`).join(' ');
+      let names = '';
+      for (let i = 0; `touch ${globs} && cp `.length + names.length < 198_000; i++)
+        names += `s${i} `;
+      for (const [command, want] of [
+        // A few hundred wildcards made, then one copy of thousands of files.
+        [`touch ${globs} && cp ${names}dest/`, 'warn'],
+        // A wildcard of many stars removed, then a copy to a long name.
+        [`rm -f ${stars} && cp a.txt ${long}`, 'warn'],
+        // A folder with a long name made, then a wildcard of many stars.
+        [`mkdir ${long} && cp a.txt ${stars}/`, 'warn'],
+        // With a covered file removed after it: not read fully for the stars, and told so in time.
+        [`rm -f ${stars} && cp a.txt ${long} && rm -f certs/server.pem`, 'warn'],
+        // With few enough stars to match, the same line is read fully and blocked.
+        [`rm -f *a*b && cp a.txt ${long} && rm -f certs/server.pem`, 'deny'],
+      ] as const) {
+        expect(command.length).toBeLessThan(200_000);
+        let best = Infinity;
+        let said: Verdict = 'allow';
+        for (let k = 0; k < 2; k++) {
+          const t0 = performance.now();
+          said = verdictOf(await g.shell(command));
+          best = Math.min(best, performance.now() - t0);
+        }
+        expect(said, command.slice(0, 60)).toBe(want);
+        // 200 ms is the aim; the bound leaves room for a busy runner.
+        expect(best, command.slice(0, 60)).toBeLessThan(500);
       }
     } finally {
       g.mindly.close();

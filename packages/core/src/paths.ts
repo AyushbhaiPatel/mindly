@@ -1,6 +1,14 @@
-import { chmodSync, existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { MindlyError } from './errors.js';
 import { globToRegExp, matchesAnyGlob } from './glob.js';
 import { DEFAULT_DENY_PATHS } from './redact.js';
@@ -61,20 +69,77 @@ export function toPosix(p: string): string {
   return sep === '/' ? p : p.split(sep).join('/');
 }
 
+/** Symbolic links followed on the way to one path; the system gives up at about as many. */
+const MAX_LINKS = 40;
+
+/**
+ * Where a write to an absolute path lands: each part taken as the system takes it, so a `..`
+ * leaves the folder a link before it led to (not the link's own folder), and a link whose target
+ * is not there yet leads to that target, never to the link's own name. Parts that are not there
+ * stay as written under the part that is. Throws when links go round or too deep, where the
+ * system fails the write too.
+ */
+function landing(p: string): string {
+  const { root } = parse(p);
+  const parts = (text: string): string[] => text.split(sep === '/' ? '/' : /[\\/]/);
+  let current = root;
+  const rest = parts(p.slice(root.length));
+  let links = 0;
+  let missing = false;
+  while (rest.length > 0) {
+    const part = rest.shift() as string;
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      current = dirname(current);
+      continue;
+    }
+    const next = join(current, part);
+    if (!missing) {
+      let link = false;
+      try {
+        link = lstatSync(next).isSymbolicLink();
+      } catch {
+        missing = true;
+      }
+      if (link) {
+        if (++links > MAX_LINKS) {
+          throw new MindlyError('invalid_input', 'path goes through too many symbolic links');
+        }
+        const target = readlinkSync(next);
+        const from = parse(target).root;
+        if (from !== '') current = from;
+        rest.unshift(...parts(target.slice(from.length)));
+        continue;
+      }
+    }
+    current = next;
+  }
+  return current;
+}
+
 function realpathOrNearest(p: string): string {
-  // Resolve symlinks of the deepest existing ancestor so a not-yet-created file inside a
-  // symlinked directory is still checked against its real location.
-  let current = p;
+  // A path that is there, with no `..` to take off a link, is what the system says it is.
+  // `.native` returns the on-disk case on case-insensitive file systems (macOS), so deny-list
+  // checks see `.env` even when the input says `.ENV`.
+  const climbs = p.split(sep === '/' ? '/' : /[\\/]/).includes('..');
+  if (!climbs) {
+    try {
+      return realpathSync.native(p);
+    } catch {
+      // Not there, or not all of it: placed part by part below.
+    }
+  }
+  // Links are followed part by part, so a not-yet-created file inside a symlinked directory, or
+  // behind a link to a file that is not there yet, is checked against where it will be.
+  let current = landing(p);
   const tail: string[] = [];
   for (;;) {
     try {
-      // `.native` returns the on-disk case on case-insensitive file systems (macOS), so deny-list
-      // checks see `.env` even when the input says `.ENV`.
       const real = realpathSync.native(current);
       return tail.length ? join(real, ...tail.reverse()) : real;
     } catch {
       const parent = dirname(current);
-      if (parent === current) return p;
+      if (parent === current) return landing(p);
       tail.push(current.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
       current = parent;
     }
@@ -100,9 +165,8 @@ export function resolveInsideRoot(root: string, input: string): ResolvedProjectP
     throw new MindlyError('invalid_input', 'path contains control characters or is too long');
   }
   const realRoot = realpathOrNearest(resolve(root));
-  const candidate = realpathOrNearest(
-    isAbsolute(input) ? resolve(input) : resolve(realRoot, input),
-  );
+  // Not folded as text: a `..` after a link is taken off the folder the link leads to.
+  const candidate = realpathOrNearest(isAbsolute(input) ? input : `${realRoot}${sep}${input}`);
   const rel = relative(realRoot, candidate);
   // Only a `..` segment leaves the root; a name that merely starts with dots (`..cache`) does not.
   const leaves = rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);

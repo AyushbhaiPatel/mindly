@@ -38,7 +38,9 @@ memory, which is then injected into every other agent.
 - An `enforce` rule is applied to every path a tool call reports, and to the files a shell
   command's text shows it writes. Files on the deny-list can be protected this way too: their
   names are matched against the rule, but they are still never read and nothing about them is
-  stored. Reading a command is not a sandbox: a program can write a file its command line never
+  stored. A path is placed where a write to it lands: symbolic links are followed part by part,
+  a `..` leaves the folder a link before it leads to, and a link to a file that is not there
+  yet stands for that file, never for its own name. Reading a command is not a sandbox: a program can write a file its command line never
   names. A line whose paths depend on what runs (a variable, a pipe into anything but a filter,
   a `cd` other than a leading one) is not read fully and is warned about, as described below,
   and a command too long to read to its end (200,000 characters, 500 write targets) is answered
@@ -81,18 +83,32 @@ memory, which is then injected into every other agent.
   with its parents under `-p`: paths under it are read as written, unless something else made
   that path first (`ln -s certs d; mkdir d`), or a command that may make a link is given it as
   its destination without a `/` after it. What is only removed (`rm`, `rmdir`, the source of a
-  move), or may only change (a mode or owner, the tree as a whole where that is a possible
-  write of a git command, warned about as described above), is not made; nor are the folder a
-  command runs in and the top of the tree, only what they hold. The paths git is given in its
+  move), or only changed in mode or owner, is not made; nor are the folder a command runs in
+  and the top of the tree, only what they hold. A git command that may change the tree as a
+  whole (a switch, a merge, a pull, a reset, a stash, a patch applied) makes whatever that tree
+  holds: after it, a path given to another program there is not read fully
+  (`git pull && rm -f certs/server.pem`, `git checkout other && echo x > link`). The paths git is given in its
   own working tree are not held against what the line made: git does not follow a link there,
   it refuses the path or puts a folder in the link's place. The destination of `git mv` is
-  followed, and is held like any other. A file that has another name as well (a hard link:
-  a link count above one when the command is checked) is written under every name it has. A
-  line that writes such a file in place, that is its content, mode, owner or times (a
-  redirection onto it, `cp` onto it or into the folder that holds it, `touch`, `chmod`, `chown`,
-  an output file of git), is not read fully. Nor is a recursive `chmod`, `chown` or copy over a
-  folder that holds such a file at any depth, or more files than can be looked at in the time
-  there is. Taking a name away or giving it to something else (`rm`, `mv` onto it, `ln -f`,
+  followed, and is held like any other; and a folder git is sent to or pointed at (`-C`,
+  `--work-tree`, `--git-dir`) that is, or is reached through, something the line made is not
+  read fully. A path the text does not settle makes the line not read fully as well: a `..`
+  after a folder's name in any path written or copied from (`rm -f deep/../server.pem`: the
+  system takes `..` off the folder a link before it leads to; a leading `../..` is placed from
+  the folder the session is in), and a word that starts with a `~` the shell expands to
+  anything but the user's own home (`~-`, `~+`, `~name`). A file that has another name as well (a hard link:
+  a link count above one when the command is checked) is written under every name it has, and
+  a write onto a symbolic link that leads to a file that is not there makes that file. A line
+  that writes such a name in place, that is its content, mode, owner or times (a redirection
+  onto it, `cp` onto it, `touch`, `chmod`, `chown`, an output file of git), is not read fully.
+  A recursive `chmod` or `chown` looks through the folder it is given. A copy into a folder
+  looks only at what it lands on: the name of each source there, and under it the names a
+  source folder holds (for `src/.`, the names `src` holds), where a symbolic link is written
+  through and counts too; the rest of the destination is not looked at. A folder git fills
+  with files of its own naming (`format-patch -o`) is looked at for files of such names right
+  in it. A
+  folder with more in it than can be looked at in the time there is counts as holding one.
+  Taking a name away or giving it to something else (`rm`, `mv` onto it, `ln -f`,
   `cp --remove-destination`) leaves the file alone, and git puts a new file where it writes
   one of its tree: those are read as before. A copy,
   move or link into a folder lands inside it under each source's name, and that name is what is
@@ -100,7 +116,9 @@ memory, which is then injected into every other agent.
   a folder on disk (not a link to one) that the line has not written, removed or renamed. Any
   other destination is made itself; one written earlier on the line in any way may or may not be
   a folder, and the line is not read fully. The rest of a line read fully is: words of plain characters
-  (`*` and `?` included, unless they may match what an earlier command of the line makes),
+  (`*` and `?` included, unless they may match what an earlier command of the line makes; a
+  part of a path with more than three runs of `*` is taken to match anything; a copy or move of
+  more than 64 sources is not read fully),
   single-quoted text, double-quoted text
   without `$`, a backtick or a backslash; `&&`, `||`, `;` and line ends; redirections to a plain
   path (`>`, `>>`, `2>`, `&>`), `2>&1`, `</dev/null`; a pipe into `head`, `tail`, `grep`, `wc` or
@@ -125,8 +143,9 @@ memory, which is then injected into every other agent.
     folder itself, links followed;
   - the folder is there when the command is checked, is a directory, is not reached through a
     symbolic link in any part of the path, and can be entered (search permission);
-  - everything after the `cd` is one chain of `&&` to the end of the line: no `;`, `||`, `&`,
-    pipe or line end between commands, so nothing runs when the `cd` fails;
+  - everything after the `cd` is one chain of `&&` to the end of the line: no `;`, `||`, `&`
+    or line end between commands, so nothing runs when the `cd` fails. A pipe into a filter is
+    part of the chain: its commands run together or not at all;
   - there is no other `cd`, `pushd` or `popd` on the line. `cd` as a word given to another
     program (`echo cd`, `git log cd`) is not one.
 - Anything else is not read fully: any other program (`sort`, `uniq`, `awk`, `sed`, `rg`,
@@ -140,14 +159,13 @@ memory, which is then injected into every other agent.
   above, a `[…]` class or `{a,b}`, `!`, a background `&`, a private-use character or a
   noncharacter anywhere on the line (U+E000 to U+F8FF, U+FDD0 to U+FDEF, U+FFFE, U+FFFF and the
   private-use planes), and more than 4,000 commands. Such a line is never blocked, and never let
-  through without a word. It may write the whole tree: whenever a file an enforced rule covers is
-  present in the project, or a folder a rule's scope names is there, it gets one warning that names the
-  rule and what it covers; the write guards (a split's ownership of files) are asked the same
-  way and only warn. The first 32 paths it names are placed one by one, as possible writes
-  only, so a folder it makes and fills, or a covered file it creates, is warned about too. When
-  it names more than that, or part of it was not read for its paths, it gets a warning that it
-  may write any file, naming every enforced rule not already warned about, whether or not a
-  file the rule covers is there yet. Nothing of it is asked of git. Lines
+  through without a word. It may write any file, one that is not there yet too, so the warning
+  does not wait for a covered file or a rule's folder to be there: in a project with an enforced
+  rule, every line not read fully gets one warning that says it could not be read fully and
+  names the enforced rules (five of them, and how many more), those first that cover something
+  the line names or may reach, with what of that is covered. The write guards (a split's
+  ownership of files) are asked about the whole tree and only warn. The first 32 paths it names
+  are placed one by one, as possible writes only, to say which covered paths it names. Nothing of it is asked of git. Lines
   that now warn this way include any line with `$VAR` or `$(…)`, a loop or a function, a test
   run through a package manager, `npx`, a pipe into `sort` or `xargs`, `sed`, `find`, strict
   shell options, `export`, `source`, `[[ … ]]`, and a shell given code.

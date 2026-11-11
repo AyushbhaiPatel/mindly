@@ -3,6 +3,7 @@ import { isLiteralScope, patternsMayOverlap } from '../src/hooks/scope.js';
 import {
   mayHold,
   mentionsPath,
+  partNames,
   namesPathOrParent,
   normalizeCommandLine,
   pathNamer,
@@ -1317,6 +1318,9 @@ describe('write targets of a shell command', () => {
       'cd /srv/app && ls',
       "cd 'my folder' && ls",
       'cd sub && ls\n',
+      // A pipe joins commands that run together or not at all.
+      'cd sub && ls | head',
+      'cd sub && git log --oneline | head -5 && pwd',
       // `cd` as a word given to another program is not a `cd`.
       'echo cd sub; git log cd',
       'if git diff --quiet; then echo ok; else echo changed; fi',
@@ -1346,7 +1350,7 @@ describe('write targets of a shell command', () => {
       'cd sub && git status; pwd',
       'cd sub && ls\nrm x',
       'cd sub && ls || true',
-      'cd sub && ls | head',
+      'cd sub && ls | head; pwd',
       'cd sub && if true; then ls; fi',
       'ls; cd a && ls',
       '>x || cd a && ls',
@@ -1537,6 +1541,48 @@ describe('write targets of a shell command', () => {
       // What lands on a name a command that may make a link made may go through it.
       ['cp -P l d/ && cp -r x/l d/', false],
       ['cp a d/ && cp b d/', true],
+      // A path the text does not settle: `..` after a folder's name, a `~` that is not the
+      // user's own home.
+      ['rm -f deep/../x', false],
+      ['echo x > a/b/../c', false],
+      ['cp a.txt deep/..', false],
+      ['cp deep/../a.txt b', false],
+      ['cd sub && rm -f lk/../x', false],
+      ['git checkout v1 -- a/../x', false],
+      ['rm -f ../../x', true],
+      ['rm -f ./a/x', true],
+      ['rm -f ~-/x', false],
+      ['rm -f ~+/x', false],
+      ['rm -f ~someone/x', false],
+      ['echo x > ~other', false],
+      ['rm -f ~/x', true],
+      ["rm -f '~x'", true],
+      // A folder git is sent to that is, or is reached through, something the line made.
+      ['ln -s . d && git --work-tree=d checkout v1 -- x', false],
+      ['ln -s . d && git -C d status', false],
+      ['ln -s . d && git -C d/sub status', false],
+      ['ln -s x d && git --git-dir=d/.git status', false],
+      ['cp -r a b && git -C b status', false],
+      ['git -C a/../b status', false],
+      ['git -C ~other status', false],
+      ['mkdir wt && git -C wt status', true],
+      ['git -C sub status && git --work-tree=. status', true],
+      // What a tree holds after git may have changed any of it is made by git.
+      ['git pull && rm -f x', false],
+      ['git reset --hard && echo x > a/b', false],
+      ['git stash pop && cp a b', false],
+      ['git checkout v1 -- . && rm -f x', false],
+      ['git checkout main && git stash pop && git status', true],
+      ['git pull && git checkout -- x', true],
+      ['git status && rm -f x', true],
+      ['git add -A && git commit -m x && rm -f x', true],
+      // More sources than are kept by name.
+      [`cp ${Array.from({ length: 65 }, (_, i) => `s${i}`).join(' ')} dest/`, false],
+      [`cp ${Array.from({ length: 64 }, (_, i) => `s${i}`).join(' ')} dest/`, true],
+      // A wildcard with more runs of `*` than are matched may match what the line made.
+      ['rm -f *a*a*a*a*b && cp a.txt c', false],
+      ['rm -f *a*b && cp a.txt c', true],
+      ['mkdir aaa && cp a.txt *a*a*a*a*b/', false],
       // What is only removed, or changed in mode, is not made.
       ['rm -rf d && touch d/x', true],
       ['chmod -R 755 d && rm d/x', true],
@@ -1569,9 +1615,15 @@ describe('write targets of a shell command', () => {
         understoodOnly: true,
         cwd: '/w',
         isDir: (path) => path === 'dir',
-        shared: (path, tree, glob) => {
-          asked.push(`${path}${tree ? ' tree' : ''}${glob ? ' glob' : ''}`);
-          return path === 'f' || path === 'sub/f' || path === 'dir/f' || (tree && path === 'dir');
+        strays: ({ path, kind, glob, from }) => {
+          asked.push(`${kind} ${path}${glob ? ' glob' : ''}${from ? ` from ${from}` : ''}`);
+          return (
+            path === 'f' ||
+            path === 'sub/f' ||
+            path === 'dir/f' ||
+            (kind === 'tree' && path === 'dir') ||
+            (kind === 'copy' && path === 'dir/a')
+          );
         },
       }).understood;
     for (const [line, fully] of [
@@ -1602,8 +1654,44 @@ describe('write targets of a shell command', () => {
       expect(withNames(line), line).toBe(fully);
     }
     asked.length = 0;
-    withNames('touch d*/f && cp a b');
-    expect(asked).toEqual(['d*/f glob', 'b', 'b/a']);
+    withNames(
+      'touch d*/f && cp a b && cp -r src/. out && git format-patch -o patches -1 && git clone u c',
+    );
+    expect(asked).toEqual([
+      'file d*/f glob',
+      'file b',
+      'copy b/a from a',
+      'file out',
+      'copy out from src',
+      'file patches/*.patch glob',
+      'land c',
+    ]);
+    for (const [part, name, names] of [
+      ['a*', 'abc', true],
+      ['*c', 'abc', true],
+      ['a*c', 'abc', true],
+      ['a*b*c', 'a-b-c', true],
+      ['a*b*c', 'a-c-b', false],
+      ['a?c', 'abc', true],
+      ['a?c', 'ac', false],
+      ['*?*', '', false],
+      ['*', '', true],
+      ['a*a', 'a', false],
+      ['*.t?', 'x.ts', true],
+      ['*a?c*', 'xxabcxx', true],
+      ['*a?c*', 'xxabxx', false],
+      ['abc', 'abc', true],
+      ['abc', 'abd', false],
+      // More runs of `*` than are matched: any name.
+      ['*a*a*a*b', 'zzz', true],
+      ['*a*a*b', 'zzz', false],
+    ] as const) {
+      expect(partNames(part, name), `${part} ~ ${name}`).toBe(names);
+    }
+    // Linear in the name: a pattern that sends an expression back and forth is matched at once.
+    const started = performance.now();
+    for (let i = 0; i < 2000; i++) partNames('*a*a*b', 'a'.repeat(4000));
+    expect(performance.now() - started).toBeLessThan(500);
     expect(mayHold('/w/a', '/w/a/b')).toBe(true);
     expect(mayHold('/w/a/b', '/w/a/b')).toBe(true);
     expect(mayHold('/w/?', '/w/a/b')).toBe(true);
@@ -1621,16 +1709,14 @@ describe('write targets of a shell command', () => {
     const unread = readShellWrites('rm $(cat list)', { top: '/w', understoodOnly: true });
     expect(unread.understood).toBe(false);
     expect(unread.targets).toMatchObject([{ path: '/w', tree: true, certain: false }]);
-    expect(unread.unlisted).toBe(false);
-    // The first few paths it names are kept; with more, it says that some are not listed.
+    // The first few paths it names are kept.
     const few = Array.from({ length: 32 }, (_, i) => `f${i}`).join(' ');
-    const read = (line: string) => readShellWrites(line, { top: '/w', understoodOnly: true });
-    expect(read(`touch ${few}; echo "$x" > f0`).unlisted).toBe(false);
-    const more = read(`touch ${few}; echo "$x" > .env`);
-    expect(more.unlisted).toBe(true);
+    const more = readShellWrites(`touch ${few}; echo "$x" > .env`, {
+      top: '/w',
+      understoodOnly: true,
+    });
+    expect(more.targets.map((t) => t.path)).toContain('f31');
     expect(more.targets.map((t) => t.path)).not.toContain('.env');
-    // A part of it that was not read for its paths counts the same.
-    expect(read(`${'true; '.repeat(2001)}echo "$x" > .env`).unlisted).toBe(true);
     // A character of the reader's own marks, written in the line, is not one of them.
     expect(readShellWrites('rm \ue000/x').targets).toEqual([]);
     expect(readShellWrites('rm "$PWD/x"').targets.map((t) => t.path)).toEqual(['x']);
@@ -1675,7 +1761,6 @@ describe('write targets of a shell command', () => {
       targets: [expect.anything()],
       limit: null,
       understood: true,
-      unlisted: false,
     });
     const many = Array.from({ length: 700 }, (_, i) => `rm f${i}.ts`).join('; ');
     const cut = readShellWrites(many);

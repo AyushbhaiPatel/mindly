@@ -914,12 +914,13 @@ describe('hook flow', () => {
       expect(sub.context).toContain('could not read this command fully');
       expect((await shell(`rm ~/${name}/src/auth.ts`)).decision).toBeNull();
       expect((await shell('rm ~/elsewhere/src/generated/api.ts')).decision).toBeNull();
-      // Another user's home is taken to sit next to this one.
       process.env['HOME'] = join(dirname(root), 'someone');
-      expect((await shell(`rm ~${name}/src/generated/api.ts`)).decision).toBe('deny');
-      const other = await shell(`cd ~${name} && rm -rf src`);
-      expect(other.decision).toBeNull();
-      expect(other.context).toContain('could not read this command fully');
+      // Another user's home is wherever the system says it is: a path under it is not placed.
+      for (const command of [`rm ~${name}/src/generated/api.ts`, `cd ~${name} && rm -rf src`]) {
+        const other = await shell(command);
+        expect(other.decision, command).toBeNull();
+        expect(other.context, command).toContain('could not read this command fully');
+      }
     } finally {
       if (home === undefined) delete process.env['HOME'];
       else process.env['HOME'] = home;
