@@ -1037,6 +1037,7 @@ describe('write targets of a shell command', () => {
       {
         path: 'src/generated/*.ts',
         unplaced: false,
+        noFollow: false,
         glob: true,
         dotfiles: false,
         nocase: false,
@@ -1634,6 +1635,20 @@ describe('write targets of a shell command', () => {
     expect(placed("rm -f '~'/k.pem")).toEqual(['~/k.pem']);
     expect(placed('rm -f ./~old.pem "~new.pem"')).toEqual(['~old.pem', '~new.pem']);
     expect(placed('rm -f ~other/k.pem')).toEqual(['~other/k.pem unplaced']);
+    // The shell expands a `~` only as the first character of a word, with nothing quoted (not
+    // even an empty string) before the first `/`, and never after the `=` of an option.
+    for (const line of [
+      "rm -f ~''/k.pem",
+      "rm -f ~'/k.pem'",
+      "rm -f ''~/k.pem",
+      'rm -f ~""/k.pem',
+      'rm -f "~"/k.pem',
+      'rm -f \\~/k.pem',
+    ]) {
+      expect(placed(line), line).toEqual(['~/k.pem']);
+    }
+    expect(placed('git diff --output=~/n.pem v1 v2')).toEqual(['~/n.pem']);
+    expect(placed('rm -f ~/\'k.pem\' ~/"k.pem"')).toEqual(['~/k.pem unplaced']);
     expect(placed('rm -f ~/k.pem')).toEqual(['~/k.pem unplaced']);
     expect(readShellWrites('rm -f ~/k.pem', { home: '/home/u' }).targets[0]).toMatchObject({
       path: '/home/u/k.pem',
@@ -1653,7 +1668,7 @@ describe('write targets of a shell command', () => {
         cwd: '/w',
         strays: ({ path, kind }) => {
           links.push(`${kind} ${path}`);
-          return kind === 'link' ? /^l\?k|^sub\/\*/.test(path) : path === 'l?k';
+          return kind === 'link' ? /^l\?k|^sub\/\*/.test(path) : /^l\?k/.test(path);
         },
       }).understood;
     for (const [line, fully] of [
@@ -1667,6 +1682,12 @@ describe('write targets of a shell command', () => {
       ['echo x > l?k', false],
       ['rm -rf packages/*/dist', true],
       ["git checkout -- 'l?k/x'", true],
+      // What a copy, move or link brings lands in a link to a folder the last part matches.
+      ['mv b.txt l?k', false],
+      ['mv -t l?k b.txt', false],
+      ['ln -s ../a.txt l?k', false],
+      ['cp b.txt l?k', false],
+      ['mv b.txt d?r', true],
     ] as const) {
       expect(withLinks(line), line).toBe(fully);
     }

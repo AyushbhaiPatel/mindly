@@ -413,6 +413,17 @@ export class HookHandler {
     }
   }
 
+  /** A name in a located folder, the name itself not followed. */
+  private under(dir: Located, name: string): Located {
+    const rel = dir.rel === '' ? toPosix(name) : `${dir.rel}/${toPosix(name)}`;
+    return {
+      ...dir,
+      rel,
+      abs: `${dir.abs}${sep}${name}`,
+      own: dir.own && !isDeniedPath(rel, this.k.config.redaction.denyPaths),
+    };
+  }
+
   /**
    * The places a write to a path may change (see {@link writePlaces}), each located: where the
    * path leads, and the name itself when that is a symbolic link.
@@ -424,7 +435,6 @@ export class HookHandler {
     trees: TreeLookups | null,
   ): Promise<(Located | 'unknown')[]> {
     const found: (Located | 'unknown')[] = [];
-    const deny = this.k.config.redaction.denyPaths;
     for (const place of places) {
       if (place.name === undefined) {
         const at = await this.locate(project, treeRoot, place.at, trees);
@@ -438,13 +448,7 @@ export class HookHandler {
         found.push(dir);
         continue;
       }
-      const rel = dir.rel === '' ? place.name : `${dir.rel}/${place.name}`;
-      found.push({
-        ...dir,
-        rel,
-        abs: join(dir.abs, place.name),
-        own: dir.own && !isDeniedPath(rel, deny),
-      });
+      found.push(this.under(dir, place.name));
     }
     return found;
   }
@@ -551,6 +555,8 @@ export class HookHandler {
     // bounded number of times; past that, or out of time, a path counts as one.
     let lookups = 0;
     let looked = 0;
+    /** For each folder that is not there: whether the nearest name above it leads nowhere. */
+    const nowhere = new Map<string, boolean>();
     const linked = (path: string): boolean => {
       if (++lookups > MAX_LINK_LOOKUPS || timeUp()) return true;
       try {
@@ -589,10 +595,13 @@ export class HookHandler {
             looked++;
             return looked > MAX_NAME_LOOKUPS || timeUp();
           },
+          nowhere,
         ),
     });
     let limit = reading.limit;
     const trees: TreeLookups | null = ownTreeOnly ? null : { roots: [], dirs: new Map() };
+    /** Folders that are not there, each placed once. */
+    const missing = new Map<string, Located | 'unknown' | null>();
     const seen = new Set<string>();
     let late = false;
     for (const t of reading.targets) {
@@ -616,6 +625,18 @@ export class HookHandler {
         if (hasUnsafeChars(abs) || abs.length > 4096) {
           into.unsafe++;
           return null;
+        }
+        // Under a folder that is not there, a name is where the folder is: the folder is
+        // placed once for all the names the line gives under it.
+        const dir = dirname(abs);
+        if (dir !== abs && !exists(dir)) {
+          let at = missing.get(dir);
+          if (at === undefined) {
+            at = await this.locate(project, treeRoot, dir, late ? null : trees);
+            missing.set(dir, at);
+          }
+          if (at === 'unknown') into.unchecked++;
+          return at === null || at === 'unknown' ? null : this.under(at, basename(abs));
         }
         const found = await this.locate(project, treeRoot, abs, late ? null : trees);
         if (found === 'unknown') into.unchecked++;
@@ -674,14 +695,12 @@ export class HookHandler {
             limit ??= 'no time was left to place all it writes';
             return;
           }
-          if (base === null) file(await place(join(dest, rel)));
+          if (base === null) {
+            file(await place(join(dest, rel)));
+            await named(join(dest, rel));
+          }
           // Put together as text: the folder is placed, and what is under it is not there.
-          else
-            file({
-              ...base,
-              rel: base.rel === '' ? toPosix(rel) : `${base.rel}/${toPosix(rel)}`,
-              abs: `${base.abs}${sep}${rel}`,
-            });
+          else file(this.under(base, rel));
         }
       };
       if (t.glob) {
@@ -710,7 +729,8 @@ export class HookHandler {
         if (root !== null) scope(root, ['**']);
         continue;
       }
-      const directory = isDirectory(path);
+      // `ln -n` takes a link to a folder as the name it is, not as the folder it leads to.
+      const directory = isDirectory(path) && !(t.noFollow && isLink(path));
       if (t.how === 'land') {
         // An archive unpacked there: files of unknown names are put somewhere inside.
         landing(await place(path));
@@ -740,6 +760,9 @@ export class HookHandler {
             continue;
           }
           const dest = name === '.' ? path : join(path, name);
+          // The name each source lands under is checked as a name too: a link there is
+          // replaced by a move or a new link, and written through by a copy.
+          if (name !== '.') await named(dest);
           if (from !== null && isFile(from)) {
             file(await place(dest));
             continue;
@@ -918,6 +941,16 @@ export class HookHandler {
           this.appendToolEvent(pid, session, 'tool.before', { tool: toolName });
         return EMPTY_HOOK_RESULT;
       }
+      // A file with another name as well is written under both: it is the very file a rule
+      // names, or it may be a file a rule covers, which the name does not tell.
+      const enforced = this.enforced(pid);
+      const twice = enforced.length > 0 ? checked.filter((p) => linkCount(p.abs) > 1) : [];
+      const same = twice
+        .map((p) => {
+          const named = ruleNaming(enforced, project.root, p.abs);
+          return named === null ? null : { rule: named, covers: [p.rel] };
+        })
+        .find((hit) => hit !== null);
       const paths = checked.filter((p) => p.own).map((p) => p.rel);
       // Deny-listed files and files in another working tree: checked by name, never recorded.
       const unrecorded = checked.filter((p) => !p.own).map((p) => p.rel);
@@ -937,8 +970,8 @@ export class HookHandler {
       const all = [...paths, ...unrecorded];
       const rule: RuleHit | null = built?.deny
         ? { rule: built.deny, covers: coveredBy(built.deny, all) }
-        : this.enforcedRules(
-            this.enforced(pid),
+        : (this.enforcedRules(
+            enforced,
             {
               paths: unrecorded.map((rel) => ({ rel, abs: rel, own: false })),
               scopes: [],
@@ -947,7 +980,9 @@ export class HookHandler {
               unsafe: 0,
             },
             new ScopeSearch(null, 0),
-          ).deny;
+          ).deny ??
+          same ??
+          null);
       if (overlap.overlaps.length > 0 || rule || pending.length > 0) {
         // What Mindly told the agent before this write: the evidence of overlap and rule saves.
         this.appendToolEvent(pid, session, 'tool.before', {
@@ -957,10 +992,23 @@ export class HookHandler {
           deniedBy: rule?.rule.id ?? null,
         });
       }
+      const titles = enforced.slice(0, 5).map((m) => `"${m.title}"`);
+      const more = enforced.length > 5 ? ` and ${enforced.length - 5} more` : '';
       const context = joinContext(
         built?.text ?? null,
         renderSections([
-          { heading: 'Coordination warning', lines: outside.warnings.map((w) => `- ${w}`) },
+          {
+            heading: 'Coordination warning',
+            lines: [
+              ...outside.warnings,
+              ...twice
+                .slice(0, 5)
+                .map(
+                  (p) =>
+                    `${sanitizeLine(p.rel, 160)} has another name as well (a hard link): this write changes the file under every name it has, which may be a file covered by ${enforced.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${titles.join(', ')}${more}. Do not change it without asking the user.`,
+                ),
+            ].map((w) => `- ${w}`),
+          },
         ]),
       );
       if (rule) return this.ruleDenial(rule, context);
@@ -1083,6 +1131,7 @@ export class HookHandler {
             (h) => !h.unfinished || h.wholeTree === true,
           )
         : [];
+      let unreadWarning: string | null = null;
       if (understood) {
         for (const hit of [...rules.warn, ...mayApply].slice(0, 5)) {
           warnings.push(
@@ -1107,9 +1156,8 @@ export class HookHandler {
         const covered = [...new Set(hits.flatMap((hit) => (hit.unfinished ? [] : hit.covers)))]
           .slice(0, 5)
           .map((x) => sanitizeLine(x, 160));
-        warnings.push(
-          `Mindly could not read this command fully; it may write any file, including files covered by ${ordered.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${titles.join(', ')}${more}.${covered.length > 0 ? ` Of what it names or may reach, ${covered.join(', ')} ${covered.length === 1 ? 'is' : 'are'} covered.` : ''} Do not change such files without asking the user.`,
-        );
+        unreadWarning = `Mindly could not read this command fully; it may write any file, including files covered by ${ordered.length === 1 ? 'a project rule' : 'project rules'} the user marked as enforced: ${titles.join(', ')}${more}.${covered.length > 0 ? ` Of what it names or may reach, ${covered.join(', ')} ${covered.length === 1 ? 'is' : 'are'} covered.` : ''} Do not change such files without asking the user.`;
+        warnings.push(unreadWarning);
       }
       if (possible.unchecked > 0) {
         warnings.push(
@@ -1138,7 +1186,11 @@ export class HookHandler {
       if (rule) return this.ruleDenial(rule, context);
       if (guard.deny)
         return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: guard.deny, context };
-      return context === null ? EMPTY_HOOK_RESULT : { ...EMPTY_HOOK_RESULT, context };
+      if (context === null) return EMPTY_HOOK_RESULT;
+      // The warning on its own too, as plain text, for an agent that shows it to the person.
+      return unreadWarning === null
+        ? { ...EMPTY_HOOK_RESULT, context }
+        : { ...EMPTY_HOOK_RESULT, context, unreadWarning: sanitizeLine(unreadWarning, 2000) };
     }
     if (pending.length > 0) this.appendToolEvent(pid, session, 'tool.before', { tool: toolName });
     return EMPTY_HOOK_RESULT;
@@ -1546,20 +1598,47 @@ function physical(path: string): string {
 function writesElsewhere(
   write: { path: string; glob: boolean; kind: InPlace['kind']; from: string | null },
   out: () => boolean,
+  /** What was found for each folder that is not there, kept for the whole call. */
+  known: Map<string, boolean> = new Map(),
 ): boolean {
-  /** Whether a name that is not there is behind a link that cannot be followed. */
+  /**
+   * Whether a name that is not there is behind a link that cannot be followed: the nearest name
+   * above it that is there is a link, and nothing is where it leads. Asked once for each folder,
+   * within the looks there are.
+   */
   const nowhere = (target: string): boolean => {
-    // As many steps up as the path has parts, at most.
-    for (let at = target; ;) {
+    /** A link to nothing, when the name is there; null when it is not. */
+    const state = (name: string): boolean | null => {
       try {
-        // The nearest name that is there: a link, if nothing is where it leads.
-        return lstatSync(at).isSymbolicLink() && !existsSync(at);
+        return lstatSync(name).isSymbolicLink() && !existsSync(name);
       } catch {
-        const up = dirname(at);
-        if (up === at) return false;
-        at = up;
+        return null;
       }
+    };
+    const own = state(target);
+    if (own !== null) return own;
+    // Not there: the answer is that of its folder, found once for all the names under it.
+    const walked: string[] = [];
+    let found = false;
+    for (let at = dirname(target); ;) {
+      const before = known.get(at);
+      if (before !== undefined) {
+        found = before;
+        break;
+      }
+      if (out()) return true;
+      const here = state(at);
+      if (here !== null) {
+        found = here;
+        break;
+      }
+      walked.push(at);
+      const up = dirname(at);
+      if (up === at) break;
+      at = up;
     }
+    for (const dir of walked) known.set(dir, found);
+    return found;
   };
   /** A file written under this name. */
   const file = (target: string): boolean => {
@@ -1648,19 +1727,82 @@ function writesElsewhere(
   const parts = write.path.split('/');
   const wild = write.glob ? parts.findIndex((x) => /[*?]/.test(x)) : -1;
   if (wild === -1) return at(write.path);
+  /**
+   * Whether a symbolic link a part of the pattern names is followed. As a folder on the way, or
+   * as what a removal goes through, only one that leads to a folder is; as the last part of a
+   * write in place, any is.
+   */
+  const followed = (name: string, last: boolean): boolean =>
+    last && write.kind !== 'link' ? true : isDirectory(name);
   const match = (dir: string, rest: readonly string[]): boolean => {
     const [part, ...more] = rest;
     if (part === undefined) return at(dir);
-    if (!/[*?]/.test(part)) return match(join(dir, part), more);
+    if (!/[*?]/.test(part)) {
+      // A plain part after a wildcard, in each folder the wildcard matched.
+      const next = join(dir, part);
+      if (out()) return true;
+      if (isLink(next) && followed(next, more.length === 0)) return true;
+      return match(next, more);
+    }
     const entries = list(dir);
-    // A symbolic link the part may match is followed by a write in place, and by a removal of
-    // what it holds: where that leads is not looked for.
+    // Where a link that is followed leads is not looked for.
     return (
       entries === null ||
-      entries.some((e) => partNames(part, e.name) && (e.link || match(join(dir, e.name), more)))
+      entries.some((e) => {
+        if (!partNames(part, e.name)) return false;
+        const next = join(dir, e.name);
+        return e.link ? followed(next, more.length === 0) : match(next, more);
+      })
     );
   };
   return match(parts.slice(0, wild).join('/') || '/', parts.slice(wild));
+}
+
+/** How many names a regular file has (links followed to it); 0 when it is not one. */
+function linkCount(path: string): number {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() ? stat.nlink : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Enforced rules whose scopes are looked at for a file named outright. */
+const MAX_NAMED_RULES = 32;
+
+/**
+ * The enforced rule that names, as a plain path with no wildcard, the very file at `abs` (the
+ * same file on disk, under another name); null when none of the first few does.
+ */
+function ruleNaming(rules: readonly Memory[], root: string, abs: string): Memory | null {
+  let target;
+  try {
+    target = statSync(abs);
+  } catch {
+    return null;
+  }
+  for (const rule of rules.slice(0, MAX_NAMED_RULES)) {
+    for (const scope of rule.scope.paths) {
+      if (/[*?[\]{}]/.test(scope)) continue;
+      try {
+        const named = statSync(join(root, scope));
+        if (named.isFile() && named.dev === target.dev && named.ino === target.ino) return rule;
+      } catch {
+        // Not there: nothing it names.
+      }
+    }
+  }
+  return null;
+}
+
+/** Whether a name is a symbolic link. */
+function isLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 /** Symbolic links followed by hand to where a write through one that leads nowhere lands. */
@@ -1707,7 +1849,8 @@ function writePlaces(raw: string): {
     try {
       let at = path;
       for (let i = 0; i < MAX_LINKS_FOLLOWED && linkAt(at, true); i++) {
-        at = resolve(dirname(at), readlinkSync(at));
+        // From the folder the link is in, not the one the path names it by.
+        at = resolve(realpathSync.native(dirname(at)), readlinkSync(at));
       }
       if (linkAt(at, true)) lost = true;
       else places.push({ at });

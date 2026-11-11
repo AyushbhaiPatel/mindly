@@ -192,22 +192,29 @@ describe('gemini render', () => {
     });
   });
 
-  it('shows the person what a tool call is warned about, as the model cannot be told', () => {
+  it('shows the person that a line was not read fully, and nothing else of the context', () => {
     const before = must(a.parse('BeforeTool', f('BeforeTool.run_shell_command')));
-    expect(
-      out(a.render(before, result({ context: 'could not read this command' })).stdout),
-    ).toEqual({ systemMessage: 'could not read this command' });
-    expect(
-      out(
-        a.render(before, result({ decision: 'allow', context: 'ctx', userMessage: 'note' })).stdout,
-      ),
-    ).toEqual({ systemMessage: 'note\n\nctx' });
-    const long = out(a.render(before, result({ context: 'x'.repeat(5000) })).stdout);
+    const unread = { context: '<ctx>could not read</ctx>', unreadWarning: 'could not read' };
+    expect(out(a.render(before, result(unread)).stdout)).toEqual({
+      systemMessage: 'could not read',
+    });
+    expect(out(a.render(before, result({ ...unread, userMessage: 'note' })).stdout)).toEqual({
+      systemMessage: 'note\n\ncould not read',
+    });
+    const long = out(a.render(before, result({ unreadWarning: 'x'.repeat(5000) })).stdout);
     expect((long['systemMessage'] as string).length).toBe(2000);
-    expect(a.render(before, result({ decision: 'allow' })).stdout).toBe('');
+    // A deny carries the context in its reason; an ask shows its reason.
+    expect(
+      out(a.render(before, result({ ...unread, decision: 'deny', reason: 'no' })).stdout),
+    ).toEqual({ decision: 'deny', reason: 'no\n\n<ctx>could not read</ctx>' });
+    expect(
+      out(a.render(before, result({ ...unread, decision: 'ask', reason: 'sure?' })).stdout),
+    ).toEqual({ decision: 'ask', reason: 'sure?', systemMessage: 'sure?' });
   });
 
-  it('never emits allow, AfterAgent decisions or SessionEnd output', () => {
+  it('never emits allow, BeforeTool context, AfterAgent decisions or SessionEnd output', () => {
+    const before = must(a.parse('BeforeTool', f('BeforeTool.write_file')));
+    expect(a.render(before, result({ decision: 'allow', context: 'ctx' })).stdout).toBe('');
     const stop = must(a.parse('AfterAgent', f('AfterAgent')));
     expect(a.render(stop, result({ context: 'ctx' })).stdout).toBe('');
     expect(out(a.render(stop, result({ userMessage: 'bye' })).stdout)).toEqual({

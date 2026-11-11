@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, normalize } from 'node:path';
+import { join, normalize, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GIT_ENV, file, guarded, runInCopy } from './written.js';
 
@@ -108,6 +108,14 @@ const OLDPWD_INHERITED = works(
 /** GNU `cp -a` keeps two names of one file as one file; BSD `cp -a` (macOS) copies each. */
 const CP_KEEPS_NAMES = works(
   'd=$(mktemp -d) && mkdir "$d/a" && echo x > "$d/a/f" && ln "$d/a/f" "$d/a/g" && cp -a "$d/a/." "$d/b" && [ "$d/b/f" -ef "$d/b/g" ]; r=$?; rm -rf "$d"; exit $r',
+);
+/** GNU `mv` takes `-t`; BSD `mv` (macOS) does not. */
+const MV_TARGET = works(
+  'd=$(mktemp -d) && touch "$d/a" && mkdir "$d/b" && mv -t "$d/b" "$d/a"; r=$?; rm -rf "$d"; exit $r',
+);
+/** GNU `ln` takes `--no-dereference`; BSD `ln` (macOS) has no long options. */
+const LN_NO_DEREFERENCE = works(
+  'd=$(mktemp -d) && mkdir "$d/a" && ln -s a "$d/l" && ln -sf --no-dereference b "$d/l"; r=$?; rm -rf "$d"; exit $r',
 );
 /** GNU `cp` takes `--remove-destination`; BSD `cp` (macOS) does not. */
 const CP_REMOVES_DESTINATION = works(
@@ -2125,6 +2133,41 @@ const unsettled: {
       { name: 'in the folder it runs in', command: 'git format-patch -q -1' },
     ],
   },
+  {
+    title: 'a folder whose name is a literal ~, named so that the shell does not expand it',
+    scopes: ['**/*.pem'],
+    prep: "mkdir -p '~' && echo k > '~/k.pem'",
+    covered: endsInPem,
+    cases: [
+      { name: 'an empty string after the ~', command: "rm -f ~''/k.pem" },
+      { name: 'the rest of the word quoted', command: "rm -f ~'/k.pem'" },
+      { name: 'an empty string before the ~', command: "rm -f ''~/k.pem" },
+      { name: 'an empty double-quoted string after the ~', command: 'rm -f ~""/k.pem' },
+      { name: 'the value of an option', command: 'git diff --output=~/n.pem v1 v2' },
+    ],
+  },
+  {
+    title: 'a wildcard next to a symbolic link to a covered folder',
+    scopes: ['certs/**'],
+    prep: 'mkdir -p a/b certs/sub && ln -s ../../certs a/b/c && ln -s certs lnk && echo b > b.txt',
+    covered: inCerts,
+    cases: [
+      { name: 'rm through a link named after the wildcard', command: 'rm -f a/*/c/server.pem' },
+      { name: 'rm of what such a link holds', command: 'rm -rf a/*/c/' },
+      { name: 'a copy into such a link', command: 'cp b.txt a/*/c/' },
+      { name: 'a move into a link the last part matches', command: 'mv b.txt l?k' },
+      { name: 'a link made in a link the last part matches', command: 'ln -s ../a.txt l?k' },
+      { name: 'another name made in a link the last part matches', command: 'ln b.txt l?k' },
+    ],
+  },
+  {
+    title: 'a move with -t into a link the last part of a wildcard matches',
+    scopes: ['certs/**'],
+    prep: 'ln -s certs lnk && echo b > b.txt',
+    covered: inCerts,
+    runs: MV_TARGET,
+    cases: [{ name: 'mv -t', command: 'mv -t l?k b.txt' }],
+  },
 ];
 
 describe('lines whose paths nothing settles are never let through in silence', () => {
@@ -2412,6 +2455,151 @@ describe('a path an editing tool reports', () => {
   });
 });
 
+describe('a covered name that is a symbolic link, written by a line that names its folder', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUpWithFile(
+      ['certs/**'],
+      'mkdir -p other/d sub && echo o > other/file && ln -s ../other/file certs/cur.pem && ln -s ../other/d certs/dlink && echo z > cur.pem && echo z > sub/cur.pem',
+    );
+  });
+  afterAll(() => g.mindly.close());
+
+  for (const [command, name, runs] of [
+    ['mv cur.pem certs/', 'certs/cur.pem', true],
+    ['mv -t certs cur.pem', 'certs/cur.pem', MV_TARGET],
+    ['mv sub/cur.pem certs', 'certs/cur.pem', true],
+    ['cp --remove-destination cur.pem certs/', 'certs/cur.pem', CP_REMOVES_DESTINATION],
+    ['ln -f cur.pem certs/', 'certs/cur.pem', true],
+    ['ln -sf ../cur.pem certs/', 'certs/cur.pem', true],
+    // `-n`: the link to a folder is itself replaced, nothing is put in the folder it leads to.
+    ['ln -sfn ../a.txt certs/dlink', 'certs/dlink', true],
+    ['ln -sf --no-dereference ../a.txt certs/dlink', 'certs/dlink', LN_NO_DEREFERENCE],
+  ] as const) {
+    it(`is not replaced: ${command}`, async () => {
+      if (runs) {
+        const copy = copyOf(g.dir);
+        const before = whatIs(join(copy, name));
+        expect(before).toMatch(/^link to /);
+        execFileSync('bash', ['-c', command], { cwd: copy, env: GIT_ENV });
+        expect(whatIs(join(copy, name)), `\`${command}\` replaces ${name}`).not.toBe(before);
+      }
+      expect(verdictOf(await g.shell(command)), `hook on \`${command}\``).toBe('deny');
+    });
+  }
+});
+
+describe('a link to a file in the folder a wildcard for a folder expands in', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUpWithFile(
+      ['**/*.pem', 'packages/*/prisma/migrations/*.sql'],
+      'echo a > AGENTS.md && ln -s AGENTS.md GUIDE.md && mkdir -p keys x/dist x/node_modules && echo k > keys/k.pem && echo t > x/y.tmp',
+    );
+  });
+  afterAll(() => g.mindly.close());
+
+  for (const [command, names] of [
+    ['rm -f */*.pem', ['certs/server.pem', 'keys/k.pem']],
+    ['rm -f */server.pem', ['certs/server.pem']],
+    ['rm -rf */', ['certs/server.pem', 'keys/k.pem']],
+  ] as const) {
+    it(`does not keep a line from being blocked: ${command}`, async () => {
+      expect(runInCopy(g.dir, command, endsInPem).written).toEqual([...names]);
+      expect(verdictOf(await g.shell(command)), `hook on \`${command}\``).toBe('deny');
+    });
+  }
+
+  for (const command of [
+    'rm -rf */dist',
+    'rm -f */*.tmp',
+    'rm -rf */node_modules',
+    'cp a.txt */dist',
+  ]) {
+    it(`is not a reason to warn: ${command}`, async () => {
+      const kept = (rel: string) => endsInPem(rel) || rel === 'AGENTS.md';
+      expect(runInCopy(g.dir, command, kept).written).toEqual([]);
+      const r = await g.shell(command);
+      expect(r.decision).toBeNull();
+      expect(r.context ?? '', command).not.toContain('enforced');
+    });
+  }
+});
+
+describe('a tool call onto a file with two names', () => {
+  /** What an editing tool does with a path: fold it as text, then write. */
+  const toolWrites = (copy: string, path: string) => writeFileSync(resolve(copy, path), 'x\n');
+  const write = (g: ReturnType<typeof setUp>, path: string) =>
+    g.mindly.hooks.handle({
+      agentKind: 'claude-code',
+      event: 'pre_tool',
+      externalSessionId: 'edits',
+      cwd: g.dir,
+      transcriptPath: null,
+      startSource: null,
+      prompt: null,
+      lastMessage: null,
+      tool: {
+        name: 'Write',
+        writes: true,
+        shell: false,
+        edits: [{ path, addedText: 'x\n', removedText: '', wholeFile: true }],
+        command: null,
+        failed: false,
+        outputExcerpt: null,
+      },
+    });
+
+  it('is warned about when a rule may cover the file under its other name', async () => {
+    const g = setUp(['certs/**'], 'ln certs/server.pem second.txt && echo o > one.txt');
+    try {
+      if (CP_KEEPS_NAMES) {
+        const copy = copyOf(g.dir);
+        toolWrites(copy, 'second.txt');
+        expect(readFileSync(join(copy, 'certs/server.pem'), 'utf8')).toBe('x\n');
+      }
+      const r = await write(g, join(g.dir, 'second.txt'));
+      expect(r.decision).toBeNull();
+      expect(r.context ?? '').toContain('second.txt has another name as well');
+      expect(r.context ?? '').toContain(RULE);
+      // A file with one name is not.
+      const one = await write(g, join(g.dir, 'one.txt'));
+      expect(one.decision).toBeNull();
+      expect(one.context ?? '').not.toContain('another name');
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('is blocked when a rule names the very file', async () => {
+    const g = setUp(['certs/server.pem'], 'ln certs/server.pem second.txt');
+    try {
+      const r = await write(g, join(g.dir, 'second.txt'));
+      expect(r.decision).toBe('deny');
+      expect(r.reason).toContain(RULE);
+    } finally {
+      g.mindly.close();
+    }
+  });
+
+  it('through a folder link, onto a link that leads to nothing by a target with ..', async () => {
+    const g = setUp(
+      ['certs/**'],
+      'mkdir -p a/b && ln -s a/b fl && ln -s ../../certs/new.pem a/b/out.txt',
+    );
+    try {
+      const copy = copyOf(g.dir);
+      toolWrites(copy, 'fl/out.txt');
+      expect(whatIs(join(copy, 'certs/new.pem')), 'the covered file the tool makes').toBe(
+        'file x\n',
+      );
+      expect((await write(g, join(g.dir, 'fl/out.txt'))).decision).toBe('deny');
+    } finally {
+      g.mindly.close();
+    }
+  });
+});
+
 describe('a comment on a line', () => {
   let g: ReturnType<typeof setUp>;
   beforeAll(() => {
@@ -2506,6 +2694,50 @@ describe('the warning for a line not read fully is handed to every kind of agent
       expect(rendered.stdout, `what ${kind} is handed`).toContain('could not read this command');
     });
   }
+
+  it('gemini is shown nothing for an edit that only has context for the model', async () => {
+    const { getAdapter } = await import('../../adapters/src/index.js');
+    const adapter = getAdapter('gemini');
+    if (adapter === null) throw new Error('no adapter for gemini');
+    const project = await g.mindly.projects.resolve(g.dir);
+    g.mindly.memory.remember({
+      projectId: project.project.id,
+      projectRoot: g.dir,
+      kind: 'rule',
+      title: 'Source files use two spaces',
+      body: 'Indent with two spaces.',
+      scopePaths: ['src/**'],
+      source: { type: 'user', sessionId: null, agentKind: null },
+      enforce: false,
+    });
+    const tool = {
+      name: 'write_file',
+      writes: true,
+      shell: false,
+      edits: [
+        { path: join(g.dir, 'src/a.ts'), addedText: 'x\n', removedText: '', wholeFile: true },
+      ],
+      command: null,
+      failed: false,
+      outputExcerpt: null,
+    };
+    const event = {
+      agentKind: 'gemini' as const,
+      event: 'pre_tool' as const,
+      externalSessionId: 'kinds',
+      cwd: g.dir,
+      transcriptPath: null,
+      startSource: null,
+      prompt: null,
+      lastMessage: null,
+      tool,
+    };
+    const result = await g.mindly.hooks.handle(event);
+    expect(result.decision).toBeNull();
+    expect(result.context ?? '').toContain('Source files use two spaces');
+    expect(result.unreadWarning ?? null).toBeNull();
+    expect(adapter.render({ ...event, nativeEvent: 'BeforeTool' }, result).stdout).toBe('');
+  });
 });
 
 describe('a session in a folder reached through a link', () => {
@@ -2726,6 +2958,40 @@ describe('git commands read without false warnings or slow reading', () => {
       } finally {
         g.mindly.close();
       }
+    }
+  });
+
+  it('many paths under a long folder that is not there are read fully, in good time', async () => {
+    const g = setUp(
+      ['certs/**'],
+      'mkdir big && for i in $(seq 1 5000); do echo $i > big/f$i; done',
+    );
+    try {
+      await g.shell('true');
+      const deep = (n: number) => `${Array.from({ length: 1890 }, () => 'a').join('/')}/d${n}`;
+      const twelve = Array.from({ length: 12 }, (_, i) => `${deep(0)}/${i}`);
+      const copies = (n: number) =>
+        Array.from({ length: n }, (_, i) => `cp -r big ${deep(i + 1)}`).join('; ');
+      for (const [name, command, want] of [
+        ['twelve touched', `touch ${twelve.join(' ')}`, 'allow'],
+        ['twelve redirections', twelve.map((p) => `echo x > ${p}`).join('; '), 'allow'],
+        ['three copies of 5,000 files', copies(3), 'allow'],
+        ['five copies of 5,000 files', copies(5), 'allow'],
+        ['five copies, then a covered file', `${copies(5)}; rm -f certs/server.pem`, 'deny'],
+      ] as const) {
+        let best = Infinity;
+        let said: Verdict = 'warn';
+        for (let k = 0; k < 2; k++) {
+          const t0 = performance.now();
+          said = verdictOf(await g.shell(command));
+          best = Math.min(best, performance.now() - t0);
+        }
+        expect(said, name).toBe(want);
+        // 200 ms is the aim; the bound leaves room for a busy runner.
+        expect(best, name).toBeLessThan(500);
+      }
+    } finally {
+      g.mindly.close();
     }
   });
 
