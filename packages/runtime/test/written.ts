@@ -135,7 +135,14 @@ export function runInCopy(
       break;
     } catch (e) {
       if (attempt >= 5) throw e;
-      execFileSync('sleep', ['0.2']);
+      // What the failed attempt left cannot be copied over (git's objects are read-only), so
+      // the next one starts from an empty folder.
+      execFileSync('bash', [
+        '-c',
+        'chmod -R u+rwx "$1" 2>/dev/null; rm -rf "$1" && mkdir "$1" && sleep 0.2',
+        'bash',
+        copy,
+      ]);
     }
   }
   // Let mtimes move apart from the copy's.
