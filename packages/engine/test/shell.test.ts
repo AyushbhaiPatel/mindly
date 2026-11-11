@@ -1066,6 +1066,8 @@ describe('write targets of a shell command', () => {
         unplaced: false,
         noFollow: false,
         asWritten: false,
+        follows: false,
+        parents: false,
         glob: true,
         dotfiles: false,
         nocase: false,
@@ -2009,6 +2011,35 @@ describe('write targets of a shell command', () => {
     expect(fully('ln -s ../../pems d/a/sub; cp lnk/sub/* out/', ['lnk'])).toBe(false);
     expect(fully('mkdir tmp && cp lnk/a.txt tmp/', ['lnk'])).toBe(false);
     expect(fully('cp lnk/a.txt tmp/', ['lnk'])).toBe(true);
+    // What a command makes at a path with such a link is somewhere the text does not tell:
+    // nothing written after it is read. Read alone, or before a command that only reads, it is.
+    for (const [line, read] of [
+      ['ln -s ../certs current/x && rm -f stage/x/server.pem', false],
+      ['echo x > current/app.json && cp -r stage/. conf/', false],
+      ['cp a.txt current/app.json && mv stage/* conf/', false],
+      ['echo x > current/app.json', true],
+      ['echo x > current/app.json && ls stage', true],
+      ['rm -f current/app.json && rm -f stage/x', true],
+      // A folder `mkdir` made there holds nothing and leads nowhere.
+      ['mkdir current/d && rm -f stage/x', true],
+    ] as const) {
+      expect(fully(line, ['current']), line).toBe(read);
+    }
+    // A destination a copy may fill as a folder holds names not known, and is no plain file.
+    expect(fully('cp tpl/* stage && cp -r stage/. conf/')).toBe(false);
+    expect(fully('cp -t stage tpl/* && cp -a stage/. conf/')).toBe(false);
+    expect(fully('cp -r tpl stage && mv stage conf/')).toBe(false);
+    expect(fully('cp a.txt b.txt && mv b.txt conf/')).toBe(true);
+    // The content of a source found by a wildcard in a folder on its way is not looked up.
+    expect(fully('cp -r pkg/*/keys out/')).toBe(false);
+    expect(fully('cp -r */a/keys/. out/')).toBe(false);
+    expect(fully('cp pkg/*/keys/k.pem out/')).toBe(true);
+    expect(fully('cp -r pkg/a/keys out/')).toBe(true);
+    // What the caller is told of a copy that follows links, and of `mkdir -p`.
+    expect(readShellWrites('cp -rL docs out/').targets[0]).toMatchObject({ follows: true });
+    expect(readShellWrites('cp -r docs out/').targets[0]).toMatchObject({ follows: false });
+    expect(readShellWrites('mkdir -p a/b/c').targets[0]).toMatchObject({ parents: true });
+    expect(readShellWrites('mkdir a/b/c').targets[0]).toMatchObject({ parents: false });
     // `ln -s` makes a link under each source's name as written, there or not.
     const written = (line: string) =>
       readShellWrites(line).targets.map(

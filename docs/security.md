@@ -94,7 +94,9 @@ memory, which is then injected into every other agent.
   made by a command that may make a link of either kind (`ln`, `cp` with `-a`, `-R`, `-P`, `-l`
   or `-s`, `mv`, git) may reach another file through it (`ln certs/server.pem f && echo x > f`),
   and the line is not read fully either. The one exception is a folder `mkdir` made on the line,
-  with its parents under `-p`: paths under it are read as written, unless something else made
+  with its parents under `-p` (each parent that is not there is a folder the command makes,
+  and is checked like the one it names, up to 256 of them in one call; a line that makes more
+  is told the rest was not checked): paths under it are read as written, unless something else made
   that path first (`ln -s certs d; mkdir d`), or a command that may make a link is given it as
   its destination without a `/` after it. What is only removed (`rm`, `rmdir`, the source of a
   move), or only changed in mode or owner, is not made; nor are the folder a command runs in
@@ -116,7 +118,12 @@ memory, which is then injected into every other agent.
   not there until `mkdir secrets && mv b.txt sl/k`). So once a line has made anything, a folder
   `mkdir` made included, a later path it writes, removes or lands something on that has a
   symbolic link among the parts of it that are there, or is one that leads nowhere, makes the
-  line not read fully; the paths git is given in its own tree are left out, as above.
+  line not read fully; the paths git is given in its own tree are left out, as above. The
+  same holds the other way round: what a command makes at a path with such a link among its
+  parts is somewhere the text does not tell, so nothing a later command of the line writes is
+  read (`current` leads to `stage`, and the line runs
+  `ln -s ../certs current/x && rm -f stage/x/server.pem`). A folder `mkdir` makes there does
+  not count, and a line that ends with that command, or only reads after it, is read fully.
   A path the text does not settle makes the line not read fully as well: a `..`
   after a folder's name in any path written or copied from (`rm -f deep/../server.pem`: the
   system takes `..` off the folder a link before it leads to; a leading `../..` is placed from
@@ -162,6 +169,17 @@ memory, which is then injected into every other agent.
   A source named in full and copied without its content lands under its own name whatever it
   is, and so does a file the line made by a command that makes no link, or a folder `mkdir`
   made and nothing was put in: `echo x > n.key && cp n.key certs/` is read fully, and blocked.
+  A destination a copy may have filled as a folder (a recursive copy, several sources, a source
+  found by a wildcard) holds names not known, and is never such a plain file
+  (`cp tpl/* stage && cp -r stage/. conf/`). A source whose names cannot be listed makes the
+  line not read fully as well: one whose content is brought and that has a wildcard in a
+  folder on its way (`cp -r pkg/*/keys out/`), a folder of more than 50,000 entries or one that
+  cannot be read, and one still being listed when the time runs out. Under `cp -L` or `-H`, a
+  symbolic link found inside a source is followed by the copy and not by the listing, and the
+  line is not read fully (`cp -rL docs out/` with `docs/latest` a link to a folder). A
+  wildcard source that starts with a dot matches names that start with one (`cp .env* out/`).
+  More than 2,000 files brought to a folder that is not there are held against the rules by
+  their names under it, and are not placed one by one.
   A folder `mkdir` made is not counted as written for what lies under it, which was there
   before (`mkdir -p out && mv out/a b`). `ln -s` makes a link under the name of each source
   as written, whether or not the source is there, so a source with a wildcard that matches
@@ -259,7 +277,8 @@ memory, which is then injected into every other agent.
   up, and whatever makes the line one not read fully in
   the first place. Such a line is also warned about when it turns out to write nothing
   covered: `npm test`, `git checkout main && rm -rf dist`, `chmod -R` over a folder of hard
-  links, `cp config.json packages/*/`, `touch a.txt && cp *.txt backup/`,
+  links, `cp config.json packages/*/`, `cp -r packages/*/dist out/`, `cp -rL docs out/` where
+  `docs` holds a link, `touch a.txt && cp *.txt backup/`,
   `cp -r src out && cp -r out out2`, and a line that makes a folder and then names a path
   under `node_modules/pkg` where a package manager made that a link. A copy to a wildcard that
   does match a covered file (`cp b.txt certs/*.pem`) is warned about too, not blocked. Both
