@@ -505,6 +505,12 @@ interface Word {
   cut?: boolean | undefined;
   /** A process substitution (`<(…)`, `>(…)`): the code whose output or input it stands for. */
   procSub?: string | undefined;
+  /**
+   * Where in `text` the first quoting starts, even of nothing (`~''/x`: 1); 0 for a word that
+   * is only the later part of the word as written (the value after `=` in an option). A `~`
+   * is the home directory only before any of it.
+   */
+  quoteAt?: number | undefined;
 }
 
 interface Redirect {
@@ -699,6 +705,11 @@ function parse(
   let heredocNext: { stripTabs: boolean } | null = null;
 
   const cur = (): Word => (open ??= { text: '', mask: '', dynamic: false });
+  /** Quoting starts in the open word, where it has got to. */
+  const quotes = (): void => {
+    const w = cur();
+    w.quoteAt ??= w.text.length;
+  };
   /** The open word holds a value not known here, from where it has got to. */
   const unknownValue = (): void => {
     const w = cur();
@@ -890,13 +901,13 @@ function parse(
     }
     if (c === "'") {
       const end = src.indexOf("'", i + 1);
-      cur();
+      quotes();
       put(src.slice(i + 1, end === -1 ? src.length : end), true);
       i = end === -1 ? src.length : end + 1;
       continue;
     }
     if (c === '"') {
-      cur();
+      quotes();
       i++;
       while (i < src.length && src[i] !== '"') {
         const d = src[i] as string;
@@ -1106,7 +1117,13 @@ function programName(w: Word): string {
 }
 
 function sliceWord(w: Word, from: number, to?: number): Word {
-  return { text: w.text.slice(from, to), mask: w.mask.slice(from, to), dynamic: w.dynamic };
+  return {
+    text: w.text.slice(from, to),
+    mask: w.mask.slice(from, to),
+    dynamic: w.dynamic,
+    // What follows the start of a word is not where the shell looks for a `~`.
+    ...(from > 0 ? { quoteAt: 0 } : w.quoteAt !== undefined ? { quoteAt: w.quoteAt } : {}),
+  };
 }
 
 /** `dir/name`, keeping what is known about each part. */
@@ -1116,6 +1133,7 @@ function joinWords(dir: Word, name: Word): Word {
     text: `${dir.text}${sep}${name.text}`,
     mask: `${dir.mask}${'u'.repeat(sep.length)}${name.mask}`,
     dynamic: dir.dynamic || name.dynamic,
+    ...(dir.quoteAt !== undefined ? { quoteAt: dir.quoteAt } : {}),
   };
 }
 
@@ -1177,6 +1195,8 @@ interface Item {
   entries?: { name: string; from: Word | null }[];
   /** The path is taken away (removed, or moved elsewhere), not made. */
   gone?: boolean;
+  /** A destination that is a link to a folder is the name itself, not the folder (`ln -n`). */
+  noFollow?: boolean;
   /**
    * The name is given to something else (a rename onto it, a new link in its place): a file
    * that was there is not written, and stays as it is under any other name it has.
@@ -1717,7 +1737,13 @@ function readCopy(program: string, words: readonly Word[]): Verdict {
     program === 'mv' ||
     program === 'ln' ||
     (program === 'cp' && hasFlag(words, /^--remove-destination$/));
-  const item: Item = { word: dest, tree: recursive, entries, ...(replaces ? { replaces } : {}) };
+  const item: Item = {
+    word: dest,
+    tree: recursive,
+    entries,
+    ...(replaces ? { replaces } : {}),
+    ...(program === 'ln' && hasOption(words, 'n', ['--no-dereference']) ? { noFollow: true } : {}),
+  };
   // `--delete` removes from the destination what the source does not hold: the tree goes.
   if (hasFlag(words, /^--del(ete.*)?$/)) return writes(...gone, ...trees([dest]));
   return writes(...gone, item);
@@ -3609,6 +3635,8 @@ export interface ShellTarget {
    * `cd` before it) or absolute. May hold `*`, `?` or `{a,b}` when `glob` is set.
    */
   path: string;
+  /** For a copy: a destination that is a link to a folder is the name itself (`ln -n`). */
+  noFollow: boolean;
   /**
    * The path is under a home directory that could not be placed here (`~name/x`, or any `~`
    * path when no home was given): it starts with the `~` the shell expands. A name that merely
@@ -4072,7 +4100,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
 /** Paths of a line not read fully kept as possible writes. */
 const MAX_UNREAD_TARGETS = 32;
 
-/** Folders above a path that are held against what the line made. */
+/** Folders above a path that are walked up; a deeper path is compared another way. */
 const MAX_DEPTH_ABOVE = 256;
 
 /** Simple commands read of a line not read fully, for the paths it names. */
@@ -4681,6 +4709,7 @@ function unreadLine(top: string | null): ShellReading {
       {
         path: top ?? '.',
         unplaced: false,
+        noFollow: false,
         glob: false,
         dotfiles: false,
         nocase: false,
@@ -4869,8 +4898,17 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     const path = posix.normalize(out);
     return path.length > 1 ? path.replace(/\/+$/, '') : path;
   };
-  /** Whether a word starts with a `~` the shell expands (written outside quotes). */
-  const tilde = (w: Word): boolean => w.text.startsWith('~') && w.mask.startsWith('u');
+  /**
+   * Whether a word starts with a `~` the shell expands: the first character of the word as
+   * written, with nothing quoted, not even an empty string, up to the first `/` outside quotes.
+   * Any other `~` is a name (`~''/x`, `''~/x`, `~'/x'`, `--output=~/x`).
+   */
+  const tilde = (w: Word): boolean => {
+    if (!w.text.startsWith('~')) return false;
+    let end = 0;
+    while (end < w.text.length && !(w.text[end] === '/' && w.mask[end] === 'u')) end++;
+    return !w.mask.slice(0, end).includes('q') && (w.quoteAt === undefined || w.quoteAt > end);
+  };
 
   // What the command being read makes, kept until it ends: its own words are not held against it.
   let pending: { path: string; glob: boolean; kind: 'made' | 'gone' | 'folder'; link: boolean }[] =
@@ -4902,6 +4940,26 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     r.limit ??= 'no time was left to read all of it';
     r.unmatched = true;
     return true;
+  };
+  /**
+   * Whether a folder above a path is one of `made`. A shallow path is walked up; a deep one is
+   * held against each of them instead, which costs less than its many folders.
+   */
+  const hasAbove = (
+    at: string,
+    made: { has: (key: string) => boolean; keys: () => Iterable<string> },
+  ): boolean => {
+    const ups = above(at);
+    if (ups.length < MAX_DEPTH_ABOVE) return ups.some((up) => made.has(up));
+    for (const m of made.keys()) {
+      if (late()) return true;
+      if (
+        m === '.' ? !/^(\/|~|\.\.(\/|$))/.test(at) : at.startsWith(m.endsWith('/') ? m : `${m}/`)
+      ) {
+        return true;
+      }
+    }
+    return false;
   };
   /** Whether a pattern an earlier command wrote may name a path, in parts, or a folder above it. */
   const mayName = (g: { pattern: string; parts: string[] }, at: string, parts: string[]): boolean =>
@@ -4944,9 +5002,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     const at = anchor(path);
     const own = r.through.get(at);
     if (own !== undefined && (slash || (onto && own))) return true;
-    const ups = above(at);
-    // Deeper than is walked: a folder above it may be one the line made.
-    if (ups.length >= MAX_DEPTH_ABOVE || ups.some((up) => r.through.has(up))) return true;
+    if (hasAbove(at, r.through)) return true;
     if (r.wild.length === 0) return false;
     const parts = pathParts(at);
     const up = parts.slice(0, -1);
@@ -4955,7 +5011,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   /** Whether an earlier command of the line wrote a path or a folder above it, in any way. */
   const stale = (path: string): boolean => {
     const at = anchor(path);
-    if (r.touched.has(at) || above(at).some((up) => r.touched.has(up))) return true;
+    if (r.touched.has(at) || hasAbove(at, r.touched)) return true;
     if (r.wild.length === 0) return false;
     const parts = pathParts(at);
     return r.wild.some((g) => mayName(g, at, parts));
@@ -5065,13 +5121,14 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         // a link that leads nowhere yet, is not read here. A name taken away or given to
         // something else leaves the file be, and git puts a new file where it writes one of
         // its tree. A copy writes its destination, or what each source brings under its name.
-        // A wildcard the shell matches against a symbolic link leads where the link does: for
-        // a folder on the way, whatever the command; for the last part, when a removal names it
-        // with a `/` after it, which goes through to what it holds.
+        // A wildcard the shell matches against a symbolic link to a folder leads where the link
+        // does: for a folder on the way, whatever the command; for the last part, when what a
+        // copy, move or link brings lands in it, or a removal names it with a `/` after it.
         if (r.strays !== null && form.glob && !item.pathspec && !item.pattern) {
           if (
             (wildFolder(w) && r.strays({ path: posix.dirname(path), glob: true, kind: 'link' })) ||
-            (gone && w.text.endsWith('/') && r.strays({ path, glob: true, kind: 'link' }))
+            ((item.entries !== undefined || (gone && w.text.endsWith('/'))) &&
+              r.strays({ path, glob: true, kind: 'link' }))
           ) {
             r.unmatched = true;
           }
@@ -5138,6 +5195,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       r.out.set(key, {
         path,
         unplaced: path.startsWith('~') && (tilde(w) || w.text.startsWith(HOME)),
+        noFollow: item.noFollow ?? false,
         glob: form.glob,
         dotfiles: item.dotfiles ?? false,
         nocase: item.nocase ?? false,

@@ -131,8 +131,9 @@ function parseGemini(nativeEvent: string, payload: unknown): NormalizedHookEvent
 /**
  * Renders a result as Gemini CLI hook JSON. Gemini reads `hookSpecificOutput.additionalContext`
  * on SessionStart, BeforeAgent and AfterTool only. BeforeTool has no context channel, so a deny
- * folds the context into the reason the model sees, and without a deny the context (a warning
- * about the call) goes to the person as the `systemMessage`. Decisions are top-level `decision` /
+ * folds the context into the reason the model sees; without a deny or an ask the context is
+ * dropped, and only the warning that a line could not be read fully goes to the person, as the
+ * `systemMessage`. Decisions are top-level `decision` /
  * `reason`; `allow` is never emitted so Gemini's own confirmations still apply, and AfterAgent
  * never gets a decision (a deny there would force a retry turn).
  */
@@ -153,9 +154,11 @@ function renderGemini(event: NormalizedHookEvent, result: HookResult): RenderedH
         // Gemini shows the systemMessage in its confirmation prompt.
         notice ??= reasonText(result);
       }
-      // What the model cannot be told before the tool runs, the person is.
-      if (result.decision !== 'deny' && context !== null) {
-        notice = capText(notice === null ? context : `${notice}\n\n${context}`, MAX_NOTICE_CHARS);
+      // The model cannot be told before the tool runs that its line was not read: the person is.
+      const unread = result.unreadWarning ?? null;
+      if (result.decision !== 'deny' && result.decision !== 'ask' && unread !== null) {
+        const warning = capText(unread, MAX_NOTICE_CHARS);
+        if (warning.trim() !== '') notice = notice === null ? warning : `${notice}\n\n${warning}`;
       }
     } else if (context !== null && event.event !== 'stop') {
       out['hookSpecificOutput'] = {
