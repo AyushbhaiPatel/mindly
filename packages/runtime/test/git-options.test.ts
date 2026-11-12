@@ -133,6 +133,10 @@ const CP_TARGET = works(
 const LN_N_SLASH = works(
   'd=$(mktemp -d) && mkdir "$d/t" && ln -s t "$d/l" && ln -sfn x "$d/l/" && [ -L "$d/t/x" ]; r=$?; rm -rf "$d"; exit $r',
 );
+/** GNU `chmod -R` goes through a symbolic link it is given; BSD `chmod -R` (macOS) does not. */
+const CHMOD_R_THROUGH_LINK = works(
+  'd=$(mktemp -d) && mkdir "$d/s" && touch "$d/s/f" && chmod 600 "$d/s/f" && ln -s s "$d/l" && chmod -R 700 "$d/l" && [ -x "$d/s/f" ]; r=$?; rm -rf "$d"; exit $r',
+);
 /** Linux makes a folder 1,800 levels deep; macOS stops at a path of 1,024 bytes. */
 const DEEP_FOLDER = works(
   `d=$(mktemp -d) && cd "$d" && mkdir -p c1/${'a/'.repeat(1800)}; r=$?; cd /; rm -rf "$d"; exit $r`,
@@ -1944,7 +1948,8 @@ const unsettled: {
   env?: Record<string, string>;
   /** False where the commands cannot run as they do elsewhere: only asked. */
   runs?: boolean;
-  cases: { name: string; command: string; cwd?: string }[];
+  /** A case's own `runs` is false where that one command cannot run as it does elsewhere. */
+  cases: { name: string; command: string; cwd?: string; runs?: boolean }[];
 }[] = [
   {
     title: 'a covered file that is not there yet, made through what the line made',
@@ -2731,7 +2736,7 @@ const unsettled: {
       { name: 'the link with a / after it', command: 'rm -rf t2/' },
       { name: 'all it holds', command: 'rm -rf t2/*' },
       { name: 'by wildcards', command: 'rm -f t2/*/certs/*.pem' },
-      { name: 'a change of mode', command: 'chmod -R 700 t2' },
+      { name: 'a change of mode', command: 'chmod -R 700 t2', runs: CHMOD_R_THROUGH_LINK },
       { name: 'by the folder itself', command: 'rm -rf store/*' },
       { name: 'a folder in a worktree', command: 'rm -rf t2/w1/certs' },
     ],
@@ -2761,7 +2766,7 @@ describe('lines whose paths nothing settles are never let through in silence', (
       });
       for (const c of group.cases) {
         it(`${c.name}: ${c.command}`, async () => {
-          if (group.runs ?? true) {
+          if ((group.runs ?? true) && (c.runs ?? true)) {
             const done = runInCopy(g.dir, c.command, group.covered, c.cwd ?? '');
             expect(
               done.written.length,
