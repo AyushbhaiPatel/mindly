@@ -30,6 +30,12 @@ const setUp = (prep = '') => {
 const verdictOf = (r: { decision: string | null; context: string | null }): Verdict =>
   r.decision === 'deny' ? 'deny' : (r.context ?? '').includes(RULE) ? 'warn' : 'allow';
 
+/**
+ * What a verdict may be here: git is asked what a whole-tree change writes, so one that writes a
+ * covered file may be blocked rather than warned about, when git could be asked.
+ */
+const allowed = (want: Verdict): Verdict[] => (want === 'warn' ? ['warn', 'deny'] : [want]);
+
 const OLD_BRANCH =
   'git checkout -q -b old v1 && echo b > src/b.ts && git add -A && git commit -qm b';
 const LOCAL_PEM = 'echo local > certs/server.pem';
@@ -209,7 +215,9 @@ describe('single git commands, checked against what they write', () => {
           );
         }
         const r = await g.shell(c.command);
-        expect(verdictOf(r), `hook on \`${c.command}\`: ${r.reason ?? ''}`).toBe(c.want);
+        expect(allowed(c.want), `hook on \`${c.command}\`: ${r.reason ?? ''}`).toContain(
+          verdictOf(r),
+        );
       } finally {
         g.mindly.close();
       }
@@ -222,7 +230,9 @@ describe('single git commands, checked against what they write', () => {
         const done = runInCopy(g.dir, c.command, pem);
         if (c.want === 'allow') expect(done.written, c.command).toEqual([]);
         const r = await g.shell(c.command);
-        expect(verdictOf(r), `hook on \`${c.command}\`: ${r.reason ?? ''}`).toBe(c.want);
+        expect(allowed(c.want), `hook on \`${c.command}\`: ${r.reason ?? ''}`).toContain(
+          verdictOf(r),
+        );
       } finally {
         g.mindly.close();
       }

@@ -1014,14 +1014,15 @@ cases.push(
     scopes: ['certs/**'],
     prep: EMPTY_RULE_FOLDER,
     command: 'git checkout -q HEAD~1 -- .',
-    want: ['warn'],
+    // git is asked: it names the file it brings back.
+    want: ['deny'],
   },
   {
     name: 'git reset --hard into an empty rule folder',
     scopes: ['certs/**'],
     prep: EMPTY_RULE_FOLDER,
     command: 'git reset -q --hard HEAD~1',
-    want: ['warn'],
+    want: ['deny'],
   },
   // A `cd` that fails leaves the commands after it where the shell was.
   {
@@ -3910,13 +3911,36 @@ describe('what enforced rules warn about is handed to every kind of agent', () =
     };
     const result = await repo.mindly.hooks.handle(event);
     const { stdout } = adapter.render({ ...event, nativeEvent: 'BeforeTool' }, result);
-    return { result, shown: stdout === '' ? '' : String(JSON.parse(stdout).systemMessage ?? '') };
+    const handed = (stdout === '' ? {} : JSON.parse(stdout)) as Record<string, unknown>;
+    return { result, handed, shown: String(handed['systemMessage'] ?? '') };
   };
 
+  // What such a git command would write is asked of git: a covered file among it is a block,
+  // and Gemini is handed the block.
+  for (const [name, command, prep] of [
+    ['files git checks out', 'git checkout -q HEAD~2 -- .', ''],
+    ['a hard reset', 'git reset -q --hard HEAD~2', ''],
+    ['git clean', 'git clean -fdq', 'echo local > certs/local.pem'],
+  ] as const) {
+    it(`gemini is handed the block of a git command that writes a covered file: ${name}`, async () => {
+      const repo = setUp(['certs/**'], prep);
+      try {
+        expect(runInCopy(repo.dir, command, inCerts).written.length).toBeGreaterThan(0);
+        const { result, handed } = await asGemini(repo, {
+          name: 'run_shell_command',
+          command,
+          edit: null,
+        });
+        expect(result.decision).toBe('deny');
+        expect(handed['decision']).toBe('deny');
+        expect(String(handed['reason'])).toContain(RULE);
+      } finally {
+        repo.mindly.close();
+      }
+    });
+  }
+
   for (const [name, command, prep, says] of [
-    ['files git checks out', 'git checkout -q HEAD~2 -- .', '', 'This command names'],
-    ['a hard reset', 'git reset -q --hard HEAD~2', '', 'This command names'],
-    ['git clean', 'git clean -fdq', 'echo local > certs/local.pem', 'This command names'],
     ['a change of mode', 'chmod 600 certs/server.pem', '', 'This command names'],
     [
       'a line cut short at its 500th write',

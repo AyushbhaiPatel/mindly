@@ -504,8 +504,7 @@ describe('split through hook events', () => {
       ['rm -rf src/api', 'src/api/**'],
       ['rm -rf src', 'src/**'],
       ['rm -rf src/api/not-there-yet', 'src/api/not-there-yet/**'],
-      // The tracked files git puts back are what is asked about, by name.
-      ['git checkout HEAD~1 src', 'src/api/billing.ts'],
+      ['git checkout HEAD~1 src', 'src/**'],
       // A wildcard stands for the files it expands to.
       ['rm src/api/*.ts', 'src/api/billing.ts'],
       ['rm -f src/**/*.ts', 'src/api/billing.ts'],

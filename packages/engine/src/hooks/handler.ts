@@ -13,9 +13,9 @@ import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, parse, resolve, sep } from 'node:path';
 import {
   EMPTY_HOOK_RESULT,
+  deniedPathTest,
   globToRegExp,
   hasUnsafeChars,
-  deniedPathTest,
   isDeniedPath,
   matchesAnyGlob,
   redactText,
@@ -46,6 +46,7 @@ import {
   pathNamer,
   readShellWrites,
   type FileKinds,
+  type GitQuestion,
   shellMayWrite,
   shellMayWriteFiles,
 } from './shell.js';
@@ -95,6 +96,13 @@ const MAX_SHELL_CHANGED = 20;
  */
 const PRE_TOOL_BUDGET_MS = 900;
 const PRE_TOOL_SHARE = 0.6;
+/**
+ * Time one git question about a shell command gets: at least the first, at most the second, and
+ * otherwise what is left of the budget once the third is kept for searching what is written.
+ */
+const GIT_QUESTION_MS = 400;
+const GIT_QUESTION_MAX_MS = 700;
+const SEARCH_RESERVE_MS = 250;
 /** Wildcard segments one written pattern may have; a deeper one counts as its whole directory. */
 const MAX_PATTERN_SEGMENTS = 16;
 /** Files one source brings that are placed one by one in a folder that is not there. */
@@ -154,11 +162,6 @@ interface RuleHit {
    * apply. That is a warning, never a block.
    */
   unfinished?: boolean;
-  /**
-   * The search that could not finish was for files a git command may write across the whole
-   * tree: said even where the write is only possible.
-   */
-  wholeTree?: boolean;
 }
 
 /** Other working trees of the project found while placing the paths of one tool call. */
@@ -578,6 +581,7 @@ export class HookHandler {
     command: string,
     ownTreeOnly = false,
     timeUp: () => boolean = () => false,
+    timeLeft: () => number = () => Infinity,
     understoodOnly = false,
   ): Promise<{
     certain: Writes;
@@ -599,7 +603,8 @@ export class HookHandler {
     // The programs of the line find their paths from the folder itself, whatever links the
     // session's spelling of it goes through: paths are placed from there.
     const cwd = physical(resolve(session));
-    const treeRoot = (await this.k.ports.git.findRepoRoot(cwd)) ?? project.root;
+    const repoRoot = await this.k.ports.git.findRepoRoot(cwd);
+    const treeRoot = repoRoot ?? project.root;
     // The command is read as text; where it runs, the home directory and the repository root
     // are handed in so `~`, `$HOME` and `$(git rev-parse --show-toplevel)` can be placed.
     // A `cd` through a symbolic link leads elsewhere than its text says. Asked of the disk a
@@ -689,6 +694,40 @@ export class HookHandler {
     /** Folders that names are placed under, each placed once. */
     const missing = new Map<string, Located | 'unknown' | null>();
     const seen = new Set<string>();
+    // git commands that bring files back (`checkout -- x`, `restore`, `stash`, `reset --hard`):
+    // git says which files they change. Those it could not answer for fall back to the paths
+    // they were given. After the command ran there is nothing left to ask: the paths are used.
+    const unanswered = new Set<number>();
+    // The top of the repository each folder git ran in belongs to, as git said it.
+    const tops = new Map<string, string>();
+    if (repoRoot !== null) tops.set(resolve(cwd), repoRoot);
+    const denied = deniedPathTest(this.k.config.redaction.denyPaths);
+    for (const [i, q] of reading.questions.entries()) {
+      const answer = ownTreeOnly ? null : await this.askGit(cwd, q, timeUp, timeLeft, tops);
+      if (answer === null) {
+        unanswered.add(i);
+        continue;
+      }
+      if (answer.files.length === 0) continue;
+      // git names files relative to the top of its working tree, never through a symbolic link
+      // to a folder (it does not follow them), and a link itself is replaced or removed, not what
+      // it points to: only the top is placed, and each file is named from there.
+      const top = await this.locate(project, treeRoot, answer.root, trees);
+      if (top === null) continue;
+      if (top === 'unknown') {
+        certain.unchecked++;
+        continue;
+      }
+      for (const f of answer.files) {
+        const rel = top.rel === '' ? f : `${top.rel}/${f}`;
+        // git's names are already plain: `a/b`, never `./a` or `a//b`.
+        const at = `${top.abs}/${f}`;
+        const key = `true:${at}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        certain.paths.push({ rel, abs: at, own: top.own && !denied(rel) });
+      }
+    }
     // What a copy brings could not be found out: the line is not one read fully after all.
     let unsure = false;
     // What each source folder of a copy holds, and whether a symbolic link is in it.
@@ -697,6 +736,7 @@ export class HookHandler {
     const parents = new Set<string>();
     let late = false;
     for (const t of reading.targets) {
+      if (t.fallback !== null && !unanswered.has(t.fallback)) continue;
       // Out of time: what is left is not placed, and the line is told it was not read to its
       // end. Searching what the placed paths hold is bounded apart, and reports what it did
       // not get to.
@@ -706,6 +746,7 @@ export class HookHandler {
         continue;
       }
       const into = t.certain ? certain : possible;
+      const fallback = t.fallback !== null;
       // Only files that exist there, of the kinds git touches (`git clean`, and what a command
       // that puts back tracked files stands for when git cannot say).
       const existing: FileKinds | null =
@@ -1034,6 +1075,11 @@ export class HookHandler {
       }
       const at = await place(path);
       if (at === null) continue;
+      if (fallback && ownTreeOnly) {
+        // After the command: what it brought back is checked again like any written file.
+        file(at);
+        continue;
+      }
       if (existing !== null && !ownTreeOnly) {
         // The path and what is under it are decided by what is there, never by the name alone.
         if (at.rel !== '') {
@@ -1066,6 +1112,69 @@ export class HookHandler {
       understood: reading.understood && !unsure,
       unlisted: reading.understood && unsure,
     };
+  }
+
+  /**
+   * The files a git command that brings files back would change, relative to the top of the
+   * working tree git runs in: what `git diff` reports between the working tree and what the files
+   * come from, for the pathspecs exactly as given (so git's own wildcards and magic apply), and
+   * the untracked files it would remove. Null when git cannot say in time; the caller then falls
+   * back to the paths given. `tops` keeps the top of each folder asked about, so it is asked once.
+   */
+  private async askGit(
+    cwd: string,
+    q: GitQuestion,
+    timeUp: () => boolean,
+    timeLeft: () => number,
+    tops: Map<string, string>,
+  ): Promise<{ root: string; files: string[] } | null> {
+    const git = this.k.ports.git;
+    if (!git.whatGitChanges || timeUp()) return null;
+    const at = resolve(cwd, q.cwd);
+    if (!isDirectory(at)) return null;
+    // A word that may be a path or a branch is asked as a path whatever is on disk: git reads it
+    // as one when it matches the index too (a deleted file it would bring back), and a pathspec
+    // that matches nothing changes nothing.
+    // git compares every file of the tree: on a large one that takes longer than a listing. It
+    // gets what the hook can spare, keeping enough to search what is written afterwards.
+    // Never past the hook's own deadline.
+    const timeoutMs = Math.floor(
+      Math.min(
+        timeLeft(),
+        Math.max(GIT_QUESTION_MS, Math.min(GIT_QUESTION_MAX_MS, timeLeft() - SEARCH_RESERVE_MS)),
+      ),
+    );
+    if (timeoutMs < 50) return null;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<null>((done) => {
+      timer = setTimeout(() => done(null), timeoutMs + 50);
+    });
+    const known = tops.get(at);
+    try {
+      const answer = await Promise.race([
+        git
+          .whatGitChanges(at, {
+            against: q.against,
+            pathspecs: q.pathspecs,
+            untracked: q.untracked,
+            ignored: q.ignored,
+            tracked: q.tracked,
+            mayFail: q.mayFail,
+            guess: q.guess,
+            listTree: q.listTree,
+            ...(q.unlessAncestor !== undefined ? { unlessAncestor: q.unlessAncestor } : {}),
+            ...(known !== undefined ? { root: known } : {}),
+            timeoutMs,
+          })
+          .catch(() => null),
+        late,
+      ]);
+      if (answer === null) return null;
+      tops.set(at, answer.root);
+      return { root: answer.root, files: [...answer] };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** The rules the user marked as enforced that have a scope. */
@@ -1158,7 +1267,6 @@ export class HookHandler {
       covers.push(...(brought.get(rule) ?? []));
       const maybe: string[] = [];
       const unsearched: string[] = [];
-      let wholeTree = false;
       for (const s of writes.scopes) {
         const reaching = globsReaching(s, globs);
         if (reaching.length === 0) continue;
@@ -1181,10 +1289,7 @@ export class HookHandler {
             : [];
         if (rewritten.length > 0) covers.push(...rewritten.slice(0, 5));
         else if (folders.length > 0) covers.push(...folders.slice(0, 5));
-        else if (!found.complete) {
-          unsearched.push(...found.unsearched);
-          if (s.existing !== undefined) wholeTree = true;
-        }
+        else if (!found.complete) unsearched.push(...found.unsearched);
       }
       for (const l of writes.landings) {
         const label = l.rel === '' ? '.' : l.rel;
@@ -1208,7 +1313,7 @@ export class HookHandler {
       }
       if (maybe.length > 0) warn.push({ rule, covers: [...new Set(maybe)] });
       if (unsearched.length > 0)
-        warn.push({ rule, covers: [...new Set(unsearched)], unfinished: true, wholeTree });
+        warn.push({ rule, covers: [...new Set(unsearched)], unfinished: true });
     }
     return { deny: null, warn, cut };
   }
@@ -1373,6 +1478,7 @@ export class HookHandler {
         tool.command,
         false,
         () => performance.now() > until - budget / 2,
+        () => until - performance.now(),
         true,
       );
       // A shell line that also holds a patch: the files the patch names may be written too.
@@ -1469,11 +1575,10 @@ export class HookHandler {
           .slice(0, 5)
           .map((x) => sanitizeLine(x, 160))
           .join(', ');
-      // A possible write only warns when a covered file was actually found, or, for what a git
-      // command may do to the whole tree, when the search for one could not finish.
+      // A possible write only warns when a covered file was actually found.
       const mayApply = softRules
         ? [...(softRules.deny ? [softRules.deny] : []), ...softRules.warn].filter(
-            (h) => !h.unfinished || h.wholeTree === true,
+            (h) => !h.unfinished,
           )
         : [];
       // What is said about enforced rules, and about what was not checked against them, is

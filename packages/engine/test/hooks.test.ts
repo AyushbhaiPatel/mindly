@@ -444,6 +444,7 @@ describe('hook flow', () => {
       ['mv dist dist.old', 'dist/m7/leaf.pem', 'Certificates are issued by hand'],
       ['rm -rf packages/*/dist', 'packages/api/dist/m3/.env', 'Env files are edited by hand'],
       ['rm -rf certs', 'certs/server.pem', 'Certificates are issued by hand'],
+      ['git checkout -- .', '.pem', 'Certificates are issued by hand'],
       ['rm -rf .', '.pem', 'Certificates are issued by hand'],
       ['rm -f *.pem', 'old.pem', 'Certificates are issued by hand'],
     ] as const) {
@@ -452,10 +453,6 @@ describe('hook flow', () => {
       expect(r.reason, command).toContain(title);
       expect(r.reason, command).toContain(file);
     }
-    // What git may do to the whole tree is a warning when a covered file is there.
-    const restored = await shell('git checkout -- .');
-    expect(restored.decision).toBeNull();
-    expect(restored.context).toContain('Certificates are issued by hand');
     // A top-level wildcard is one level: it does not see what lies in folders.
     expect((await shell('rm -f *.log')).decision).toBeNull();
     expect((await shell('rm -f *.env')).decision).toBeNull();
@@ -473,11 +470,8 @@ describe('hook flow', () => {
     const mode = await shell('chmod -R 755 .');
     expect(mode.decision).toBeNull();
     expect(mode.context).toContain('Certificates are issued by hand');
-    expect((await shell('rm -rf *')).decision).toBe('deny');
-    for (const command of ['git checkout .', 'git restore .']) {
-      const r = await shell(command);
-      expect(r.decision, command).toBeNull();
-      expect(r.context, command).toContain('Certificates are issued by hand');
+    for (const command of ['git checkout .', 'git restore .', 'rm -rf *']) {
+      expect((await shell(command)).decision, command).toBe('deny');
     }
   });
 
@@ -775,6 +769,52 @@ describe('hook flow', () => {
       event(root, 'codex', 'cx', 'pre_tool', { tool: { ...tool, editsCut: false, edits } }),
     );
     expect(huge.decision).toBe('deny');
+  });
+
+  it('names what git says a command changes from the top of the tree, at any count', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'syn-eng-')));
+    const listed = Array.from({ length: 100_000 }, (_, i) => `src/lib/d${i % 500}/f${i}.ts`);
+    const roots: (string | undefined)[] = [];
+    let answer = listed;
+    const mindly = Mindly.open({
+      inMemory: true,
+      clock: new FakeClock(),
+      ports: {
+        git: {
+          ...fakeGit,
+          findRepoRoot: async (cwd) => (cwd === root || cwd.startsWith(`${root}/`) ? root : null),
+          whatGitChanges: async (_cwd, query) => {
+            roots.push(query.root);
+            return Object.assign([...answer], { root });
+          },
+        },
+      },
+    });
+    const ctx = await mindly.projects.resolve(root);
+    mindly.memory.remember({
+      projectId: ctx.project.id,
+      projectRoot: root,
+      kind: 'rule',
+      title: 'Certificates are issued by hand',
+      body: 'Ask first.',
+      scopePaths: ['**/*.pem'],
+      source: USER,
+      enforce: true,
+    });
+    const shell = (command: string) =>
+      mindly.hooks.handle(event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(command) }));
+    // A hundred thousand files are named without looking each one up.
+    let started = performance.now();
+    expect((await shell('git rm -r -q src')).decision).toBeNull();
+    expect(performance.now() - started).toBeLessThan(3000);
+    answer = [...listed, 'certs/server.pem'];
+    started = performance.now();
+    const r = await shell('git rm -r -q src');
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(r.decision).toBe('deny');
+    expect(r.reason).toContain('certs/server.pem');
+    // The top of the tree is known already: git is not asked for it again.
+    expect(roots).toEqual([root, root]);
   });
 
   it('refuses a write to a path with control or bidi characters, never passing it over', async () => {
