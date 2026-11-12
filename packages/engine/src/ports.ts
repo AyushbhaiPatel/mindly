@@ -222,16 +222,92 @@ export interface SplitGitPort {
   branchExists(repoRoot: string, branch: string): Promise<boolean>;
   /** Creates branch `branch` at `startPoint` in a new worktree at `path`; refuses existing ones. */
   addWorktree(repoRoot: string, path: string, branch: string, startPoint: string): Promise<string>;
-  /** Removes a linked worktree (and its uncommitted work). False when it was not a worktree. */
-  removeWorktree(repoRoot: string, path: string): Promise<boolean>;
-  deleteBranch(repoRoot: string, branch: string): Promise<boolean>;
+  /**
+   * Removes a linked worktree. False when it was not a worktree. With `force` (the default) its
+   * uncommitted work goes with it; with `force: false` git refuses (`conflict`, `details.refused`,
+   * and `details.locked` for a locked one) a worktree with modified or untracked files (flagged
+   * skip-worktree or assume-unchanged ones included), with submodules or that is locked. Ignored
+   * files go either way.
+   */
+  removeWorktree(repoRoot: string, path: string, options?: { force?: boolean }): Promise<boolean>;
+  /**
+   * Puts `paths` of `worktree` back to its HEAD in the index and writes the committed ones that
+   * are missing from disk, never overwriting a file: what is left for git's check after the
+   * files a user confirmed were deleted.
+   */
+  restoreFromHead(repoRoot: string, worktree: string, paths: readonly string[]): Promise<void>;
+  /**
+   * Git data in `worktree` that no listing of files can stand for, and that an abort never
+   * deletes short of a discard: nested repositories (new, ignored, or in a tracked folder),
+   * populated submodules and committed repositories, `.git` entries in tracked folders, git
+   * directories among untracked or ignored files, and a non-empty `modules` folder in its own
+   * git directory. Worktree-relative paths (that `modules` folder: absolute).
+   */
+  gitDataIn(repoRoot: string, worktree: string): Promise<string[]>;
+  /**
+   * The last look at `worktree` before it is removed, in one pass: `stray`, what removing it
+   * would delete that a listing counts (untracked files, and ignored files on the deny-list or
+   * `secretDeny`): once the confirmed work is gone, anything here appeared since; `gitData`, as
+   * `gitDataIn`.
+   */
+  lastLook(
+    repoRoot: string,
+    worktree: string,
+    secretDeny: readonly string[],
+  ): Promise<{ stray: string[]; gitData: string[] }>;
+  /** Deletes a branch; with `expectedTip`, refuses (`conflict`) one that has moved since. */
+  deleteBranch(repoRoot: string, branch: string, expectedTip?: string): Promise<boolean>;
+  /**
+   * What deleting `branch` would lose: its tip, and its commits (newest first, at most 50; `more`
+   * when there are others) that no other branch, tag or remote-tracking branch reaches (branches
+   * in `ignoring` do not count). Only reachability counts, not where else the changes are.
+   */
+  branchOnlyWork(
+    repoRoot: string,
+    branch: string,
+    options: { ignoring: readonly string[] },
+  ): Promise<{
+    tip: string | null;
+    commits: { commit: string; subject: string }[];
+    more: boolean;
+  }>;
+  /**
+   * Work in `worktree` that is not on `refs/heads/<branch>`. `paths`: paths whose content differs
+   * from the branch tip, deny-listed ones included. `ignoredDenied`: ignored files on the secret
+   * deny-list (a local `.env`), which no commit has and removing the worktree deletes. `denied`:
+   * every deny-listed path of both, whose content must never be read. Edited files flagged
+   * skip-worktree or assume-unchanged, and new nested repositories (as their folders), are among
+   * `paths`. `extraDeny` adds globs that are never read (the user's and the project's) to the
+   * built-in list; `secretDeny` adds those of them that name secrets, the only ignored files
+   * counted besides the built-in list.
+   */
+  uncommittedWork(
+    repoRoot: string,
+    worktree: string,
+    branch: string,
+    extraDeny: readonly string[],
+    secretDeny: readonly string[],
+    since?: string,
+  ): Promise<{
+    paths: string[];
+    denied: string[];
+    ignoredDenied: string[];
+    /** With `since`: paths that differ between that commit and the worktree, as `changedSince`. */
+    changedSince?: string[];
+  }>;
   /** Paths that differ between `base` and the worktree's current content (committed or not). */
-  changedSince(repoRoot: string, worktree: string, base: string): Promise<string[]>;
+  changedSince(
+    repoRoot: string,
+    worktree: string,
+    base: string,
+    extraDeny: readonly string[],
+  ): Promise<string[]>;
   /** Shadow-merges the sides' worktrees (uncommitted work included) on top of `base`. */
   mergeCheck(
     repoRoot: string,
     base: string,
     sides: readonly SplitMergeSide[],
+    extraDeny: readonly string[],
   ): Promise<SplitMergeCheck>;
   /** Merges `branches` in order onto `base` into the NEW branch `into` with merge commits. */
   mergeBranches(

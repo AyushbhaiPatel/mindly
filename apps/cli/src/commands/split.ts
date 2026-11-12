@@ -18,6 +18,9 @@ import {
   trackOf,
   trackPromptLines,
   validatePlan,
+  type SplitAbortCheck,
+  type SplitAbortResult,
+  type SplitMergeCheckResult,
   type SplitMergeResult,
   type TrackReport,
   type TrackSuggestion,
@@ -33,6 +36,7 @@ import {
   renderMerged,
   renderPlan,
   renderSplitStatus,
+  unmergedLine,
 } from '../views/split.js';
 import { parseOptions } from './memory.js';
 import { adapterOf, adaptersFor, installCommand, userHome } from './setup.js';
@@ -389,9 +393,12 @@ export async function splitCheck(out: Out, o: { json?: boolean }): Promise<numbe
       return run.status === 'passed' ? 0 : 1;
     }
     const sc = out.screen();
+    const missing = (run.result as SplitMergeCheckResult | null)?.missing ?? [];
     sc.summary(
       run.status === 'passed'
-        ? `${sc.mark('ok')} Merge check clean: every part merges and the checks pass.`
+        ? missing.length > 0
+          ? `${sc.mark('warn')} Merge check clean for the parts that could be checked; ${count(missing.length, 'part')} could not.`
+          : `${sc.mark('ok')} Merge check clean: every part merges and the checks pass.`
         : run.status === 'failed'
           ? `${sc.mark('fail')} Merge check failed.`
           : `${sc.mark('fail')} Merge check could not run.`,
@@ -419,6 +426,13 @@ export async function splitMerge(
           'Merge anyway with: mindly split merge --force',
         );
       }
+      if (isMindlyError(err, 'conflict') && Array.isArray(err.details?.['uncommitted'])) {
+        throw new HintedError(
+          'conflict',
+          err.message,
+          "Commit it in each part's worktree on the part branch and merge again, or merge without it: mindly split merge --force",
+        );
+      }
       throw err;
     }
     if (o.json) out.json(m);
@@ -427,26 +441,77 @@ export async function splitMerge(
   });
 }
 
-/** `mindly split abort [--keep-branches] [-y]`. */
+/** `mindly split abort [--keep-branches] [--discard] [-y]`. */
 export async function splitAbort(
   out: Out,
-  o: { keepBranches?: boolean; yes?: boolean; json?: boolean },
+  o: { keepBranches?: boolean; discard?: boolean; yes?: boolean; json?: boolean },
 ): Promise<number> {
   return withProject(out.io, async (scope) => {
     const id = currentSplit(scope);
     const svc = splitOf(scope.mindly);
     const split = scope.mindly.store.splits.get(id);
+    const keepBranches = o.keepBranches === true;
+    // A "yes" on the terminal covers what is listed here and nothing else, with or without
+    // --discard: only `-y --discard` deletes whatever the parts hold.
+    const blanket = o.yes === true && o.discard === true;
+    const KEEP =
+      'Remove only the worktrees and keep the part branches, so nothing is lost: mindly split abort --keep-branches';
+    const DISCARD = 'To delete it anyway: mindly split abort --yes --discard';
+    let check: SplitAbortCheck | null = null;
+    try {
+      if (split.status !== 'aborted') check = await svc.abortCheck(id, { keepBranches });
+    } catch (err) {
+      if (!blanket) {
+        throw new HintedError(
+          'unavailable',
+          `could not check the parts for work an abort would delete, so nothing was removed: ${err instanceof Error ? err.message : String(err)}`,
+          `Try again. ${DISCARD}`,
+        );
+      }
+    }
+    const unmerged = check?.work ?? [];
+    let confirmed: SplitAbortCheck | undefined;
     if (!o.json || !o.yes) {
+      if (!o.yes && unmerged.length > 0) {
+        out.warn(
+          `These parts hold work that ${split.status === 'merged' ? 'the merged branch does not have' : 'no other branch has'}:`,
+        );
+        for (const w of unmerged) out.warn(`  ${unmergedLine(w)}`);
+      }
       const ok = await confirm(
         out.io,
-        `Remove the worktrees${o.keepBranches ? '' : ' and branches'} of the split "${split.goal.slice(0, 60)}"? Uncommitted work in them is lost.`,
+        `Remove the worktrees${keepBranches ? '' : ' and branches'} of the split "${split.goal.slice(0, 60)}"? ${unmerged.length > 0 ? 'The work listed above is lost.' : `Uncommitted work in them${keepBranches ? '' : ' and commits only on their branches'} is lost.`}`,
         o.yes === true,
       );
       if (!ok) return 1;
+      if (!o.yes && check) confirmed = check;
     }
-    const a = await svc.abort(id, { keepBranches: o.keepBranches === true });
+    let a: SplitAbortResult;
+    try {
+      a = await svc.abort(id, {
+        keepBranches,
+        discardUncommitted: blanket,
+        ...(confirmed ? { confirmed } : {}),
+      });
+    } catch (err) {
+      if (isMindlyError(err, 'conflict') && Array.isArray(err.details?.['uncommitted'])) {
+        const files = err.details?.['paths'] === true;
+        throw new HintedError(
+          'conflict',
+          err.message,
+          err.details?.['appeared'] === true
+            ? 'Run mindly split abort again to see everything it would remove.'
+            : `${files ? 'Commit the files on their part branch first. ' : ''}${KEEP}. ${DISCARD}`,
+        );
+      }
+      if (isMindlyError(err, 'unavailable') && err.details?.['lossCheckFailed'] === true) {
+        throw new HintedError('unavailable', err.message, `Try again. ${DISCARD}`);
+      }
+      throw err;
+    }
     if (o.json) out.json(a);
     else renderAborted(out.screen(), a);
-    return 0;
+    // Something was kept: the abort is not done, and a script should know.
+    return a.finished ? 0 : 1;
   });
 }

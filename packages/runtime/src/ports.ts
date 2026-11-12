@@ -12,6 +12,7 @@ import {
   createBisectWorkspace,
   checkpointDiskUsage,
   checkpointRefName,
+  branchOnlyWork,
   createSnapshotRef,
   deleteCheckpointRefs,
   currentBranch,
@@ -21,6 +22,10 @@ import {
   fileAtRef,
   fileStateAtRef,
   findRepoRoot,
+  flaggedChanges,
+  ignoredDeniedFiles,
+  gitDataPaths,
+  worktreeScan,
   headCommit,
   hunkHashes,
   isManifestPath,
@@ -32,6 +37,7 @@ import {
   openWarmWorkspace,
   removeWarmWorkspace,
   removeWorktree,
+  restoreFromHead,
   restoreSnapshotToBranch,
   runChecks,
   runGit,
@@ -99,21 +105,88 @@ export function createSplitGitPort(): SplitGitPort {
     branchExists: (repoRoot, branch) => branchExists(repoRoot, branch),
     addWorktree: async (repoRoot, path, branch, startPoint) =>
       (await addWorktree(repoRoot, path, branch, startPoint)).path,
-    removeWorktree: (repoRoot, path) => removeWorktree(repoRoot, path),
-    deleteBranch: (repoRoot, branch) => deleteBranch(repoRoot, branch),
-    changedSince: async (repoRoot, worktree, base) => {
-      const captured = await captureWorktreeCommit(worktree, { message: 'mindly split status' });
+    removeWorktree: (repoRoot, path, options) => removeWorktree(repoRoot, path, options),
+    restoreFromHead: (_repoRoot, worktree, paths) => restoreFromHead(worktree, paths),
+    gitDataIn: (_repoRoot, worktree) => gitDataPaths(worktree),
+    lastLook: async (_repoRoot, worktree, secretDeny) => {
+      const scan = await worktreeScan(worktree, secretDeny);
+      return {
+        stray: [...new Set([...scan.untracked, ...scan.ignoredDenied])].sort(),
+        gitData: scan.gitData,
+      };
+    },
+    deleteBranch: (repoRoot, branch, expectedTip) => deleteBranch(repoRoot, branch, expectedTip),
+    branchOnlyWork: (repoRoot, branch, options) => branchOnlyWork(repoRoot, branch, options),
+    uncommittedWork: async (repoRoot, worktree, branch, extraDeny, secretDeny, since) => {
+      const captured = await captureWorktreeCommit(worktree, {
+        message: 'mindly split status',
+        extraDeny,
+      });
+      const res = await runGit(
+        [
+          'diff',
+          '--name-only',
+          '-z',
+          '--no-renames',
+          `refs/heads/${branch}`,
+          captured.commit,
+          '--',
+        ],
+        { cwd: repoRoot, timeoutMs: 30_000 },
+      );
+      const ignored = await ignoredDeniedFiles(worktree, secretDeny);
+      // Edited files flagged skip-worktree or assume-unchanged: neither the capture nor git's
+      // status sees them.
+      const flagged = await flaggedChanges(worktree, extraDeny);
+      const paths = new Set([
+        ...res.stdout.split('\0').filter((p) => p !== ''),
+        // Left out of the capture because they are on the deny-list: still work in the worktree.
+        ...captured.skipped,
+        // New nested repositories, left out of the capture: not on the branch either.
+        ...captured.nested,
+        ...flagged.changed,
+        // Written into the folder of an uninitialised submodule: git lists nothing there.
+        ...flagged.uninitialised,
+      ]);
+      // The same look at the worktree, against another commit (status asks for both).
+      const changed =
+        since === undefined
+          ? undefined
+          : [
+              ...(
+                await runGit(
+                  ['diff', '--name-only', '-z', '--no-renames', since, captured.commit, '--'],
+                  { cwd: repoRoot, timeoutMs: 30_000 },
+                )
+              ).stdout
+                .split('\0')
+                .filter((p) => p !== ''),
+              ...captured.nested,
+            ];
+      return {
+        paths: [...paths].sort(),
+        denied: [...new Set([...captured.skipped, ...ignored, ...flagged.denied])].sort(),
+        ignoredDenied: ignored.filter((p) => !paths.has(p)),
+        ...(changed ? { changedSince: changed } : {}),
+      };
+    },
+    changedSince: async (repoRoot, worktree, base, extraDeny) => {
+      const captured = await captureWorktreeCommit(worktree, {
+        message: 'mindly split status',
+        extraDeny,
+      });
       const res = await runGit(
         ['diff', '--name-only', '-z', '--no-renames', base, captured.commit, '--'],
         { cwd: repoRoot, timeoutMs: 30_000 },
       );
-      return res.stdout.split('\0').filter((p) => p !== '');
+      return [...res.stdout.split('\0').filter((p) => p !== ''), ...captured.nested];
     },
-    mergeCheck: async (repoRoot, base, sides) => {
+    mergeCheck: async (repoRoot, base, sides, extraDeny) => {
       const captured: { label: string; commit: string }[] = [];
       for (const side of sides) {
         const c = await captureWorktreeCommit(side.worktree, {
           message: `mindly split capture ${side.label}`,
+          extraDeny,
         });
         captured.push({ label: side.label, commit: c.commit });
       }
