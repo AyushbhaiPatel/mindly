@@ -162,10 +162,13 @@ memory, which is then injected into every other agent.
   `-w` for the mode, `rm -- -old.pem` removes a file of that name), and a colon in a name
   given to `mv` or `cp` is part of the name. A copy,
   move or link into a folder lands inside it under each source's name, and that name is what is
-  made and what is checked (the name itself, and where it leads when it is a link): a destination written with a `/` after it, a folder `mkdir` made earlier on the line, or
+  made and what is checked (the name itself, and where it leads when it is a link): a folder `mkdir` made earlier on the line (it is one though it is not on disk when the
+  line is checked: every source of `mkdir -p backup && cp -r src certs backup` lands in it
+  under its own name, with what it holds), or
   a folder on disk (not a link to one) that the line has not written, removed or renamed. Any
-  other destination is made itself; one written earlier on the line in any way may or may not be
-  a folder, and the line is not read fully. What a source brings is looked up on disk when the
+  other destination is made itself, with a `/` after it or not: `cp -r a newd/` makes `newd`
+  the copy of `a` when `newd` is not there. One written earlier on the line in any way may or
+  may not be a folder, and the line is not read fully (`cp -r a newd/ && cp -r certs newd`). What a source brings is looked up on disk when the
   command is checked, which is before the line runs. So a source the line has written by then
   makes the line not read fully: one with a wildcard that may match what an earlier command
   made (`echo x > n.key && cp *.key certs/`); one whose content is brought (a recursive copy, a
@@ -298,12 +301,22 @@ memory, which is then injected into every other agent.
   (`trees/w1/certs/server.pem`) is `certs/server.pem` of that worktree, for a tool call and for
   a shell line, from whichever checkout the session runs in, and a rule for `trees/**` in the
   main checkout is no rule for it. A folder written as a whole or by a wildcard that holds
-  such worktrees is checked in each of them (`rm -rf trees`, `rm -f trees/*/certs/*.pem`). A
+  working trees of the project is checked in each of them (`rm -rf trees`,
+  `rm -f trees/*/certs/*.pem`), the session's own included when the folder is above its top
+  (`rm -f ../*/certs/*.pem`, `chmod -R 700 ..`), and the folder is taken as it is on disk, so
+  a symbolic link to it reaches them too. A shell wildcard does not stand for a name that
+  starts with a dot: `rm -rf *` does not reach worktrees kept in `.wt`. A
   folder inside a repository of another project kept in the checkout (`vendor/repo/certs`) is
   not listed by git: it is walked for the files a rule covers, as the repository is when it is
   written as a whole.
 
-  One known limit of the reading: on bash 5.1 and earlier, `.*` also matches `.` and `..`, so
+  A rule reaches into `node_modules` or `.git` only when its scope names that folder. A line
+  that removes or rewrites one of those folders as a whole, or a folder in it, is not checked
+  against other rules (`rm -rf node_modules` under a rule for `**/*.pem` is let through, also
+  when a package there holds such a file), while a file there named in full is checked like
+  any other (`rm -f node_modules/pkg/test/key.pem` is blocked).
+
+  One more known limit of the reading: on bash 5.1 and earlier, `.*` also matches `.` and `..`, so
   `cp -r .* out/` brings the whole folder and the one above it. The hook takes `.*` for the
   names that start with a dot and does not see the rest.
 

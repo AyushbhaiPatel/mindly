@@ -839,25 +839,47 @@ export class HookHandler {
        * The project's working trees kept under a folder that is written as a whole or by a
        * wildcard: each holds its files under its own names, and is a scope of its own.
        */
-      const treesBelow = async (base: string, rest: readonly string[]): Promise<void> => {
-        if (trees === null || !hasLinkedTrees(treeRoot)) return;
-        for (const root of await this.otherTrees(treeRoot, trees)) {
-          if (!root.startsWith(`${base}${sep}`)) continue;
-          const parts = root.slice(base.length + 1).split(sep);
+      const treesBelow = async (
+        base: string,
+        rest: readonly string[],
+        /** The session's own tree too, when the folder is above its top. */
+        own = true,
+      ): Promise<void> => {
+        if (trees === null) return;
+        // The folder as it is on disk: the trees are told by where they really are.
+        const real = physical(base);
+        const above = real.endsWith(sep) ? real : `${real}${sep}`;
+        const roots = [
+          ...(hasLinkedTrees(treeRoot) ? await this.otherTrees(treeRoot, trees) : []),
+          ...(own ? [treeRoot] : []),
+        ];
+        for (const root of roots) {
+          if (!root.startsWith(above)) continue;
+          const parts = root.slice(above.length).split(sep);
           // The parts of the pattern that lead to the tree's top; what is left names files in it.
           let k = 0;
           while (k < parts.length && rest[k] !== undefined && rest[k] !== '**') {
+            const part = parts[k] as string;
+            const pattern = rest[k] as string;
+            // A shell's wildcard does not stand for a leading dot.
+            if (!t.dotfiles && part.startsWith('.') && /^[*?]/.test(pattern)) break;
             try {
-              if (!globToRegExp(rest[k] as string).test(parts[k] as string)) break;
+              if (!globToRegExp(pattern).test(part)) break;
             } catch {
+              // Not a part that can be held against a name: where it leads is not told.
+              unsure = true;
               break;
             }
             k++;
           }
           if (k < parts.length && rest[k] !== '**') continue;
+          const left = rest[k] === '**' ? rest.slice(k) : rest.slice(parts.length);
+          // A folder the rest names that the tree does not hold: nothing of it is there.
+          const wild = left.findIndex((x) => /[*?{]/.test(x));
+          const folders = left.slice(0, wild === -1 ? left.length - 1 : wild);
+          if (folders.length > 0 && !exists(join(root, ...folders))) continue;
           const top = await this.locate(project, treeRoot, root, trees);
           if (top === null || top === 'unknown' || top.root !== root) continue;
-          const left = rest[k] === '**' ? rest.slice(k) : rest.slice(parts.length);
           scope(top, left.length > 0 ? left : ['**']);
         }
       };
@@ -927,19 +949,40 @@ export class HookHandler {
           const left = downTo(base, treeRoot, rest);
           const root = left === null ? null : await place(treeRoot);
           if (root !== null) scope(root, [...(left as string[]), '**']);
+          await treesBelow(base, [...rest, '**'], false);
+        } else {
+          // A pattern from above the project that reaches into it (`rm -f ../*/certs/*.pem`).
+          await treesBelow(base, rest);
         }
         continue;
       }
+      /**
+       * `mkdir -p` makes the folders above the one it names that are not there: each is
+       * written too, as many as are placed.
+       */
+      const above = async (): Promise<void> => {
+        for (let up = dirname(path); t.parents && up !== dirname(up); up = dirname(up)) {
+          if (parents.has(up) || exists(up)) break;
+          if (parents.size >= MAX_PARENTS) {
+            limit ??= `more than ${MAX_PARENTS} folders made on the way`;
+            break;
+          }
+          parents.add(up);
+          file(await place(up));
+        }
+      };
       // A word that is a path only when such an entry exists.
       if (t.ifExists && !exists(path)) continue;
       // A directory above the project, written with everything in it, holds the project too.
-      if (t.tree && t.certain && t.how !== 'land' && downTo(toPosix(path), treeRoot, []) !== null) {
+      if (t.tree && t.how !== 'land' && downTo(toPosix(path), treeRoot, []) !== null) {
         const root = await place(treeRoot);
         if (root !== null) scope(root, ['**']);
+        await treesBelow(path, ['**'], false);
         continue;
       }
       // `ln -n` takes a link to a folder as the name it is, not as the folder it leads to.
-      const directory = isDirectory(path) && !(t.noFollow && isLink(path));
+      // A folder `mkdir` made earlier on the line is one, though it is not on disk yet.
+      const directory = t.intoFolder || (isDirectory(path) && !(t.noFollow && isLink(path)));
       if (t.how === 'land') {
         // An archive unpacked there: files of unknown names are put somewhere inside.
         landing(await place(path));
@@ -962,6 +1005,13 @@ export class HookHandler {
             else await brings(path, brought);
           }
           continue;
+        }
+        // The folder `mkdir` made is written by it, with those above it; and when something
+        // else is at its name (the `mkdir` failed, or did not run), the copy writes that.
+        if (t.intoFolder && !isDirectory(path)) {
+          file(await place(path));
+          await named(path);
+          await above();
         }
         for (const [name, from] of copied(t, cwd, timeUp)) {
           if (name === null) {
@@ -1014,17 +1064,7 @@ export class HookHandler {
       }
       file(at);
       await named(path);
-      // `mkdir -p` makes the folders above the one it names that are not there: each is
-      // written too, as many as are placed.
-      for (let up = dirname(path); t.parents && up !== dirname(up); up = dirname(up)) {
-        if (parents.has(up) || exists(up)) break;
-        if (parents.size >= MAX_PARENTS) {
-          limit ??= `more than ${MAX_PARENTS} folders made on the way`;
-          break;
-        }
-        parents.add(up);
-        file(await place(up));
-      }
+      await above();
       // A whole tree is written when the text says so; a path merely given to a program counts
       // as a tree only when it is a directory.
       if (t.tree && (t.certain || directory)) {

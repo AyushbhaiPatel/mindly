@@ -1921,6 +1921,13 @@ const LINKS_TO_A_NEW_FILE = [
   'ln -s .env dl',
 ].join(' && ');
 
+/** More folders for a rule to name: certificates in two places, keys in `dist`, settings. */
+const MORE_FILES =
+  'mkdir -p certs/old dist/keys config a pkg/certs && echo k > certs/old/prev.pem && echo k > pkg/certs/p.pem && echo d > dist/x.js && echo k > dist/keys/tls.pem && echo s > config/secrets.json && echo c > config/app.json && echo f > a/f.txt && echo p > package.json';
+/** Folders that hold worktrees, kept out of git's view. */
+const IGNORED_TREES =
+  "printf 'trees/\\nstore/\\nt2\\n.wt/\\n' > .gitignore && git add -A && git commit -qm ignore";
+
 /**
  * Lines that write a covered file where nothing the hook is told settles it: a covered file that
  * is not there yet, made through what the line made; a link on disk that leads to a file that is
@@ -2616,6 +2623,119 @@ const unsettled: {
       { name: 'the repository as a whole', command: 'rm -rf vendor/repo' },
     ],
   },
+  {
+    title: 'a folder written as a whole, under a rule that names it after **/',
+    scopes: ['**/certs/**'],
+    prep: MORE_FILES,
+    covered: (rel) => /(^|\/)certs\//.test(rel),
+    cases: [
+      { name: 'removed', command: 'rm -rf certs' },
+      { name: 'its files by a wildcard', command: 'rm -f certs/*.pem' },
+      { name: 'all it holds', command: 'rm -rf certs/*' },
+      { name: 'moved away', command: 'mv certs old' },
+      { name: 'a change of mode', command: 'chmod -R 700 certs' },
+      { name: 'one deeper in', command: 'rm -rf pkg/certs' },
+    ],
+  },
+  {
+    title: 'a folder written as a whole, under rules that name a file in it after **/',
+    scopes: ['**/certs/*.pem', '**/config/secrets.json'],
+    prep: MORE_FILES,
+    covered: (rel) =>
+      /(^|\/)certs\/[^/]*\.pem$/.test(rel) || /(^|\/)config\/secrets\.json$/.test(rel),
+    cases: [
+      { name: 'the folder of the first', command: 'rm -rf certs' },
+      { name: 'its files by a wildcard', command: 'rm -f certs/*.pem' },
+      { name: 'the folder of the second', command: 'rm -rf config' },
+      { name: 'its files by a wildcard', command: 'rm -f config/*.json' },
+    ],
+  },
+  {
+    title: 'a folder written as a whole, under a rule with a folder between two **',
+    scopes: ['**/pkg/**/p.pem'],
+    prep: MORE_FILES,
+    covered: (rel) => /(^|\/)pkg\/(.*\/)?p\.pem$/.test(rel),
+    cases: [
+      { name: 'the folder', command: 'rm -rf pkg' },
+      { name: 'a folder in it', command: 'rm -rf pkg/certs' },
+      { name: 'by wildcards', command: 'rm -f pkg/*/*.pem' },
+    ],
+  },
+  {
+    title: 'copies into a folder that is not on disk when the line is checked',
+    scopes: ['**/*.pem'],
+    prep: MORE_FILES,
+    covered: endsInPem,
+    cases: [
+      {
+        name: 'two sources into a folder mkdir made',
+        command: 'mkdir -p backup && cp -r src certs backup',
+      },
+      { name: 'with a / after it', command: 'mkdir -p backup && cp -r src certs backup/' },
+      {
+        name: 'two copies into it',
+        command: 'mkdir -p build && cp package.json build && cp -r dist build',
+      },
+      {
+        name: 'the same without -p',
+        command: 'mkdir build && cp package.json build/ && cp -r dist build/',
+      },
+      { name: 'after ;', command: 'mkdir build; cp package.json build; cp -r certs build' },
+      {
+        name: 'two files, then a folder',
+        command: 'mkdir build && cp package.json a.txt build && cp -a certs build',
+      },
+      {
+        name: 'a folder a copy made, then a second copy',
+        command: 'cp -r a newd/ && cp -r certs newd',
+      },
+      { name: 'then a file copied into it', command: 'cp -r a newd/ && cp certs/server.pem newd/' },
+    ],
+  },
+  {
+    title: 'a folder copied into a folder mkdir made, under rules that name it after **/',
+    scopes: ['**/config/secrets.json', '**/dist/keys/*'],
+    prep: MORE_FILES,
+    covered: (rel) => /(^|\/)config\/secrets\.json$/.test(rel) || /(^|\/)dist\/keys\//.test(rel),
+    cases: [
+      { name: 'with -p', command: 'mkdir -p backup && cp -r config backup' },
+      { name: 'with a / after it', command: 'mkdir backup && cp -r config backup/' },
+      {
+        name: 'the folder is named with the source',
+        command: 'mkdir -p build && cp -r dist build',
+      },
+    ],
+  },
+  {
+    title: 'from a linked worktree kept inside the main checkout, a folder above it',
+    scopes: ['certs/**'],
+    prep: `${IGNORED_TREES} && git worktree add -q trees/w1`,
+    covered: (rel) => rel.startsWith('trees/w1/certs/'),
+    cases: [
+      { name: 'all the worktrees removed', command: 'rm -rf ../*', cwd: 'trees/w1' },
+      { name: 'by wildcards', command: 'rm -f ../*/certs/*.pem', cwd: 'trees/w1' },
+      {
+        name: 'from the main checkout down',
+        command: 'rm -f ../../trees/*/certs/server.pem',
+        cwd: 'trees/w1',
+      },
+      { name: 'a change of mode', command: 'chmod -R 700 ../../trees', cwd: 'trees/w1' },
+    ],
+  },
+  {
+    title: 'worktrees reached through a symbolic link to the folder they are kept in',
+    scopes: ['certs/**'],
+    prep: `${IGNORED_TREES} && mkdir store && ln -s store t2 && git worktree add -q store/w1`,
+    covered: (rel) => rel.startsWith('store/w1/certs/'),
+    cases: [
+      { name: 'the link with a / after it', command: 'rm -rf t2/' },
+      { name: 'all it holds', command: 'rm -rf t2/*' },
+      { name: 'by wildcards', command: 'rm -f t2/*/certs/*.pem' },
+      { name: 'a change of mode', command: 'chmod -R 700 t2' },
+      { name: 'by the folder itself', command: 'rm -rf store/*' },
+      { name: 'a folder in a worktree', command: 'rm -rf t2/w1/certs' },
+    ],
+  },
 ];
 
 describe('lines whose paths nothing settles are never let through in silence', () => {
@@ -3237,6 +3357,90 @@ describe('a linked worktree kept inside the main checkout', () => {
   });
 });
 
+describe('a wildcard, or a recursive change, in the folder above the project', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUp(['certs/**']);
+  });
+  afterAll(() => g.mindly.close());
+  /** Runs the line in a copy of the project alone in a folder: what its covered file is after. */
+  const inHolder = (command: string): string => {
+    const holder = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-holder-')));
+    const proj = join(holder, 'proj');
+    execFileSync('cp', ['-a', `${g.dir}/.`, proj]);
+    execFileSync('chmod', ['644', join(proj, 'certs/server.pem')]);
+    try {
+      execFileSync('bash', ['-c', `${command} 2>&1`], { cwd: proj, env: GIT_ENV });
+    } catch {
+      // What it did before it failed is looked at all the same.
+    }
+    const pem = join(proj, 'certs/server.pem');
+    const after = existsSync(pem) ? `mode ${(lstatSync(pem).mode & 0o777).toString(8)}` : 'gone';
+    execFileSync('bash', ['-c', 'chmod -R u+rwx "$1" 2>/dev/null; rm -rf "$1"', 'bash', holder]);
+    return after;
+  };
+
+  for (const command of [
+    'rm -f ../*/certs/*.pem',
+    'rm -f ../*/certs/server.pem',
+    'chmod 700 ../*/certs/*.pem',
+    'chmod -R 700 ..',
+  ]) {
+    it(`reaches the project's own covered file: ${command}`, async () => {
+      expect(inHolder(command), 'the real run').not.toBe('mode 644');
+      expect(verdictOf(await g.shell(command)), `hook on \`${command}\``).not.toBe('allow');
+    });
+  }
+});
+
+describe('worktrees kept in a hidden folder', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUp(['certs/**'], `${IGNORED_TREES} && git worktree add -q .wt/w1`);
+  });
+  afterAll(() => g.mindly.close());
+  const inWorktree = (rel: string) => rel.startsWith('.wt/');
+
+  for (const command of ['rm -f */*/certs/*.pem', 'rm -f */*/*/*.pem', 'rm -rf ?wt', 'rm -rf *t']) {
+    it(`are not reached by a wildcard that matches no dot name: ${command}`, async () => {
+      expect(runInCopy(g.dir, command, inWorktree).written, 'the real run').toEqual([]);
+      expect(verdictOf(await g.shell(command)), `hook on \`${command}\``).toBe('allow');
+    });
+  }
+
+  it('are reached by a wildcard that names the dot, and the main checkout stays covered', async () => {
+    expect(verdictOf(await g.shell('rm -f .wt/*/certs/*.pem'))).toBe('deny');
+    expect(verdictOf(await g.shell('rm -rf .*'))).toBe('deny');
+    // The covered folder of the main checkout itself.
+    expect(verdictOf(await g.shell('rm -rf *'))).toBe('deny');
+  });
+
+  it('a change of mode over what a wildcard matches says nothing of them', async () => {
+    const other = setUp(['gen/**'], `${IGNORED_TREES} && git worktree add -q .wt/w1`);
+    try {
+      expect(verdictOf(await other.shell('chmod -R u+w *'))).toBe('allow');
+    } finally {
+      other.mindly.close();
+    }
+  });
+});
+
+describe('a covered file under node_modules', () => {
+  it('is blocked named in full, and not looked for when the folder goes as a whole', async () => {
+    const g = setUp(
+      ['**/*.pem'],
+      'echo node_modules > .gitignore && mkdir -p node_modules/pkg/test && echo k > node_modules/pkg/test/key.pem',
+    );
+    try {
+      expect(verdictOf(await g.shell('rm -f node_modules/pkg/test/key.pem'))).toBe('deny');
+      // A rule reaches into node_modules only when its scope names that folder.
+      expect(verdictOf(await g.shell('rm -rf node_modules'))).toBe('allow');
+    } finally {
+      g.mindly.close();
+    }
+  });
+});
+
 describe('the folders mkdir -p makes on the way', () => {
   let g: ReturnType<typeof setUp>;
   beforeAll(() => {
@@ -3528,6 +3732,7 @@ describe('lines that stay read fully', () => {
     'mkdir -p src && cp src/a.ts b.ts',
     'cp a.txt dist/',
     'mkdir -p dist/assets && cp a.txt dist/assets/',
+    'mkdir -p build && cp -r src build',
     'rm -rf packages/*/dist',
     // A name after `--`, and a mode, where nothing is covered.
     'rm -- -f',
