@@ -309,6 +309,33 @@ describe('intents and file changes', () => {
     expect(store.fileChanges.findByHash(project.id, 'src/a.ts', 'h2')[0]?.sessionId).toBe(a.id);
     expect(store.fileChanges.otherEditors(project.id, b.id, 'src/a.ts', 0)).toEqual([a.id]);
   });
+
+  it('keeps the working tree a change was made in, null when not given', () => {
+    const { store, project, a } = setup();
+    const base = {
+      projectId: project.id,
+      sessionId: a.id,
+      tool: 'Edit',
+      hunkHashes: [],
+      addedLines: 1,
+      removedLines: 0,
+      promptEventId: null,
+    };
+    expect(store.fileChanges.record({ ...base, path: 'x.ts', worktree: '/wt' }).worktree).toBe(
+      '/wt',
+    );
+    expect(store.fileChanges.record({ ...base, path: 'y.ts' }).worktree).toBeNull();
+    expect(store.fileChanges.forPath(project.id, 'x.ts')[0]?.worktree).toBe('/wt');
+    // Two processes opening an older store at once may both apply v7.
+    store.db.exec(MIGRATIONS[6] as string);
+    expect(store.fileChanges.forPath(project.id, 'x.ts')[0]?.worktree).toBe('/wt');
+    expect(store.fileChanges.since(project.id, 0).map((c) => [c.path, c.worktree])).toEqual(
+      expect.arrayContaining([
+        ['x.ts', '/wt'],
+        ['y.ts', null],
+      ]),
+    );
+  });
 });
 
 describe('conflicts', () => {
@@ -510,5 +537,39 @@ describe('misc repos', () => {
     expect(store.snapshots.get(s.id).state).toEqual({ tasks: [] });
     store.kv.set('k', { a: 1 });
     expect(store.kv.get('k')).toEqual({ a: 1 });
+  });
+
+  it("deletes the keys of a project's sessions under a prefix", () => {
+    const { store, a, b } = setup();
+    const other = store.projects.upsertByRoot('/elsewhere', 'elsewhere');
+    const c = store.sessions.upsert({
+      projectId: other.id,
+      agentKind: 'codex',
+      externalId: 'cx-2',
+      worktree: '/elsewhere',
+      branch: 'main',
+      transcriptPath: null,
+    }).session;
+    for (const s of [a, b, c]) store.kv.set(`notes:${s.id}`, [1]);
+    store.kv.set(`other:${a.id}`, 1);
+    expect(store.kv.deleteForSessions('notes:', a.projectId)).toBe(2);
+    expect(store.kv.get(`notes:${a.id}`)).toBeNull();
+    expect(store.kv.get(`notes:${b.id}`)).toBeNull();
+    expect(store.kv.get(`notes:${c.id}`)).toEqual([1]);
+    expect(store.kv.get(`other:${a.id}`)).toBe(1);
+  });
+
+  it('deletes the keys under a prefix last written before a time', () => {
+    const { store } = setup();
+    store.kv.set('notes:old', 1);
+    store.kv.set('notes_x', 1);
+    store.kv.set('other:old', 1);
+    store.db.prepare('UPDATE kv SET updated_at = 0').run();
+    store.kv.set('notes:fresh', 1);
+    expect(store.kv.deleteStale('notes:', 1)).toBe(1);
+    expect(store.kv.get('notes:old')).toBeNull();
+    expect(store.kv.get('notes_x')).toBe(1);
+    expect(store.kv.get('other:old')).toBe(1);
+    expect(store.kv.get('notes:fresh')).toBe(1);
   });
 });

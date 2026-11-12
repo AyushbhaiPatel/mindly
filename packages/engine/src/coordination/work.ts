@@ -28,6 +28,18 @@ export function sessionLabel(s: Session): string {
 export class TaskService {
   constructor(private readonly k: Kernel) {}
 
+  /**
+   * Task text is shown to every other agent (the "working on" line, handoffs), so it is redacted
+   * like any other stored agent text.
+   */
+  private redact(text: string): string {
+    return redactText(text, { extraPatterns: this.k.config.redaction.extraPatterns });
+  }
+
+  private line(text: string, max: number): string {
+    return sanitizeLine(this.redact(text), max);
+  }
+
   create(input: {
     projectId: string;
     title: string;
@@ -38,14 +50,12 @@ export class TaskService {
   }): Task {
     const task = this.k.store.tasks.create({
       projectId: input.projectId,
-      title: sanitizeLine(input.title, 200),
-      description: (input.description ?? '').slice(0, 4000),
+      title: this.line(input.title, 200),
+      description: this.redact(input.description ?? '').slice(0, 4000),
       status: input.owner ? 'in_progress' : 'open',
       ownerSessionId: input.owner?.id ?? null,
       parentId: input.parentId ?? null,
-      plan: (input.plan ?? [])
-        .slice(0, 50)
-        .map((t) => ({ text: sanitizeLine(t, 300), done: false })),
+      plan: (input.plan ?? []).slice(0, 50).map((t) => ({ text: this.line(t, 300), done: false })),
     });
     if (input.owner) this.k.store.sessions.setCurrentTask(input.owner.id, task.id);
     this.k.store.events.append({
@@ -70,14 +80,14 @@ export class TaskService {
   ): Task {
     const clean: TaskPatch = {};
     if (patch.status) clean.status = patch.status;
-    if (patch.title) clean.title = sanitizeLine(patch.title, 200);
-    if (patch.description !== undefined) clean.description = patch.description.slice(0, 4000);
+    if (patch.title) clean.title = this.line(patch.title, 200);
+    if (patch.description !== undefined)
+      clean.description = this.redact(patch.description).slice(0, 4000);
     if (patch.plan)
       clean.plan = patch.plan
         .slice(0, 50)
-        .map((s) => ({ text: sanitizeLine(s.text, 300), done: !!s.done }));
-    if (patch.blockers)
-      clean.blockers = patch.blockers.slice(0, 20).map((b) => sanitizeLine(b, 300));
+        .map((s) => ({ text: this.line(s.text, 300), done: !!s.done }));
+    if (patch.blockers) clean.blockers = patch.blockers.slice(0, 20).map((b) => this.line(b, 300));
     const task = this.k.store.tasks.update(id, clean);
     this.k.store.events.append({
       projectId: task.projectId,

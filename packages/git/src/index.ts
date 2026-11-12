@@ -17,6 +17,7 @@ export {
   hardenedGitEnv,
   parseGitVersion,
   runGit,
+  runGitRecords,
   versionAtLeast,
 } from './exec.js';
 export type { GitResult, GitVersion, RunGitOptions } from './exec.js';
@@ -75,12 +76,28 @@ export type {
 export {
   addWorktree,
   branchExists,
+  branchOnlyWork,
   deleteBranch,
+  DEPENDENCY_DIRS,
+  PACKAGE_DIRS,
+  flaggedChanges,
+  ignoredDeniedFiles,
+  gitDataPaths,
+  elsewhereGitDirLabel,
+  linkedGitDirLabel,
+  worktreeScan,
   listFiles,
   mergeIntoNewBranch,
   removeWorktree,
+  restoreFromHead,
 } from './worktrees.js';
-export type { MergeIntoBranchResult, MergeSource } from './worktrees.js';
+export type {
+  BranchOnlyCommit,
+  BranchOnlyWork,
+  MergeIntoBranchResult,
+  MergeSource,
+  WorktreeScan,
+} from './worktrees.js';
 
 export { DEFAULT_CHECK_OUTPUT_BYTES, checkEnv, runChecks } from './checks.js';
 export type { CheckResult, CheckSpec, CheckStatus, RunChecksOptions } from './checks.js';

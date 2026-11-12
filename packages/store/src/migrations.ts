@@ -24,6 +24,7 @@ import { MIGRATION_V3_SPLIT } from './migrations/v3-split.js';
 import { MIGRATION_V4_BISECT } from './migrations/v4-bisect.js';
 import { MIGRATION_V5_TRACK } from './migrations/v5-track.js';
 import { MIGRATION_V6_SENTINEL } from './migrations/v6-sentinel.js';
+import { MIGRATION_V7_CHANGE_WORKTREE } from './migrations/v7-change-worktree.js';
 
 /** `col IN ('a','b')` from a closed enum tuple (values are compile-time constants, not input). */
 function oneOf(col: string, values: readonly string[]): string {
@@ -347,4 +348,5 @@ CREATE INDEX saves_project ON saves (project_id, status, created_at);
   /* v4: checkpoints (bisect) */ MIGRATION_V4_BISECT,
   /* v5: line survival (track) */ MIGRATION_V5_TRACK,
   /* v6: sentinel */ MIGRATION_V6_SENTINEL,
+  /* v7: the working tree of an edit */ MIGRATION_V7_CHANGE_WORKTREE,
 ];

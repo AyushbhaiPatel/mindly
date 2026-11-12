@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { splitOf } from '@mindly/engine';
 import { openMindly } from '@mindly/runtime';
 import { cli, git, sandbox, tempDir, write, type Sandbox } from './helpers.js';
 
@@ -161,6 +162,8 @@ interface StatusJson {
     task: { status: string; parentId: string | null };
     state: string;
     filesChanged: string[];
+    uncommitted: string[];
+    unmergedCommits: string[];
     session: { id: string } | null;
   }[];
   mergeCheck: { status: string; result: { clean: boolean; conflictedPaths: string[] } } | null;
@@ -556,8 +559,12 @@ describe('split status, merge and abort (acceptance 4)', () => {
       commit: string;
       merged: string[];
       checksSkipped: string | null;
+      leftBehind: { part: string; paths: string[] }[];
     };
     expect(m.branch).toBe('mindly/billing/integration');
+    expect(m.leftBehind).toEqual([
+      { part: 'page', title: 'Billing page', paths: ['src/app/billing.ts'] },
+    ]);
     expect(m.merged).toEqual(['api', 'webhook', 'page']);
     expect(m.checksSkipped).toBe('none_configured');
     expect(git(sb.repo, 'rev-parse', 'mindly/billing/integration').trim()).toBe(m.commit);
@@ -578,6 +585,357 @@ describe('split status, merge and abort (acceptance 4)', () => {
     const again = await cli(sb, ['split', 'merge', '--force']);
     expect(again.code).toBe(1);
     expect(again.stderr).toContain('merged, not active');
+
+    // The page's file is only in its worktree: status says so and does not suggest removing it.
+    const after = await cli(sb, ['split', 'status']);
+    expect(after.stdout).toMatch(/1\s+not\s+committed/);
+    expect(after.stdout).not.toContain('mindly split abort');
+    expect(after.stdout).toContain(`cd ${partDir(sb, 'page')}`);
+    // Cleaning up would delete it: -y alone refuses, --discard is the way to say so.
+    const cleanup = await cli(sb, ['split', 'abort', '--yes']);
+    expect(cleanup.code).toBe(1);
+    expect(cleanup.stderr).toContain(
+      'hold work no other branch has: "Billing page" (not committed:',
+    );
+    expect(cleanup.stderr).toContain('src/app/billing.ts');
+    expect(cleanup.stderr).toContain('mindly split abort --yes --discard');
+    expect(existsSync(join(partDir(sb, 'page'), 'src/app/billing.ts'))).toBe(true);
+    const discard = await cli(sb, ['split', 'abort', '--yes', '--discard']);
+    expect(discard.code).toBe(0);
+    expect(discard.stdout).toContain('Uncommitted work was removed');
+    expect(discard.stdout).toContain('Part "Billing page": src/app/billing.ts');
+    expect(existsSync(worktreeRoot(sb))).toBe(false);
+    expect(branches(sb)).toEqual(['mindly/billing/integration']);
+  });
+
+  it('abort after a merge keeps commits a part made on its branch since', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'api'), 'src/api/plans.ts', 'export const plans = 1;\n');
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    // The page agent keeps working after the merge and commits on its part branch.
+    commitIn(partDir(sb, 'page'), 'src/app/late.ts', 'export const late = 1;\n');
+    const late = git(partDir(sb, 'page'), 'rev-parse', 'HEAD').trim();
+
+    const s = await statusJson(sb);
+    expect(s.parts.map((p) => p.uncommitted)).toEqual([[], [], []]);
+    expect(s.parts.map((p) => p.unmergedCommits)).toEqual([
+      [],
+      [],
+      [`${late.slice(0, 12)} work in src/app/late.ts`],
+    ]);
+    const status = await cli(sb, ['split', 'status']);
+    expect(status.stdout).toMatch(/1\s+commit\s+not\s+merged/);
+    expect(status.stdout).toContain('mindly split abort --keep-branches');
+
+    const abort = await cli(sb, ['split', 'abort', '--yes']);
+    expect(abort.code).toBe(1);
+    expect(abort.stderr).toContain(
+      `hold work no other branch has: "Billing page" (1 commit only on its branch: ${late.slice(0, 12)} work in src/app/late.ts)`,
+    );
+    expect(abort.stderr).toContain('mindly split abort --keep-branches');
+    expect(abort.stderr).toContain('mindly split abort --yes --discard');
+    expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(late);
+    expect(existsSync(partDir(sb, 'page'))).toBe(true);
+
+    // Merged into the integration branch, the commit is safe and the cleanup goes through.
+    const integration = join(tempDir('syn-split-int-'), 'integration');
+    git(sb.repo, 'worktree', 'add', '-q', integration, 'mindly/billing/integration');
+    git(integration, 'merge', '-q', '--no-edit', 'mindly/billing/page');
+    git(sb.repo, 'worktree', 'remove', '--force', integration);
+    const ok = await cli(sb, ['split', 'abort', '--yes']);
+    expect(ok.stderr).toBe('');
+    expect(ok.code).toBe(0);
+    expect(branches(sb)).toEqual(['mindly/billing/integration']);
+    expect(git(sb.repo, 'merge-base', '--is-ancestor', late, 'mindly/billing/integration')).toBe(
+      '',
+    );
+  });
+
+  it('a yes on the terminal never covers a commit made while the question was open', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    let late = '';
+    // The page agent commits on its branch while the user reads the question. The answer is read
+    // with `.trim()`: the commit happens then.
+    const answer = {
+      trim: (): string => {
+        commitIn(partDir(sb, 'page'), 'src/app/late.ts', 'export const late = 1;\n');
+        late = git(partDir(sb, 'page'), 'rev-parse', 'HEAD').trim();
+        return 'y';
+      },
+    };
+    const r = await cli(sb, ['split', 'abort'], { answers: [answer] as unknown as string[] });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('not shown when the abort was confirmed');
+    expect(r.stderr).toContain(`${late.slice(0, 12)} work in src/app/late.ts`);
+    expect(r.stderr).toContain('mindly split abort again');
+    expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(late);
+    expect(existsSync(partDir(sb, 'page'))).toBe(true);
+    // Asked again, the commit is listed and a yes covers it.
+    const again = await cli(sb, ['split', 'abort'], { answers: ['y'] });
+    expect(again.stderr).toContain(`${late.slice(0, 12)} work in src/app/late.ts`);
+    expect(again.code).toBe(0);
+    expect(branches(sb)).toEqual(['mindly/billing/integration']);
+  });
+
+  it('a yes on the terminal covers only what was listed, with --discard too', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    // A post-merge commit the user is shown and agrees to delete.
+    commitIn(partDir(sb, 'page'), 'src/app/shown.ts', 'export const shown = 1;\n');
+    let late = '';
+    const answer = {
+      trim: (): string => {
+        commitIn(partDir(sb, 'page'), 'src/app/late.ts', 'export const late = 1;\n');
+        late = git(partDir(sb, 'page'), 'rev-parse', 'HEAD').trim();
+        return 'y';
+      },
+    };
+    const r = await cli(sb, ['split', 'abort', '--discard'], {
+      answers: [answer] as unknown as string[],
+    });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('not shown when the abort was confirmed');
+    expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(late);
+  });
+
+  it('abort after a squash merge refuses, and --keep-branches cleans up without losing anything', async () => {
+    for (const deleteIntegration of [false, true]) {
+      const sb = await splitSandbox();
+      await createSplit(sb);
+      commitIn(partDir(sb, 'api'), 'src/api/plans.ts', 'export const plans = 1;\n');
+      commitIn(partDir(sb, 'page'), 'src/app/debug.ts', 'export const debug = 1;\n');
+      expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+      // The usual way a merged branch lands: squash-merged into main by a pull request.
+      git(sb.repo, 'merge', '-q', '--squash', 'mindly/billing/integration');
+      git(sb.repo, 'commit', '-q', '-m', 'Add billing (#12)');
+      if (deleteIntegration) git(sb.repo, 'branch', '-D', 'mindly/billing/integration');
+      // After it, the page agent removes the debug file it had added: a real change that only
+      // its branch has, although merging it into main would change nothing.
+      git(partDir(sb, 'page'), 'rm', '-q', 'src/app/debug.ts');
+      git(partDir(sb, 'page'), 'commit', '-q', '-m', 'Remove the debug module');
+      const fix = git(partDir(sb, 'page'), 'rev-parse', 'HEAD').trim();
+      const refused = await cli(sb, ['split', 'abort', '--yes']);
+      expect(refused.code).toBe(1);
+      expect(refused.stderr).toContain(`${fix.slice(0, 12)} Remove the debug module`);
+      expect(refused.stderr).toContain('expected after a squash or rebase merge');
+      expect(refused.stderr).toContain('mindly split abort --keep-branches');
+      expect(refused.stderr).not.toContain('merge it into');
+      expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(fix);
+      // Keeping the branches removes the worktrees and loses nothing.
+      const kept = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+      expect(kept.stderr).toBe('');
+      expect(kept.code).toBe(0);
+      expect(existsSync(worktreeRoot(sb))).toBe(false);
+      expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(fix);
+    }
+  });
+
+  it('abort after a squash merge and later work on main refuses instead of guessing', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'api'), 'src/api/plans.ts', 'export const plans = 1;\n');
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    git(sb.repo, 'merge', '-q', '--squash', 'mindly/billing/integration');
+    git(sb.repo, 'commit', '-q', '-m', 'Add billing (#12)');
+    git(sb.repo, 'branch', '-D', 'mindly/billing/integration');
+    // Ordinary follow-up work on main touches what the page part wrote.
+    write(sb.repo, 'src/app/billing.ts', 'export const billing = 2;\n');
+    git(sb.repo, 'commit', '-q', '-am', 'Tweak billing');
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('the parts hold work no other branch has');
+    expect(r.stderr).toContain('expected after a squash or rebase merge');
+    expect(r.stderr).toContain('mindly split abort --keep-branches');
+    const kept = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(kept.code).toBe(0);
+    expect(branches(sb)).toEqual([
+      'mindly/billing/api',
+      'mindly/billing/page',
+      'mindly/billing/webhook',
+    ]);
+  });
+
+  it('abort counts an uncommitted deny-listed file and an ignored local .env as work', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    // Documented env vars, never committed; and a local .env that git ignores.
+    write(partDir(sb, 'page'), 'src/app/.env.example', 'STRIPE_KEY=\nBILLING_URL=\n');
+    write(partDir(sb, 'page'), '.gitignore', '.env\nnode_modules/\n');
+    git(partDir(sb, 'page'), 'add', '.gitignore');
+    git(partDir(sb, 'page'), 'commit', '-q', '-m', 'ignore');
+    git(sb.repo, 'branch', 'keep/page', 'mindly/billing/page');
+    write(partDir(sb, 'page'), '.env', 'STRIPE_KEY=sk_live_secret\n');
+    write(partDir(sb, 'page'), 'node_modules/pkg/index.js', 'x\n');
+    expect((await statusJson(sb)).parts[2]!.uncommitted).toEqual(['src/app/.env.example']);
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('(not committed: .env, src/app/.env.example)');
+    expect(r.stderr).not.toContain('node_modules');
+    expect(r.stderr).not.toContain('sk_live_secret');
+    expect(existsSync(join(partDir(sb, 'page'), 'src/app/.env.example'))).toBe(true);
+    expect(existsSync(join(partDir(sb, 'page'), '.env'))).toBe(true);
+  });
+
+  it('abort before a merge refuses with -y alone, like after one', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    write(partDir(sb, 'page'), 'src/app/draft.ts', 'export const draft = 1;\n');
+    const r = await cli(sb, ['split', 'abort', '--yes']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('not committed: src/app/draft.ts; 1 commit only on its branch');
+    expect(r.stderr).not.toContain('squash');
+    expect(branches(sb)).toContain('mindly/billing/page');
+    // Keeping the branches keeps the commit; the draft file still stops it until it is committed.
+    expect((await cli(sb, ['split', 'abort', '--yes', '--keep-branches'])).code).toBe(1);
+    commitIn(partDir(sb, 'page'), 'src/app/draft.ts', 'export const draft = 1;\n');
+    const kept = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(kept.code).toBe(0);
+    expect(branches(sb)).toContain('mindly/billing/page');
+    expect(existsSync(worktreeRoot(sb))).toBe(false);
+  });
+
+  it('an abort left unfinished by a commit can be finished keeping the branch', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    const splitId = (await statusJson(sb)).split.id;
+    // The page agent commits on its branch while the abort removes its worktree.
+    const mindly = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
+    let late = '';
+    try {
+      const port = mindly.kernel.ports.git.split!;
+      const remove = port.removeWorktree.bind(port);
+      port.removeWorktree = async (root, path) => {
+        if (path === partDir(sb, 'page') && !late) {
+          commitIn(path, 'src/app/late.ts', 'export const late = 1;\n');
+          late = git(path, 'rev-parse', 'HEAD').trim();
+        }
+        return remove(root, path);
+      };
+      expect((await splitOf(mindly).abort(splitId, {})).finished).toBe(false);
+    } finally {
+      mindly.close();
+    }
+    expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(late);
+    const status = await cli(sb, ['split', 'status']);
+    expect(status.stdout).toContain('finish the abort: it lists what is left');
+    const again = await cli(sb, ['split', 'abort', '--yes', '--keep-branches']);
+    expect(again.stderr).toBe('');
+    expect(again.code).toBe(0);
+    expect(git(sb.repo, 'rev-parse', 'mindly/billing/page').trim()).toBe(late);
+    expect((await cli(sb, ['split', 'status'])).stdout).not.toContain('finish the abort');
+  });
+
+  it('a yes never removes a nested repository, whatever is written into it while asked', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    const nested = join(partDir(sb, 'page'), 'src/app/vendor');
+    write(nested, 'lib.ts', 'export const lib = 1;\n');
+    git(nested, 'init', '-q', '-b', 'main');
+    git(nested, 'add', '-A');
+    git(nested, 'commit', '-q', '-m', 'vendor');
+    const answer = {
+      trim: (): string => {
+        write(nested, 'lib.ts', 'export const lib = 2;\n');
+        write(nested, 'new.ts', 'export const fresh = 1;\n');
+        return 'y';
+      },
+    };
+    const r = await cli(sb, ['split', 'abort'], { answers: [answer] as unknown as string[] });
+    expect(r.code).toBe(1);
+    expect(r.stdout.replace(/\s+/g, ' ')).toContain(
+      'it holds git data that abort never deletes: src/app/vendor.',
+    );
+    expect(readFileSync(join(nested, 'new.ts'), 'utf8')).toBe('export const fresh = 1;\n');
+    expect(readFileSync(join(nested, 'lib.ts'), 'utf8')).toBe('export const lib = 2;\n');
+    // Only a discard that was not asked about removes it.
+    expect((await cli(sb, ['split', 'abort', '--yes', '--discard'])).code).toBe(0);
+    expect(existsSync(nested)).toBe(false);
+  });
+
+  it('abort after a merge removes commits only on a part branch with --discard', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    expect((await cli(sb, ['split', 'merge', '--force'])).code).toBe(0);
+    commitIn(partDir(sb, 'page'), 'src/app/late.ts', 'export const late = 1;\n');
+    const r = await cli(sb, ['split', 'abort', '--yes', '--discard']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('Work no other branch has was removed');
+    expect(r.stdout).toContain('Part "Billing page": 1 commit only on its branch:');
+    expect(branches(sb)).toEqual(['mindly/billing/integration']);
+  });
+
+  it('refuses to merge while finished work is not committed on the part branches', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    // One part left its file untracked, another committed on a branch of its own.
+    write(partDir(sb, 'api'), 'src/api/plans.ts', 'export const plans = 1;\n');
+    git(partDir(sb, 'webhook'), 'checkout', '-q', '-b', 'feature/webhook');
+    commitIn(partDir(sb, 'webhook'), 'src/webhooks/invoice.ts', 'export const invoice = 1;\n');
+    commitIn(partDir(sb, 'page'), 'src/app/billing.ts', 'export const billing = 1;\n');
+    const s = await statusJson(sb);
+    expect(s.parts.map((p) => p.uncommitted)).toEqual([
+      ['src/api/plans.ts'],
+      ['src/webhooks/invoice.ts'],
+      [],
+    ]);
+    const mindly = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
+    try {
+      for (const p of s.parts) mindly.tasks.update(p.part.taskId, { status: 'done' }, null);
+    } finally {
+      mindly.close();
+    }
+    // The merge check sees the worktrees and is clean; the merge would take neither file.
+    expect((await cli(sb, ['split', 'check'])).code).toBe(0);
+    const status = await cli(sb, ['split', 'status']);
+    expect(status.stdout).toContain(`cd ${partDir(sb, 'api')}`);
+    expect(status.stdout).not.toContain('mindly split merge');
+    const refused = await cli(sb, ['split', 'merge']);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('2 parts have work that is not committed on their branch');
+    expect(refused.stderr).toContain('"Billing API" (src/api/plans.ts)');
+    expect(refused.stderr).toContain('"Stripe webhook handler" (src/webhooks/invoice.ts)');
+    expect(refused.stderr).toContain('mindly split merge --force');
+    expect(branches(sb)).not.toContain('mindly/billing/integration');
+    expect((await statusJson(sb)).split.status).toBe('active');
+
+    // Committed on the part branches, everything is merged and the worktrees can go.
+    commitIn(partDir(sb, 'api'), 'src/api/plans.ts', 'export const plans = 1;\n');
+    git(partDir(sb, 'webhook'), 'checkout', '-q', 'mindly/billing/webhook');
+    git(partDir(sb, 'webhook'), 'merge', '-q', '--ff-only', 'feature/webhook');
+    const merged = await cli(sb, ['split', 'merge']);
+    expect(merged.stderr).toBe('');
+    expect(merged.code).toBe(0);
+    expect(merged.stdout).not.toContain('Not merged');
+    expect(merged.stdout).toContain('mindly split abort');
+    const tree = git(sb.repo, 'ls-tree', '-r', '--name-only', 'mindly/billing/integration');
+    expect(tree).toContain('src/api/plans.ts');
+    expect(tree).toContain('src/webhooks/invoice.ts');
+    expect(tree).toContain('src/app/billing.ts');
+    expect((await cli(sb, ['split', 'abort', '--yes'])).code).toBe(0);
+  });
+
+  it('says so when a merge check could not look at a part', async () => {
+    const sb = await splitSandbox();
+    await createSplit(sb);
+    git(sb.repo, 'worktree', 'remove', '--force', partDir(sb, 'page'));
+    const check = await cli(sb, ['split', 'check']);
+    expect(check.code).toBe(0);
+    expect(check.stdout).not.toContain('every part merges');
+    expect(check.stdout).toContain('1 part could not');
+    expect(check.stdout).toContain('Part "page" was not checked: its worktree folder is gone');
   });
 
   it('merges when every part is done and reports the checks of a trusted project', async () => {
@@ -668,11 +1026,23 @@ describe('split status, merge and abort (acceptance 4)', () => {
     await hook(sb, partDir(sb, 'api'), 'api-session', 'SessionStart', { source: 'startup' });
     const noTty = await cli(sb, ['split', 'abort']);
     expect(noTty.code).toBe(1);
+    expect(noTty.stderr).toContain('Part "Billing API": src/api/wip.ts');
     expect(existsSync(partDir(sb, 'api'))).toBe(true);
-    const r = await cli(sb, ['split', 'abort', '--yes']);
+    // -y alone removes nothing that no branch has, before a merge too.
+    const yes = await cli(sb, ['split', 'abort', '--yes']);
+    expect(yes.code).toBe(1);
+    expect(yes.stderr).toContain(
+      'hold work no other branch has: "Billing API" (not committed: src/api/wip.ts)',
+    );
+    expect(yes.stderr).toContain('mindly split abort --yes --discard');
+    expect(existsSync(join(partDir(sb, 'api'), 'src/api/wip.ts'))).toBe(true);
+    const r = await cli(sb, ['split', 'abort', '--yes', '--discard']);
     expect(r.stderr).toBe('');
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('removed 3 worktrees, deleted 3');
+    // The work that went with them is named.
+    expect(r.stdout).toContain('Uncommitted work was removed with a worktree');
+    expect(r.stdout).toContain('Part "Billing API": src/api/wip.ts');
     expect(existsSync(worktreeRoot(sb))).toBe(false);
     expect(worktrees(sb)).toBe(1);
     expect(branches(sb)).toEqual(['mindly/billing/unrelated']);

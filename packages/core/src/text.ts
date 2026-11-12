@@ -70,3 +70,63 @@ export function normalizeLine(line: string): string {
 export function fingerprint(...parts: readonly (string | number | null | undefined)[]): string {
   return sha256(parts.map((p) => String(p ?? '')).join('\u0000')).slice(0, 32);
 }
+
+let graphemes: Intl.Segmenter | null | undefined;
+
+/** The grapheme segmenter, or null on a runtime built without it. */
+function graphemeSegmenter(): Intl.Segmenter | null {
+  if (graphemes === undefined) {
+    try {
+      graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    } catch {
+      graphemes = null;
+    }
+  }
+  return graphemes;
+}
+
+/** True when cutting `line` at `at` would split a surrogate pair. */
+const splitsPair = (line: string, at: number): boolean =>
+  at > 0 &&
+  at < line.length &&
+  (line.charCodeAt(at - 1) & 0xfc00) === 0xd800 &&
+  (line.charCodeAt(at) & 0xfc00) === 0xdc00;
+
+/**
+ * Shortens `line` to at most `max` UTF-16 units by taking its middle out: the first third stays,
+ * then `…`, then the end. Both cuts fall between characters as a reader sees them, never inside
+ * a surrogate pair nor between a letter and the marks joined to it, so each side stays whole
+ * text (a side may come out a little shorter for that).
+ *
+ * A single character longer than half a side (a letter under hundreds of marks) would leave that
+ * side empty or nearly so: there the cut falls between code points instead, so that both ends of
+ * the line are always shown.
+ */
+export function cutMiddle(line: string, max: number): string {
+  if (line.length <= max) return line;
+  if (max <= 1) return max <= 0 ? '' : '…';
+  const head = Math.floor((max - 1) / 3);
+  const tail = max - 1 - head;
+  const tailFrom = line.length - tail;
+  let headEnd = 0;
+  let tailStart = line.length;
+  const segmenter = graphemeSegmenter();
+  if (segmenter) {
+    for (const { index } of segmenter.segment(line)) {
+      if (index <= head) headEnd = index;
+      if (index >= tailFrom) {
+        tailStart = index;
+        break;
+      }
+    }
+  }
+  if (headEnd < head / 2) headEnd = splitsPair(line, head) ? head - 1 : head;
+  if (line.length - tailStart < tail / 2) {
+    tailStart = splitsPair(line, tailFrom) ? tailFrom + 1 : tailFrom;
+  }
+  // A mark that segmentation leaves apart from its letter (some spacing vowel signs) is not
+  // shown without it.
+  const marks = /^\p{M}+/u.exec(line.slice(tailStart, tailStart + 32))?.[0].length ?? 0;
+  if (marks > 0 && marks < 32 && line.length - (tailStart + marks) >= tail / 2) tailStart += marks;
+  return `${line.slice(0, headEnd)}…${line.slice(tailStart)}`;
+}

@@ -496,7 +496,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
   splitCmd
     .command('merge')
     .description('Merge the parts into one integration branch (no push)')
-    .option('--force', 'merge even if some parts are not marked done')
+    .option(
+      '--force',
+      'merge even if some parts are not marked done or have uncommitted work (which is left out)',
+    )
     .option('--json', 'machine-readable output')
     .action(
       act(
@@ -508,6 +511,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .command('abort')
     .description('Remove the worktrees (and branches) the split created')
     .option('--keep-branches', 'keep the part branches')
+    .option(
+      '--discard',
+      'with --yes, also remove uncommitted work and commits no other branch has (without --yes, the question covers only what it lists)',
+    )
     .option('-y, --yes', 'do not ask')
     .option('--json', 'machine-readable output')
     .action(

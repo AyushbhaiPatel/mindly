@@ -1,4 +1,5 @@
 import { statSync } from 'node:fs';
+import { createContext, Script, type Context } from 'node:vm';
 import { z } from 'zod';
 import {
   fingerprint,
@@ -25,21 +26,29 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
  * Executable memory. A contract binds a memory (usually a decision) to a declarative check over
  * the repository, re-evaluated whenever the file it reads changes.
  *
- * Regex safety: JavaScript regexes cannot be interrupted once running, so a time check alone
- * cannot stop catastrophic backtracking. Patterns are therefore restricted to a conservative safe
- * subset at creation time (see `checkSafePattern`): at most 300 characters, no backreferences, no
- * lookaround, no quantified group that itself contains a quantifier or alternation (the classic
- * `(a+)+` / `(a|aa)*` shapes), at most two unbounded quantifiers (a `{n,m}` with m > 16 counts as
- * unbounded) and at most eight quantifiers in total. Without nested quantifiers, the paths a
- * backtracking matcher can try per start position are bounded by counting them: a sequence
- * multiplies the paths of its parts, an alternation adds the paths of its branches (or counts
- * once when its branches are distinct literals, none a prefix of another, since only one can
- * match), and a quantifier multiplies by its number of repeat counts. That count is capped at
- * `MAX_PATHS` (two unbounded quantifiers over a full line, with a little room for optional
- * tokens). That bounds the cost of a single line to roughly cubic in the
- * line length, so matching line by line over at most 512 KB of content with lines capped at 200
- * characters keeps each line within a few milliseconds to a few tens of milliseconds and lets the
- * 100 ms budget (checked after every line) take effect.
+ * Regex safety: a regex cannot be interrupted by the code running it, so a time check between
+ * lines cannot stop catastrophic backtracking. Patterns are therefore restricted to a conservative
+ * safe subset at creation time (see `checkSafePattern`): at most 300 characters, no
+ * backreferences, no lookaround, no repeated group that holds a quantifier (`?` included) or
+ * alternation or can match nothing (the classic `(a+)+` / `(a|aa)*` shapes; a counted repeat such
+ * as `(a+){12}` or `(a?){16}` is the same thing written out), no repeated part right after a
+ * variable-length one that can match the same characters (`a?a?a{16}`, `a*a*`, `.*\s*`), at
+ * most two unbounded quantifiers (a `{n,m}` with m > 16 counts as unbounded) and at most eight
+ * quantifiers in total. As a backstop for anything the subset lets through, the match runs in a
+ * separate context with a timeout (see `matchLines`), which does stop a running regex; a pattern
+ * that runs out of time is not run again on the same file content. Without nested quantifiers, the paths a
+ * backtracking matcher can try per
+ * start position are bounded by counting them: a sequence multiplies the paths of its parts, an
+ * alternation adds the paths of its branches (or counts once when its branches are distinct
+ * literals, none a prefix of another, since only one can match), and a quantifier multiplies by
+ * its number of repeat counts, with every repeat of an atom that has several paths of its own
+ * (a group holding an optional part, `(a?a?)+`) multiplying them again. That count is capped at
+ * `MAX_PATHS` (two unbounded quantifiers over a full window, with a little room for optional
+ * tokens). That bounds the cost of one match attempt to roughly cubic in the length of the text
+ * it runs over, so that text is never longer than `MATCH_WINDOW_CHARS`: a line that fits is
+ * matched whole, a longer one (minified code, one-line JSON) in overlapping windows of that size
+ * (see `MATCH_SOURCE`). Each window stays within a few milliseconds to a few tens of
+ * milliseconds, and the whole file, at most 512 KB, within the 100 ms timeout.
  *
  * `command` contracts are never executed here: only the user may create them, their argv hash is
  * pinned at creation, and the daemon runs them later through a trusted runner.
@@ -47,15 +56,27 @@ import { attachService, guarded, liveSessions, safeProjectPath } from './shared.
 
 export const MAX_PATTERN_LENGTH = 300;
 const MAX_CONTRACT_FILE_BYTES = 512 * 1024;
-const MAX_LINE_CHARS = 200;
+/** The longest text a pattern is run against in one go; longer lines are matched in windows. */
+const MATCH_WINDOW_CHARS = 200;
+/** How far consecutive windows of a long line overlap: a match up to about this long is found. */
+const MATCH_WINDOW_OVERLAP = 100;
 const PATTERN_BUDGET_MS = 100;
+/** Where patterns' verdicts are kept. */
+const PATTERN_VERDICT_BASE = 'contract:pattern-verdict:';
+/**
+ * Verdicts are kept per version of these rules and of the regex engine, since what compiles (and
+ * so what is judged) differs between engines: a verdict made under another one is judged again.
+ */
+const PATTERN_VERDICT_PREFIX = `${PATTERN_VERDICT_BASE}3:${process.versions.v8}:`;
+/** Recent contract results read, once, for a contract whose last pass/fail was never kept. */
+const LEGACY_LOOKBACK = 2000;
 const MAX_UNBOUNDED_QUANTIFIERS = 2;
 /** Every quantifier (including `?` and `{n,m}`) counts toward this cap. */
 const MAX_QUANTIFIERS = 8;
 /** A bounded repeat with an upper bound above this counts as unbounded. */
 const MAX_BOUNDED_REPEAT = 16;
 /** Cap on the match paths a backtracking matcher can try per start position (see above). */
-const MAX_PATHS = 8 * (MAX_LINE_CHARS + 1) ** 2;
+const MAX_PATHS = 8 * (MATCH_WINDOW_CHARS + 1) ** 2;
 
 /** Result of evaluating a contract once. */
 export interface ContractEvaluation {
@@ -68,6 +89,40 @@ export interface ContractEvaluation {
  * message, or null when the pattern is acceptable.
  */
 export function checkSafePattern(pattern: string): string | null {
+  const cached = verdicts.get(pattern);
+  if (cached !== undefined) return cached;
+  const verdict = judgePattern(pattern);
+  if (verdicts.size >= VERDICT_CACHE_SIZE) verdicts.clear();
+  verdicts.set(pattern, verdict);
+  return verdict;
+}
+
+/** `checkSafePattern` is called on every evaluation, so its answers are kept. */
+const verdicts = new Map<string, string | null>();
+const VERDICT_CACHE_SIZE = 512;
+
+/**
+ * Characters a part of a pattern can match, as sorted, disjoint, inclusive ranges of UTF-16 code
+ * units (a pattern without the `u` flag matches code units).
+ */
+type CharSet = readonly (readonly [number, number])[];
+
+/** One atom of a sequence (a character, a class, a group) with its quantifier. */
+interface Atom {
+  /** Characters its first and last matched character can be. */
+  first: CharSet;
+  last: CharSet;
+  /** Whether one repeat of it always matches at least one character. */
+  consumes: boolean;
+  /** `^`, `$`, `\b`, `\B`: matches no character. */
+  anchor: boolean;
+  /** A group whose length varies by itself, through a quantifier inside it. */
+  variable: boolean;
+  min: number;
+  max: number;
+}
+
+function judgePattern(pattern: string): string | null {
   if (pattern.length === 0) return 'pattern is empty';
   if (pattern.length > MAX_PATTERN_LENGTH)
     return `pattern exceeds ${MAX_PATTERN_LENGTH} characters`;
@@ -77,6 +132,9 @@ export function checkSafePattern(pattern: string): string | null {
     return 'pattern does not compile';
   }
   interface Frame {
+    /** Inline modifiers in force in this group: `(?i:` and `(?s:` (and `(?-i:`, `(?-s:`). */
+    ignoreCase: boolean;
+    dotAll: boolean;
     quantified: boolean;
     alternation: boolean;
     /** Match paths through the finished branches, the current branch, and its last atom. */
@@ -85,8 +143,21 @@ export function checkSafePattern(pattern: string): string | null {
     atom: number;
     branchStart: number;
     branches: string[];
+    /** The current branch's last atom, until the next one starts (its quantifier may follow). */
+    pending: Atom | null;
+    /** Last characters of the variable-length atoms since the branch's last mandatory one. */
+    open: CharSet;
+    branchFirst: CharSet | null;
+    branchLast: CharSet | null;
+    branchConsumes: boolean;
+    /** Over all finished branches: first and last characters, and whether one can be empty. */
+    first: CharSet;
+    last: CharSet;
+    nullable: boolean;
   }
-  const frame = (branchStart: number): Frame => ({
+  const frame = (branchStart: number, ignoreCase = false, dotAll = false): Frame => ({
+    ignoreCase,
+    dotAll,
     quantified: false,
     alternation: false,
     finished: 0,
@@ -94,43 +165,98 @@ export function checkSafePattern(pattern: string): string | null {
     atom: 1,
     branchStart,
     branches: [],
+    pending: null,
+    open: [],
+    branchFirst: null,
+    branchLast: null,
+    branchConsumes: false,
+    first: [],
+    last: [],
+    nullable: false,
   });
+  let ambiguous = false;
+  const work: JudgeWork = { left: JUDGE_WORK };
+  /** Adds the atom that just ended to its branch: what it may start and end with, and overlaps. */
+  const settle = (f: Frame): void => {
+    const a = f.pending;
+    f.pending = null;
+    if (!a || a.anchor) return;
+    const min = a.consumes ? a.min : 0;
+    const quantified = a.min !== 1 || a.max !== 1;
+    // A repeated part right after a variable-length one that can take the same characters gives
+    // the matcher a choice at every such character: `a?a?a{16}`, `.*\s*`, `\d?\d{2}`,
+    // `a+(?:b*a)`.
+    if ((quantified || a.variable) && charsOverlap(f.open, a.first, work)) {
+      ambiguous = true;
+    }
+    if (a.min !== a.max || a.variable) {
+      f.open = min >= 1 ? a.last : unionChars(f.open, a.last, work);
+    } else if (min >= 1) {
+      f.open = [];
+    }
+    if (f.branchFirst === null) f.branchFirst = min >= 1 ? a.first : ANY_CHAR;
+    f.branchLast = min >= 1 ? a.last : ANY_CHAR;
+    if (min >= 1) f.branchConsumes = true;
+  };
   const endBranch = (f: Frame, end: number): void => {
+    settle(f);
     f.finished += f.current * f.atom;
     f.current = 1;
     f.atom = 1;
     f.branches.push(pattern.slice(f.branchStart, end));
     f.branchStart = end + 1;
+    f.first = unionChars(f.first, f.branchFirst ?? ANY_CHAR, work);
+    f.last = unionChars(f.last, f.branchLast ?? ANY_CHAR, work);
+    if (!f.branchConsumes) f.nullable = true;
+    f.open = [];
+    f.branchFirst = null;
+    f.branchLast = null;
+    f.branchConsumes = false;
   };
   const paths = (f: Frame): number => (exclusiveLiterals(f.branches) ? 1 : f.finished);
   const stack: Frame[] = [frame(0)];
   let unbounded = 0;
   let quantifiers = 0;
   let lastClosed: Frame | null = null;
+  /** Capturing groups seen, checked against the engine's own count once the scan is done. */
+  let capturing = 0;
   let i = 0;
   const top = (): Frame => stack[stack.length - 1] as Frame;
-  const atom = (cost: number): void => {
+  const atom = (cost: number, next: Omit<Atom, 'min' | 'max'>): void => {
     const f = top();
     f.current *= f.atom;
     f.atom = cost;
+    settle(f);
+    f.pending = { ...next, min: 1, max: 1 };
   };
+  const char = (source: string): Omit<Atom, 'min' | 'max'> => {
+    const f = top();
+    const fold = (set: CharSet): CharSet => (f.ignoreCase ? foldCase(set, work) : set);
+    const chars = atomChars(source, f.dotAll, fold);
+    return { first: chars, last: chars, consumes: true, anchor: false, variable: false };
+  };
+  const ANCHOR = { first: [], last: [], consumes: false, anchor: true, variable: false };
   while (i < pattern.length) {
     const ch = pattern[i] as string;
     if (ch === '\\') {
       const next = pattern[i + 1] ?? '';
       if (/[1-9]/.test(next) || next === 'k') return 'backreferences are not allowed';
-      atom(1);
-      i += 2;
+      const length = escapeLength(pattern, i, false);
+      // A `\c` that is not a control escape is a plain backslash; the `c` is read next.
+      const source = length === 1 ? '\\\\' : pattern.slice(i, i + length);
+      atom(1, next === 'b' || next === 'B' ? ANCHOR : char(source));
+      i += length;
       lastClosed = null;
       continue;
     }
     if (ch === '[') {
-      // Skip the character class, honouring escapes.
+      // Skip the character class, honouring escapes. As in JavaScript, a `]` right after `[` or
+      // `[^` closes it (`[]` matches nothing, `[^]` anything); it is not a literal `]`.
+      const start = i;
       i++;
       if (pattern[i] === '^') i++;
-      if (pattern[i] === ']') i++;
       while (i < pattern.length && pattern[i] !== ']') i += pattern[i] === '\\' ? 2 : 1;
-      atom(1);
+      atom(1, char(pattern.slice(start, i + 1)));
       i++;
       lastClosed = null;
       continue;
@@ -142,10 +268,27 @@ export function checkSafePattern(pattern: string): string | null {
       if (pattern.startsWith('(?<=', i) || pattern.startsWith('(?<!', i)) {
         return 'lookbehind is not allowed';
       }
-      // Skip group syntax such as `(?:`, `(?<name>` or `(?i:` so its `?` is not a quantifier.
-      if (pattern[i + 1] === '?') i = pattern.indexOf(pattern[i + 2] === '<' ? '>' : ':', i);
+      // Skip group syntax such as `(?:`, `(?<name>` or `(?i:` so its `?` is not a quantifier, and
+      // apply inline modifiers to the group.
+      let { ignoreCase, dotAll } = top();
+      if (pattern[i + 1] !== '?') capturing++;
+      else if (pattern[i + 2] === '<') {
+        capturing++;
+        i = pattern.indexOf('>', i);
+        if (i === -1) return UNREADABLE;
+      } else {
+        const mod = /^\(\?([a-z]*)(?:-([a-z]*))?:/.exec(pattern.slice(i));
+        if (!mod) return UNREADABLE;
+        const on = mod[1] ?? '';
+        const off = mod[2] ?? '';
+        if (on.includes('i')) ignoreCase = true;
+        if (off.includes('i')) ignoreCase = false;
+        if (on.includes('s')) dotAll = true;
+        if (off.includes('s')) dotAll = false;
+        i += mod[0].length - 1;
+      }
       i++;
-      stack.push(frame(i));
+      stack.push(frame(i, ignoreCase, dotAll));
       lastClosed = null;
       continue;
     }
@@ -155,7 +298,13 @@ export function checkSafePattern(pattern: string): string | null {
       endBranch(closed, i);
       // A group containing a quantifier or an alternation makes the enclosing group "quantified".
       if (closed.quantified || closed.alternation) top().quantified = true;
-      atom(paths(closed));
+      atom(paths(closed), {
+        first: closed.first,
+        last: closed.last,
+        consumes: !closed.nullable,
+        anchor: false,
+        variable: closed.quantified,
+      });
       lastClosed = closed;
       i++;
       continue;
@@ -177,24 +326,37 @@ export function checkSafePattern(pattern: string): string | null {
         /^\{\d+,\}$/.test(tok) ||
         (upper !== undefined && Number(upper) > MAX_BOUNDED_REPEAT);
       quantifiers++;
-      const repeats = isUnbounded || (/^\{\d+,\d+\}$/.test(tok) && !/^\{[01],1\}$/.test(tok));
-      if (lastClosed && repeats && (lastClosed.quantified || lastClosed.alternation)) {
-        return 'nested quantifiers are not allowed';
+      const lower = Number(/^\{(\d+)/.exec(tok)?.[1] ?? (tok === '+' ? 1 : 0));
+      const most = isUnbounded ? MATCH_WINDOW_CHARS : tok === '?' ? 1 : Number(upper ?? lower);
+      // Anything that can match its atom more than once repeats it: `*`, `+`, `{n,}`, `{n,m}` and
+      // the counted `{n}` alike. A repeated group must take a character every time and leave the
+      // matcher one way through it: no quantifier (`?` included) or alternation inside.
+      if (lastClosed && most > 1) {
+        if (lastClosed.quantified || lastClosed.alternation) {
+          return 'nested quantifiers are not allowed: a repeated group must not hold a quantifier or alternatives';
+        }
+        if (lastClosed.nullable) return 'a repeated group must match at least one character';
       }
       if (isUnbounded) unbounded++;
-      const lower = Number(/^\{(\d+)/.exec(tok)?.[1] ?? (tok === '+' ? 1 : 0));
-      const most = isUnbounded ? MAX_LINE_CHARS : tok === '?' ? 1 : Number(upper ?? lower);
       const f = top();
       if (most <= 1) f.atom += lower === 0 ? 1 : 0;
-      else f.atom *= most - Math.min(lower, most) + 1;
-      if (tok !== '?') f.quantified = true;
+      // Each repeat walks the atom's own paths again (1 for a plain character or class).
+      else f.atom = (most - Math.min(lower, most) + 1) * f.atom ** most;
+      // Only an exact count leaves one way through, so a group holding nothing else may still be
+      // repeated (`(\d{2}-){2}`).
+      if (!/^\{\d+\}$/.test(tok)) f.quantified = true;
+      if (f.pending) {
+        f.pending.min = lower;
+        f.pending.max = most;
+      }
       i += tok.length;
       // Skip a lazy/possessive marker.
       if (pattern[i] === '?') i++;
       lastClosed = null;
       continue;
     }
-    atom(1);
+    if (ch === '^' || ch === '$') atom(1, ANCHOR);
+    else atom(1, char(ch === '.' ? '.' : /[\w\s]/.test(ch) ? ch : `\\${ch}`));
     lastClosed = null;
     i++;
   }
@@ -204,11 +366,286 @@ export function checkSafePattern(pattern: string): string | null {
   if (unbounded > MAX_UNBOUNDED_QUANTIFIERS) {
     return `at most ${MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers are allowed`;
   }
+  // Anything this scan read differently from the engine (an escape, a group) would show as an
+  // unclosed group or a different number of capturing groups: refuse rather than guess.
+  if (stack.length !== 1 || capturing !== captureCount(pattern)) return UNREADABLE;
   endBranch(top(), pattern.length);
+  if (work.left <= 0) {
+    return 'pattern is too complex to check; use fewer character classes or alternatives';
+  }
   if (paths(top()) > MAX_PATHS) {
     return 'pattern allows too much backtracking; use fewer optional parts or alternatives';
   }
+  if (ambiguous) {
+    return 'repeated parts next to each other can match the same characters (as in a?a? or .*\\s*), which makes matching slow; merge them, or put a fixed character between them';
+  }
   return null;
+}
+
+/** What judging one pattern may cost, in range steps; past it the pattern is refused. */
+const JUDGE_WORK = 200_000;
+
+interface JudgeWork {
+  left: number;
+}
+
+const ANY_CHAR: CharSet = [[0, 0xffff]];
+const DIGIT: CharSet = [[0x30, 0x39]];
+const WORD: CharSet = [
+  [0x30, 0x39],
+  [0x41, 0x5a],
+  [0x5f, 0x5f],
+  [0x61, 0x7a],
+];
+const SPACE: CharSet = [
+  [0x09, 0x0d],
+  [0x20, 0x20],
+  [0xa0, 0xa0],
+  [0x1680, 0x1680],
+  [0x2000, 0x200a],
+  [0x2028, 0x2029],
+  [0x202f, 0x202f],
+  [0x205f, 0x205f],
+  [0x3000, 0x3000],
+  [0xfeff, 0xfeff],
+];
+const LINE_END: CharSet = [
+  [0x0a, 0x0a],
+  [0x0d, 0x0d],
+  [0x2028, 0x2029],
+];
+
+function unionChars(a: CharSet, b: CharSet, work?: JudgeWork): CharSet {
+  if (a.length === 0) return b;
+  if (b.length === 0) return a;
+  const all = [...a, ...b].sort((x, y) => x[0] - y[0]);
+  if (work) work.left -= all.length;
+  const out: [number, number][] = [];
+  for (const [lo, hi] of all) {
+    const prev = out[out.length - 1];
+    if (prev && lo <= prev[1] + 1) prev[1] = Math.max(prev[1], hi);
+    else out.push([lo, hi]);
+  }
+  return out;
+}
+
+function complementChars(a: CharSet): CharSet {
+  const out: [number, number][] = [];
+  let next = 0;
+  for (const [lo, hi] of a) {
+    if (lo > next) out.push([next, lo - 1]);
+    next = hi + 1;
+  }
+  if (next <= 0xffff) out.push([next, 0xffff]);
+  return out;
+}
+
+const verdictKey = (pattern: string): string => `${PATTERN_VERDICT_PREFIX}${sha256(pattern)}`;
+
+const UNREADABLE = 'pattern could not be read reliably; use a simpler pattern';
+
+/** The number of capturing groups the engine finds in `pattern`. */
+function captureCount(pattern: string): number {
+  try {
+    return (new RegExp(`(?:${pattern})|`).exec('')?.length ?? 1) - 1;
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * Case-insensitive matching (without the `u` flag) treats two code units as the same when they
+ * canonicalise alike: upper case, unless that takes more than one unit or turns a non-ASCII unit
+ * into an ASCII one. These are the classes of more than one unit, built when first needed.
+ */
+let caseClasses: readonly (readonly number[])[] | null = null;
+
+function canonical(c: number): number {
+  const upper = String.fromCharCode(c).toUpperCase();
+  if (upper.length !== 1) return c;
+  const u = upper.charCodeAt(0);
+  return c >= 128 && u < 128 ? c : u;
+}
+
+/** `set` with every unit that matches one of its units case-insensitively. */
+function foldCase(set: CharSet, work: JudgeWork): CharSet {
+  if (caseClasses === null) {
+    const byCanonical = new Map<number, number[]>();
+    for (let c = 0; c <= 0xffff; c++) {
+      const k = canonical(c);
+      const members = byCanonical.get(k);
+      if (members) members.push(c);
+      else byCanonical.set(k, [c]);
+    }
+    caseClasses = [...byCanonical.values()].filter((m) => m.length > 1);
+  }
+  const added: [number, number][] = [];
+  for (const members of caseClasses) {
+    work.left--;
+    if (members.some((c) => inChars(set, c))) for (const c of members) added.push([c, c]);
+  }
+  return unionChars(set, added, work);
+}
+
+function inChars(set: CharSet, c: number): boolean {
+  let lo = 0;
+  let hi = set.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const [a, b] = set[mid] as readonly [number, number];
+    if (c < a) hi = mid - 1;
+    else if (c > b) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+
+/** Whether some character is in both sets, walking both range lists once. */
+function charsOverlap(a: CharSet, b: CharSet, work: JudgeWork): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    work.left--;
+    const [alo, ahi] = a[i] as readonly [number, number];
+    const [blo, bhi] = b[j] as readonly [number, number];
+    if (alo <= bhi && blo <= ahi) return true;
+    if (ahi < bhi) i++;
+    else j++;
+  }
+  return false;
+}
+
+/**
+ * The characters a single-character atom matches: a character, an escape, a class or `.`.
+ * Anything it cannot read counts as every character.
+ */
+function atomChars(source: string, dotAll: boolean, fold: (set: CharSet) => CharSet): CharSet {
+  // A negated class leaves out every case of what it lists, so it is folded before negating.
+  if (source.startsWith('[')) return classChars(source, fold) ?? ANY_CHAR;
+  return fold(plainAtomChars(source, dotAll));
+}
+
+function plainAtomChars(source: string, dotAll: boolean): CharSet {
+  if (source === '.') return dotAll ? ANY_CHAR : complementChars(LINE_END);
+  if (source.startsWith('\\')) {
+    const set = escapeSet(source[1] ?? '');
+    if (set) return set;
+    const code = escapeCode(source.slice(1), false);
+    return code === null ? ANY_CHAR : [[code, code]];
+  }
+  const code = source.charCodeAt(0);
+  return [[code, code]];
+}
+
+/** `\d`, `\w`, `\s` and their negations. */
+function escapeSet(letter: string): CharSet | null {
+  switch (letter) {
+    case 'd':
+      return DIGIT;
+    case 'D':
+      return complementChars(DIGIT);
+    case 'w':
+      return WORD;
+    case 'W':
+      return complementChars(WORD);
+    case 's':
+      return SPACE;
+    case 'S':
+      return complementChars(SPACE);
+    default:
+      return null;
+  }
+}
+
+/**
+ * How many characters the escape at `i` (a backslash) takes, read as a pattern without the `u`
+ * flag reads it: `\x` and `\u` without their hex digits are a plain `x` or `u`, and a `\c` that
+ * is not a control escape is a plain backslash (1: the `c` is read next).
+ */
+function escapeLength(pattern: string, i: number, inClass: boolean): number {
+  const next = pattern[i + 1] ?? '';
+  if (next === 'x') return /^[0-9a-fA-F]{2}/.test(pattern.slice(i + 2)) ? 4 : 2;
+  if (next === 'u') return /^[0-9a-fA-F]{4}/.test(pattern.slice(i + 2)) ? 6 : 2;
+  if (next === 'c')
+    return (inClass ? /^[A-Za-z0-9_]/ : /^[A-Za-z]/).test(pattern.slice(i + 2)) ? 3 : 1;
+  if (next === '0' && /^[0-7]/.test(pattern.slice(i + 2))) {
+    return /^[0-7]{2}/.test(pattern.slice(i + 2)) ? 4 : 3;
+  }
+  return 2;
+}
+
+/** The code unit an escape (without its backslash) stands for, or null if it cannot tell. */
+function escapeCode(body: string, inClass: boolean): number | null {
+  const letter = body[0] ?? '';
+  const simple: Record<string, number> = { n: 10, r: 13, t: 9, v: 11, f: 12 };
+  if (letter in simple) return simple[letter] as number;
+  if (letter === '0') return parseInt(body, 8);
+  if (letter === 'b') return inClass ? 8 : null;
+  if (letter === 'x') return body.length === 3 ? parseInt(body.slice(1), 16) : 0x78;
+  if (letter === 'u') return body.length === 5 ? parseInt(body.slice(1), 16) : 0x75;
+  if (letter === 'c') return body.length === 2 ? body.charCodeAt(1) % 32 : null;
+  if (letter === '\\' || (letter !== '' && !/[0-9A-Za-z]/.test(letter))) {
+    return letter.charCodeAt(0);
+  }
+  return null;
+}
+
+/** The characters of a class such as `[^a-z_\d]`, or null when it cannot be read. */
+function classChars(source: string, fold: (set: CharSet) => CharSet): CharSet | null {
+  if (!source.endsWith(']')) return null;
+  let i = 1;
+  const negated = source[i] === '^';
+  if (negated) i++;
+  const end = source.length - 1;
+  // `[]` matches nothing and `[^]` everything.
+  if (i === end) return negated ? ANY_CHAR : [];
+  let set: CharSet = [];
+  /** Reads one item: a code unit, or a set (`\d`); advances `i`. */
+  const item = (): number | CharSet | null => {
+    const ch = source[i] as string;
+    if (ch !== '\\') {
+      i++;
+      return ch.charCodeAt(0);
+    }
+    const letter = source[i + 1] ?? '';
+    const asSet = escapeSet(letter);
+    if (asSet) {
+      i += 2;
+      return asSet;
+    }
+    const length = escapeLength(source, i, true);
+    if (length === 1) {
+      i += 1;
+      return 0x5c;
+    }
+    const code = escapeCode(source.slice(i + 1, i + length), true);
+    i += length;
+    return code;
+  };
+  while (i < end) {
+    const lo = item();
+    if (lo === null) return null;
+    if (typeof lo !== 'number') {
+      set = unionChars(set, lo);
+      continue;
+    }
+    if (source[i] === '-' && i + 1 < end) {
+      i++;
+      const hi = item();
+      if (hi === null) return null;
+      if (typeof hi === 'number') {
+        if (hi < lo) return null;
+        set = unionChars(set, [[lo, hi]]);
+        continue;
+      }
+      // `[a-\d]`: the dash is a plain character.
+      set = unionChars(unionChars(set, [[lo, lo]]), unionChars([[0x2d, 0x2d]], hi));
+      continue;
+    }
+    set = unionChars(set, [[lo, lo]]);
+  }
+  return negated ? complementChars(fold(set)) : fold(set);
 }
 
 /**
@@ -305,6 +742,8 @@ export class ContractService {
       }
       clean.path = resolved.rel;
     }
+    this.k.store.contracts.pruneConclusive();
+    this.pruneVerdicts();
     const contract = this.k.store.contracts.create({
       projectId: memory.projectId,
       memoryId,
@@ -354,14 +793,27 @@ export class ContractService {
       case 'pattern_present':
       case 'pattern_absent': {
         const pattern = spec.pattern ?? '';
-        const rejected = checkSafePattern(pattern);
+        const rejected = this.patternVerdict(pattern);
         if (rejected !== null) {
           return {
             state: 'error',
             message: `pattern rejected as too expensive to evaluate safely: ${sanitizeLine(pattern, 120)} (${rejected}); add a contract with a simpler pattern`,
           };
         }
+        // A pattern that ran out of time on this content is not run on it again, or every hook
+        // would pay the whole budget; any change to the file runs it again.
+        const tooSlow = {
+          state: 'error' as const,
+          message: `pattern took longer than ${PATTERN_BUDGET_MS} ms on ${rel}; it runs again when the file changes`,
+        };
+        const run = sha256(`${pattern}\u0000${content}`);
+        const contracts = this.k.store.contracts;
+        if (contracts.slowRun(contract.id) === run) return tooSlow;
         const found = matchLines(pattern, content);
+        if (found === 'timeout') {
+          contracts.setSlowRun(contract.id, run);
+          return tooSlow;
+        }
         if (found === 'error') return { state: 'error', message: 'pattern could not be evaluated' };
         if (contract.kind === 'pattern_present') {
           return found
@@ -373,12 +825,8 @@ export class ContractService {
           : { state: 'passing', message: `pattern absent from ${rel}` };
       }
       case 'json_key': {
-        let doc: unknown;
-        try {
-          doc = JSON.parse(content);
-        } catch {
-          return { state: 'failing', message: `${rel} is not valid JSON` };
-        }
+        const doc = parseJsonLenient(content);
+        if (doc === INVALID_JSON) return { state: 'failing', message: `${rel} is not valid JSON` };
         const key = spec.key ?? '';
         return hasDotPath(doc, key)
           ? { state: 'passing', message: `${key} present in ${rel}` }
@@ -396,6 +844,28 @@ export class ContractService {
   }
 
   /**
+   * `checkSafePattern` for a stored pattern, judged once and kept by pattern hash, so a hook (a
+   * fresh process each time) does not judge the same pattern again.
+   */
+  private patternVerdict(pattern: string): string | null {
+    const key = verdictKey(pattern);
+    const kept = this.k.store.kv.get<{ verdict: string | null }>(key);
+    if (kept && (kept.verdict === null || typeof kept.verdict === 'string')) return kept.verdict;
+    const verdict = checkSafePattern(pattern);
+    this.k.store.kv.set(key, { verdict });
+    return verdict;
+  }
+
+  /**
+   * Drops kept verdicts no stored contract uses any more, and those of other rule or engine
+   * versions.
+   */
+  private pruneVerdicts(): void {
+    const contracts = this.k.store.contracts;
+    contracts.pruneKeys(PATTERN_VERDICT_BASE, contracts.patterns().map(verdictKey));
+  }
+
+  /**
    * Evaluates a contract, stores the result and handles transitions: passing to failing opens a
    * critical conflict and notifies live sessions; failing to passing resolves it.
    */
@@ -409,16 +879,68 @@ export class ContractService {
     actor: Session | null,
     opts: { actorInRoot?: boolean } = {},
   ): Contract {
-    const result = this.evaluate(contract, projectRoot);
+    return this.record(contract, this.evaluate(contract, projectRoot), actor, opts).contract;
+  }
+
+  /**
+   * Stores one result of `contract` (the contract as it was before this result) and handles the
+   * transition. The daemon records the results of command contracts through this too, so both
+   * kinds open, announce and resolve a broken contract the same way. `broke` is true when this
+   * result opened (or reopened) the conflict.
+   *
+   * A result of `error` (a timeout, a file too large to read) says nothing about the contract, so
+   * a transition is judged against the last result that did (the store remembers it per
+   * contract): passing, error, failing is a break, and failing, error, passing is a fix.
+   */
+  record(
+    contract: Contract,
+    result: ContractEvaluation,
+    actor: Session | null,
+    opts: { actorInRoot?: boolean } = {},
+  ): { contract: Contract; broke: boolean } {
+    const before = this.lastConclusive(contract);
     const saved = this.k.store.contracts.recordResult(contract.id, result.state, result.message);
     this.recordEvent(saved, result, actor?.id ?? null, contract.state);
     const fp = fingerprint('contract_broken', contract.id);
-    if (contract.state === 'passing' && result.state === 'failing') {
-      this.reportBroken(saved, result, fp, actor, opts.actorInRoot === true);
-    } else if (contract.state === 'failing' && result.state === 'passing') {
+    let broke = false;
+    if (before === 'passing' && result.state === 'failing') {
+      broke = this.reportBroken(saved, result, fp, actor, opts.actorInRoot === true);
+    } else if (before === 'failing' && result.state === 'passing') {
       this.resolveBroken(saved, fp, actor);
     }
-    return saved;
+    return { contract: saved, broke };
+  }
+
+  /**
+   * The last state of `contract` that was passing or failing: its stored state, or, when that is
+   * `error` or `unknown`, the one the store remembers for it. Null when it never had one: then
+   * nothing can be said to have changed.
+   *
+   * A contract last run before the store kept this has nothing remembered; its last result is
+   * then looked up once in the recent event log and written back, so the log is read at most once
+   * per contract.
+   */
+  private lastConclusive(contract: Contract): 'passing' | 'failing' | null {
+    if (contract.state === 'passing' || contract.state === 'failing') return contract.state;
+    const contracts = this.k.store.contracts;
+    let known = contracts.lastConclusive(contract.id);
+    if (known === undefined) {
+      known = 'none';
+      const results = this.k.store.events.query(contract.projectId, {
+        types: ['contract.result'],
+        order: 'desc',
+        limit: LEGACY_LOOKBACK,
+      });
+      for (const e of results) {
+        if (e.payload['contractId'] !== contract.id) continue;
+        const state = e.payload['state'];
+        if (state !== 'passing' && state !== 'failing') continue;
+        known = state;
+        break;
+      }
+      contracts.setLastConclusive(contract.id, known);
+    }
+    return known === 'none' ? null : known;
   }
 
   /** Runs every declarative contract reading `path`. */
@@ -476,7 +998,7 @@ export class ContractService {
     fp: string,
     actor: Session | null,
     actorInRoot: boolean,
-  ): void {
+  ): boolean {
     const memory = this.k.store.memories.find(c.memoryId);
     const title = sanitizeLine(memory?.title ?? 'a recorded decision', 120);
     const headline = `${memory?.kind === 'decision' ? 'Decision' : 'Memory'} '${title}' no longer holds: ${r.message}`;
@@ -485,12 +1007,15 @@ export class ContractService {
       kind: 'contract_broken',
       severity: 'critical',
       title: headline,
-      detail: `Contract ${c.kind} on ${c.spec.path ?? 'the project'} started failing.`,
+      detail:
+        c.kind === 'command'
+          ? 'An approved command contract started failing.'
+          : `Contract ${c.kind} on ${c.spec.path ?? 'the project'} started failing.`,
       sessionIds: actor ? [actor.id] : [],
       paths: c.spec.path ? [c.spec.path] : [],
       fingerprint: fp,
     });
-    if (!isNew) return;
+    if (!isNew) return false;
     this.k.store.events.append({
       projectId: c.projectId,
       sessionId: actor?.id ?? null,
@@ -507,7 +1032,7 @@ export class ContractService {
     });
     const recipients = liveSessions(this.k, c.projectId).map((s) => s.id);
     if (actor && !recipients.includes(actor.id)) recipients.push(actor.id);
-    if (recipients.length === 0) return;
+    if (recipients.length === 0) return true;
     this.telepathy.send({
       projectId: c.projectId,
       from: null,
@@ -515,9 +1040,13 @@ export class ContractService {
       kind: 'conflict',
       priority: 8,
       title: headline,
-      body: `A recorded project decision is checked automatically and the latest change to ${c.spec.path ?? 'the project'} broke it. Restore it, or ask the user whether the decision should change.`,
+      body:
+        c.kind === 'command'
+          ? 'A recorded project decision is checked by a command the user approved, and that command now fails on the current working tree. Restore what it checks, or ask the user whether the decision should change.'
+          : `A recorded project decision is checked automatically and the latest change to ${c.spec.path ?? 'the project'} broke it. Restore it, or ask the user whether the decision should change.`,
       dedupeKey: `contract:${c.id}:${conflict.updatedAt}`,
     });
+    return true;
   }
 
   private resolveBroken(c: Contract, fp: string, actor: Session | null): void {
@@ -537,19 +1066,123 @@ export class ContractService {
 }
 
 /**
- * Line-by-line match of a pattern that passed `checkSafePattern`, with a time budget. Returns
- * 'error' if the budget is exceeded.
+ * The loop `matchLines` runs, as source for a separate context so it can be stopped. Lines end at
+ * LF or CRLF, so `$` works in either kind of file. A line of up to `windowChars` is matched whole.
+ * A longer one is matched in windows of that size, each overlapping the one before by `overlap`,
+ * so the cost of one match attempt stays bounded however long the line is. A window that does not
+ * start at the line's start only accepts a match from its second character on, and one that does
+ * not reach the line's end must leave its last character unmatched (`open`): every match found
+ * this way is a match in the full line (`^`, `$` and `\b` see the real neighbours), and every
+ * match of the full line up to about `overlap` characters long is found.
  */
-function matchLines(pattern: string, content: string): boolean | 'error' {
-  const re = new RegExp(pattern);
-  const start = performance.now();
-  const lines = content.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = (lines[i] as string).slice(0, MAX_LINE_CHARS);
-    if (re.test(line)) return true;
-    if (performance.now() - start > PATTERN_BUDGET_MS) return 'error';
+const MATCH_SOURCE = `(() => {
+  const step = windowChars - overlap;
+  let lineStart = 0;
+  while (lineStart <= content.length) {
+    let lineEnd = content.indexOf('\\n', lineStart);
+    if (lineEnd === -1) lineEnd = content.length;
+    const end = lineEnd > lineStart && content[lineEnd - 1] === '\\r' ? lineEnd - 1 : lineEnd;
+    const line = content.slice(lineStart, end);
+    for (let at = 0; ; at += step) {
+      const last = at + windowChars >= line.length;
+      const re = last ? whole : open;
+      re.lastIndex = at === 0 ? 0 : 1;
+      if (re.test(at === 0 && last ? line : line.slice(at, at + windowChars))) return true;
+      if (last) break;
+    }
+    lineStart = lineEnd + 1;
   }
   return false;
+})()`;
+
+let matcher: { context: Context; script: Script } | null = null;
+
+/**
+ * Matches a pattern that passed `checkSafePattern` against `content`, line by line. A regex cannot
+ * be interrupted by the code that started it, so the loop runs in a separate context with a
+ * timeout, which stops it even inside a single match attempt: whatever the pattern, a hook is
+ * never held for much longer than `PATTERN_BUDGET_MS`. Returns 'timeout' when the budget ran out
+ * and 'error' when the pattern could not run at all.
+ */
+function matchLines(pattern: string, content: string): boolean | 'timeout' | 'error' {
+  matcher ??= {
+    context: createContext(Object.create(null) as object),
+    script: new Script(MATCH_SOURCE),
+  };
+  const globals = matcher.context as Record<string, unknown>;
+  try {
+    globals['whole'] = new RegExp(pattern, 'g');
+    // A window that stops short of the line's end must leave its last character unmatched: that
+    // keeps `$` from matching there and gives `\b` the real next character.
+    globals['open'] = new RegExp(`(?:${pattern})(?=[^])`, 'g');
+    globals['content'] = content;
+    globals['windowChars'] = MATCH_WINDOW_CHARS;
+    globals['overlap'] = MATCH_WINDOW_OVERLAP;
+    return matcher.script.runInContext(matcher.context, { timeout: PATTERN_BUDGET_MS }) === true;
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    return code === 'ERR_SCRIPT_EXECUTION_TIMEOUT' ? 'timeout' : 'error';
+  } finally {
+    globals['content'] = '';
+    globals['whole'] = null;
+    globals['open'] = null;
+  }
+}
+
+const INVALID_JSON = Symbol('invalid JSON');
+
+/**
+ * Parses JSON, also accepting what editors and compilers accept in files such as `tsconfig.json`:
+ * a byte order mark, `//` and block comments, and a trailing comma before `}` or `]`.
+ */
+function parseJsonLenient(content: string): unknown {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    // Not strict JSON: try it as JSON with comments.
+  }
+  try {
+    return JSON.parse(stripJsonComments(text)) as unknown;
+  } catch {
+    return INVALID_JSON;
+  }
+}
+
+/** Removes comments and trailing commas that are outside strings; everything else is kept. */
+function stripJsonComments(text: string): string {
+  let out = '';
+  /** Index in `out` of a comma that so far is followed only by whitespace and comments. */
+  let comma = -1;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i] as string;
+    if (ch === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      const close = text.indexOf('*/', i + 2);
+      i = close === -1 ? text.length : close + 2;
+      out += ' ';
+      continue;
+    }
+    if (ch === '"') {
+      const from = i++;
+      while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
+      out += text.slice(from, ++i);
+      comma = -1;
+      continue;
+    }
+    if ((ch === '}' || ch === ']') && comma !== -1) {
+      out = out.slice(0, comma) + out.slice(comma + 1);
+    }
+    if (ch === ',') comma = out.length;
+    else if (!/\s/.test(ch)) comma = -1;
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 function hasDotPath(doc: unknown, key: string): boolean {
