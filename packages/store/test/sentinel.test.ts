@@ -169,6 +169,33 @@ describe('SentinelRepo', () => {
     });
   });
 
+  it('keeps checks named like inherited object members', () => {
+    const { store, project } = setup();
+    const checks: Record<string, SentinelCheck> = {};
+    for (const name of ['constructor', 'toString', '__proto__']) {
+      Object.defineProperty(checks, name, {
+        value: check({ state: 'failing', failingSeq: 2 }),
+        enumerable: true,
+      });
+    }
+    store.sentinel.save(project.id, '/repo', {
+      checkedSeq: 2,
+      checkedAt: 5,
+      setupCommit: null,
+      checks,
+    });
+    const back = store.sentinel.get(project.id, '/repo')?.checks ?? {};
+    expect(Object.keys(back)).toEqual(['constructor', 'toString', '__proto__']);
+    for (const name of Object.keys(back)) {
+      expect(Object.hasOwn(back, name)).toBe(true);
+      expect(Object.getOwnPropertyDescriptor(back, name)?.value).toMatchObject({
+        state: 'failing',
+        failingSeq: 2,
+      });
+    }
+    expect(Object.getPrototypeOf(back)).toBe(Object.prototype);
+  });
+
   it('is deleted with its project', () => {
     const { store, project } = setup();
     store.sentinel.save(project.id, '/repo', {

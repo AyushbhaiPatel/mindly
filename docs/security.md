@@ -164,13 +164,29 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   scratch worktree under `$MINDLY_HOME/sentinel/` (mode `0700`), outside the repository, never in
   the user's checkout; the path is refused if it is inside or around the repository (the sentinel
   reports `MINDLY_HOME` inside the repository as not ready). One pass at a time holds a checkout,
-  by a lock released only when its process ends, and the daemon queues passes behind the
-  project's merge checks. Bisects the sentinel starts are capped per project per day
-  (`sentinel.maxBisectsPerDay`), and a step where nothing could run is retried with a growing
-  back-off (15 minutes up to 6 hours), not on every tick. Agents cannot start a pass: there is no
-  MCP tool, and the daemon endpoint only reads. A mistake the sentinel records from its own bisect
-  has the system as its source, so it is only `proposed` (a user-run `mindly bisect` records an
-  approved one): nobody looked at the result before agents are warned with it.
+  by a lock that stays held while the process that took it lives. The lock records its PID, an
+  id of its own, when the process started, its PID namespace and its machine and boot (the boot
+  id on Linux, the host name and boot time elsewhere), so a PID used again by another process
+  does not keep it. A PID is only judged on its own machine and boot and inside its own
+  namespace: seen from anywhere else (two containers sharing `MINDLY_HOME`, a container and the
+  host, two machines sharing a folder), the lock is held for as long as its holder keeps
+  touching it (every 10 seconds). It is taken over only by a process that found it unchanged
+  again more than a minute after it was first looked at from the same machine and boot, counted
+  on a clock that does not step (what was seen is noted in a `lock.seen-*` file next to the
+  lock, one per machine and boot, so one-shot containers build on each other's looks), and a
+  time sync or a resume from suspend never makes a live lock look abandoned. A holder that was
+  suspended for longer than that (a paused container) can lose its lock: the command it runs
+  is stopped as soon as its heartbeat finds out, and the pass checks the lock before it opens
+  the scratch tree, before every command and before it saves anything, then stops as
+  cancelled, leaving the scratch tree and the state to the new holder. The daemon queues passes
+  behind the project's merge checks. Bisects the
+  sentinel starts are capped per project per day (`sentinel.maxBisectsPerDay`), and a step where
+  nothing could run, or whose pass failed, is retried with a growing back-off counted from the
+  end of the pass (15 minutes up to 6 hours), not on every tick. Agents cannot start a pass:
+  there is no MCP tool, and the daemon endpoint only reads. A mistake the sentinel records from
+  its own bisect has the system as its source, so it is only `proposed` (a user-run
+  `mindly bisect` records an approved one): nobody looked at the result before agents are warned
+  with it.
 - Check output reaches agents only as a redacted, sanitized, length-capped tail inside the
   delivery of a break, rendered as reference data like every other delivery: a test that prints
   instructions cannot turn them into a rule, a memory or a command.
