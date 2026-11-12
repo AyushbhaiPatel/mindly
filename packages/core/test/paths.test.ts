@@ -39,12 +39,22 @@ describe('home', () => {
 });
 
 describe('isDeniedPath', () => {
-  it.each(['.env', 'config/.env.production', 'keys/server.pem', 'home/.ssh/config', '.npmrc'])(
-    'denies %s',
-    (p) => expect(isDeniedPath(p)).toBe(true),
-  );
+  it.each([
+    '.env',
+    'config/.env.production',
+    '.env-prod',
+    'apps/web/.env_local',
+    '.envrc',
+    'keys/server.pem',
+    'keys/id_dsa',
+    'keys/id_ed25519.pub',
+    'home/.ssh/config',
+    '.npmrc',
+  ])('denies %s', (p) => expect(isDeniedPath(p)).toBe(true));
   it('allows normal source and custom deny-lists', () => {
     expect(isDeniedPath('src/env.ts')).toBe(false);
+    expect(isDeniedPath('src/.environment.ts')).toBe(false);
+    expect(isDeniedPath('src/id_token.ts')).toBe(false);
     expect(isDeniedPath('vault/x.txt', ['vault/**'])).toBe(true);
   });
 });

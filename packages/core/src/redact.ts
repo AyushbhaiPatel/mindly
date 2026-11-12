@@ -6,6 +6,8 @@
  * so hostile content cannot stall a hook with catastrophic regex backtracking.
  */
 
+import { redactCommandCredentials } from './shell-credentials.js';
+
 export const REDACTED = '[REDACTED]';
 
 /** Hard cap on how much text one call processes. Longer input is truncated first. */
@@ -16,8 +18,18 @@ interface Rule {
   re: RegExp;
   /** Replacement; `$1` style groups keep non-secret context such as the variable name. */
   replace: string;
-  /** Returns true for matches that are clearly not secrets (receives the capture groups). */
-  skip?: (groups: readonly string[]) => boolean;
+  /**
+   * Returns true for matches that are clearly not secrets. Receives the capture groups and
+   * where the match sits in the text.
+   */
+  skip?: (groups: readonly string[], at: MatchContext) => boolean;
+}
+
+/** Where a match sits: the whole text, and the offsets the match starts and ends at. */
+interface MatchContext {
+  text: string;
+  start: number;
+  end: number;
 }
 
 /** Type names that follow `password:` in code (TypeScript, Python, Go, …), never secrets. */
@@ -48,20 +60,105 @@ const TYPE_WORDS = new Set([
  * True when an assignment's value is a type annotation or a reference to where the secret lives
  * (`process.env.X`, `config.password`), not a literal secret. Redacting those only garbles code.
  */
-function isNonSecretValue(prefix: string, raw: string): boolean {
+function isNonSecretValue(prefix: string, raw: string, after = ''): boolean {
   const value = raw.replace(/[)\]}>.;,]+$/, '');
   // Type names only count after an unquoted `:` (an annotation), never after `=` or a quote.
   const annotation = /:\s*$/.test(prefix);
   if (annotation && TYPE_WORDS.has(value.toLowerCase())) return true;
   if (annotation && /^[A-Z][A-Za-z0-9]*(?:[<[(|].*)?$/.test(value) && !/\d/.test(value)) {
-    return true;
+    // A capitalised word is a type name only where code continues around it: a generic or union
+    // (`Optional[str]`, `Foo | null`), or a closing bracket, separator or default value after it
+    // (`password: SecretString }`). Alone on its line (`password: Wintermute`) it is a value.
+    const typeSyntax = value !== raw || /[<[(|]/.test(value);
+    if (typeSyntax || /^[ \t]{0,8}(?:\r?\n[ \t]{0,8})?[;,)}\]|=>]/.test(after)) return true;
   }
   return /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|env\.|config\.|settings\.|this\.|self\.|options\.|opts\.|props\.|req\.|args\.)/.test(
     value,
   );
 }
 
-const RULES: Rule[] = [
+/** Words that mark a name (variable, key or flag) as holding a secret. */
+const SECRET_WORDS =
+  'secret|token|passwd|password|pwd|api[_-]?key|apikey|private[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?key|credentials?';
+
+/** A secret-bearing name: a secret word with up to 60 name characters on either side. */
+const SECRET_NAME = `[A-Za-z0-9_.-]{0,60}(?:${SECRET_WORDS})[A-Za-z0-9_.-]{0,60}`;
+
+/**
+ * Last words of a name that only ever name display text, never the secret itself
+ * (`passwordPlaceholder`, `passwordError`). Kept short on purpose: words such as `text`, `input`,
+ * `message`, `prompt` or `type` also name fields and variables that hold the secret.
+ */
+const DISPLAY_WORDS = new Set(
+  'placeholder label hint help tooltip caption heading error'.split(' '),
+);
+
+/** The last word of the name in an assignment prefix: `passwordLabel: '` -> `label`. */
+function lastNameWord(prefix: string): string {
+  const name = /([A-Za-z0-9_.-]{1,200})["']?\s{0,5}[:=]\s{0,5}["']?$/.exec(prefix)?.[1] ?? '';
+  const words = name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[\s_.-]+/)
+    .filter((w) => w !== '');
+  return (words[words.length - 1] ?? '').toLowerCase();
+}
+
+/**
+ * An ordinary word of a sentence: letters of any script with an inner hyphen or apostrophe, at
+ * most 24 characters, with a capital inside it only once and only in a word of up to 12 letters
+ * (a name such as `GitHub`); or a number of up to four digits, a range or a minimum (`8–64`,
+ * `8+`). Brackets, quotes and sentence punctuation around it do not count. A token that mixes
+ * letters and digits is never plain.
+ */
+function isPlainWord(word: string): boolean {
+  const core = word.replace(/^[("'“‘«]+/, '').replace(/[)"'”’».,:;!?…]+$/, '');
+  if (core === '') return word.length <= 3;
+  // A number, a range or a minimum: `8`, `8-64`, `8–64`, `8+`.
+  if (/^\d{1,4}(?:[-–—]\d{1,4})?\+?$/.test(core)) return true;
+  if (core.length > 24 || !/^\p{L}+(?:['’-]\p{L}+)*$/u.test(core)) return false;
+  // One capital inside a short word is a name (`GitHub`, `iPhone`); more is an identifier.
+  const inner = core.match(/\p{Ll}\p{Lu}/gu)?.length ?? 0;
+  return inner === 0 || (inner === 1 && core.length <= 12);
+}
+
+/** True for two or more ordinary words: a sentence or a label, not a token. */
+function isPlainWords(value: string): boolean {
+  const words = value.trim().split(/\s+/);
+  return words.length >= 2 && words.length <= 40 && words.every(isPlainWord);
+}
+
+/**
+ * A quoted value is display text, not a secret, only when both hold: the name says so
+ * (`passwordPlaceholder`, `tokenError`) and the value reads as plain words (`"Enter your
+ * password"`). A single word, a token mixing letters and digits or a long or mixed-case word is
+ * still redacted, whatever the name ends in. A `..._type` name is display text only for an
+ * authorization scheme followed by plain words (`token_type: "Bearer access"`).
+ */
+function isDisplayText(prefix: string, value: string): boolean {
+  const last = lastNameWord(prefix);
+  if (last === 'type')
+    return /^\s*(?:Bearer|Basic|Digest|MAC)\s/i.test(value) && isPlainWords(value);
+  return DISPLAY_WORDS.has(last) && isPlainWords(value);
+}
+
+/**
+ * The same test for the unquoted-value rule, which only matched the first word of a quoted
+ * string: the rest of the string, up to its closing quote, is read from the text.
+ */
+function startsDisplayText(prefix: string, value: string, at: MatchContext): boolean {
+  const quote = prefix.slice(-1);
+  if (quote !== '"' && quote !== "'") return false;
+  const last = lastNameWord(prefix);
+  if (last !== 'type' && !DISPLAY_WORDS.has(last)) return false;
+  const rest = at.text.slice(at.end, at.end + 400);
+  const close = rest.search(quote === '"' ? /["\n]/ : /['\n]/);
+  return (
+    close !== -1 && rest[close] === quote && isDisplayText(prefix, value + rest.slice(0, close))
+  );
+}
+
+/** Provider tokens, private keys and URL credentials: matched by their own shape. */
+const TOKEN_RULES: Rule[] = [
   {
     kind: 'private_key',
     re: /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----[\s\S]{0,20000}?-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----/g,
@@ -106,12 +203,55 @@ const RULES: Rule[] = [
     re: /\b([a-z][a-z0-9+.-]{1,20}:\/\/[^\s:/@]{1,200}:)[^\s@/]{1,200}@/gi,
     replace: `$1${REDACTED}@`,
   },
+];
+
+/**
+ * Secrets found by the name next to them: `docker login -p`, `--token value`, `NAME=value`. These
+ * run after the command reader, which handles HTTP clients' credentials.
+ */
+const NAMED_RULES: Rule[] = [
+  {
+    kind: 'cli_credentials',
+    // `docker login -p value`: `-p` means a password only for this command.
+    re: /\b((?:docker|podman|nerdctl)(?:\.exe)?\s{1,5}login\s(?:[^\n|;&]{0,300}?\s)?-p\s{1,5}["']?)([^\s"'`]{3,4000})/gi,
+    replace: `$1${REDACTED}`,
+    skip: (g) => (g[2] ?? '').startsWith('$'),
+  },
+  {
+    kind: 'cli_flag',
+    // `--token value` / `--db-password value`: a flag whose name ends in a secret word, with the
+    // value as the next argument. `--password-stdin`, `--token-file` and the like do not end in
+    // one; a value that is another flag or a shell variable is not a literal secret.
+    re: new RegExp(
+      `((?:^|[\\s"'\`(])--?(?:[A-Za-z0-9]{1,30}[-_]){0,6}(?:${SECRET_WORDS})\\s{1,5}["']?)([^\\s"'\`,;]{6,4000})`,
+      'gi',
+    ),
+    replace: `$1${REDACTED}`,
+    skip: (g) => /^[-$]/.test(g[2] ?? ''),
+  },
   {
     kind: 'assignment',
-    // NAME=value / "name": "value" where NAME looks secret-bearing.
-    re: /\b([A-Za-z0-9_.-]{0,60}(?:secret|token|passwd|password|pwd|api[_-]?key|apikey|private[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?key|credentials?)[A-Za-z0-9_.-]{0,60}["']?\s{0,5}[:=]\s{0,5}["']?)([^\s"'`,;]{6,4000})/gi,
+    // NAME="value" / "name": "value": a quoted value is taken whole, spaces and punctuation
+    // included, up to its closing quote.
+    re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}")([^"\\n]{6,4000})(?=")`, 'gi'),
     replace: `$1${REDACTED}`,
-    skip: (g) => isNonSecretValue(g[1] ?? '', g[2] ?? ''),
+    skip: (g) => isDisplayText(g[1] ?? '', g[2] ?? '') || isNonSecretValue(g[1] ?? '', g[2] ?? ''),
+  },
+  {
+    kind: 'assignment',
+    re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}')([^'\\n]{6,4000})(?=')`, 'gi'),
+    replace: `$1${REDACTED}`,
+    skip: (g) => isDisplayText(g[1] ?? '', g[2] ?? '') || isNonSecretValue(g[1] ?? '', g[2] ?? ''),
+  },
+  {
+    kind: 'assignment',
+    // NAME=value / name: value where NAME looks secret-bearing.
+    re: new RegExp(`\\b(${SECRET_NAME}["']?\\s{0,5}[:=]\\s{0,5}["']?)([^\\s"'\`,;]{6,4000})`, 'gi'),
+    replace: `$1${REDACTED}`,
+    // The first word of a quoted display string is not a secret either.
+    skip: (g, at) =>
+      startsDisplayText(g[1] ?? '', g[2] ?? '', at) ||
+      isNonSecretValue(g[1] ?? '', g[2] ?? '', at.text.slice(at.end, at.end + 12)),
   },
 ];
 
@@ -150,17 +290,35 @@ export function redact(input: string, options: RedactOptions = {}): RedactionRes
   const apply = (kind: string, re: RegExp, replace: string, skip?: Rule['skip']): void => {
     re.lastIndex = 0;
     text = text.replace(re, (...args: unknown[]) => {
-      // Do not double-count already-redacted values.
       const match = String(args[0]);
-      if (match.endsWith(REDACTED) || match === REDACTED) return match;
-      if (skip?.(args.map((a) => (typeof a === 'string' ? a : '')))) return match;
+      const groups = args.map((a) => (typeof a === 'string' ? a : ''));
+      // Do not double-count a value that is already redacted. Only the secret part is looked
+      // at (the match without its kept prefix), and only when nothing else is left in it: a
+      // value that merely ends in an earlier redaction still has a secret in front of it.
+      const kept = replace
+        .slice(0, Math.max(0, replace.indexOf(REDACTED)))
+        .replace(/\$(\d)/g, (_m, g: string) => groups[Number(g)] ?? '');
+      const secret = match.startsWith(kept) ? match.slice(kept.length) : match;
+      if (secret.includes(REDACTED) && !/[A-Za-z0-9]/.test(secret.split(REDACTED).join(''))) {
+        return match;
+      }
+      const offset = args.find((a) => typeof a === 'number');
+      const start = typeof offset === 'number' ? offset : 0;
+      if (skip?.(groups, { text, start, end: start + match.length })) return match;
       count++;
       kinds.add(kind);
       return replace.replace(/\$(\d)/g, (_m, g: string) => String(args[Number(g)] ?? ''));
     });
   };
 
-  for (const rule of RULES) apply(rule.kind, rule.re, rule.replace, rule.skip);
+  for (const rule of TOKEN_RULES) apply(rule.kind, rule.re, rule.replace, rule.skip);
+  const commands = redactCommandCredentials(text, REDACTED);
+  if (commands.count > 0) {
+    text = commands.text;
+    count += commands.count;
+    kinds.add('cli_credentials');
+  }
+  for (const rule of NAMED_RULES) apply(rule.kind, rule.re, rule.replace, rule.skip);
   for (const source of options.extraPatterns ?? []) {
     const re = compileExtra(source);
     if (re) apply('custom', re, REDACTED);
@@ -194,12 +352,16 @@ export function redactDeep<T>(value: T, options?: RedactOptions, depth = 0): T {
 export const DEFAULT_DENY_PATHS: readonly string[] = [
   '**/.env',
   '**/.env.*',
+  '**/.env-*',
+  '**/.env_*',
+  '**/.envrc',
   '**/*.pem',
   '**/*.key',
   '**/*.p12',
   '**/*.pfx',
   '**/*.keystore',
   '**/id_rsa*',
+  '**/id_dsa*',
   '**/id_ed25519*',
   '**/id_ecdsa*',
   '**/.ssh/**',

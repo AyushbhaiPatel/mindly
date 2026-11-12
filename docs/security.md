@@ -55,11 +55,49 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 
 - A redaction pass runs on every prompt, tool payload, memory body and notification before it is
   stored or sent: private keys, common provider tokens (AWS, GitHub, Slack, Stripe, OpenAI,
-  Anthropic, Google, npm, JWTs), `.env`-style assignments and high-entropy strings next to
-  secret-like names.
-- Paths matching the default deny-list (`.env*`, `*.pem`, `*.key`, `id_*`, `.ssh/`, `.aws/`,
-  `.npmrc`, `.netrc`, `secrets/`, credential stores) are never read for evidence and their content
-  is never captured.
+  Anthropic, Google, npm, JWTs), credentials in URLs, and values next to secret-like names:
+  `.env`-style assignments (a quoted value is removed whole), command-line flags such as
+  `--token <value>` and `--password <value>`, `docker login -p <value>`, and the credentials
+  HTTP clients take on a command line. These are found by one rule, read line by line, that
+  quoting cannot get wrong because it does not use quoting to find commands. Lines are joined
+  only across a continuation (`\`, or `^` or a PowerShell backtick after a space) and into
+  indented option lines directly under a line that names a client, never across an open quote.
+  On a line that names a client earlier, anywhere and quoted or not (curl and its builds, wget,
+  curlie, aria2c, ab, lftp, hurl, httpstat, httpie, xh, or a variable named after one such as
+  `$CURL` or `$HTTP_CLIENT`, but not `$HTTP_PORT` or `$HTTPBIN`), the value after `-u`,
+  `--user`, `-U` / `--proxy-user` (alone or at the end of a cluster such as `-su`), ab's `-A` /
+  `-P`, httpie's and xh's `-a` / `--auth`, `--cert file:`, `--pass`, `--tlspassword`,
+  `--oauth2-bearer`, `--bearer` and `-E` (curl's short `--cert`, for a certificate file), is
+  redacted, also when the option is its own quoted argument (`["curl", "-u", "admin:<value>"]`).
+  The value is the run after the option, to its matching quote if it starts with one; in
+  `user:<value>` only the secret goes (lftp, as the client nearest before the option, also takes
+  `user,<value>`), and `(`, `)`, `;`, `|` and a PowerShell escape inside an unquoted value stay
+  part of it. A bare user name or a `$VARIABLE` is left alone, and so is an rsync target
+  `user@host:/path` after a cluster. An `Authorization:` header or item (also a quoted key,
+  `"Authorization": "Bearer ..."`, and one split by a line continuation inside its value) is
+  redacted when its value looks like a credential: a scheme (`Bearer`, `Basic`, `Token`, ...) and a token of at
+  least 8 characters, a single token of at least 16, or the secret parameters of `Digest` and
+  `AWS4-...` (SigV4 and SigV4a: `response`, `nonce`, `cnonce`, `opaque`, `Signature`), which are
+  redacted wherever they are on a line that holds such a header (its scheme may follow a line
+  continuation), a quoted value up to its next quote and spaces allowed around `=`; a header
+  named in a sentence is not. On a line that is a JSON object, the client may come after
+  the option. Nothing is capped or skipped: the work is one pass per line.
+  The trade-off: on a line that names a client, another program's `-u x:y` after it has its
+  value redacted too (`curl … && docker run -u 1000:[REDACTED]`), which garbles that value and
+  nothing else. Known gaps: a value on the line after its flag, a flag on a line that only a
+  multi-line quoted body joins to the client, a client behind a shell alias or function, and a
+  quoted `"Authorization"` key on a line that names no client (`fetch(url, {headers: ...})`).
+  Task titles, plan steps and blockers go through the same pass. Type annotations and references
+  such as `process.env.X` or `$TOKEN` are left alone, since they hold no secret. So is quoted UI
+  text, but only when both the name says so (it ends in `placeholder`, `label`, `hint`, `help`,
+  `tooltip`, `caption`, `heading` or `error`) and the value is two or more plain words, as in
+  `tokenPlaceholder="Paste your GitHub token"`. A passphrase made of plain words stored under
+  such a name is therefore not redacted.
+- Paths matching the default deny-list are never read for evidence and their content is never
+  captured: `.env`, `.env.*`, `.env-*`, `.env_*`, `.envrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
+  `*.keystore`, `*.kdbx`, SSH private keys (`id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`),
+  `.ssh/`, `.aws/`, `.gnupg/`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `secrets/`,
+  `credentials.json` and `service-account*.json`, at any depth. `redaction.denyPaths` adds more.
 - Model API keys are read from environment variables at call time and never written to disk by
   Mindly.
 - Pager payloads contain titles and counts only, never code or prompt text.
@@ -139,8 +177,9 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
 
 ### T7. Denial of service against agents
 
-- Hooks have a hard deadline (default 1500 ms) and fail open: on any internal error they print
-  nothing and exit 0 so the agent continues.
+- Hooks have a hard deadline (`hooks.timeoutMs`, default 1500 ms, at most 10 s) and fail open: on
+  any internal error they print nothing and exit 0 so the agent continues. The hooks are also
+  registered with each agent's own 10 second limit, as a backstop if the process hangs.
 - Context packets are bounded by a token budget; retrieval queries are bounded by `LIMIT`.
 - SQLite runs with `busy_timeout` and WAL; long-running work happens in the daemon, not in hooks.
 

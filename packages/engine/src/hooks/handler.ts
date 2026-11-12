@@ -493,7 +493,7 @@ export class HookHandler {
   /** The comparable key of a shell command (program and subcommand), redacted. */
   private commandKey(command: string): string {
     return sanitizeLine(
-      redactText(commandKey(command), { extraPatterns: this.k.config.redaction.extraPatterns }),
+      commandKey(command, { extraPatterns: this.k.config.redaction.extraPatterns }),
       120,
     );
   }
