@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isLiteralScope, patternsMayOverlap } from '../src/hooks/scope.js';
+import { limitTo } from '../src/hooks/search.js';
 import {
   mayHold,
   mentionsPath,
@@ -1040,6 +1041,7 @@ describe('write targets of a shell command', () => {
         noFollow: false,
         asWritten: false,
         follows: false,
+        intoFolder: false,
         parents: false,
         glob: true,
         dotfiles: false,
@@ -1825,7 +1827,7 @@ describe('write targets of a shell command', () => {
     // A copy into a folder made earlier on the line lands inside it.
     const into = readShellWrites('mkdir vendor && cp src/a.ts vendor', { understoodOnly: true });
     expect(into.understood).toBe(true);
-    expect(into.targets.map((t) => t.path)).toContain('vendor/a.ts');
+    expect(into.targets).toMatchObject([{ path: 'vendor', intoFolder: true, entries: ['a.ts'] }]);
     expect(readShellWrites('touch v && cp a.ts v', { understoodOnly: true }).understood).toBe(
       false,
     );
@@ -1927,12 +1929,10 @@ describe('write targets of a shell command', () => {
     // Folders `mkdir -p` makes on the way are folders for a later copy, however many.
     const lands = (line: string) =>
       readShellWrites(line, { understoodOnly: true, cwd: '/w' }).targets.map((t) => t.path);
-    expect(lands('mkdir -p a/b/c a/b/d && cp x.txt a/b')).toEqual([
-      'a/b/c',
-      'a/b/d',
-      'a/b',
-      'a/b/x.txt',
-    ]);
+    expect(lands('mkdir -p a/b/c a/b/d && cp x.txt a/b')).toEqual(['a/b/c', 'a/b/d', 'a/b']);
+    expect(
+      readShellWrites('mkdir -p a/b/c && cp x.txt y.txt a/b', { understoodOnly: true }).targets[1],
+    ).toMatchObject({ path: 'a/b', intoFolder: true, entries: ['x.txt', 'y.txt'] });
   });
 
   it('holds the sources of a copy against what the line wrote', () => {
@@ -2216,6 +2216,21 @@ describe('comparing a written directory or wildcard with a scope', () => {
     }
     expect(patternsMayOverlap('SRC/WEB/**', 'src/web/**')).toBe(false);
     expect(patternsMayOverlap('SRC/WEB/**', 'src/web/**', { nocase: true })).toBe(true);
+  });
+
+  it('limits a rule that starts with ** to the folder written, the folder itself included', () => {
+    // The rule's folder may be the folder written, or one above it: its files are right there.
+    expect(limitTo('certs', '**/certs/**')).toBe('certs/**');
+    expect(limitTo('pkg/certs', '**/certs/**')).toBe('pkg/certs/**');
+    expect(limitTo('certs', '**/certs/*.pem')).toBe('certs/**/*.pem');
+    expect(limitTo('config', '**/config/secrets.json')).toBe('config/**/secrets.json');
+    expect(limitTo('pkg/certs', '**/pkg/**/p.pem')).toBe('pkg/certs/**/p.pem');
+    expect(limitTo('a/x', 'a/**/x/**')).toBe('a/x/**');
+    // A rule that names no folder of the one written lies below it, as before.
+    expect(limitTo('packages', '**/secret1/**')).toBe('packages/**/secret1/**');
+    expect(limitTo('dist', '**/*.pem')).toBe('dist/**/*.pem');
+    expect(limitTo('prisma', '**/migrations/**')).toBe('prisma/**/migrations/**');
+    expect(limitTo('prisma/migrations', '**/migrations/**')).toBe('prisma/migrations/**');
   });
 
   it('tells a rule that names its path from one that needs a look', () => {

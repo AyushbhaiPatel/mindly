@@ -719,19 +719,43 @@ export class ScopeSearch {
 
 /**
  * A rule glob limited to what lies under `base` (relative; `''` is the root), so git is only
- * asked about the directory being written. Exact when the glob starts with `**` or names a
- * directory around or inside `base`; otherwise everything under `base`, filtered afterwards.
+ * asked about the directory being written. Exact when the glob names a directory around or
+ * inside `base`, or starts with `**` and names no folder of `base`; otherwise a wider pattern
+ * under `base`, filtered afterwards.
  */
 export function limitTo(base: string, glob: string): string {
   if (base === '') return glob;
   const segments = collapse(patternSegments(glob));
-  if (segments[0] === '**') return [base, ...segments].join('/');
+  /**
+   * A rule that goes on with `**` from somewhere at or above `base`. Its next part may name
+   * one of the folders `above` (those of `base` it has not passed): then the files right
+   * under `base` may be covered, and only the rule's last part limits the listing. Else all
+   * of the rule lies below `base`.
+   */
+  const below = (rest: readonly string[], above: readonly string[]): string => {
+    const next = rest.find((x) => x !== '**');
+    let within: boolean;
+    try {
+      within = next !== undefined && above.some((part) => globToRegExp(next).test(part));
+    } catch {
+      within = true;
+    }
+    if (!within) return [base, ...rest].join('/');
+    const last = rest[rest.length - 1] as string;
+    return last === '**' ? `${base}/**` : `${base}/**/${last}`;
+  };
+  if (segments[0] === '**') return below(segments, base.split('/'));
   const prefix = literalPrefix(glob).join('/');
   // The rule already lies inside the directory.
   if (prefix === base || prefix.startsWith(`${base}/`)) return glob;
   if (base.startsWith(`${prefix}/`) || prefix === '') {
     const after = segments.slice(prefix === '' ? 0 : prefix.split('/').length);
-    if (after[0] === '**') return [base, ...after].join('/');
+    if (after[0] === '**') {
+      return below(
+        after,
+        prefix === '' ? base.split('/') : base.slice(prefix.length + 1).split('/'),
+      );
+    }
   }
   return `${base}/**`;
 }

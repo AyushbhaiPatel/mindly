@@ -1218,6 +1218,8 @@ interface Item {
   asWritten?: boolean;
   /** A copy that follows the symbolic links it finds in its sources (`cp -L`, `-H`). */
   follows?: boolean;
+  /** The destination of a copy is a folder `mkdir` made earlier on the line. */
+  intoFolder?: boolean;
   /** The folders above the path that are not there are made too (`mkdir -p`). */
   parents?: boolean;
   /**
@@ -3283,6 +3285,11 @@ export interface ShellTarget {
   asWritten: boolean;
   /** For a copy: the symbolic links found in its sources are followed (`cp -L`, `-H`). */
   follows: boolean;
+  /**
+   * For a copy: the destination is a folder the line made with `mkdir`, so it is one though it
+   * is not on disk yet, and each source lands inside it.
+   */
+  intoFolder: boolean;
   /** The folders above the path that are not there are made, and so written, too (`mkdir -p`). */
   parents: boolean;
   /**
@@ -4350,6 +4357,7 @@ function unreadLine(top: string | null): ShellReading {
         noFollow: false,
         asWritten: false,
         follows: false,
+        intoFolder: false,
         parents: false,
         glob: false,
         dotfiles: false,
@@ -4782,7 +4790,14 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     const inside = entries.map((e) => (e.name === '.' || e.name === '*' ? null : e.name));
     const inner = inside.flatMap((name) => (name === null ? [] : [under(dest, name)]));
     if (inside.includes(null)) return [dest, ...inner];
-    if (w.text.endsWith('/')) return inner;
+    // A `/` after a destination that is not there does not make it a folder: the copy of a
+    // single source becomes the destination itself.
+    if (
+      w.text.endsWith('/') &&
+      (r.madeDirs.has(anchor(dest)) || r.isDir === null || stale(dest) || r.isDir(dest))
+    ) {
+      return inner;
+    }
     if (r.madeDirs.has(anchor(dest))) return linking ? [dest, ...inner] : inner;
     if (r.isDir !== null && !stale(dest) && r.isDir(dest) && !(r.linked?.(dest) ?? false)) {
       return inner;
@@ -5019,6 +5034,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         known.certain ||= certain;
         known.dotfiles ||= item.dotfiles ?? false;
         known.follows ||= item.follows ?? false;
+        known.intoFolder ||= item.intoFolder ?? false;
         known.parents ||= item.parents ?? false;
         // One mention takes the name as it is and the other does not: which holds for what
         // lands there is not told by one target.
@@ -5045,6 +5061,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         noFollow: item.noFollow ?? false,
         asWritten: item.asWritten ?? false,
         follows: item.follows ?? false,
+        intoFolder: item.intoFolder ?? false,
         parents: item.parents ?? false,
         glob: form.glob,
         dotfiles: item.dotfiles ?? false,
@@ -5163,20 +5180,9 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         continue;
       }
       if (r.madeDirs.has(anchor(dest))) {
-        // `mkdir` may have failed, or not run: the destination itself is written too.
-        out.push(item);
-        for (const e of (item.entries ?? []).slice(0, MAX_ENTRIES)) {
-          if (e.name === '*') {
-            r.unmatched = true;
-            continue;
-          }
-          const name = e.name === '.' ? '' : `/${e.name}`;
-          const text = `${item.word.text}${name}`;
-          out.push({
-            word: { ...item.word, text, mask: `${item.word.mask}${'q'.repeat(name.length)}` },
-            tree: true,
-          });
-        }
+        // A folder, though not on disk yet: each source lands inside it under its own name.
+        if ((item.entries ?? []).some((e) => e.name === '*')) r.unmatched = true;
+        out.push({ ...item, intoFolder: true });
         continue;
       }
       // Written earlier on the line in another way (made, or removed and perhaps still there):
