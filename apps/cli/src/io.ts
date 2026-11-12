@@ -25,22 +25,135 @@ export interface CliIo {
   prompt: ((question: string) => Promise<string>) | null;
 }
 
-/** Thrown by {@link readStdin} when the input exceeds its limit. */
-export class StdinTooLarge extends Error {}
+/**
+ * Thrown by {@link readStdin} when the input exceeds its limit. `toolName` is the value of the
+ * payload's top-level tool name key, wherever it comes in the payload; null when there is none or
+ * it was not found.
+ */
+export class StdinTooLarge extends Error {
+  constructor(
+    message: string,
+    readonly toolName: string | null = null,
+  ) {
+    super(message);
+  }
+}
 
-/** Reads stdin completely, refusing more than `max` bytes. */
+/** How much of an input that is too large is still read, looking for the tool's name. */
+const SCAN_BYTES = 256 * 1024 * 1024;
+
+/** Keys a hook payload names its tool with, at its top level. */
+const TOOL_KEYS = new Set(['tool_name', 'toolName', 'tool']);
+
+/**
+ * Finds the string value of a top-level tool name key in JSON read piece by piece, without
+ * keeping or parsing the rest: only the nesting depth and whether a string is open are followed,
+ * so a key of the same name inside the tool's input is not mistaken for it. Works on bytes: no
+ * character of the JSON structure is ever part of a multi-byte UTF-8 sequence.
+ */
+export class ToolNameScan {
+  name: string | null = null;
+  private depth = 0;
+  private inString = false;
+  private escaped = false;
+  /** At the top level of an object: the next string is a key. */
+  private expectKey = false;
+  /** The top-level string being read (a key, or the value of a tool key), as bytes. */
+  private current: number[] | null = null;
+  private currentIsKey = false;
+  private lastKey: string | null = null;
+
+  /** Reads more of the input; true once the name is known. */
+  feed(chunk: Uint8Array): boolean {
+    if (this.name !== null) return true;
+    for (let i = 0; i < chunk.length; i++) {
+      const c = chunk[i] as number;
+      if (this.inString) {
+        if (this.escaped) {
+          this.escaped = false;
+          this.current = null;
+        } else if (c === 0x5c) {
+          // An escape in a key or name: not one of the plain names looked for.
+          this.escaped = true;
+          this.current = null;
+        } else if (c === 0x22) {
+          this.inString = false;
+          if (this.current !== null) {
+            const text = Buffer.from(this.current).toString('utf8');
+            if (this.currentIsKey) this.lastKey = text;
+            else if (this.lastKey !== null && TOOL_KEYS.has(this.lastKey)) {
+              this.name = text;
+              return true;
+            }
+          } else if (this.currentIsKey) this.lastKey = null;
+          this.current = null;
+        } else if (this.current !== null) {
+          if (this.current.length < 200) this.current.push(c);
+          else this.current = null;
+        }
+        continue;
+      }
+      switch (c) {
+        case 0x22: // "
+          this.inString = true;
+          if (this.depth === 1) {
+            this.currentIsKey = this.expectKey;
+            const wanted = this.expectKey || (this.lastKey !== null && TOOL_KEYS.has(this.lastKey));
+            this.current = wanted ? [] : null;
+          }
+          break;
+        case 0x7b: // {
+        case 0x5b: // [
+          this.depth++;
+          if (this.depth === 1) this.expectKey = c === 0x7b;
+          break;
+        case 0x7d: // }
+        case 0x5d: // ]
+          this.depth--;
+          break;
+        case 0x3a: // :
+          if (this.depth === 1) this.expectKey = false;
+          break;
+        case 0x2c: // ,
+          if (this.depth === 1) {
+            this.expectKey = true;
+            this.lastKey = null;
+          }
+          break;
+        default:
+          break;
+      }
+    }
+    return false;
+  }
+}
+
+/**
+ * Reads stdin completely, refusing more than `max` bytes. What is beyond the limit is still read
+ * (up to a bound) only to find the payload's top-level tool name, for {@link StdinTooLarge}.
+ */
 export async function readStdin(
   stdin: AsyncIterable<Buffer | string>,
   max: number,
 ): Promise<string> {
   const chunks: Buffer[] = [];
   let total = 0;
+  let scan: ToolNameScan | null = null;
   for await (const chunk of stdin) {
     const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
     total += buf.length;
-    if (total > max) throw new StdinTooLarge('payload too large');
-    chunks.push(buf);
+    if (scan === null && total > max) {
+      scan = new ToolNameScan();
+      for (const c of chunks) scan.feed(c);
+      chunks.length = 0;
+    }
+    if (scan === null) {
+      chunks.push(buf);
+      continue;
+    }
+    if (scan.feed(buf) || total > SCAN_BYTES) break;
   }
+  if (scan !== null) throw new StdinTooLarge('payload too large', scan.name);
   return Buffer.concat(chunks).toString('utf8');
 }
 

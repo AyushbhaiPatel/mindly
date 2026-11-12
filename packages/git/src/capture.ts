@@ -1,4 +1,13 @@
-import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { MindlyError, isDeniedPath } from '@mindly/core';
@@ -83,6 +92,11 @@ export interface CapturedCommit {
   parent: string | null;
   /** Repository-relative paths that were changed but left out because they are denied. */
   skipped: string[];
+  /**
+   * New nested repositories (untracked folders git does not descend into), left out of the
+   * tree: recording one would point at a commit only it holds, or fail when it has none.
+   */
+  nested: string[];
 }
 
 /**
@@ -103,10 +117,7 @@ export async function captureWorktreeCommit(
   const timeoutMs = options.timeoutMs ?? 120_000;
   const parent = await headCommit(root);
   const overrides = await driverOverrides(root);
-  const indexPath = (
-    await runGit(['rev-parse', '--git-path', 'index'], { cwd: root })
-  ).stdout.trim();
-  const realIndex = isAbsolute(indexPath) ? indexPath : resolve(root, indexPath);
+  const realIndex = await indexFile(root);
 
   const tmp = mkdtempSync(join(tmpdir(), 'mindly-capture-'));
   try {
@@ -127,6 +138,9 @@ export async function captureWorktreeCommit(
     if (!seeded && parent) await runGit(['read-tree', parent], common);
 
     const split = (out: string): string[] => out.split('\0').filter((p) => p !== '');
+    // A file only touched (same content, new time) is not a change: refresh the copy's stat
+    // cache first, or it would be reported (and, if deny-listed, counted as skipped).
+    await runGit(['update-index', '-q', '--refresh'], { ...common, okExitCodes: [1] });
     // Worktree vs index (modified/deleted tracked files) and new untracked files.
     const unstaged = split(
       (await runGit(['diff-files', '--name-only', '-z', '--ignore-submodules=dirty'], common))
@@ -149,8 +163,14 @@ export async function captureWorktreeCommit(
 
     const extraDeny = options.extraDeny ?? [];
     const skipped = new Set<string>();
+    const nested = new Set<string>();
     const toAdd: string[] = [];
     for (const p of new Set([...unstaged, ...untracked])) {
+      // A new nested repository, listed as its folder: left out (see `nested`).
+      if (p.endsWith('/')) {
+        nested.add(p.slice(0, -1));
+        continue;
+      }
       if (isDeniedPath(p, extraDeny)) skipped.add(p);
       else toAdd.push(p);
     }
@@ -184,8 +204,24 @@ export async function captureWorktreeCommit(
       parent ? [parent] : [],
       options.message ?? 'mindly capture',
     );
-    return { commit, tree, parent, skipped: [...skipped].sort() };
+    return { commit, tree, parent, skipped: [...skipped].sort(), nested: [...nested].sort() };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/** The index file of the working tree at `root`: from its `.git` entry, or else from git. */
+async function indexFile(root: string): Promise<string> {
+  try {
+    const dotgit = join(root, '.git');
+    if (lstatSync(dotgit).isDirectory()) return join(dotgit, 'index');
+    const m = /^gitdir: (.+)$/m.exec(readFileSync(dotgit, 'utf8'));
+    if (m) return join(resolve(root, (m[1] as string).trim()), 'index');
+  } catch {
+    // Asked of git below.
+  }
+  const indexPath = (
+    await runGit(['rev-parse', '--git-path', 'index'], { cwd: root })
+  ).stdout.trim();
+  return isAbsolute(indexPath) ? indexPath : resolve(root, indexPath);
 }

@@ -1,4 +1,12 @@
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+} from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError } from '@mindly/core';
@@ -14,7 +22,20 @@ import {
   tryLockCheckpoint,
   worktreeId,
 } from '../src/index.js';
-import { git, makeRepo, tempDir, write } from './helpers.js';
+import { commitAll, git, makeRepo, tempDir, write } from './helpers.js';
+
+/** A repository that keeps its refs in reftables, or null when this git cannot (before 2.45). */
+function reftableRepo(): string | null {
+  const root = tempDir('syn-reftable-');
+  try {
+    git(root, 'init', '-q', '--ref-format=reftable');
+  } catch {
+    return null;
+  }
+  write(root, 'a.txt', 'a\n');
+  commitAll(root);
+  return root;
+}
 
 /** Everything in the user's checkout a checkpoint must leave byte-identical. */
 function checkoutState(root: string): {
@@ -295,6 +316,55 @@ describe('captureCheckpoint', () => {
     expect(git(root, 'ls-files', '--error-unmatch', 'gone.txt').trim()).toBe('gone.txt');
   });
 
+  it('stores a link whose target is missing, and a retargeted one, as links', async () => {
+    const root = makeRepo({ 'a.txt': 'a\n' });
+    symlinkSync('a.txt', join(root, 'link'));
+    git(root, 'add', 'link');
+    git(root, 'commit', '-q', '-m', 'link');
+    const indexFile = join(tempDir(), 'index');
+    const mode = (commit: string, path: string) =>
+      git(root, 'ls-tree', commit, path).trim().split(/\s+/)[0];
+    const first = await captureCheckpoint({
+      worktree: root,
+      indexFile,
+      parent: null,
+      paths: null,
+      always: true,
+      ref: checkpointRefName(root, 1),
+      message: 'step 1',
+    });
+    // A new link to a file that does not exist yet (a build output, say), captured by path.
+    symlinkSync('not-yet-there.txt', join(root, 'pending'));
+    const second = await captureCheckpoint({
+      worktree: root,
+      indexFile,
+      parent: { commit: first.commit as string },
+      paths: ['pending'],
+      always: false,
+      ref: checkpointRefName(root, 2),
+      message: 'step 2',
+    });
+    expect(second.changed).toBe(true);
+    expect(treePaths(root, second.commit as string)).toEqual(['a.txt', 'link', 'pending']);
+    expect(mode(second.commit as string, 'pending')).toBe('120000');
+    expect(blob(root, second.commit as string, 'pending')).toBe('not-yet-there.txt');
+    // The tracked link now points at something missing: it stays in the tree, retargeted.
+    rmSync(join(root, 'link'));
+    symlinkSync('build/out.js', join(root, 'link'));
+    const third = await captureCheckpoint({
+      worktree: root,
+      indexFile,
+      parent: { commit: second.commit as string },
+      paths: null,
+      always: false,
+      ref: checkpointRefName(root, 3),
+      message: 'step 3',
+    });
+    expect(third.changedPaths).toEqual(['link']);
+    expect(treePaths(root, third.commit as string)).toEqual(['a.txt', 'link', 'pending']);
+    expect(blob(root, third.commit as string, 'link')).toBe('build/out.js');
+  });
+
   it('sees a same-size rewrite made within a second of the last git add', async () => {
     // Git trusts an index entry's stat cache unless the entry is "racily clean" (its mtime is
     // not older than the index file's). The private index is seeded from the real one, so it
@@ -429,6 +499,47 @@ describe('checkpoint refs', () => {
     expect(git(root, 'rev-parse', 'refs/heads/main').trim()).toMatch(/^[0-9a-f]{40}$/);
     expect(await deleteCheckpointRefs(root, [checkpointRefName(root, 1)])).toBe(0);
     expect(await deleteCheckpointRefs(root, [])).toBe(0);
+  });
+
+  it('dates a ref by when it was written, not by the fixed date of its commit', async () => {
+    const root = makeRepo({ 'a.txt': 'a\n' });
+    const started = Date.now();
+    const r = await captureCheckpoint({
+      worktree: root,
+      indexFile: join(tempDir(), 'index'),
+      parent: null,
+      paths: null,
+      always: true,
+      ref: checkpointRefName(root, 1),
+      message: 'step 1',
+    });
+    expect(git(root, 'show', '-s', '--format=%ct', r.commit as string).trim()).toBe('946684800');
+    const [loose] = await listCheckpointRefs(root);
+    // File times can be a little coarser than the clock.
+    expect(loose?.createdAt).toBeGreaterThanOrEqual(started - 2000);
+    expect(loose?.createdAt).toBeLessThanOrEqual(Date.now() + 2000);
+    // Once git packs the ref its own file is gone; the packed file is never older than the ref.
+    git(root, 'pack-refs', '--all');
+    const [packed] = await listCheckpointRefs(root);
+    expect(packed?.commit).toBe(r.commit);
+    expect(packed?.createdAt).toBeGreaterThanOrEqual(started - 2000);
+  });
+
+  const reftable = reftableRepo();
+  it.skipIf(reftable === null)('dates a ref kept in a reftable by its table list', async () => {
+    const root = reftable as string;
+    const started = Date.now();
+    await captureCheckpoint({
+      worktree: root,
+      indexFile: join(tempDir(), 'index'),
+      parent: null,
+      paths: null,
+      always: true,
+      ref: checkpointRefName(root, 1),
+      message: 'step 1',
+    });
+    const [ref] = await listCheckpointRefs(root);
+    expect(ref?.createdAt).toBeGreaterThanOrEqual(started - 2000);
   });
 
   it('reports only remotes configured as mirrors', async () => {

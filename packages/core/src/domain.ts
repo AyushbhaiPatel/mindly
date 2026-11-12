@@ -8,8 +8,12 @@ import { z } from 'zod';
  * Timestamps are integer Unix milliseconds. Ids are UUIDv7 strings.
  */
 
-/** Agent kind slugs. `repo-file` is reserved for {@link REPO_FILE_SOURCE}. */
-export const AGENT_KIND_RE = /^(?!repo-file$)[a-z][a-z0-9-]{1,31}$/;
+/**
+ * Agent kind slugs. `repo-file` is reserved for {@link REPO_FILE_SOURCE}; `user` and `system` are
+ * reserved because they name who a memory comes from: an agent called `user` would have its
+ * proposals shown as "suggested by user".
+ */
+export const AGENT_KIND_RE = /^(?!(?:repo-file|user|system)$)[a-z][a-z0-9-]{1,31}$/;
 export const KNOWN_AGENT_KINDS = ['claude-code', 'codex', 'cursor', 'generic'] as const;
 /** Agent kinds are open-ended so community adapters can add their own, but must be slug-shaped. */
 export const AgentKindSchema = z.string().regex(AGENT_KIND_RE, 'invalid agent kind');
@@ -347,6 +351,11 @@ export interface FileChange {
   removedLines: number;
   /** Event id of the prompt that triggered this turn, for provenance. */
   promptEventId: string | null;
+  /**
+   * Canonical root of the working tree the edit was made in (`path` is relative to it); null
+   * when it could not be told or the row predates it.
+   */
+  worktree: string | null;
   createdAt: number;
 }
 

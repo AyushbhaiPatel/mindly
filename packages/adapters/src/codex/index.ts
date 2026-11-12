@@ -26,7 +26,7 @@ import { compactSteps, planJsonFile, validateInstallOptions } from '../shared/pl
 import { isRecord } from '../shared/payload.js';
 import { parseToml, TOML_BLOCK_BEGIN, upsertMcpServerToml } from './toml.js';
 
-export { findPatchText, MAX_PATCH_BYTES, parseApplyPatch } from './apply-patch.js';
+export { findPatchText, MAX_PATCH_BYTES, parseApplyPatch, readApplyPatch } from './apply-patch.js';
 
 const KIND = 'codex';
 

@@ -17,9 +17,8 @@ import { HistoryView, type HistorySub } from './views/History';
 import { HomeView } from './views/Home';
 import { MemoryView } from './views/Memory';
 import { SettingsView } from './views/Settings';
+import { addressWithProject, formatRoute, parseRoute, projectOfRoute } from './route';
 import { GUIDE, PAGES, SUBPAGES, type Page } from './vocab';
-
-const PAGE_KEYS = new Set<string>(PAGES.map((p) => p.key));
 
 const MOCK = import.meta.env.VITE_MINDLY_MOCK === '1';
 const PROJECT_KEY = 'mindly.project';
@@ -30,40 +29,13 @@ interface Route {
   params: URLSearchParams;
 }
 
-/**
- * Older links and the views' own `navigate()` calls still use the previous page names; each maps
- * to a page and, where the page has sections, the section to open.
- */
-const ALIASES: Record<string, { page: Page; sub?: string }> = {
-  overview: { page: 'home' },
-  coordination: { page: 'agents', sub: 'team' },
-  split: { page: 'agents', sub: 'split' },
-  runs: { page: 'history', sub: 'runs' },
-  insight: { page: 'history', sub: 'xray' },
-};
-
-function canonical(
-  path: string,
-  params: Record<string, string>,
-): { page: Page; params: Record<string, string> } {
-  if (PAGE_KEYS.has(path)) return { page: path as Page, params };
-  const alias = ALIASES[path];
-  if (!alias) return { page: 'home', params };
-  return { page: alias.page, params: alias.sub ? { sub: alias.sub, ...params } : params };
-}
-
 function readRoute(): Route {
-  const raw = location.hash.replace(/^#\/?/, '');
-  const [path = '', query = ''] = raw.split('?');
-  const params = new URLSearchParams(query);
-  const c = canonical(path, Object.fromEntries(params));
-  return { page: c.page, params: new URLSearchParams(c.params) };
+  const r = parseRoute(location.hash);
+  return { page: r.page, params: new URLSearchParams(r.params) };
 }
 
 function writeRoute(tab: string, params: Record<string, string> = {}) {
-  const c = canonical(tab, params);
-  const q = new URLSearchParams(c.params).toString();
-  const next = `#/${c.page}${q ? `?${q}` : ''}`;
+  const next = formatRoute(tab, params);
   if (location.hash !== next) location.hash = next;
 }
 
@@ -297,18 +269,20 @@ const EMPTY_VERSIONS: Record<Topic, number> = {
 function Shell({
   client,
   liveFactory,
-  projects,
+  projects: initialProjects,
 }: {
   client: MindlyClient;
   liveFactory: LiveFactory;
   projects: Project[];
 }) {
   const [route, setRoute] = useState<Route>(readRoute);
-  const [projectId, setProjectId] = useState<string>(() => {
-    const fromHash = readRoute().params.get('p');
-    const saved = fromHash ?? loadString(PROJECT_KEY);
-    return projects.some((p) => p.id === saved) ? saved! : projects[0]!.id;
-  });
+  // The list from boot, read again when something stored on a project changes.
+  const [projects, setProjects] = useState<Project[]>(initialProjects);
+  const projectIds = useMemo(() => projects.map((p) => p.id), [projects]);
+  const [projectId, setProjectId] = useState<string>(
+    () =>
+      projectOfRoute(readRoute().params, projectIds, loadString(PROJECT_KEY)) ?? projects[0]!.id,
+  );
   const project = projects.find((p) => p.id === projectId) ?? projects[0]!;
   const [theme, setTheme] = useState<ThemePref>(loadTheme);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
@@ -323,11 +297,37 @@ function Shell({
   const pendingTopics = useRef(new Set<Topic>());
   const flushTimer = useRef<number | undefined>(undefined);
 
+  // The address decides the page and the project: Back, Forward and a pasted link change both.
+  // An address without a known project keeps the one on screen.
   useEffect(() => {
-    const onHash = () => setRoute(readRoute());
+    const onHash = () => {
+      const next = readRoute();
+      setRoute(next);
+      setProjectId((cur) => projectOfRoute(next.params, projectIds, cur) ?? cur);
+    };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
-  }, []);
+  }, [projectIds]);
+
+  const reloadProjects = useCallback(async () => {
+    const list = await client.projects();
+    if (list.length === 0) return;
+    setProjects([...list]);
+    // The project on screen may be gone from the list: move to one that exists, as a switch
+    // (its events, sessions, saved choice and address follow from the id).
+    setProjectId((cur) => (list.some((p) => p.id === cur) ? cur : list[0]!.id));
+  }, [client]);
+
+  // The address always names the project on screen. On a first visit it names none, and it can
+  // name one that does not exist; either way a copied link would open something else, and Back
+  // after the first switch would have no project to return to. The address is corrected in
+  // place: no history entry, and no hashchange to answer.
+  useEffect(() => {
+    const next = addressWithProject(location.hash, projectId);
+    if (next === null) return;
+    history.replaceState(history.state, '', next);
+    setRoute(readRoute());
+  }, [projectId, route]);
 
   const notify = useCallback((text: string, tone: Toast['tone'] = 'neutral') => {
     const id = Date.now() + Math.random();
@@ -429,9 +429,21 @@ function Shell({
       versions,
       notify,
       navigate,
+      reloadProjects,
       params: route.params,
     }),
-    [client, project, sessions, events, eventsLoadedFor, versions, notify, navigate, route.params],
+    [
+      client,
+      project,
+      sessions,
+      events,
+      eventsLoadedFor,
+      versions,
+      notify,
+      navigate,
+      reloadProjects,
+      route.params,
+    ],
   );
 
   const changeProject = (id: string) => {

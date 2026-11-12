@@ -30,7 +30,7 @@ export { CSP, SECURITY_HEADERS } from './http/security.js';
 export { BODY_LIMIT, buildServer, defaultDashboardDir } from './server.js';
 export { LiveFeed, MAX_LIVE_SOCKETS, PING_INTERVAL_MS, POLL_INTERVAL_MS } from './live.js';
 export { Scheduler, type JobSpec } from './jobs/scheduler.js';
-export type { JobContext } from './jobs/context.js';
+export { notify, type JobContext } from './jobs/context.js';
 export {
   createShadowMergeRun,
   executeShadowMerge,
@@ -42,7 +42,10 @@ export { runCommandContracts, runnableCommandContracts, contractsTick } from './
 export {
   checkpointPruneTick,
   housekeepingTick,
+  notifyOutboxTick,
   selfHealingTick,
+  STANDUP_MAX_ATTEMPTS,
+  STANDUP_RETRY_MS,
   standupTick,
   SURVIVAL_PER_TICK,
   trackSurvivalTick,

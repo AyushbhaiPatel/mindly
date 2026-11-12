@@ -15,7 +15,7 @@ and so on. **Off by default**: nothing is sent until channels are configured.
       { "type": "ntfy", "url": "https://ntfy.sh", "topic": "my_private_topic_123" },
       { "type": "webhook", "url": "https://example.com/mindly-hook" }
     ],
-    "triggers": ["agent_blocked", "rate_limited"]
+    "triggers": ["rate_limited", "conflict_critical", "check_failed"]
   }
 }
 ```
@@ -28,15 +28,26 @@ await pager.send({ trigger: 'agent_blocked', title: 'Agent waiting', body: '2 se
 ```
 
 `send()` never throws; it returns one `SendResult` per channel (`sent`, `skipped` with
-`trigger_disabled` / `deduped` / `rate_limited` / `unsupported`, or `failed`).
+`trigger_disabled` / `deduped` / `rate_limited` / `unsupported`, or `failed`). `isSettled(results)`
+says whether the notification needs another attempt: it does when a channel failed and none took
+it, or when the hourly budget held it back.
+
+`send(n, { ignoreTriggers: true })` sends whatever `triggers` lists (a scheduled standup, which
+the user asked for by setting its time); `bypassLimits: true` also skips dedupe and the budget
+(`mindly notify test`). Pass `redactPatterns` (the user's `redaction.extraPatterns`) and a `log`
+to `createNotifier`: each failing channel is reported to it once, without the URL.
 
 ## Channels
 
 - `desktop`: macOS runs `osascript -e <fixed script> -- <title> <body> <project>`; the text is
   read from `argv` inside `on run argv` and never interpolated into AppleScript source. Linux runs
-  `notify-send -- <title> <body>`. Windows is reported as `unsupported`.
-- `ntfy`: `POST <url>/<topic>`, plain-text body, `Title`/`Priority`/`Tags` headers.
-- `webhook`: `POST` JSON `{ trigger, title, body, project, ts }`.
+  `notify-send -- <title> <body>`; the body is markup to a notification server, so `&`, `<` and
+  `>` in it are sent as entities. Windows is reported as `unsupported`.
+- `ntfy`: `POST <url>/<topic>`, plain-text body, `Title`/`Priority`/`Tags` headers. A query string
+  on the URL is kept (`?auth=...` carries an ntfy access token).
+- `webhook`: `POST` JSON `{ id, trigger, title, body, project, ts }`. `id` is
+  `Notification.id` when given (the outbox gives the same one on every attempt), so a receiver
+  can drop a repeat. ntfy sets its own message id, so its messages carry none of ours.
 
 ## Security notes
 
@@ -50,5 +61,10 @@ await pager.send({ trigger: 'agent_blocked', title: 'Agent waiting', body: '2 se
   are refused; redirects are never followed (`redirect: 'error'`); 5 s timeout. Errors never echo
   the URL, which may contain a secret path.
 - **Rate limits** (in memory): the same `dedupeKey` at most once per 10 minutes, at most 30
-  notifications per hour overall.
+  notifications per hour overall. Both count notifications that reached a channel: one that
+  failed everywhere keeps its key and can be sent again, and failures never hold a new
+  notification back. How often a failed one is tried again is up to the caller (Mindly's
+  outbox backs off).
+- **Order of cleaning**: control and invisible characters are removed before redaction, so a
+  token cannot hide behind a zero-width character.
 - Processes are started with `execFile` and an argument array only, never a shell.

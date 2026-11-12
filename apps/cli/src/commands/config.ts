@@ -5,7 +5,9 @@ import {
   readUserConfig,
   mindlyHome,
   MindlyError,
+  parseUserConfigUpdate,
   readRegularFileBounded,
+  unusableChannelsIn,
   UserConfigSchema,
   writeJsonFile,
   type UserConfig,
@@ -173,21 +175,24 @@ export function configPathCmd(out: Out): number {
  * is not set (it is optional and has no default) prints `null`.
  */
 export function configGet(out: Out, key: string | undefined): number {
-  const { config, warnings } = readUserConfig(configPath(out));
+  const path = configPath(out);
+  const { config, warnings } = readUserConfig(path);
   for (const w of warnings) out.warn(`${w}. Fix it with: mindly config set or mindly config unset`);
   const parts = key === undefined ? [] : configKey(key);
   const value = getPath(config, parts);
+  const shown = withUnusedChannels(out, readRaw(path), key, value);
   if (value === undefined) {
     if (settingAt(parts) === null) throw noSuchSetting(key ?? '');
     out.json(null);
     return 0;
   }
-  out.json(value);
+  out.json(shown);
   return 0;
 }
 
 function validated(raw: Record<string, unknown>, key: string): UserConfig {
-  const parsed = UserConfigSchema.safeParse(raw);
+  // A channel the file already holds with an unusable URL does not block other settings.
+  const parsed = parseUserConfigUpdate(raw, key);
   if (!parsed.success) {
     throw new MindlyError(
       'invalid_input',
@@ -233,6 +238,29 @@ function deletePath(obj: Record<string, unknown>, parts: readonly string[]): voi
   if (holder !== null && typeof holder === 'object') {
     Reflect.deleteProperty(holder, parts[parts.length - 1] as string);
   }
+}
+
+/**
+ * Channels the file holds with a URL that cannot be used are left out of the effective config.
+ * `config get` shows them as written, so they can be found and fixed, and says on stderr why they
+ * are not used.
+ */
+function withUnusedChannels(
+  out: Out,
+  raw: Record<string, unknown>,
+  key: string | undefined,
+  value: unknown,
+): unknown {
+  const unusable = unusableChannelsIn(raw);
+  const covers = key === undefined || key === 'notify' || key === 'notify.channels';
+  if (unusable.length === 0 || !covers) return value;
+  for (const c of unusable) {
+    out.warn(`notify.channels[${c.index}] (${c.type}) is not used: its ${c.problem}.`);
+  }
+  const channels = (raw['notify'] as { channels: unknown[] }).channels;
+  if (key === 'notify.channels') return channels;
+  const notify = { ...(getPath(value, key === undefined ? ['notify'] : []) as object), channels };
+  return key === undefined ? { ...(value as object), notify } : notify;
 }
 
 /**

@@ -1,16 +1,23 @@
 import { existsSync, writeFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLogger, nullSink, type Project, type Session } from '@mindly/core';
-import { commandHash, contractsOf, USER } from '@mindly/engine';
+import { commandHash, contractsOf, notifyOutbox, standupService, USER } from '@mindly/engine';
 import {
   createShadowMergeRun,
   executeShadowMerge,
   failoverTick,
   housekeepingTick,
+  notify,
+  notifyOutboxTick,
   runCommandContracts,
   Scheduler,
   shadowMergeTick,
+  STANDUP_MAX_ATTEMPTS,
+  STANDUP_RETRY_MS,
+  standupTick,
   SURVIVAL_PER_TICK,
   trackSurvivalTick,
   type Daemon,
@@ -226,6 +233,65 @@ describe('command contracts', () => {
     const [c] = d.mindly.store.conflicts.list(pid);
     expect(c).toMatchObject({ kind: 'contract_broken', severity: 'critical' });
   });
+
+  it('a timeout between a pass and a fail still opens the conflict, and tells live agents', async () => {
+    t = await testDaemon();
+    const d = t.daemon;
+    const root = repo();
+    const s = seedSession(d, root);
+    const pid = s.projectId;
+    const memory = d.mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'decision',
+      title: 'The build must pass',
+      body: 'checked by a command',
+      source: USER,
+    });
+    write(root, '.mindly/config.json', '{}');
+    d.mindly.projects.trust(pid, d.mindly.projects.byId(pid).configHash ?? '');
+    const contract = contractsOf(d.mindly).create(
+      memory.id,
+      'command',
+      { argv: [node, '-e', 'process.exit(0)'] },
+      USER,
+    );
+    const runWith = async (script: string) => {
+      const spec = { argv: [node, '-e', script], timeoutSec: 1 };
+      d.mindly.store.db
+        .prepare('UPDATE contracts SET spec = ? WHERE id = ?')
+        .run(JSON.stringify(spec), contract.id);
+      d.mindly.store.contracts.approve(contract.id, commandHash(spec.argv));
+      await runCommandContracts(d.jobs, pid);
+      return d.mindly.store.contracts.get(contract.id).state;
+    };
+    const open = () =>
+      d.mindly.store.conflicts
+        .list(pid, { statuses: ['open', 'acknowledged'] })
+        .filter((x) => x.kind === 'contract_broken');
+    const hang = 'setTimeout(() => {}, 60000)';
+
+    expect(await runWith('process.exit(0)')).toBe('passing');
+    expect(await runWith(hang)).toBe('error');
+    expect(open()).toHaveLength(0);
+    expect(await runWith('process.exit(3)')).toBe('failing');
+    expect(open()).toHaveLength(1);
+    const told = d.mindly.store.deliveries
+      .list(pid)
+      .filter((x) => x.kind === 'conflict' && x.targetSessionId === s.id);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.title).toContain("Decision 'The build must pass' no longer holds");
+
+    // Still failing: not reported again. A timeout and then a pass closes it.
+    expect(await runWith('process.exit(3)')).toBe('failing');
+    expect(d.mindly.store.deliveries.list(pid).filter((x) => x.kind === 'conflict')).toHaveLength(
+      1,
+    );
+    expect(await runWith(hang)).toBe('error');
+    expect(open()).toHaveLength(1);
+    expect(await runWith('process.exit(0)')).toBe('passing');
+    expect(open()).toHaveLength(0);
+  });
 });
 
 describe('maintenance and failover', () => {
@@ -242,9 +308,12 @@ describe('maintenance and failover', () => {
     });
     store.db.prepare('UPDATE events SET created_at = ?').run(Date.now() - 40 * 86_400_000);
     store.db.prepare('UPDATE sessions SET last_seen_at = ?').run(Date.now() - 7 * 3_600_000);
+    // A write in flight the session never finished: it goes when the session is ended.
+    store.kv.set(`checkpoints:writing:${s.id}`, [{ at: Date.now() }]);
     const r = housekeepingTick(d.jobs);
     expect(r.promptsCompacted).toBe(1);
     expect(r.sessionsEnded).toBe(1);
+    expect(store.kv.get(`checkpoints:writing:${s.id}`)).toBeNull();
     const [e] = store.events.query(s.projectId, { types: ['prompt.submitted'] });
     expect(e?.payload).toEqual({ summary: 'old' });
   });
@@ -328,6 +397,54 @@ describe('maintenance and failover', () => {
     expect(String((launches[0]?.input as { prompt: string }).prompt)).toContain(h.id);
   });
 
+  it('launches the next agent in the worktree of the session that hit its limit', async () => {
+    const home = tempDir('mindly-failover-wt-home-');
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ failover: { autoLaunch: true } }));
+    t = await testDaemon({ home });
+    const root = repo();
+    const wt = linkedWorktree(root, 'feature');
+    const gone = linkedWorktree(root, 'gone');
+    const packet = {
+      goal: 'g',
+      plan: [],
+      filesChanged: [],
+      recentPrompts: [],
+      decisions: [],
+      blockers: [],
+      nextSteps: [],
+      branch: null,
+      headCommit: null,
+    };
+    const handoffFrom = (worktree: string) => {
+      const s = seedSession(t!.daemon, root, { agentKind: 'claude-code', worktree });
+      return t!.daemon.mindly.store.handoffs.create({
+        projectId: s.projectId,
+        fromSessionId: s.id,
+        toAgentKind: 'codex',
+        taskId: null,
+        reason: 'rate_limit',
+        summary: 'limit',
+        packet,
+      });
+    };
+    const inWorktree = handoffFrom(wt);
+    // A worktree that was removed meanwhile: the main checkout is the fallback.
+    const inGone = handoffFrom(gone);
+    git(root, 'worktree', 'remove', '--force', gone);
+    await failoverTick(t.daemon.jobs);
+    await t.daemon.scheduler.idle();
+    const cwdOf = (handoffId: string): unknown =>
+      (
+        t!.runners.calls.find(
+          (c) =>
+            c.kind === 'launch' &&
+            String((c.input as { prompt: string }).prompt).includes(handoffId),
+        )?.input as { cwd?: string } | undefined
+      )?.cwd;
+    expect(cwdOf(inWorktree.id)).toBe(wt);
+    expect(cwdOf(inGone.id)).toBe(root);
+  });
+
   it('cancels runs a previous daemon left queued', async () => {
     const home = tempDir('mindly-stale-home-');
     t = await testDaemon({ home });
@@ -339,6 +456,224 @@ describe('maintenance and failover', () => {
     expect(t.daemon.mindly.store.runs.get(run.id).status).toBe('queued');
     await t.daemon.listen();
     expect(t.daemon.mindly.store.runs.get(run.id).status).toBe('cancelled');
+  });
+});
+
+/** A webhook endpoint on 127.0.0.1 that answers `status.code` and records what it was sent. */
+async function pagerEndpoint(): Promise<{
+  url: string;
+  bodies: string[];
+  status: { code: number };
+  close: () => Promise<void>;
+}> {
+  const bodies: string[] = [];
+  const status = { code: 200 };
+  const server: Server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c: Buffer) => (body += c.toString('utf8')));
+    req.on('end', () => {
+      bodies.push(body);
+      res.statusCode = status.code;
+      res.end('ok');
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}/hook`,
+    bodies,
+    status,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+describe('pager delivery', () => {
+  /** A daemon with a real webhook channel and a clock the test moves. */
+  async function pagerDaemon(
+    url: string,
+    extra: Record<string, unknown> = {},
+  ): Promise<{ d: Daemon; clock: { t: number }; root: string; pid: string }> {
+    const home = tempDir('mindly-daemon-home-');
+    writeFileSync(
+      join(home, 'config.json'),
+      JSON.stringify({ notify: { channels: [{ type: 'webhook', url }] }, ...extra }),
+    );
+    // 10:00 local time on a fixed day: after a 09:00 standup, well before the next.
+    const clock = { t: new Date(2026, 5, 10, 10, 0).getTime() };
+    t = await testDaemon({
+      home,
+      runtime: { disableLlm: true, clock: { now: () => clock.t } },
+    });
+    const d = t.daemon;
+    const root = repo();
+    seedSession(d, root);
+    const pid = d.mindly.store.projects.findByRoot(root)!.id;
+    return { d, clock, root, pid };
+  }
+
+  it('tries a standup again until it is sent, and gives one day up after a few attempts', async () => {
+    const hook = await pagerEndpoint();
+    try {
+      const { d, clock, root, pid } = await pagerDaemon(hook.url, { standup: { time: '09:00' } });
+      // Something to report: a rule that waits for the user.
+      d.mindly.memory.remember({
+        projectId: pid,
+        projectRoot: root,
+        kind: 'rule',
+        title: 'Prefer named exports',
+        body: 'default exports are not used here',
+        source: { type: 'agent', agentKind: 'codex', sessionId: null },
+      });
+      const svc = standupService(d.mindly);
+      expect(svc.isDue(pid, clock.t)).toBe(true);
+
+      hook.status.code = 500;
+      await standupTick(d.jobs);
+      expect(hook.bodies).toHaveLength(1);
+      // Not delivered: still due. The default triggers do not list `standup`, and it is sent
+      // all the same.
+      expect(d.mindly.config.notify.triggers).not.toContain('standup');
+      expect(svc.isDue(pid, clock.t)).toBe(true);
+
+      // The next ticks leave the endpoint alone until the retry time.
+      clock.t += 60_000;
+      await standupTick(d.jobs);
+      expect(hook.bodies).toHaveLength(1);
+
+      hook.status.code = 200;
+      clock.t += STANDUP_RETRY_MS;
+      await standupTick(d.jobs);
+      expect(hook.bodies).toHaveLength(2);
+      expect(JSON.parse(hook.bodies[1]!)).toMatchObject({ trigger: 'standup' });
+      expect(svc.isDue(pid, clock.t)).toBe(false);
+
+      // The day after, with the endpoint down for good: a bounded number of attempts.
+      hook.status.code = 500;
+      clock.t += 24 * 60 * 60_000;
+      const before = hook.bodies.length;
+      for (let i = 0; i < STANDUP_MAX_ATTEMPTS + 4; i++) {
+        await standupTick(d.jobs);
+        clock.t += STANDUP_RETRY_MS;
+      }
+      expect(svc.isDue(pid, clock.t)).toBe(false);
+      expect(hook.bodies.length - before).toBeLessThanOrEqual(STANDUP_MAX_ATTEMPTS);
+      expect(hook.bodies.length - before).toBeGreaterThan(1);
+    } finally {
+      await hook.close();
+    }
+  });
+
+  it('gives a new occurrence of an alert a new id, even with the same dedupe key', async () => {
+    const hook = await pagerEndpoint();
+    try {
+      const { d, clock } = await pagerDaemon(hook.url);
+      const alert = {
+        trigger: 'check_failed' as const,
+        title: 'A check fails on merged agent work',
+        body: 'Check "test" failed.',
+        dedupeKey: 'check_failed:proj:fp-test',
+      };
+      // Monday the check fails; it is fixed, and on Tuesday it fails again: a new alert.
+      await notify(d.jobs, alert);
+      clock.t += 24 * 60 * 60_000;
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 24 * 60 * 60_000);
+      await notify(d.jobs, alert);
+      const ids = hook.bodies.map((b) => (JSON.parse(b) as { id: string }).id);
+      expect(ids).toHaveLength(2);
+      expect(ids[1]).not.toBe(ids[0]);
+    } finally {
+      vi.useRealTimers();
+      await hook.close();
+    }
+  });
+
+  it('after an outage sends what waited, and new alerts are not held back', async () => {
+    const hook = await pagerEndpoint();
+    try {
+      const { d, clock } = await pagerDaemon(hook.url);
+      hook.status.code = 503;
+      // Three alerts during the outage, retried by the outbox tick for twelve minutes.
+      for (let k = 0; k < 3; k++) {
+        await notify(d.jobs, {
+          trigger: 'check_failed',
+          title: `Alert ${k}`,
+          body: 'b',
+          dedupeKey: `a${k}`,
+        });
+      }
+      for (let minute = 0; minute < 12; minute++) {
+        clock.t += 60_000;
+        await notifyOutboxTick(d.jobs);
+      }
+      const duringOutage = hook.bodies.length;
+      expect(duringOutage).toBeGreaterThan(3);
+
+      // Back at minute 12; a fresh alert at minute 15 goes straight out.
+      hook.status.code = 200;
+      clock.t += 3 * 60_000;
+      await notify(d.jobs, {
+        trigger: 'check_failed',
+        title: 'Fresh',
+        body: 'b',
+        dedupeKey: 'fresh',
+      });
+      const fresh = hook.bodies.slice(duringOutage).map((b) => JSON.parse(b) as { title: string });
+      expect(fresh.map((b) => b.title)).toEqual(['Fresh']);
+
+      // The three that waited go out once their next attempt is due.
+      clock.t += 30 * 60_000;
+      await notifyOutboxTick(d.jobs);
+      const titles = hook.bodies
+        .slice(duringOutage)
+        .map((b) => (JSON.parse(b) as { title: string }).title);
+      expect(titles.sort()).toEqual(['Alert 0', 'Alert 1', 'Alert 2', 'Fresh']);
+      expect(notifyOutbox(d.mindly).nextDueAt()).toBeNull();
+    } finally {
+      await hook.close();
+    }
+  });
+
+  it('keeps a notification that reached no channel and sends it from the outbox', async () => {
+    const hook = await pagerEndpoint();
+    try {
+      const { d, clock } = await pagerDaemon(hook.url, {
+        redaction: { extraPatterns: ['ACME-[0-9]{6}'] },
+      });
+      hook.status.code = 503;
+      await notify(d.jobs, {
+        trigger: 'check_failed',
+        title: 'A check fails',
+        body: 'Check "deploy ACME-123456" failed in proj-ACME-654321.',
+        projectName: 'proj-ACME-654321',
+        dedupeKey: 'check:1',
+      });
+      expect(hook.bodies).toHaveLength(1);
+      expect(notifyOutbox(d.mindly).hasDue(clock.t)).toBe(true);
+
+      hook.status.code = 200;
+      await notifyOutboxTick(d.jobs);
+      expect(hook.bodies).toHaveLength(2);
+      expect(notifyOutbox(d.mindly).hasDue(clock.t + 60 * 60_000)).toBe(false);
+
+      // What the user asked to keep out of stored text is kept out of the pager too.
+      for (const body of hook.bodies) expect(body).not.toMatch(/ACME-\d/);
+      expect(JSON.parse(hook.bodies[1]!)).toMatchObject({
+        trigger: 'check_failed',
+        project: 'proj-[REDACTED]',
+      });
+      // The first attempt and the retry from the outbox carry one id.
+      const ids = hook.bodies.map((b) => (JSON.parse(b) as { id: string }).id);
+      expect(ids[0]).toBeTruthy();
+      expect(ids[1]).toBe(ids[0]);
+
+      // A notification that was delivered is not queued.
+      await notify(d.jobs, { trigger: 'check_failed', title: 'Another', body: 'b' });
+      expect(hook.bodies).toHaveLength(3);
+      expect(notifyOutbox(d.mindly).hasDue(clock.t + 60 * 60_000)).toBe(false);
+    } finally {
+      await hook.close();
+    }
   });
 });
 

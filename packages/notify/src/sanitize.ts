@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { redactText, sanitizeLine, MindlyError, truncate } from '@mindly/core';
 import type { Notification, SafePayload } from './types.js';
 
@@ -8,9 +9,17 @@ export const MAX_BODY_CHARS = 240;
 /** Maximum project name length in characters. */
 export const MAX_PROJECT_CHARS = 60;
 
-/** Redacts, collapses to a single line and caps a piece of notification text. */
+/** Longest text looked at; anything beyond is cut before it is cleaned. */
+const MAX_INPUT_CHARS = 8000;
+
+/**
+ * Collapses a piece of notification text to a single line, redacts it and caps it. Control and
+ * invisible characters go first: a token with a zero-width character inside it is not a token to
+ * the redactor, and would be put back together by the cleaning that follows.
+ */
 export function safeLine(text: string, max: number, extraPatterns: readonly string[] = []): string {
-  const flat = sanitizeLine(redactText(text, { extraPatterns }), max * 2);
+  const clean = sanitizeLine(text.slice(0, MAX_INPUT_CHARS), MAX_INPUT_CHARS);
+  const flat = sanitizeLine(redactText(clean, { extraPatterns }), max * 2);
   return truncate(flat, max);
 }
 
@@ -20,6 +29,9 @@ export function toSafePayload(n: Notification, extraPatterns: readonly string[] 
   const project =
     n.projectName === undefined ? null : safeLine(n.projectName, MAX_PROJECT_CHARS, extraPatterns);
   return {
+    // Without an id from the caller this is a new one: a dedupe key can be shared by separate
+    // occurrences of an alert, so an id derived from it could make a receiver drop a real one.
+    id: n.id !== undefined && /^[A-Za-z0-9_-]{1,64}$/.test(n.id) ? n.id : randomUUID(),
     trigger: n.trigger,
     title,
     body: safeLine(n.body, MAX_BODY_CHARS, extraPatterns),

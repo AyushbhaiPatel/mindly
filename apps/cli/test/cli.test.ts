@@ -19,6 +19,7 @@ import { codename, MINDLY_VERSION, shortId } from '@mindly/core';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary, runHook, styleFor } from '../src/index.js';
 import { EXPORT_QUERIES } from '../src/commands/data.js';
+import { ToolNameScan } from '../src/io.js';
 import { cli, fixture, sandbox, tempDir, testIo, write, type Sandbox } from './helpers.js';
 
 /** A port on 127.0.0.1 that nothing listens on right now. */
@@ -440,6 +441,68 @@ describe('hook', () => {
     }
   });
 
+  it('refuses a write too large to read, and lets any other oversized event through', async () => {
+    const sb = sandbox();
+    const big = 'x'.repeat(3 * 1024 * 1024);
+    const write = JSON.stringify({
+      ...fixture('claude-code.PostToolUse.Write'),
+      hook_event_name: 'PreToolUse',
+      cwd: sb.repo,
+      tool_input: { file_path: join(sb.repo, 'a.ts'), content: big },
+    });
+    const io = testIo(sb, { stdin: write });
+    expect(await runHook('claude-code', 'PreToolUse', io)).toBe(0);
+    const out = JSON.parse(io.out.join(''));
+    expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain('too large to check');
+    // The tool is told by the payload's own tool name, wherever it comes, and never by a key of
+    // that name inside what the tool is given.
+    const late = JSON.stringify({
+      session_id: 's',
+      cwd: sb.repo,
+      tool_input: { file_path: join(sb.repo, 'a.ts'), content: big, tool_name: 'Read' },
+      tool_name: 'Write',
+    });
+    const after = testIo(sb, { stdin: late });
+    expect(await runHook('claude-code', 'PreToolUse', after)).toBe(0);
+    expect(JSON.parse(after.out.join('')).hookSpecificOutput.permissionDecision).toBe('deny');
+    // A large call of a tool that reads is let through as before.
+    const read = JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      session_id: 's',
+      cwd: sb.repo,
+      tool_input: { file_path: join(sb.repo, 'a.ts'), padding: big, tool_name: 'Write' },
+      tool_name: 'Read',
+    });
+    const other = testIo(sb, { stdin: read });
+    expect(await runHook('claude-code', 'PreToolUse', other)).toBe(0);
+    expect(other.out.join('')).toBe('');
+    for (const native of ['PostToolUse', 'UserPromptSubmit']) {
+      const other = testIo(sb, { stdin: write });
+      expect(await runHook('claude-code', native, other)).toBe(0);
+      expect(other.out.join('')).toBe('');
+    }
+  });
+
+  it('finds the top-level tool name of a payload read piece by piece', () => {
+    const name = (text: string, step: number): string | null => {
+      const scan = new ToolNameScan();
+      const bytes = Buffer.from(text, 'utf8');
+      for (let i = 0; i < bytes.length; i += step) scan.feed(bytes.subarray(i, i + step));
+      return scan.name;
+    };
+    const payload = JSON.stringify({
+      a: ['tool_name', { tool_name: 'Read' }],
+      note: 'say "tool_name": "Read", \\ é',
+      tool_input: { tool_name: 'Read', nested: [{ toolName: 'Read' }] },
+      tool_name: 'Edit',
+    });
+    for (const step of [1, 2, 3, 7, 1024]) expect(name(payload, step), String(step)).toBe('Edit');
+    expect(name(JSON.stringify({ toolName: 'Bash', x: 1 }), 1)).toBe('Bash');
+    expect(name(JSON.stringify({ tool_input: { tool_name: 'Write' } }), 5)).toBeNull();
+    expect(name(JSON.stringify({ tool: { name: 'Write' } }), 5)).toBeNull();
+  });
+
   it('a hook that exceeds the deadline exits 0 quickly with no output', async () => {
     const sb = sandbox();
     expect((await cli(sb, ['config', 'set', 'hooks.timeoutMs', '200'])).code).toBe(0);
@@ -643,6 +706,104 @@ describe('memory and rules', () => {
       (await cli(sb, ['memory', 'add', '--kind', 'fact', '--title', 'x', '--enforce'])).code,
     ).toBe(2);
     expect((await cli(sb, ['memory', 'list', '--limit', '0'])).code).toBe(2);
+  });
+
+  it('refuses an enforced rule without a scope', async () => {
+    const sb = sandbox();
+    const r = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'No edits',
+      '--enforce',
+    ]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('--enforce needs at least one --scope');
+    expect(json<unknown[]>((await cli(sb, ['memory', 'list', '--json'])).stdout)).toEqual([]);
+  });
+
+  it('enforces a rule scoped to a folder on every file below it', async () => {
+    const sb = sandbox();
+    write(sb.repo, 'infra/main.tf', '# infra\n');
+    write(sb.repo, 'deploy/k8s/app.yaml', 'kind: Deployment\n');
+    const add = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'Infrastructure is changed by hand',
+      '--scope',
+      'infra',
+      '--scope',
+      'deploy/',
+      '--enforce',
+    ]);
+    expect(add.code).toBe(0);
+    expect(add.stdout).not.toContain('No file in this project matches');
+    const write1 = async (path: string): Promise<string> => {
+      const r = await cli(sb, ['hook', 'claude-code', 'PreToolUse'], {
+        stdin: JSON.stringify({
+          session_id: 'cc1',
+          cwd: sb.repo,
+          tool_name: 'Write',
+          tool_input: { file_path: join(sb.repo, path), content: 'x' },
+        }),
+      });
+      expect(r.code).toBe(0);
+      return r.stdout;
+    };
+    await cli(sb, ['hook', 'claude-code', 'SessionStart'], {
+      stdin: JSON.stringify({ session_id: 'cc1', cwd: sb.repo, source: 'startup' }),
+    });
+    expect(await write1('infra/main.tf')).toContain('"deny"');
+    expect(await write1('deploy/k8s/app.yaml')).toContain('"deny"');
+    expect(await write1('README.md')).not.toContain('"deny"');
+    expect(await write1('docs/infra.md')).not.toContain('"deny"');
+  });
+
+  it('says so when a scope matches no file of the project', async () => {
+    const sb = sandbox();
+    write(sb.repo, 'src/generated/api.ts', 'export const api = 1;\n');
+    const rooted = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'Never edit generated code',
+      '--scope',
+      'generated/**',
+      '--enforce',
+    ]);
+    expect(rooted.code).toBe(0);
+    expect(rooted.stdout).toContain('No file in this project matches the scope "generated/**" yet');
+    expect(rooted.stdout).toContain('"**/generated/**" matches at any depth');
+    const typo = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'Never edit vendored code',
+      '--scope',
+      'vendor/**',
+    ]);
+    expect(typo.stdout).toContain('No file in this project matches the scope "vendor/**" yet');
+    expect(typo.stdout).toContain('Check the spelling');
+    const fine = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'Generated code is regenerated',
+      '--scope',
+      'src/generated',
+    ]);
+    expect(fine.stdout).not.toContain('No file in this project matches');
   });
 
   it('contract add shows the pinned hash of a command', async () => {
