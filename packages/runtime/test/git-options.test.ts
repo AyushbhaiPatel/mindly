@@ -14,8 +14,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, normalize, resolve } from 'node:path';
+import { dirname, join, normalize, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { matchesAnyGlob } from '../../core/src/index.js';
 import { GIT_ENV, file, guarded, runInCopy } from './written.js';
 
 const RULE = 'Certificates are issued by hand';
@@ -4490,5 +4491,478 @@ describe('git commands read without false warnings or slow reading', () => {
     } finally {
       g.mindly.close();
     }
+  });
+});
+
+describe('made, removed and outer folders, held against what the line really writes', () => {
+  const LINE_RULE = 'Certificates are issued by hand';
+  type Answer = 'deny' | 'warn' | 'allow';
+  const answerOf = (r: { decision: string | null; context: string | null }): Answer =>
+    r.decision === 'deny'
+      ? 'deny'
+      : (r.context ?? '').includes(LINE_RULE) || (r.context ?? '').includes('did not read')
+        ? 'warn'
+        : 'allow';
+
+  const repo = (scopes: string[], prep: string) => {
+    const g = guarded({ [LINE_RULE]: scopes });
+    execFileSync('bash', ['-c', prep], { cwd: g.dir, env: GIT_ENV });
+    return g;
+  };
+  const SOURCE_FILES =
+    'mkdir -p src/keys && echo x > src/a.ts && echo k > src/keys/tls.pem && echo a > a.txt && git add -A && git commit -qm base';
+
+  /**
+   * A copy into a folder `mkdir` named earlier on the line is read as
+   * landing under `dest/<source name>` only. When the folder is not there as the copy runs (it was
+   * removed or moved away again, or the `mkdir` stood behind `&&`, `||` or `if` and did not run),
+   * the copy makes the destination itself, and the files land right in it.
+   */
+  describe('a copy into a folder mkdir named that is not there when the copy runs', () => {
+    const scopes = ['d/keys/**'];
+    const covered = (rel: string) => matchesAnyGlob(rel, scopes);
+    let g: ReturnType<typeof repo>;
+    beforeAll(() => {
+      g = repo(scopes, SOURCE_FILES);
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of [
+      // removed or moved away again
+      'mkdir d && rm -rf d && cp -r src d',
+      'mkdir -p d && rmdir d && cp -r src d',
+      'mkdir d && mv d e && cp -r src d',
+      'mkdir d && rm -rf d && mv src d',
+      // the mkdir did not run
+      'test -f nothere && mkdir d; cp -r src d',
+      'if [ -f nothere ]; then mkdir d; fi; cp -r src d',
+      'ls nothere && mkdir -p d; cp -r src d',
+    ]) {
+      it(`is not let through in silence: ${command}`, async () => {
+        const real = runInCopy(g.dir, command, covered);
+        expect(real.written, `the real run writes a covered file; ${real.output}`).toContain(
+          'd/keys/tls.pem',
+        );
+        expect(answerOf(await g.shell(command)), `hook on \`${command}\``).not.toBe('allow');
+      });
+    }
+
+    // The control: with the folder there, the copy lands in d/src and nothing covered is written.
+    it('the plain form writes nothing covered and is let through', async () => {
+      const command = 'mkdir d && cp -r src d';
+      expect(runInCopy(g.dir, command, covered).written).toEqual([]);
+      expect(answerOf(await g.shell(command))).toBe('allow');
+    });
+  });
+
+  /**
+   * The same reading when the folder is on disk before the line:
+   * a removal on the line does not take it out of the folders `mkdir` made.
+   */
+  describe('a folder on disk that the line removes, and mkdir names in another branch', () => {
+    const scopes = ['out/keys/**'];
+    const covered = (rel: string) => matchesAnyGlob(rel, scopes);
+    let g: ReturnType<typeof repo>;
+    beforeAll(() => {
+      g = repo(scopes, `mkdir -p out && echo o > out/old.txt && ${SOURCE_FILES}`);
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of [
+      'if [ -d out ]; then rm -rf out; else mkdir out; fi; cp -r src out',
+      'mkdir -p out && rm -rf out && cp -r src out',
+    ]) {
+      it(`is not let through in silence: ${command}`, async () => {
+        const real = runInCopy(g.dir, command, covered);
+        expect(real.written, `the real run writes a covered file; ${real.output}`).toContain(
+          'out/keys/tls.pem',
+        );
+        expect(answerOf(await g.shell(command)), `hook on \`${command}\``).not.toBe('allow');
+      });
+    }
+  });
+
+  /**
+   * A copy or move INTO a folder above the project is read as
+   * that folder written with all it holds, so the whole project counts as written: a file moved
+   * to the parent folder, or to a home that holds the project, is blocked for every enforced
+   * rule, also one that covers nothing that is there.
+   */
+  describe('a copy or move into a folder above the project', () => {
+    /** Runs the line in a copy of the project alone in a folder; the covered files it changed. */
+    const inHolder = (
+      dir: string,
+      command: string,
+      covered: (rel: string) => boolean,
+      home = false,
+    ) => {
+      const holder = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-holder-')));
+      execFileSync('cp', ['-a', `${dir}/.`, join(holder, 'proj')]);
+      // `runInCopy` copies the holder as a whole and runs the line in `proj` under it; for a line
+      // with `~`, the home folder is the one that holds the project.
+      return runInCopy(
+        holder,
+        home ? `HOME="$(dirname "$PWD")"; ${command}` : command,
+        (rel) => (rel.startsWith('proj/') ? covered(rel.slice(5)) : false),
+        'proj',
+      );
+    };
+
+    for (const [scopes, prep, what] of [
+      [
+        ['**/*.pem'],
+        'mkdir -p certs && echo k > certs/server.pem',
+        'a covered file is in the project',
+      ],
+      [['gen/**'], 'true', 'the rule covers nothing that is there'],
+    ] as const) {
+      describe(what, () => {
+        const covered = (rel: string) => matchesAnyGlob(rel, [...scopes]);
+        let g: ReturnType<typeof repo>;
+        const keptHome = process.env.HOME;
+        beforeAll(() => {
+          g = repo(
+            [...scopes],
+            `${prep} && mkdir -p dist sub && echo d > dist/x.js && echo l > a.log && echo s > sub/s.txt && git add -A && git commit -qm base`,
+          );
+        });
+        afterAll(() => {
+          if (keptHome === undefined) delete process.env.HOME;
+          else process.env.HOME = keptHome;
+          g.mindly.close();
+        });
+
+        for (const command of ['mv a.log ..', 'cp -r dist ..', 'cp -a dist ../', 'mv dist ..']) {
+          it(`writes nothing covered and is not blocked: ${command}`, async () => {
+            const real = inHolder(g.dir, command, covered);
+            expect(real.written, `the real run; ${real.output}`).toEqual([]);
+            expect(answerOf(await g.shell(command)), `hook on \`${command}\``).not.toBe('deny');
+          });
+        }
+
+        for (const command of ['mv a.log ~', 'cp -r dist ~/']) {
+          it(`with the project under the home folder: ${command}`, async () => {
+            const real = inHolder(g.dir, command, covered, true);
+            expect(real.written, `the real run; ${real.output}`).toEqual([]);
+            // The home folder holds the project, as it does for most people.
+            process.env.HOME = dirname(g.dir);
+            expect(answerOf(await g.shell(command)), `hook on \`${command}\``).not.toBe('deny');
+          });
+        }
+      });
+    }
+  });
+
+  /**
+   * The same lines from a worktree that holds no covered file: a move into the folder above it
+   * writes nothing in the other working trees kept there.
+   */
+  describe('a move into the folder above a worktree beside the main checkout', () => {
+    const scopes = ['**/*.pem'];
+    let g: ReturnType<typeof repo>;
+    let beside: string;
+    beforeAll(() => {
+      // The covered file is not tracked: only the main checkout has it.
+      g = repo(
+        scopes,
+        'mkdir -p dist && echo d > dist/x.js && echo l > a.log && git add -A && git commit -qm base && mkdir -p certs && echo k > certs/server.pem',
+      );
+      beside = `${g.dir}-beside`;
+      g.git('worktree', 'add', '-q', beside);
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of ['mv a.log ..', 'cp -r dist ..']) {
+      it(`writes nothing covered and is not blocked: ${command}`, async () => {
+        // The main checkout and the worktree side by side in one folder, as they are on disk.
+        const holder = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-holder-')));
+        execFileSync('cp', ['-a', `${g.dir}/.`, join(holder, 'proj')]);
+        execFileSync('cp', ['-a', `${beside}/.`, join(holder, 'beside')]);
+        const real = runInCopy(holder, command, (rel) => rel.endsWith('.pem'), 'beside');
+        expect(real.written, `the real run; ${real.output}`).toEqual([]);
+        expect(answerOf(await g.shell(command, beside)), `hook on \`${command}\``).not.toBe('deny');
+      });
+    }
+  });
+
+  /**
+   * `git checkout -- <folder>` and `git restore <folder>` put
+   * back tracked files only. With nothing but an untracked (or ignored) covered file under the
+   * folder, the line is blocked though git leaves that file alone.
+   */
+  describe('git puts back the tracked files of a folder that holds an untracked covered file', () => {
+    const scopes = ['**/.env'];
+    const covered = (rel: string) => matchesAnyGlob(rel, scopes);
+    let g: ReturnType<typeof repo>;
+    beforeAll(() => {
+      g = repo(
+        scopes,
+        'mkdir -p app src && echo n > app/main.ts && echo x > src/a.ts && echo .env > .gitignore && git add -A && git commit -qm base && echo k > app/.env && echo c >> app/main.ts',
+      );
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of ['git checkout -- app', 'git restore app', 'git checkout HEAD -- app']) {
+      it(`leaves the covered file alone and is not blocked: ${command}`, async () => {
+        const real = runInCopy(g.dir, command, covered);
+        expect(real.written, `the real run; ${real.output}`).toEqual([]);
+        expect(answerOf(await g.shell(command)), `hook on \`${command}\``).not.toBe('deny');
+      });
+    }
+
+    it('the same folder cleaned of ignored files is blocked, as the file goes', async () => {
+      expect(runInCopy(g.dir, 'git clean -fdx app', covered).written).toEqual(['app/.env']);
+      expect(answerOf(await g.shell('git clean -fdx app'))).toBe('deny');
+    });
+  });
+
+  /**
+   * The same under a rule that names the folder after a double star.
+   */
+  describe('the same under a rule that names the folder after **/', () => {
+    const scopes = ['**/config/secrets.json'];
+    const covered = (rel: string) => matchesAnyGlob(rel, scopes);
+    let g: ReturnType<typeof repo>;
+    beforeAll(() => {
+      g = repo(
+        scopes,
+        'mkdir -p config && echo c > config/app.json && echo secrets.json > .gitignore && git add -A && git commit -qm base && echo s > config/secrets.json && echo c >> config/app.json',
+      );
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of ['git checkout -- config', 'git restore config']) {
+      it(`leaves the covered file alone and is not blocked: ${command}`, async () => {
+        const real = runInCopy(g.dir, command, covered);
+        expect(real.written, `the real run; ${real.output}`).toEqual([]);
+        expect(answerOf(await g.shell(command)), `hook on \`${command}\``).not.toBe('deny');
+      });
+    }
+  });
+
+  const NESTED_TREE =
+    "printf 'trees/\\n.env\\n' > .gitignore && git add -A && git commit -qm ignore && git worktree add -q trees/w1";
+
+  /**
+   * From a linked worktree kept inside the main checkout, a change of
+   * mode over the main checkout as a whole: the folder written is the top of another working tree
+   * and lies above the session's own. Only the trees below the folder are looked at, not the tree
+   * the folder is the top of.
+   */
+  describe('from a nested worktree, the main checkout changed as a whole', () => {
+    const scopes = ['**/.env'];
+    // Names as the scratch copy has them: the main checkout is the copy itself.
+    const covered = (rel: string) => !rel.startsWith('trees/') && matchesAnyGlob(rel, scopes);
+    let g: ReturnType<typeof repo>;
+    beforeAll(() => {
+      // The covered files are not tracked: only the main checkout has them.
+      g = repo(
+        scopes,
+        `${SOURCE_FILES} && ${NESTED_TREE} && echo k > .env && mkdir -p app && echo k > app/.env`,
+      );
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of ['chmod -R 700 ../..', 'chmod -R 700 ../../', 'chmod -R 700 ../../.']) {
+      it(`is not let through in silence: ${command}`, async () => {
+        const real = runInCopy(g.dir, command, covered, 'trees/w1');
+        expect(real.written, `the real run changes covered files; ${real.output}`).toEqual([
+          '.env',
+          'app/.env',
+        ]);
+        const r = await g.shell(command, join(g.dir, 'trees/w1'));
+        expect(answerOf(r), `hook on \`${command}\``).not.toBe('allow');
+      });
+    }
+
+    it('by its full path', async () => {
+      const holder = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-holder-')));
+      execFileSync('cp', ['-a', `${g.dir}/.`, join(holder, 'proj')]);
+      const real = runInCopy(
+        holder,
+        'chmod -R 700 "$(cd ../.. && pwd)"',
+        (rel) => rel.startsWith('proj/') && covered(rel.slice(5)),
+        'proj/trees/w1',
+      );
+      expect(real.written, `the real run; ${real.output}`).toEqual(['proj/.env', 'proj/app/.env']);
+      const r = await g.shell(`chmod -R 700 ${g.dir}`, join(g.dir, 'trees/w1'));
+      expect(answerOf(r)).not.toBe('allow');
+    });
+
+    /** The same folder removed. */
+    it('removed by its full path (older)', async () => {
+      const holder = realpathSync(mkdtempSync(join(tmpdir(), 'mindly-holder-')));
+      execFileSync('cp', ['-a', `${g.dir}/.`, join(holder, 'proj')]);
+      const real = runInCopy(
+        holder,
+        'rm -rf ../../../proj',
+        (rel) => rel.startsWith('proj/') && covered(rel.slice(5)),
+        'proj/trees/w1',
+      );
+      expect(real.written, `the real run; ${real.output}`).toEqual(['proj/.env', 'proj/app/.env']);
+      const r = await g.shell(`rm -rf ${g.dir}`, join(g.dir, 'trees/w1'));
+      expect(answerOf(r)).not.toBe('allow');
+    });
+
+    // The control: from the main checkout itself the same change is warned about.
+    it('is warned about from the main checkout', async () => {
+      expect(answerOf(await g.shell('chmod -R 700 .'))).toBe('warn');
+    });
+  });
+
+  /**
+   * The other side of 2: from a nested worktree, a copy into the
+   * top of the main checkout is held against the session's own tree as a whole, and what lands in
+   * the main checkout is not looked at.
+   */
+  describe('from a nested worktree, a copy into the top of the main checkout', () => {
+    const scopes = ['keys/*.pem'];
+    const covered = (rel: string) => !rel.startsWith('trees/') && matchesAnyGlob(rel, scopes);
+    let g: ReturnType<typeof repo>;
+    beforeAll(() => {
+      g = repo(scopes, `${SOURCE_FILES} && ${NESTED_TREE}`);
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of ['cp -r src/keys ../..', 'mv src/keys ../../']) {
+      it(`is not let through in silence: ${command}`, async () => {
+        const real = runInCopy(g.dir, command, covered, 'trees/w1');
+        expect(real.written, `the real run makes a covered file; ${real.output}`).toEqual([
+          'keys/tls.pem',
+        ]);
+        const r = await g.shell(command, join(g.dir, 'trees/w1'));
+        expect(answerOf(r), `hook on \`${command}\``).not.toBe('allow');
+      });
+    }
+
+    it('the same copy from a worktree beside the main checkout is blocked', async () => {
+      const beside = `${g.dir}-beside`;
+      g.git('worktree', 'add', '-q', beside);
+      expect(answerOf(await g.shell(`cp -r src/keys ${g.dir}`, beside))).toBe('deny');
+    });
+  });
+
+  /**
+   * `git clean` with `-f` twice removes the working trees kept
+   * under an ignored folder of the checkout. Their files are held against the rules by their names
+   * in the main checkout only, so a rule that names a folder from the top of a tree is not reached.
+   */
+  describe('git clean -ff from the main checkout, over a nested worktree', () => {
+    const scopes = ['certs/*.pem'];
+    let g: ReturnType<typeof repo>;
+    beforeAll(() => {
+      g = repo(
+        scopes,
+        `${SOURCE_FILES} && ${NESTED_TREE} && mkdir -p trees/w1/certs && echo k > trees/w1/certs/server.pem && git -C trees/w1 add -A && git -C trees/w1 commit -qm certs`,
+      );
+    });
+    afterAll(() => g.mindly.close());
+    const inWorktree = (rel: string) => rel === 'trees/w1/certs/server.pem';
+
+    for (const command of ['git clean -ffdx', 'git clean -ffdxq trees']) {
+      it(`is not let through in silence: ${command}`, async () => {
+        const real = runInCopy(g.dir, command, inWorktree);
+        expect(real.written, `the real run removes the worktree's file; ${real.output}`).toEqual([
+          'trees/w1/certs/server.pem',
+        ]);
+        expect(answerOf(await g.shell(command)), `hook on \`${command}\``).not.toBe('allow');
+      });
+    }
+
+    it('the folder removed by rm is blocked', async () => {
+      expect(answerOf(await g.shell('rm -rf trees'))).toBe('deny');
+    });
+  });
+
+  /**
+   * docs/security.md says a file of a worktree kept inside the
+   * main checkout answers to its name in that worktree, "and a rule for `trees/**` in the main
+   * checkout is no rule for it". That holds for a path named in full and for a tool call. A
+   * wildcard over the worktrees is also searched from the main checkout, into the ignored folder,
+   * and the worktrees' files are held against the rule by their names in the main checkout.
+   */
+  describe('a rule for the folder the worktrees are kept in, and a wildcard into them', () => {
+    const scopes = ['trees/**'];
+    // What the rule covers by the notes: what lies under trees/ and is in no worktree.
+    const covered = (rel: string) => rel.startsWith('trees/') && !/^trees\/w[12]\//.test(rel);
+    let g: ReturnType<typeof repo>;
+    beforeAll(() => {
+      g = repo(
+        scopes,
+        "mkdir -p dist && echo d > dist/x.js && echo l > a.log && printf 'trees/\\n' > .gitignore && git add -A && git commit -qm base && git worktree add -q trees/w1 && git worktree add -q trees/w2",
+      );
+    });
+    afterAll(() => g.mindly.close());
+
+    for (const command of ['rm -rf trees/*/dist', 'rm -f trees/*/a.log']) {
+      it(`writes nothing the rule covers and is not blocked: ${command}`, async () => {
+        const real = runInCopy(g.dir, command, covered);
+        expect(real.written, `the real run; ${real.output}`).toEqual([]);
+        expect(answerOf(await g.shell(command)), `hook on \`${command}\``).not.toBe('deny');
+      });
+    }
+
+    it('the same folders named in full are let through, and a file right in trees/ is blocked', async () => {
+      expect(answerOf(await g.shell('rm -rf trees/w1/dist trees/w2/dist'))).toBe('allow');
+      expect(answerOf(await g.shell('rm -f trees/w1/a.log'))).toBe('allow');
+      expect(answerOf(await g.shell('touch trees/note.txt'))).toBe('deny');
+    });
+  });
+
+  /**
+   * Time. Each copy of a line lists its source folder anew, so a
+   * line of many recursive copies of one large folder runs to the end of the time the hook gives
+   * itself (900 ms), well past half a second. Best of three; 30 rules of 5 scopes; the line is
+   * under 2 KB.
+   */
+  describe('the time a line of many copies of one large folder takes', () => {
+    const rules: Record<string, string[]> = {};
+    for (let i = 1; i <= 29; i++) {
+      rules[`Rule number ${i} is kept`] = [
+        `area${i}/**`,
+        `**/*.gen${i}.ts`,
+        `conf${i}/*.json`,
+        `**/secret${i}/**`,
+        `deep/**/x${i}/*.key`,
+      ];
+    }
+    rules[LINE_RULE] = ['certs/**', '**/certs/**', '**/*.pem', '**/.env', 'config/secrets.json'];
+    let g: ReturnType<typeof guarded>;
+    beforeAll(() => {
+      g = guarded(rules);
+      // 45,000 files in `src`, and a covered file.
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          'mkdir -p certs && echo k > certs/server.pem && for d in $(seq 1 90); do mkdir -p src/d$d; (cd src/d$d && seq 1 500 | sed "s/$/.ts/" | xargs touch); done && git add -A && git commit -qm base',
+        ],
+        { cwd: g.dir, env: GIT_ENV },
+      );
+    }, 300_000);
+    afterAll(() => g.mindly.close());
+
+    const bestOfThree = async (command: string): Promise<number> => {
+      let best = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const t0 = performance.now();
+        await g.shell(command);
+        best = Math.min(best, performance.now() - t0);
+      }
+      return best;
+    };
+
+    it('sixty copies of a folder of 45,000 files', async () => {
+      const command = Array.from({ length: 60 }, (_, i) => `mkdir b${i} && cp -r src b${i}`).join(
+        ' && ',
+      );
+      expect(command.length).toBeLessThan(2000);
+      expect(await bestOfThree(command), 'milliseconds, best of three').toBeLessThan(600);
+    }, 120_000);
+
+    // The control: one copy of the same folder is answered at once.
+    it('one copy of it', async () => {
+      expect(await bestOfThree('mkdir b0 && cp -r src b0')).toBeLessThan(200);
+    }, 120_000);
   });
 });

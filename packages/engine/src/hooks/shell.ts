@@ -532,6 +532,8 @@ interface SimpleCommand {
   piped: boolean;
   /** Joined to the command before it by `||`: it runs only when that one failed. */
   otherwise: boolean;
+  /** Joined to the command before it by `&&`: it runs only when that one succeeded. */
+  then: boolean;
   /**
    * Runs in a shell of its own (part of a pipeline, or sent to the background with `&`): a `cd`
    * in it changes nothing for the commands after it.
@@ -677,13 +679,14 @@ function parse(
   const src = cut ? input.slice(0, MAX_COMMAND_CHARS) : input;
   let steps = 0;
   const commands: SimpleCommand[] = [];
-  const blank = (piped = false, otherwise = false): SimpleCommand => ({
+  const blank = (piped = false, otherwise = false, then = false): SimpleCommand => ({
     words: [],
     redirects: [],
     nested: [],
     stdin: null,
     piped,
     otherwise,
+    then,
     apart: piped,
     stdinExpands: false,
     stdinDynamic: false,
@@ -749,7 +752,7 @@ function parse(
     }
     current.words.push(...expandBraces(w));
   };
-  const endCommand = (piped = false, otherwise = false): void => {
+  const endCommand = (piped = false, otherwise = false, then = false): void => {
     endWord();
     pendingRedirect = null;
     const c = current;
@@ -761,7 +764,7 @@ function parse(
       c.arithmetic.length > 0
     )
       commands.push(c);
-    current = blank(piped, otherwise);
+    current = blank(piped, otherwise, then);
   };
   /** Index just past the `)` that closes a `$(` opened before `from`; quotes are honoured. */
   const closeParen = (from: number): number => {
@@ -1025,7 +1028,7 @@ function parse(
       const pipe = c === '|' && src[i + 1] !== '|';
       endWord();
       if (pipe || (c === '&' && src[i + 1] !== '&')) current.apart = true;
-      endCommand(pipe, c === '|' && src[i + 1] === '|');
+      endCommand(pipe, c === '|' && src[i + 1] === '|', c === '&' && src[i + 1] === '&');
       i++;
       while (i < src.length && (src[i] === '|' || src[i] === '&' || src[i] === ';')) i++;
       continue;
@@ -3293,6 +3296,11 @@ export interface ShellTarget {
   /** The folders above the path that are not there are made, and so written, too (`mkdir -p`). */
   parents: boolean;
   /**
+   * For `clean`: repositories and working trees kept under the path go too, with all they
+   * hold (`git clean -ff`).
+   */
+  nested: boolean;
+  /**
    * The path is under a home directory that could not be placed here (`~name/x`, or any `~`
    * path when no home was given): it starts with the `~` the shell expands. A name that merely
    * starts with `~` (`./~x`, `'~'/x`) is a path like any other, and is given as `./~x`.
@@ -3704,6 +3712,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     wild: [],
     viaOld: false,
     dirViaOld: false,
+    tentative: [],
     unclimbed: [],
     climbed: new Set(),
     epoch: 0,
@@ -4359,6 +4368,7 @@ function unreadLine(top: string | null): ShellReading {
         follows: false,
         intoFolder: false,
         parents: false,
+        nested: false,
         glob: false,
         dotfiles: false,
         nocase: false,
@@ -4444,6 +4454,12 @@ interface Reading {
   viaOld: boolean;
   /** An earlier `mkdir` made a folder at such a path. */
   dirViaOld: boolean;
+  /**
+   * Folders made by a `mkdir` that runs only when what stands before it went a certain way
+   * (after `&&` or `||`, inside an `if`): folders for the commands joined to it by `&&`, and
+   * no longer once another command starts.
+   */
+  tentative: string[];
   /** Folders a `mkdir -p` made, those above them not yet among `madeDirs`. */
   unclimbed: string[];
   /** Folders a `mkdir -p` made, with those above them: not gone up from a second time. */
@@ -4593,6 +4609,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   let throughOld = false;
   // The same for a folder `mkdir` makes.
   let foldedOld = false;
+  // The command being read is a `git clean` given `-f` twice.
+  let forced = false;
   /** A placed path as told from the folder the line starts in. */
   const anchor = (path: string): string =>
     posix.isAbsolute(path) || path.startsWith('~')
@@ -5063,6 +5081,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         follows: item.follows ?? false,
         intoFolder: item.intoFolder ?? false,
         parents: item.parents ?? false,
+        nested: forced && (how === 'clean' || how === 'clean-ignored'),
         glob: form.glob,
         dotfiles: item.dotfiles ?? false,
         nocase: item.nocase ?? false,
@@ -5212,6 +5231,10 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     }
   };
   let before: SimpleCommand | null = null;
+  // How many `if` are open; whether the line starts with a `cd` all the rest is chained to.
+  let branches = 0;
+  const first = parsed.commands[0]?.words[0];
+  const ledByCd = depth === 0 && first !== undefined && !first.dynamic && first.text === 'cd';
   // Where the shell was before the last `cd`, for the command after `cd … ||`: that one runs
   // only when the `cd` failed.
   let beforeCd: string | null = null;
@@ -5239,6 +5262,21 @@ function collectTargets(command: string, startDir: string | null, depth: number,
       r.limit ??= 'no time was left to read all of it';
       return;
     }
+    // `if … fi`: what stands between runs only on one side of the condition.
+    const keyword = cmd.words[0]?.dynamic ? '' : (cmd.words[0]?.text ?? '');
+    if (keyword === 'if') branches++;
+    // A command not joined by `&&` runs whether or not a `mkdir` before it did: the folder
+    // of one that may not have run is not known to be there.
+    if (!cmd.then && r.tentative.length > 0) {
+      for (const made of r.tentative.splice(0)) {
+        r.madeDirs.delete(made);
+        for (const up of above(made)) if (r.climbed.has(up)) r.madeDirs.delete(up);
+        r.unclimbed = r.unclimbed.filter((x) => x !== made);
+      }
+      r.epoch++;
+    }
+    const sure = branches === 0 && !cmd.otherwise && (!cmd.then || ledByCd);
+    if (keyword === 'fi' && branches > 0) branches--;
     // Substitutions run where they are written, before the command that holds them.
     const at = cmd.otherwise && wasCd ? beforeCd : dir;
     wasCd = false;
@@ -5349,6 +5387,14 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // `mv` and `git mv` take folders away: asked about only on a line read fully.
     const program = words[0] !== undefined && !words[0].dynamic ? programName(words[0]) : '';
     linking = r.exact && makesAnyLink(words);
+    forced =
+      optionWords(words)
+        .filter((w) => /^-[^-]/.test(w.text))
+        .map((w) => w.text)
+        .join('')
+        .split('f').length +
+        optionWords(words).filter((w) => w.text === '--force').length >
+      2;
     folding = verdict.kind === 'writes' && program === 'mkdir';
     const git = r.exact && program === 'git' ? gitCommand(words) : null;
     const moves = r.holds !== null && (program === 'mv' || git?.rest[0]?.text === 'mv');
@@ -5460,6 +5506,20 @@ function collectTargets(command: string, startDir: string | null, depth: number,
           // same text, read the same way) adds nothing.
           const seen = new Set<string>();
           const given: { p: GitPath; magic: ReturnType<typeof pathspecMagic> }[] = [];
+          const sub = git?.rest[0]?.text ?? '';
+          const restores = sub === 'checkout' || sub === 'restore';
+          const fromRevision =
+            sub === 'checkout'
+              ? plainArgs(
+                  (git?.rest ?? []).slice(
+                    0,
+                    Math.max(
+                      (git?.rest ?? []).findIndex((w) => w.text === '--'),
+                      0,
+                    ) || undefined,
+                  ),
+                ).length > 0
+              : hasOption(git?.rest ?? [], 's', ['--source']);
           let excluded = false;
           for (const p of pathspecs) {
             const key = `${p.word.text}\0${p.word.mask}\0${p.ifExists ? 'e' : ''}${p.tracked ? 't' : ''}`;
@@ -5522,12 +5582,22 @@ function collectTargets(command: string, startDir: string | null, depth: number,
                   // git's wildcards also match names that start with a dot.
                   dotfiles: true,
                   nocase: verdict.nocase || magic.icase,
-                  // `git rm` only removes tracked files.
-                  ...(p.tracked ? { touches: TRACKED_FILES, gone: true } : {}),
+                  // `git rm` only removes tracked files; a checkout or restore of paths only
+                  // puts tracked ones back, and leaves what git does not track alone.
+                  ...(p.tracked
+                    ? { touches: TRACKED_FILES, gone: true }
+                    : restores
+                      ? { touches: TRACKED_FILES }
+                      : {}),
                   pathspec: true,
                 },
                 base,
               );
+              // From a named revision, a file may come that the index does not hold: what
+              // the path names may be written.
+              if (restores && fromRevision) {
+                add({ word: word(text), tree: true, certain: false, pathspec: true }, base);
+              }
             }
           }
           break;
@@ -5599,10 +5669,19 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         continue;
       }
       r.touched.add(at);
-      if (made.kind === 'gone') continue;
+      if (made.kind === 'gone') {
+        // Removed or renamed, with what it held: no longer a folder the line made.
+        if (r.madeDirs.size > 0) {
+          r.madeDirs.delete(at);
+          for (const d of r.madeDirs) if (d.startsWith(`${at}/`)) r.madeDirs.delete(d);
+          r.unclimbed = r.unclimbed.filter((x) => x !== at && !x.startsWith(`${at}/`));
+        }
+        continue;
+      }
       if (made.kind === 'folder') {
         if (wasThere(at)) continue;
         if (!r.through.has(at)) r.madeDirs.add(at);
+        if (!sure) r.tentative.push(at);
         // Under `-p` the folders above it are made too: put among the made ones when a later
         // command first asks (see `settle`).
         withParents ??= hasOption(words, 'p', ['--parents']);

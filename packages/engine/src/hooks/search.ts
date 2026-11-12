@@ -99,6 +99,15 @@ function insideRepository(scope: WrittenScope): boolean {
   return false;
 }
 
+/** Whether a folder is the top of a linked working tree: its `.git` is a file that says so. */
+function isLinkedTree(dir: string): boolean {
+  try {
+    return /^gitdir: .*[\\/]worktrees[\\/]/.test(readFileSync(join(dir, '.git'), 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
 /** The scope pattern as shown to people. */
 export function scopeLabel(scope: WrittenScope): string {
   return scope.pattern.replace(/^\.\//, '');
@@ -703,6 +712,8 @@ export class ScopeSearch {
           if (e.isDirectory()) {
             if (e.name === '.git' || (UNLISTED_DIRS.includes(e.name) && !deps.includes(e.name)))
               continue;
+            // A working tree of the project kept in the folder: its files are its own.
+            if (isLinkedTree(join(path, e.name))) continue;
             if (depth < maxDepth) queue.push({ path: join(path, e.name), depth: depth + 1 });
             else if (depth === 1) result.dirs.push(join(path, e.name));
             continue;

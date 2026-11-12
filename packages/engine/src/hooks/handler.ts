@@ -691,6 +691,8 @@ export class HookHandler {
     const seen = new Set<string>();
     // What a copy brings could not be found out: the line is not one read fully after all.
     let unsure = false;
+    // What each source folder of a copy holds, and whether a symbolic link is in it.
+    const listings = new Map<string, { names: string[] | null; link: boolean }>();
     // Folders above what `mkdir -p` names that were placed as made, each once.
     const parents = new Set<string>();
     let late = false;
@@ -773,7 +775,13 @@ export class HookHandler {
           ...(t.nocase ? { nocase: true } : {}),
         });
       };
-      const scope = (at: Located, segments: readonly string[], base = at.abs): void => {
+      const scope = (
+        at: Located,
+        segments: readonly string[],
+        base = at.abs,
+        /** Whatever is there, not only the kinds of file the command touches. */
+        any = false,
+      ): void => {
         // Runs of `**` are one, and a pattern too deep to compare counts as its directory.
         let rest = collapse(segments);
         if (rest.length > MAX_PATTERN_SEGMENTS) rest = ['**'];
@@ -788,7 +796,7 @@ export class HookHandler {
           only: t.only,
           dotfiles: t.dotfiles,
           nocase: t.nocase,
-          ...(existing !== null ? { existing } : {}),
+          ...(existing !== null && !any ? { existing } : {}),
         });
       };
       const landing = (at: Located | null): void => {
@@ -803,6 +811,8 @@ export class HookHandler {
         rest: readonly string[],
         /** The session's own tree too, when the folder is above its top. */
         own = true,
+        /** Whatever the trees hold, not only the kinds of file the command touches. */
+        any = false,
       ): Promise<void> => {
         if (trees === null) return;
         // The folder as it is on disk: the trees are told by where they really are.
@@ -813,8 +823,9 @@ export class HookHandler {
           ...(own ? [treeRoot] : []),
         ];
         for (const root of roots) {
-          if (!root.startsWith(above)) continue;
-          const parts = root.slice(above.length).split(sep);
+          // A tree below the folder, or one whose top the folder is.
+          if (root !== real && !root.startsWith(above)) continue;
+          const parts = root === real ? [] : root.slice(above.length).split(sep);
           // The parts of the pattern that lead to the tree's top; what is left names files in it.
           let k = 0;
           while (k < parts.length && rest[k] !== undefined && rest[k] !== '**') {
@@ -839,7 +850,7 @@ export class HookHandler {
           if (folders.length > 0 && !exists(join(root, ...folders))) continue;
           const top = await this.locate(project, treeRoot, root, trees);
           if (top === null || top === 'unknown' || top.root !== root) continue;
-          scope(top, left.length > 0 ? left : ['**']);
+          scope(top, left.length > 0 ? left : ['**'], top.abs, any);
         }
       };
       // Another user's home (`~name`) is wherever the system says: not placed by guessing. A
@@ -861,9 +872,18 @@ export class HookHandler {
        * link when the copy follows them, brings what is not known: the line is not read fully.
        */
       const listed = (from: string): string[] | null => {
-        const brought = entriesUnder(from, timeUp, () => {
-          if (t.follows) unsure = true;
-        });
+        // Listed once for a call, however many commands of the line copy it.
+        let listing = listings.get(from);
+        if (listing === undefined) {
+          let link = false;
+          const names = entriesUnder(from, timeUp, () => {
+            link = true;
+          });
+          listing = { names, link };
+          listings.set(from, listing);
+        }
+        if (listing.link && t.follows) unsure = true;
+        const brought = listing.names;
         if (brought === null && isDirectory(from)) {
           unsure = true;
           if (timeUp()) limit ??= 'no time was left to place all it writes';
@@ -933,10 +953,17 @@ export class HookHandler {
       // A word that is a path only when such an entry exists.
       if (t.ifExists && !exists(path)) continue;
       // A directory above the project, written with everything in it, holds the project too.
-      if (t.tree && t.how !== 'land' && downTo(toPosix(path), treeRoot, []) !== null) {
+      // (Not the destination of a copy or move: each source lands there under its own name,
+      // which is placed like any other path.)
+      if (
+        t.tree &&
+        t.entries.length === 0 &&
+        t.how !== 'land' &&
+        downTo(toPosix(path), treeRoot, []) !== null
+      ) {
         const root = await place(treeRoot);
         if (root !== null) scope(root, ['**']);
-        await treesBelow(path, ['**'], false);
+        await treesBelow(path, ['**'], false, t.nested);
         continue;
       }
       // `ln -n` takes a link to a folder as the name it is, not as the folder it leads to.
@@ -1014,6 +1041,9 @@ export class HookHandler {
           scope({ ...at, rel: parent === '.' ? '' : parent }, [basename(at.rel)], dirname(at.abs));
         }
         scope(at, ['**']);
+        // Given `-f` twice, `git clean` also removes the repositories and working trees kept
+        // under what it cleans, with all they hold.
+        if (t.nested) await treesBelow(path, ['**'], false, true);
         continue;
       }
       file(at);
@@ -1074,12 +1104,13 @@ export class HookHandler {
     // the folder they land in, whatever the folder is called (nothing is walked there; the
     // names are in hand); only one that fits is looked at rule by rule.
     const brought = new Map<Memory, string[]>();
+    const quiet = new Map<readonly string[], Map<string, boolean>>();
     for (const b of writes.bulk ?? []) {
       const under = b.at.rel === '' ? '**' : `${b.at.rel}/**`;
       const reach = rules
         .map((rule) => ({
           rule,
-          test: null as ((rel: string, under?: string) => boolean) | null,
+          test: null as ReturnType<typeof globsTest> | null,
           globs: rule.scope.paths.filter((g) => patternsMayOverlap(g, under)),
         }))
         .filter((x) => x.globs.length > 0);
@@ -1089,6 +1120,15 @@ export class HookHandler {
         false,
       );
       const prefix = b.at.rel === '' ? '' : `${b.at.rel}/`;
+      // The same names under another folder, against the same patterns: when no name fits
+      // any of them by itself, only the folder's own path can make one fit.
+      const key = reach.flatMap((x) => x.globs).join('\0');
+      let none = quiet.get(b.names)?.get(key);
+      if (none === undefined) {
+        none = !b.names.some((name) => any.fits(toPosix(name)));
+        quiet.set(b.names, (quiet.get(b.names) ?? new Map<string, boolean>()).set(key, none));
+      }
+      if (none && !any.fits(prefix)) continue;
       for (let i = 0; i < b.names.length && !cut; i++) {
         if ((i & 1023) === 1023 && timeUp()) cut = true;
         const name = toPosix(b.names[i] as string);
@@ -1882,7 +1922,10 @@ function withEnforcementWarning(result: HookResult, warnings: readonly string[])
 function globsTest(
   globs: readonly string[],
   nocase: boolean,
-): (rel: string, under?: string) => boolean {
+): ((rel: string, under?: string) => boolean) & {
+  /** Whether a text, as the end of a path or a piece of one, may make a pattern fit. */
+  fits: (text: string) => boolean;
+} {
   const opts = nocase ? { nocase: true } : {};
   let tests: { anywhere: boolean; re: RegExp; tail: string }[];
   // Whether any pattern may match at all: by how the path ends, or by a text it must hold.
@@ -1898,12 +1941,9 @@ function globsTest(
       const plain = !/[[{]/.test(g);
       const tail = plain ? last.slice(last.search(/[^*?]*$/)) : '';
       if (tail === '') {
-        // The longest text between its wildcards, without the `/` around it.
+        // The longest text between its wildcards and its `/`: a piece of one name.
         const needle = plain
-          ? g
-              .split(/[*?]+/)
-              .map((part) => part.replace(/^\/+|\/+$/g, ''))
-              .reduce((a, b) => (b.length > a.length ? b : a), '')
+          ? g.split(/[*?/]+/).reduce((a, b) => (b.length > a.length ? b : a), '')
           : '';
         if (needle === '') open = true;
         else needles.push(nocase ? needle.toLowerCase() : needle);
@@ -1921,9 +1961,14 @@ function globsTest(
     }
   } catch {
     // A pattern that does not compile is left to the one-path test.
-    return (rel) => matchesAnyGlob(rel, globs, opts);
+    return Object.assign((rel: string) => matchesAnyGlob(rel, globs, opts), { fits: () => true });
   }
-  return (rel, under = '') => {
+  const fits = (text: string): boolean => {
+    if (ends === null || holds === null) return true;
+    const t = nocase ? text.toLowerCase() : text;
+    return ends.test(t) || holds.test(t);
+  };
+  const test = (rel: string, under = ''): boolean => {
     const end = nocase ? rel.toLowerCase() : rel;
     if (ends !== null && holds !== null && !ends.test(end)) {
       const whole = `${under}${rel}`;
@@ -1937,6 +1982,7 @@ function globsTest(
       return t.re.test(t.anywhere ? path.slice(path.lastIndexOf('/') + 1) : path);
     });
   };
+  return Object.assign(test, { fits });
 }
 
 /** Two context blocks as one text; null when both are empty. */
