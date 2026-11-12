@@ -226,6 +226,65 @@ describe('command contracts', () => {
     const [c] = d.mindly.store.conflicts.list(pid);
     expect(c).toMatchObject({ kind: 'contract_broken', severity: 'critical' });
   });
+
+  it('a timeout between a pass and a fail still opens the conflict, and tells live agents', async () => {
+    t = await testDaemon();
+    const d = t.daemon;
+    const root = repo();
+    const s = seedSession(d, root);
+    const pid = s.projectId;
+    const memory = d.mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'decision',
+      title: 'The build must pass',
+      body: 'checked by a command',
+      source: USER,
+    });
+    write(root, '.mindly/config.json', '{}');
+    d.mindly.projects.trust(pid, d.mindly.projects.byId(pid).configHash ?? '');
+    const contract = contractsOf(d.mindly).create(
+      memory.id,
+      'command',
+      { argv: [node, '-e', 'process.exit(0)'] },
+      USER,
+    );
+    const runWith = async (script: string) => {
+      const spec = { argv: [node, '-e', script], timeoutSec: 1 };
+      d.mindly.store.db
+        .prepare('UPDATE contracts SET spec = ? WHERE id = ?')
+        .run(JSON.stringify(spec), contract.id);
+      d.mindly.store.contracts.approve(contract.id, commandHash(spec.argv));
+      await runCommandContracts(d.jobs, pid);
+      return d.mindly.store.contracts.get(contract.id).state;
+    };
+    const open = () =>
+      d.mindly.store.conflicts
+        .list(pid, { statuses: ['open', 'acknowledged'] })
+        .filter((x) => x.kind === 'contract_broken');
+    const hang = 'setTimeout(() => {}, 60000)';
+
+    expect(await runWith('process.exit(0)')).toBe('passing');
+    expect(await runWith(hang)).toBe('error');
+    expect(open()).toHaveLength(0);
+    expect(await runWith('process.exit(3)')).toBe('failing');
+    expect(open()).toHaveLength(1);
+    const told = d.mindly.store.deliveries
+      .list(pid)
+      .filter((x) => x.kind === 'conflict' && x.targetSessionId === s.id);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.title).toContain("Decision 'The build must pass' no longer holds");
+
+    // Still failing: not reported again. A timeout and then a pass closes it.
+    expect(await runWith('process.exit(3)')).toBe('failing');
+    expect(d.mindly.store.deliveries.list(pid).filter((x) => x.kind === 'conflict')).toHaveLength(
+      1,
+    );
+    expect(await runWith(hang)).toBe('error');
+    expect(open()).toHaveLength(1);
+    expect(await runWith('process.exit(0)')).toBe('passing');
+    expect(open()).toHaveLength(0);
+  });
 });
 
 describe('maintenance and failover', () => {
