@@ -1,7 +1,8 @@
-export { ContextBuilder, type BuiltContext } from './context/builder.js';
+export { ContextBuilder, type BuiltContext, type GuestView } from './context/builder.js';
 export * from './context/render.js';
 export { TelepathyService, type Recipients, type SendInput } from './coordination/telepathy.js';
 export {
+  DECLARED_INTENT_PREFIX,
   IntentService,
   TaskService,
   sessionLabel,

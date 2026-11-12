@@ -142,6 +142,10 @@ const EXPORT_QUERIES: readonly (readonly [string, string])[] = [
     'fileChangeHunks',
     'SELECT * FROM file_change_hunks WHERE change_id IN (SELECT id FROM file_changes WHERE project_id = ?)',
   ],
+  [
+    'fileChangeWorktrees',
+    'SELECT * FROM file_change_worktrees WHERE change_id IN (SELECT id FROM file_changes WHERE project_id = ?)',
+  ],
   ['conflicts', 'SELECT * FROM conflicts WHERE project_id = ? ORDER BY created_at'],
   ['deliveries', 'SELECT * FROM deliveries WHERE project_id = ? ORDER BY created_at'],
   ['contextPackets', 'SELECT * FROM context_packets WHERE project_id = ? ORDER BY created_at'],

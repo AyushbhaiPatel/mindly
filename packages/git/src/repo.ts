@@ -1,5 +1,5 @@
-import { realpathSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { MindlyError, isMindlyError, resolveInsideRoot } from '@mindly/core';
 import { driverOverrides, gitVersion, runGit, versionAtLeast } from './exec.js';
 import { assertSafeRelativePath, assertValidRevision } from './refs.js';
@@ -17,12 +17,59 @@ function absoluteDir(cwd: string): string {
  */
 export async function findRepoRoot(cwd: string): Promise<string> {
   const dir = absoluteDir(cwd);
+  const known = cachedRoot(dir);
+  if (known) return known;
   const res = await runGit(['rev-parse', '--show-toplevel'], { cwd: dir, okExitCodes: [128] });
   const top = res.stdout.trim();
   if (res.exitCode !== 0 || top === '') {
     throw new MindlyError('not_found', 'not inside a git working tree');
   }
-  return realpathSync(top);
+  const root = realpathSync(top);
+  remember(dir, root);
+  return root;
+}
+
+/*
+ * `findRepoRoot` answers are kept, by folder, while they provably still hold: the top-level's
+ * `.git` is the same entry, and no folder between the asked one and it has a `.git` of its own
+ * (a repository made inside since). Anything else asks git again.
+ */
+const ROOT_CACHE = new Map<string, { root: string; dotgit: string }>();
+const ROOT_CACHE_MAX = 512;
+
+function dotGitId(root: string): string {
+  const st = lstatSync(join(root, '.git'));
+  return `${st.dev}:${st.ino}:${st.mode}`;
+}
+
+function remember(dir: string, root: string): void {
+  try {
+    const real = realpathSync(dir);
+    if (ROOT_CACHE.size >= ROOT_CACHE_MAX) ROOT_CACHE.clear();
+    ROOT_CACHE.set(real, { root, dotgit: dotGitId(root) });
+  } catch {
+    // Not cached: asked again next time.
+  }
+}
+
+function cachedRoot(dir: string): string | null {
+  try {
+    const real = realpathSync(dir);
+    const hit = ROOT_CACHE.get(real);
+    if (!hit || !statSync(real).isDirectory() || dotGitId(hit.root) !== hit.dotgit) return null;
+    for (let d = real; d !== hit.root; d = dirname(d)) {
+      if (d === dirname(d)) return null;
+      try {
+        lstatSync(join(d, '.git'));
+        return null;
+      } catch {
+        // None here: keep going up.
+      }
+    }
+    return hit.root;
+  } catch {
+    return null;
+  }
 }
 
 /** True when `cwd` is inside a git working tree. Never throws for ordinary directories. */

@@ -1,13 +1,21 @@
 import { join } from 'node:path';
 import {
+  ancestorChain,
   createLogger,
   defaultUserConfig,
   describeError,
   fileSink,
+  HOOK_ANCESTRY_PREFIX,
+  HOOK_ANCESTRY_RETRY_MS,
+  HOOK_ANCESTRY_TTL_MS,
+  hookAncestryKey,
   homePaths,
+  type AncestryRetry,
+  type ProcessRef,
   loadUserConfig,
   mindlyHome,
   nullSink,
+  type AgentAdapter,
   type HookResult,
   type Logger,
   type NormalizedHookEvent,
@@ -16,6 +24,7 @@ import { getAdapter } from '@mindly/adapters';
 import type { Mindly } from '@mindly/engine';
 import { openMindly, type RuntimeOptions } from '@mindly/runtime';
 import { readStdin, StdinTooLarge, type CliIo } from './io.js';
+import { startPagerSender } from './pager.js';
 
 /** Largest hook payload read from stdin. */
 export const MAX_HOOK_STDIN_BYTES = 2 * 1024 * 1024;
@@ -23,9 +32,11 @@ export const MAX_HOOK_STDIN_BYTES = 2 * 1024 * 1024;
 /** Injection points for tests. */
 export interface HookDeps {
   open: (options: RuntimeOptions) => Pick<Mindly, 'hooks' | 'close'>;
+  /** Runs once the agent has its answer; must not wait. Optional so a test double needs none. */
+  afterAnswer?: (mindly: Pick<Mindly, 'hooks' | 'close'>, env: NodeJS.ProcessEnv) => void;
 }
 
-const defaultDeps: HookDeps = { open: openMindly };
+const defaultDeps: HookDeps = { open: openMindly, afterAnswer: startPagerSender };
 
 export { readStdin };
 
@@ -76,7 +87,11 @@ export async function runHook(
   try {
     raw = await readStdin(io.stdin, MAX_HOOK_STDIN_BYTES);
   } catch (err) {
-    return fail(err instanceof StdinTooLarge ? 'payload too large' : 'stdin unreadable');
+    if (!(err instanceof StdinTooLarge)) return fail('stdin unreadable');
+    // A write too large to read cannot be checked: refused, not let through unchecked.
+    const refused = refuseUnreadWrite(adapter, nativeEvent, io.cwd, err.toolName);
+    if (refused !== null) io.stdout.write(refused.stdout);
+    return refused === null ? fail('payload too large') : refused.exitCode;
   }
   let payload: unknown;
   try {
@@ -100,12 +115,23 @@ export async function runHook(
     timer = setTimeout(() => resolve('timeout'), timeoutMs);
   });
   const opened: { mindly: Pick<Mindly, 'hooks' | 'close'> | null } = { mindly: null };
+  // A notification this hook raised is sent by a separate process: a hook never waits for a
+  // pager. Whatever way the hook ends, a raised notification gets its sender.
+  const handOff = (): void => {
+    try {
+      if (opened.mindly) deps.afterAnswer?.(opened.mindly, io.env);
+    } catch {
+      // The notification stays in the outbox for the daemon or the next sender.
+    }
+  };
   const work = (async (): Promise<HookResult> => {
     // Yield once so the deadline timer is armed before any synchronous database work.
     await Promise.resolve();
     const mindly = deps.open({ env: io.env, disableNotify: false });
     opened.mindly = mindly;
-    return mindly.hooks.handle(event);
+    const result = await mindly.hooks.handle(event);
+    rememberClient(mindly, event);
+    return result;
   })();
 
   let outcome: HookResult | 'timeout';
@@ -113,13 +139,16 @@ export async function runHook(
     outcome = await Promise.race([work, deadline]);
   } catch (err) {
     clearTimeout(timer);
+    handOff();
     closeQuietly(opened.mindly);
     return fail('hook failed', { error: describeError(err) });
   }
   clearTimeout(timer);
   if (outcome === 'timeout') {
-    // The handler keeps running in the background; main.ts exits the process right away.
+    // The handler keeps running in the background; main.ts exits the process right away. A
+    // notification it raised before the deadline still gets its sender.
     work.catch(() => undefined);
+    handOff();
     return fail('deadline exceeded', { timeoutMs });
   }
   closeQuietly(opened.mindly);
@@ -128,11 +157,61 @@ export async function runHook(
   try {
     rendered = adapter.render(event, outcome);
   } catch (err) {
+    handOff();
     return fail('render failed', { error: describeError(err) });
   }
   logger.debug('hook handled', { agent, event: nativeEvent, ms: Date.now() - started });
   if (rendered.stdout !== '') io.stdout.write(rendered.stdout);
+  handOff();
   return rendered.exitCode;
+}
+
+/**
+ * Records which processes started this hook, once per session. The hooks of an agent window and
+ * its MCP server are started by the same client process, so a server finds the session that is
+ * its own among several of one agent by comparing these with its own ancestors.
+ *
+ * On Linux this reads a few files under /proc; elsewhere it is one `ps` call, made for the first
+ * hook of a session only (an empty result is kept too, so it is not tried again). Whatever goes
+ * wrong is ignored: a hook never fails or waits because of it.
+ */
+export function rememberClient(
+  mindly: unknown,
+  evt: NormalizedHookEvent,
+  options: { now?: number; chain?: () => ProcessRef[] } = {},
+): void {
+  try {
+    const kv = (mindly as { store?: { kv?: Mindly['store']['kv'] } }).store?.kv;
+    if (!kv) return;
+    const now = options.now ?? Date.now();
+    const key = hookAncestryKey(evt.agentKind, evt.externalSessionId);
+    if (evt.event === 'session_end') {
+      kv.delete(key);
+      return;
+    }
+    const stored = kv.get<unknown>(key);
+    if (evt.event !== 'session_start' && stored !== null) {
+      // Recorded already, or not readable a moment ago: try again only once that has passed.
+      const retry = (stored as Partial<AncestryRetry>).retryAfter;
+      if (typeof retry !== 'number' || retry > now) return;
+    }
+    // Sessions that ended without a session end (a closed window) leave their record behind;
+    // a new session clears out the ones nobody wrote for a long time, a bounded number at once.
+    if (evt.event === 'session_start') {
+      kv.deleteStale?.(HOOK_ANCESTRY_PREFIX, now - HOOK_ANCESTRY_TTL_MS, 50);
+    }
+    // Only PIDs and start times are kept: the program names are not needed to match a session.
+    const chain = (options.chain ?? (() => ancestorChain(process.pid)))().map(({ pid, start }) => ({
+      pid,
+      start,
+    }));
+    // Nothing read (a slow or failing process table) is not stored as an answer: the next hook
+    // tries again, a minute later at the earliest.
+    const retry: AncestryRetry = { retryAfter: now + HOOK_ANCESTRY_RETRY_MS };
+    kv.set(key, chain.length > 0 ? chain : retry);
+  } catch {
+    // Not knowing the client only means the server falls back to its guess.
+  }
 }
 
 function closeQuietly(mindly: Pick<Mindly, 'close'> | null): void {
@@ -140,5 +219,40 @@ function closeQuietly(mindly: Pick<Mindly, 'close'> | null): void {
     mindly?.close();
   } catch {
     // Closing must never turn a successful hook into a failure.
+  }
+}
+
+/**
+ * The answer to a pre-tool event of a writing or shell tool whose payload was too large to read:
+ * a refusal, rendered as the agent expects. Null for any other event, and when the tool cannot
+ * be told from how the payload starts: those fail open.
+ */
+function refuseUnreadWrite(
+  adapter: AgentAdapter,
+  nativeEvent: string,
+  cwd: string,
+  name: string | null,
+): { stdout: string; exitCode: number } | null {
+  try {
+    // Only the event name and the payload's tool name are known: a stand-in payload tells what
+    // kind of event and tool it is.
+    const stand = { session_id: 'x', conversation_id: 'x', cwd, workspace_roots: [cwd] };
+    const input = { file_path: 'x', content: '', command: 'x' };
+    // Without a name, only an event that is a write or a shell command whatever the tool counts.
+    const evt = adapter.parse(nativeEvent, {
+      ...stand,
+      tool_name: name ?? 'Read',
+      tool_input: input,
+    });
+    if (evt?.event !== 'pre_tool' || !(evt.tool?.writes || evt.tool?.shell)) return null;
+    return adapter.render(evt, {
+      context: null,
+      userMessage: null,
+      decision: 'deny',
+      reason:
+        'Mindly could not check this change: it is too large to check. Make the change in smaller steps.',
+    });
+  } catch {
+    return null;
   }
 }

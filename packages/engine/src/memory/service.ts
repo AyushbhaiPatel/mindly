@@ -9,7 +9,6 @@ import {
   redactText,
   sanitizeForContext,
   sanitizeLine,
-  sha256,
   MindlyError,
   tryResolveInsideRoot,
   type Memory,
@@ -19,6 +18,7 @@ import {
 } from '@mindly/core';
 import type { MemoryFilter, MemoryPatch, MemorySearchHit } from '@mindly/store';
 import type { Kernel } from '../kernel.js';
+import { evidenceHash } from './evidence-hash.js';
 import { stripManagedSection } from './managed-section.js';
 
 export const MAX_TITLE = 160;
@@ -92,7 +92,8 @@ export function cleanScopePaths(paths: readonly string[] | undefined): string[] 
     if (
       !p ||
       p.startsWith('/') ||
-      p.split('/').includes('..') ||
+      // `..` may also be one alternative of a group: `{..,src}/x` stands for `../x`.
+      p.split(/[/{},]/).includes('..') ||
       p.length > 300 ||
       hasUnsafeChars(p)
     ) {
@@ -308,7 +309,8 @@ export class MemoryService {
     return {
       rel: resolved.rel,
       excerpt: this.clean(excerpt, 2000),
-      hash: sha256(normExcerpt),
+      // Describes the text as found when the stored excerpt cannot be looked for as written.
+      hash: evidenceHash(normExcerpt, normalizeBlock(this.clean(excerpt, 2000))),
       valid,
     };
   }
@@ -322,7 +324,12 @@ export class MemoryService {
   ): Memory {
     const cur = this.k.store.memories.get(id);
     const clean: MemoryPatch = { ...patch };
-    if (patch.title !== undefined) clean.title = sanitizeLine(redactText(patch.title), MAX_TITLE);
+    if (patch.title !== undefined) {
+      clean.title = sanitizeLine(
+        redactText(patch.title, { extraPatterns: this.k.config.redaction.extraPatterns }),
+        MAX_TITLE,
+      );
+    }
     if (patch.body !== undefined) clean.body = this.clean(patch.body, MAX_BODY);
     if (patch.tags !== undefined) clean.tags = cleanTags(patch.tags);
     if (patch.scope?.paths !== undefined) {

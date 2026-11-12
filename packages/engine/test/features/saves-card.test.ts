@@ -92,6 +92,43 @@ describe('saves card (AC6)', () => {
     expect(svg).not.toContain('this week');
   });
 
+  it('keeps every kind row above the footer', () => {
+    const baselines = (svg: string, marker: string): number[] =>
+      [...svg.matchAll(/<text x="\d+" y="(\d+)"[^>]*>([^<]*)<\/text>/g)]
+        .filter((m) => (m[2] ?? '').includes(marker))
+        .map((m) => Number(m[1]));
+    const all: SavesSummary = {
+      since: 1_749_400_000_000,
+      total: 28,
+      byKind: {
+        impact_warned: 7,
+        overlap_avoided: 6,
+        rule_enforced: 5,
+        mistake_avoided: 4,
+        merge_conflict_early: 3,
+        check_broken_early: 2,
+        limit_handoff: 1,
+      },
+      byAgent: { codex: 28 },
+      recent: [],
+    };
+    const svg = renderSavesCard({ summary: all, until: 1_750_000_200_000 });
+    const drawn = (label: string): string => label.replace(/'/g, '&#39;');
+    for (const label of Object.values(SAVE_KIND_LABELS)) expect(svg).toContain(drawn(label));
+    const footer = baselines(svg, 'Counted only with evidence')[0] as number;
+    const lastRow = Math.max(...baselines(svg, drawn(SAVE_KIND_LABELS.limit_handoff)));
+    // The footer is 18 px text: a row has to end clear of it, as six rows do on the standard card.
+    expect(footer - lastRow).toBeGreaterThanOrEqual(34);
+    const height = Number(/ height="(\d+)"/.exec(svg)?.[1]);
+    expect(footer).toBe(height - 48);
+    // Up to six kinds still fit the standard 1200x630 card.
+    const six = renderSavesCard({
+      summary: { ...all, byKind: { ...all.byKind, limit_handoff: 0 } },
+      until: 1_750_000_200_000,
+    });
+    expect(six).toMatch(/^<svg [^>]*width="1200" height="630"/);
+  });
+
   it('draws an empty week without inventing anything', () => {
     const svg = renderSavesCard({
       summary: { since: 0, total: 0, byKind: {}, byAgent: {}, recent: [] },

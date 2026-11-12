@@ -154,8 +154,14 @@ export function isolatedPath(bin: FakeBin): string {
 export function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
+  }
+  // A killed process nobody has reaped yet (a zombie) still answers signal 0.
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) !== 'Z';
+  } catch {
+    return true;
   }
 }

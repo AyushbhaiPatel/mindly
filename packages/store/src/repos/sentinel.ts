@@ -35,7 +35,7 @@ function checksOf(value: unknown): Record<string, SentinelCheck> {
       const v = c[k];
       return typeof v === 'string' ? v : null;
     };
-    out[name] = {
+    const check: SentinelCheck = {
       argvHash: strOr('argvHash') ?? '',
       state: state as SentinelCheck['state'],
       goodSeq: numOr('goodSeq'),
@@ -46,6 +46,13 @@ function checksOf(value: unknown): Record<string, SentinelCheck> {
       note: strOr('note'),
       since: numOr('since') ?? 0,
     };
+    // Always an own property: a check may be named `__proto__` or `constructor`.
+    Object.defineProperty(out, name, {
+      value: check,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   return out;
 }

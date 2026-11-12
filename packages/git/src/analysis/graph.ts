@@ -2,7 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { posix } from 'node:path';
 import { MindlyError, isDeniedPath, tryResolveInsideRoot } from '@mindly/core';
-import { extractImports } from './imports.js';
+import { extractImports, extractReexports } from './imports.js';
 import { languageOf } from './language.js';
 import type { Language } from './language.js';
 
@@ -14,13 +14,15 @@ export const DEFAULT_GRAPH_MAX_FILES = 20_000;
 export const EXCLUDED_DIRS: readonly string[] = ['node_modules', 'dist', '.git'];
 
 const JS_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+/** Tried after the source extensions: declaration files and the explicit-module TS extensions. */
+const TS_ONLY_EXTENSIONS = ['.d.ts', '.mts', '.cts', '.d.mts', '.d.cts'];
 const PY_EXTENSIONS = ['.py'];
 /** ESM-style `.js` specifiers that actually point at TypeScript sources. */
 const TS_SUBSTITUTES: Readonly<Record<string, readonly string[]>> = {
-  '.js': ['.ts', '.tsx'],
+  '.js': ['.ts', '.tsx', '.d.ts'],
   '.jsx': ['.tsx'],
-  '.mjs': ['.mts'],
-  '.cjs': ['.cts'],
+  '.mjs': ['.mts', '.d.mts'],
+  '.cjs': ['.cts', '.d.cts'],
 };
 
 /** Options for `buildImportGraph`. */
@@ -42,10 +44,17 @@ export interface ImportGraph {
   /** Files imported by `file`. */
   dependenciesOf(file: string): string[];
   /**
-   * Files that import `file` (directly, or transitively when `transitive` is true), sorted.
-   * `file` may be absolute or repository-relative.
+   * Files that import `file`, sorted. `file` may be absolute or repository-relative.
+   *
+   * - `transitive`: also the files that import those, and so on.
+   * - `throughReexports`: also the files that reach `file` through modules re-exporting it (an
+   *   `index.ts` with `export * from './file'`, a Python `__init__.py`), but not through modules
+   *   that merely use it.
    */
-  dependentsOf(file: string, options?: { transitive?: boolean }): string[];
+  dependentsOf(
+    file: string,
+    options?: { transitive?: boolean; throughReexports?: boolean },
+  ): string[];
 }
 
 function isExcluded(rel: string, extraDeny: readonly string[]): boolean {
@@ -118,7 +127,9 @@ export async function buildImportGraph(
     const ext = posix.extname(base);
     for (const sub of TS_SUBSTITUTES[ext] ?? []) candidates.push(base.slice(0, -ext.length) + sub);
     for (const e of JS_EXTENSIONS) candidates.push(base + e);
+    for (const e of TS_ONLY_EXTENSIONS) candidates.push(base + e);
     for (const e of JS_EXTENSIONS) candidates.push(posix.join(base, `index${e}`));
+    candidates.push(posix.join(base, 'index.d.ts'));
     return firstExisting(candidates);
   };
 
@@ -151,6 +162,8 @@ export async function buildImportGraph(
   }
 
   const edges = new Map<string, string[]>();
+  /** Per file, the dependencies whose exports it passes on. */
+  const reexported = new Map<string, Set<string>>();
   for (const rel of analysed) {
     const lang = languageOf(rel) as Language;
     const resolved = tryResolveInsideRoot(root, rel);
@@ -164,11 +177,20 @@ export async function buildImportGraph(
       continue;
     }
     const deps = new Set<string>();
+    const resolveSpec = (spec: string): Promise<string | null> =>
+      lang === 'python' ? resolvePy(rel, spec) : resolveJs(rel, spec);
     for (const spec of extractImports(source, lang)) {
-      const target = lang === 'python' ? await resolvePy(rel, spec) : await resolveJs(rel, spec);
+      const target = await resolveSpec(spec);
       if (target && target !== rel) deps.add(target);
     }
     edges.set(rel, [...deps].sort());
+    if (lang === 'python' && posix.basename(rel) !== '__init__.py') continue;
+    const passedOn = new Set<string>();
+    for (const spec of extractReexports(source, lang)) {
+      const target = await resolveSpec(spec);
+      if (target && target !== rel) passedOn.add(target);
+    }
+    if (passedOn.size > 0) reexported.set(rel, passedOn);
   }
 
   const reverse = new Map<string, Set<string>>();
@@ -188,7 +210,10 @@ export async function buildImportGraph(
       const rel = toRel(file);
       return rel ? [...(edges.get(rel) ?? [])] : [];
     },
-    dependentsOf(file: string, opts: { transitive?: boolean } = {}): string[] {
+    dependentsOf(
+      file: string,
+      opts: { transitive?: boolean; throughReexports?: boolean } = {},
+    ): string[] {
       const rel = toRel(file);
       if (!rel) return [];
       const result = new Set<string>();
@@ -198,7 +223,8 @@ export async function buildImportGraph(
         for (const dep of reverse.get(cur) ?? []) {
           if (dep === rel || result.has(dep)) continue;
           result.add(dep);
-          if (opts.transitive) queue.push(dep);
+          const passesOn = opts.throughReexports === true && reexported.get(dep)?.has(cur);
+          if (opts.transitive || passesOn) queue.push(dep);
         }
       }
       return [...result].sort();

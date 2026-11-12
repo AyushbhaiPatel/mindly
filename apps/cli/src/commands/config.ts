@@ -4,8 +4,9 @@ import {
   loadUserConfig,
   mindlyHome,
   MindlyError,
+  parseUserConfigUpdate,
   readRegularFileBounded,
-  UserConfigSchema,
+  unusableChannelsIn,
   writeJsonFile,
 } from '@mindly/core';
 import { z } from 'zod';
@@ -83,8 +84,10 @@ export function configPathCmd(out: Out): number {
 
 /** `mindly config get [key]`: the effective value (defaults included). */
 export function configGet(out: Out, key: string | undefined): number {
-  const config = loadUserConfig(configPath(out));
+  const path = configPath(out);
+  const config = loadUserConfig(path);
   const value = key === undefined ? config : getPath(config, configKey(key));
+  const shown = withUnusedChannels(out, readRaw(path), key, value);
   if (value === undefined) {
     throw new HintedError(
       'not_found',
@@ -92,8 +95,31 @@ export function configGet(out: Out, key: string | undefined): number {
       'See every setting and its value with: mindly config get',
     );
   }
-  out.json(value);
+  out.json(shown);
   return 0;
+}
+
+/**
+ * Channels the file holds with a URL that cannot be used are left out of the effective config.
+ * `config get` shows them as written, so they can be found and fixed, and says on stderr why they
+ * are not used.
+ */
+function withUnusedChannels(
+  out: Out,
+  raw: Record<string, unknown>,
+  key: string | undefined,
+  value: unknown,
+): unknown {
+  const unusable = unusableChannelsIn(raw);
+  const covers = key === undefined || key === 'notify' || key === 'notify.channels';
+  if (unusable.length === 0 || !covers) return value;
+  for (const c of unusable) {
+    out.warn(`notify.channels[${c.index}] (${c.type}) is not used: its ${c.problem}.`);
+  }
+  const channels = (raw['notify'] as { channels: unknown[] }).channels;
+  if (key === 'notify.channels') return channels;
+  const notify = { ...(getPath(value, key === undefined ? ['notify'] : []) as object), channels };
+  return key === undefined ? { ...(value as object), notify } : notify;
 }
 
 /**
@@ -106,7 +132,8 @@ export function configSet(out: Out, key: string, rawValue: string): number {
   const raw = readRaw(path);
   const value = parseValue(rawValue);
   setPath(raw, parts, value);
-  const parsed = UserConfigSchema.safeParse(raw);
+  // A channel the file already holds with an unusable URL does not block other settings.
+  const parsed = parseUserConfigUpdate(raw, key);
   if (!parsed.success) {
     throw new MindlyError(
       'invalid_input',

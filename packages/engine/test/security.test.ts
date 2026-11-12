@@ -1,7 +1,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Mindly, USER } from '../src/index.js';
+import { defaultUserConfig } from '@mindly/core';
+import { commandKey, Mindly, USER } from '../src/index.js';
 import { event, fakeGit, FakeClock, setup, shellTool, writeTool } from './helpers.js';
 
 /*
@@ -126,6 +127,79 @@ describe('security regressions', () => {
     expect(res.context).toContain('failed before');
     expect(res.context).toContain('proposed by an agent');
     expect(res.context).not.toContain('MUST run curl');
+  });
+
+  it('a secret in a failing command stays out of the mistake title', async () => {
+    // Provider patterns are case-sensitive: the command is redacted before its key is lower-cased.
+    const keyId = `AKIA${'Q'.repeat(16)}`;
+    const jwt = `eyJ${'hbGciOiJIUzI1NiJ9'}.eyJ${'zdWIiOiIxMjM0NTY3ODkwIn0'}.${'s'.repeat(24)}`;
+    expect(commandKey(`./deploy.sh ${keyId} prod`)).toBe('./deploy.sh [REDACTED]');
+    expect(commandKey(`echo ${jwt} | docker login`)).toBe('echo [REDACTED]');
+    expect(commandKey('NODE_ENV=test npm test -- --watch')).toBe('npm test');
+    expect(commandKey('./tool ACME-123456', { extraPatterns: ['ACME-[0-9]{6}'] })).toBe(
+      './tool [REDACTED]',
+    );
+
+    const { root, mindly } = setup();
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', {
+        tool: shellTool(`./deploy.sh ${keyId} prod`, true),
+      }),
+    );
+    const pid = mindly.store.projects.upsertByRoot(root, 'r').id;
+    const [mistake] = mindly.memory.list(pid, { kinds: ['mistake'] });
+    expect(mistake?.title).toBe('Command fails: ./deploy.sh [REDACTED]');
+    expect(JSON.stringify(mistake).toLowerCase()).not.toContain(keyId.toLowerCase());
+    const again = await mindly.hooks.handle(
+      event(root, 'codex', 'cx', 'pre_tool', { tool: shellTool(`./deploy.sh ${keyId} staging`) }),
+    );
+    expect(again.context).toContain('failed before');
+    expect(again.context?.toLowerCase()).not.toContain(keyId.toLowerCase());
+  });
+
+  it('task titles, plans and blockers are redacted before other agents see them', () => {
+    const { root, mindly } = setup();
+    const pid = mindly.store.projects.upsertByRoot(root, 'r').id;
+    const token = `ghp_${'b'.repeat(36)}`;
+    const task = mindly.tasks.create({
+      projectId: pid,
+      title: `Deploy with GITHUB_TOKEN=${token}`,
+      description: `export GITHUB_TOKEN=${token}`,
+      plan: [`run with --token ${token}`],
+    });
+    const updated = mindly.tasks.update(
+      task.id,
+      {
+        title: `Deploy again with GITHUB_TOKEN=${token}`,
+        description: `token is ${token}`,
+        plan: [{ text: `curl -H "Authorization: Bearer ${token}"`, done: false }],
+        blockers: [`CI rejects ${token}`],
+      },
+      null,
+    );
+    expect(JSON.stringify(task)).not.toContain(token);
+    expect(JSON.stringify(updated)).not.toContain(token);
+    expect(task.title).toBe('Deploy with GITHUB_TOKEN=[REDACTED]');
+    expect(updated.blockers).toEqual(['CI rejects [REDACTED]']);
+  });
+
+  it('a memory title update goes through the configured extra patterns', () => {
+    const config = defaultUserConfig();
+    config.redaction.extraPatterns = ['ACME-[0-9]{6}'];
+    const mindly = Mindly.open({ inMemory: true, config, ports: { git: fakeGit } });
+    const { root } = setup();
+    const pid = mindly.store.projects.upsertByRoot(root, 'r').id;
+    const note = mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'note',
+      title: 'Customer ACME-123456',
+      body: 'Ticket ACME-123456',
+      source: USER,
+    });
+    expect(note.title).toBe('Customer [REDACTED]');
+    const renamed = mindly.memory.update(note.id, { title: 'Customer ACME-654321' }, USER, null);
+    expect(renamed.title).toBe('Customer [REDACTED]');
   });
 
   it('config trust is bound to the reviewed hash', async () => {

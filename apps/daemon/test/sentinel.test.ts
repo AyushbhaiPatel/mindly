@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -222,6 +222,71 @@ describe('sentinel job', () => {
         .sort(),
     ).toEqual([s.root, wt].sort());
     expect(svc.warmPath(s.pid, s.root)).not.toBe(svc.warmPath(s.pid, wt));
+  });
+
+  it('stops checking a worktree that was removed, instead of failing at every tick', async () => {
+    const s = await setup();
+    const wt = linkedWorktree(s.root, 'feature');
+    await s.d.mindly.hooks.handle(hookEvent(wt, 'codex', 'cx-2', 'session_start'));
+    const editIn = async (n: number): Promise<void> => {
+      write(wt, 'src/calc.js', calc(false, n));
+      await s.d.mindly.hooks.handle(
+        hookEvent(wt, 'codex', 'cx-2', 'post_tool', {
+          tool: {
+            name: 'Edit',
+            writes: true,
+            shell: false,
+            edits: [
+              { path: join(wt, 'src/calc.js'), addedText: 'x', removedText: '', wholeFile: true },
+            ],
+            command: null,
+            failed: false,
+            outputExcerpt: null,
+          },
+        }),
+      );
+    };
+    const svc = sentinelOf(s.d.mindly);
+    await editIn(1);
+    await sentinelTick(s.d.jobs);
+    expect(s.d.mindly.store.sentinel.get(s.pid, wt)?.checkedSeq).not.toBeNull();
+    // The part is finished and its worktree removed, with one step the sentinel never saw.
+    await editIn(2);
+    git(s.root, 'worktree', 'remove', '--force', wt);
+    expect(existsSync(wt)).toBe(false);
+    const runs = (): number => s.d.mindly.store.runs.list(s.pid, { kind: 'sentinel' }).length;
+    const before = runs();
+    expect(svc.dueWorktrees(s.pid)).not.toContain(wt);
+    for (let i = 0; i < 3; i++) await sentinelTick(s.d.jobs);
+    expect(runs()).toBe(before);
+    // Cleanup forgets it, and no later tick brings it back.
+    await sentinelPruneTick(s.d.jobs);
+    expect(s.d.mindly.store.sentinel.get(s.pid, wt)).toBeNull();
+    for (let i = 0; i < 3; i++) await sentinelTick(s.d.jobs);
+    expect(s.d.mindly.store.sentinel.get(s.pid, wt)).toBeNull();
+    expect(runs()).toBe(before);
+  });
+
+  it('makes its scratch tree again when a killed git left it locked', async () => {
+    const s = await setup();
+    const svc = sentinelOf(s.d.mindly);
+    await s.edit('claude-code', false, 1);
+    await sentinelTick(s.d.jobs);
+    const warm = svc.warmPath(s.pid, s.root);
+    // The daemon was killed in the middle of a checkout: the tree's index stays locked.
+    const admin = readFileSync(join(warm, '.git'), 'utf8').replace('gitdir:', '').trim();
+    writeFileSync(join(admin, 'index.lock'), '');
+    await s.edit('codex', true, 2);
+    expect(await sentinelTick(s.d.jobs)).toBe(1);
+    const [run] = s.d.mindly.store.runs.list(s.pid, { kind: 'sentinel', limit: 1 });
+    expect(run?.status).toBe('failed');
+    expect(s.d.mindly.store.sentinel.get(s.pid, s.root)).toMatchObject({
+      checkedSeq: 3,
+      skips: 0,
+      retryAt: null,
+    });
+    expect(s.d.mindly.store.sentinel.get(s.pid, s.root)?.checks['unit']?.state).toBe('failing');
+    rmSync(join(admin, 'index.lock'), { force: true });
   });
 
   it('waits for the merge checks of the same project instead of running beside them', async () => {

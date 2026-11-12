@@ -12,7 +12,8 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const [{ quietOnClosedPipe, whileRunning }, { failsOpen, loadSqliteWithFts5, nodeProblem }] =
     await Promise.all([import('./closed-pipe.js'), import('./node-check.js')]);
-  quietOnClosedPipe();
+  // The MCP server ends its session when its client stops reading: it handles that itself.
+  if (argv[0] !== 'mcp') quietOnClosedPipe();
   const problem = await nodeProblem(argv, {
     version: process.version,
     loadSqlite: loadSqliteWithFts5,
@@ -35,6 +36,7 @@ async function main(): Promise<void> {
     process.stdout.write('', () => process.exit(code));
     return;
   }
+  if (argv[0] === 'mcp') quietUntilServerStarts();
   const [{ processIo }, { run }] = await Promise.all([import('./io.js'), import('./run.js')]);
   // Cut off by a closed pipe before it finishes, a command has not succeeded; hooks still fail open.
   whileRunning(failsOpen(argv) ? 0 : 1);
@@ -45,6 +47,21 @@ async function main(): Promise<void> {
     return;
   }
   process.exitCode = code;
+}
+
+/**
+ * A client may stop its MCP server right after starting it. Until the server has loaded and
+ * installed its own handlers there is nothing to clean up, so a signal ends the process with
+ * exit code 0 where the default would report it as killed. The server removes these handlers
+ * through the well-known symbol when it takes over.
+ */
+function quietUntilServerStarts(): void {
+  const signals = ['SIGTERM', 'SIGINT', 'SIGHUP'] as const;
+  const quit = (): void => process.exit(0);
+  for (const s of signals) process.once(s, quit);
+  (globalThis as Record<symbol, unknown>)[Symbol.for('mindly.mcp.earlySignals')] = (): void => {
+    for (const s of signals) process.off(s, quit);
+  };
 }
 
 void main();

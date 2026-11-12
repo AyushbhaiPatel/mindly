@@ -110,13 +110,22 @@ describe('human output on a real project', () => {
     );
     expect(r.stdout).toMatch(/\[!\] Conflict[\s|]+Claude Code - [a-z]+-[a-z]+-\d+ changed/);
     const flat = r.stdout.replace(/[\s|]+/g, ' ');
-    // The sentence wraps inside its cell, so the Name cell may sit between its words.
-    expect(flat).toContain('changed the exports of');
-    expect(flat).toContain("src/auth.ts; Codex's src/dash.ts uses them");
+    // The sentence wraps inside its cell, so the Name cell may sit between any two of its words.
+    const name = '(?:[a-z]+-[a-z]+-\\d+ )?';
+    const wrapped = (text: string): RegExp =>
+      new RegExp(
+        text
+          .split(' ')
+          .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join(` ${name}`),
+      );
+    expect(flat).toMatch(
+      wrapped("changed the exports of src/auth.ts; Codex's src/dash.ts uses them"),
+    );
     expect(flat).toMatch(/Conflict Claude Code - [a-z]+-[a-z]+-\d+ changed .* [a-z]+-[a-z]+-\d+ /);
     expect(flat).toContain('- Rule "Don\'t use default exports" - suggested by you');
     expect(flat).toContain('- Handoff Waiting for Cursor:');
-    expect(flat).toContain('Finish the dashboard login form');
+    expect(flat).toMatch(wrapped('Finish the dashboard login form'));
     expect(r.stdout).toMatch(
       /^-> mindly conflict [a-z]+-[a-z]+-\d+ resolve\s+mark the conflict resolved$/m,
     );

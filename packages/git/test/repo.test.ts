@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  utimesSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isMindlyError } from '@mindly/core';
@@ -8,6 +16,7 @@ import {
   changedFiles,
   currentBranch,
   diffForFile,
+  driverOverrides,
   fileAtRef,
   findRepoRoot,
   headCommit,
@@ -27,6 +36,32 @@ describe('repository info', () => {
     await expect(findRepoRoot(plain)).rejects.toSatisfy((e: unknown) =>
       isMindlyError(e, 'not_found'),
     );
+  });
+
+  it('answers again from git once a repository appears between a folder and its root', async () => {
+    const root = makeRepo({ 'src/app/a.ts': 'a\n' });
+    const app = join(root, 'src/app');
+    expect(await findRepoRoot(app)).toBe(realpathSync(root));
+    expect(await findRepoRoot(app)).toBe(realpathSync(root));
+    git(join(root, 'src'), 'init', '-q');
+    expect(await findRepoRoot(app)).toBe(realpathSync(join(root, 'src')));
+    rmSync(join(root, 'src/.git'), { recursive: true, force: true });
+    expect(await findRepoRoot(app)).toBe(realpathSync(root));
+    // The root itself replaced by another repository.
+    rmSync(join(root, '.git'), { recursive: true, force: true });
+    await expect(findRepoRoot(app)).rejects.toSatisfy((e: unknown) =>
+      isMindlyError(e, 'not_found'),
+    );
+  });
+
+  it('sees a filter driver added to the config since the last look', async () => {
+    const root = makeRepo();
+    expect(await driverOverrides(root)).toEqual([]);
+    git(root, 'config', 'filter.lfs.smudge', 'run-me %f');
+    expect(await driverOverrides(root)).toEqual([
+      'filter.lfs.smudge=',
+      'filter.lfs.required=false',
+    ]);
   });
 
   it('reports branch, HEAD and detached state', async () => {
@@ -144,6 +179,16 @@ describe('captureWorktreeCommit', () => {
 
     // Deterministic: same state, same commit.
     expect((await captureWorktreeCommit(root)).commit).toBe(captured.commit);
+  });
+
+  it('does not report a file that was only touched', async () => {
+    const root = makeRepo({ '.env.example': 'KEY=\n', 'a.txt': 'a\n' });
+    const later = new Date(Date.now() + 5000);
+    utimesSync(join(root, '.env.example'), later, later);
+    utimesSync(join(root, 'a.txt'), later, later);
+    const captured = await captureWorktreeCommit(root);
+    expect(captured.skipped).toEqual([]);
+    expect(captured.tree).toBe(git(root, 'rev-parse', 'HEAD^{tree}').trim());
   });
 
   it('never captures denied paths and works in a repo without commits', async () => {

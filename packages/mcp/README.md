@@ -11,36 +11,98 @@ await startMcpServer({ agentKind: 'cursor', cwd: process.cwd(), env: process.env
 const server = createMcpServer(mindly, { agentKind: 'codex', cwd }); // any transport (tests)
 ```
 
-The calling session is resolved on every call: the most recently active live session of the
-agent kind in the project for `cwd` (hook sessions first), otherwise a session with external id
-`mcp-<pid>-<startTime>`. Logs go to `$MINDLY_HOME/logs/mindly.log`; stdout carries only the
-protocol.
+A server works out which session it speaks for and keeps it. In order of preference:
+
+1. The session its own client's hooks made. The first hook of a session records which processes
+   started it; a server recognises the session whose hooks were started by its own parent process.
+   This tells apart two windows of one agent in one checkout, each a client process of its own.
+   It cannot tell apart sessions that one process runs together (an app or IDE host with several
+   threads and a server per thread): when more than one live session matches, the server guesses
+   among those as in (2). A server started through a launcher that keeps running (`npx`, a node
+   shim) has the launcher as its parent: it prefers the session whose hooks its client started,
+   but only as a guess.
+2. Where that says nothing (a client without hooks, a system where the process table cannot be
+   read): the most recently active live session of the agent kind in the working tree of `cwd`
+   that no other running server speaks for, leaving out sessions whose client is gone. This is a
+   guess, and the server gives it up for (1) as soon as it can.
+3. A session of its own, with external id `mcp-<pid>-<startTime>`.
+
+A guess is the one window there is, and the server treats it as its own session for everything,
+only when all of these hold:
+
+- nothing tells that it is another window's: it is a launcher match or nothing is recorded for it,
+  its client is not known to be gone, and its client is not a running process outside the server's
+  own ancestry (where that ancestry can be read);
+- it is the only live session of the agent kind in the tree whose client runs, or may run when
+  the process table cannot be read;
+- no other running server speaks for it, nor for any other live session of the agent kind in the
+  tree.
+
+Any other guess is kept at arm's length. Every tool declares what it does then, and the server
+routes each call through that one rule:
+
+- `mindly_context` reads the context as a guest: it picks up no handoff, neither shows nor marks
+  delivered any of that window's messages, records nothing against that session (so what that
+  window's own hooks serve is unchanged), and lists as your open tasks only the tasks the server
+  took up itself;
+- `mindly_inbox` lists none of that window's messages, and `mindly_ack` acknowledges nothing;
+- `mindly_handoff` files the handoff in the server's own name, describing only the server's own
+  work;
+- `mindly_task_claim` does not claim a task that window owns, and `mindly_tasks` with `mine` lists
+  only the tasks the server took up itself; neither changes that window's current task;
+- a task the server took up stays its own only while nothing but the server has changed it and no
+  other live session has it as its current task (that window may have picked it up from a
+  handoff): after that it is listed as yours nowhere, `mindly_task_claim` refuses it, and
+  `mindly_task_update` changes it where it is; neither takes it along;
+- intents, tasks and messages the server writes are noted, and go along with it to its own
+  session once that is known.
+
+Each server records its claim, so two servers never share a session; a claim is free again only
+when its process is gone. A server on its own session moves to its client's hook session once it
+knows which that is (the first tool call may come before the first hook) and takes its unfinished
+tasks, active intents, unread messages and handoffs along; it never moves them to a session it only
+guesses at, unless that guess is the one window there is. A session stays live while its server
+is being used, except a guessed one whose client is gone, which the server lets go of. When the client disconnects (stdin closes, the process is
+signalled, the client stops reading) the server's own session is ended and its intents are
+closed. `createMcp` returns the server together with that `release` call for other transports.
+
+Logs go to `$MINDLY_HOME/logs/mindly.log`; stdout carries only the protocol.
 
 ## Tools
 
-| Tool                    | Description                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------------ |
-| `mindly_context`        | Current context for this agent (or memory relevant to `query`); delivers messages.   |
-| `mindly_search_memory`  | Full-text memory search with kind and trust filters.                                 |
-| `mindly_remember`       | Store a fact, decision, note, mistake or rule, with optional file evidence/scope.    |
-| `mindly_update_memory`  | Refine or archive one of your own proposed memories.                                 |
-| `mindly_record_mistake` | Record what failed and what to do instead.                                           |
-| `mindly_add_contract`   | Bind a memory to a declarative repository check (no command contracts).              |
-| `mindly_declare_intent` | Announce files/symbols you are about to change; returns overlap warnings.            |
-| `mindly_task_create`    | Create a task with an optional plan.                                                 |
-| `mindly_task_update`    | Update a task's status, plan, blockers, title or description.                        |
-| `mindly_task_claim`     | Take ownership of a task.                                                            |
-| `mindly_tasks`          | List tasks (by status, or only yours).                                               |
-| `mindly_send_message`   | Message another agent kind or session (at most 20 per minute per server process).    |
-| `mindly_inbox`          | Unacknowledged messages for you, without marking them delivered.                     |
-| `mindly_ack`            | Acknowledge inbox items.                                                             |
-| `mindly_handoff`        | Hand your work (summary, next steps, blockers) to the next session of another agent. |
-| `mindly_why`            | Code provenance for `file` + `line`: which session and prompt wrote it.              |
-| `mindly_status`         | Live agents, open conflicts and counts of items needing the user.                    |
+| Tool                    | Description                                                                                                                               |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `mindly_context`        | Current context for this agent (or memory relevant to `query`); delivers messages and picks up a waiting handoff, so it is not read-only. |
+| `mindly_search_memory`  | Full-text memory search with kind and trust filters.                                                                                      |
+| `mindly_remember`       | Store a fact, decision, note, mistake or rule, with optional file evidence/scope.                                                         |
+| `mindly_update_memory`  | Refine or archive one of your own proposed memories.                                                                                      |
+| `mindly_record_mistake` | Record what failed and what to do instead.                                                                                                |
+| `mindly_add_contract`   | Bind a memory to a declarative repository check (no command contracts).                                                                   |
+| `mindly_declare_intent` | Announce files/symbols you are about to change; returns overlap warnings.                                                                 |
+| `mindly_task_create`    | Create a task with an optional plan.                                                                                                      |
+| `mindly_task_update`    | Update a task's status, plan, blockers, title or description.                                                                             |
+| `mindly_task_claim`     | Take ownership of a task.                                                                                                                 |
+| `mindly_tasks`          | List tasks (by status, or only yours).                                                                                                    |
+| `mindly_send_message`   | Message another agent kind or session (at most 20 per minute per server process).                                                         |
+| `mindly_inbox`          | Unacknowledged messages for you, without marking them delivered.                                                                          |
+| `mindly_ack`            | Acknowledge inbox items.                                                                                                                  |
+| `mindly_handoff`        | Hand your work (summary, next steps, blockers) to the next session of another agent.                                                      |
+| `mindly_why`            | Code provenance for `file` + `line`: which session and prompt wrote it.                                                                   |
+| `mindly_status`         | Live agents, open conflicts and counts of items needing the user.                                                                         |
 
 Inputs are validated with strict zod schemas; errors come back as MCP tool errors of the form
-`<code>: <message>` (a `MindlyError` code, never a stack trace). Paths must stay inside the project
-and off the secret deny-list.
+`<code>: <message>` (a `MindlyError` code, never a stack trace).
+
+Paths are the agent's own: files are those of the working tree the server runs in (a linked
+worktree when the client was started in one), as for hooks. They must stay inside that tree, off
+the secret deny-list and out of the `.git` folder. When the server runs in a subfolder, a
+relative path is read from that folder if it names something there, and otherwise from the root
+of the tree, which is how Mindly prints paths; when both exist the subfolder wins and the reply
+says so. Contracts are the exception in one respect: they are always checked against the main
+checkout, and the tool says so when the server runs in a linked worktree.
+
+Intent summaries and symbols, messages and task descriptions are redacted before they are stored,
+with the user's `redaction.extraPatterns` as well as the built-in rules.
 
 ## Trust model
 
