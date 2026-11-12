@@ -313,6 +313,12 @@ track record stays on your machine and is never part of a saves card.
 When Claude Code hits its usage limit mid-task, the next agent you open starts with the goal, the
 plan, the files already changed and the next steps, instead of a blank session.
 
+A limit is recognised from the notice the agent prints, not from an agent writing about rate
+limits in your code. If the limited agent is asked to carry on and gets work done in a later turn,
+the handoff is withdrawn; one that nobody picked up is dropped after a week. With more than two agents in
+`failover.order`, the work goes to the one after the limited agent, skipping agents that hit their
+own limit in the last day.
+
 ### Shows its work
 
 - `mindly why apps/api/src/webhooks/stripe.ts:42`: which agent wrote this line, when, and from

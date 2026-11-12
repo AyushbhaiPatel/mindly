@@ -986,6 +986,10 @@ describe('doctor, config, export, misc', () => {
     );
     expect((await cli(sb, ['xray'])).code).toBe(1);
     expect((await cli(sb, ['handoff', '--summary', 'continue'])).code).toBe(1);
+    // A summary longer than what is kept is refused, not cut.
+    const long = await cli(sb, ['handoff', '--summary', 'x'.repeat(301)]);
+    expect(long.code).toBe(2);
+    expect(long.stderr).toContain('at most 300 characters');
   });
 
   it('exit codes: usage 2, help 0', async () => {

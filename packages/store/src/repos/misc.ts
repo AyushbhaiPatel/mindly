@@ -195,22 +195,29 @@ export class HandoffRepo {
    * Pending handoffs a new session of `agentKind` may pick up (excluding its own). A handoff
    * targeted at a worktree is only offered to a session whose `worktree` is that folder or one
    * below it; the others are offered to every session of the agent kind.
+   *
+   * A usage-limit handoff describes work that was in flight when it was made, so with
+   * `rateLimitMaxAgeMs` one older than that is no longer offered. Manual handoffs and split
+   * briefs are deliberate and do not age.
    */
   pendingFor(
     projectId: string,
     agentKind: string,
     sessionId: string,
     worktree: string | null = null,
+    rateLimitMaxAgeMs: number | null = null,
   ): Handoff[] {
+    const oldest = rateLimitMaxAgeMs === null ? 0 : this.clock.now() - rateLimitMaxAgeMs;
     return (
       this.db
         .prepare(
           `SELECT * FROM handoffs WHERE project_id = ? AND status = 'pending'
              AND (to_agent_kind IS NULL OR to_agent_kind = ?) AND from_session_id != ?
              AND (worktree IS NULL OR worktree = ? OR substr(?, 1, length(worktree) + 1) = worktree || '/')
+             AND (reason != 'rate_limit' OR created_at >= ?)
            ORDER BY (worktree IS NOT NULL) DESC, created_at DESC LIMIT 5`,
         )
-        .all(projectId, agentKind, sessionId, worktree ?? '', worktree ?? '') as Row[]
+        .all(projectId, agentKind, sessionId, worktree ?? '', worktree ?? '', oldest) as Row[]
     ).map(toHandoff);
   }
 
