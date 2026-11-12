@@ -4537,10 +4537,10 @@ describe('made, removed and outer folders, held against what the line really wri
     'mkdir -p src/keys && echo x > src/a.ts && echo k > src/keys/tls.pem && echo a > a.txt && git add -A && git commit -qm base';
 
   /**
-   * A copy into a folder `mkdir` named earlier on the line is read as
-   * landing under `dest/<source name>` only. When the folder is not there as the copy runs (it was
-   * removed or moved away again, or the `mkdir` stood behind `&&`, `||` or `if` and did not run),
-   * the copy makes the destination itself, and the files land right in it.
+   * A copy into a folder `mkdir` made earlier on the line lands under `dest/<source name>`. When
+   * the folder is not there as the copy runs (it was removed or moved away again, or the `mkdir`
+   * stood behind `&&`, `||` or `if` and did not run), the copy makes the destination itself and
+   * the files land right in it. Such a line is not read fully.
    */
   describe('a copy into a folder mkdir named that is not there when the copy runs', () => {
     const scopes = ['d/keys/**'];
@@ -4571,7 +4571,7 @@ describe('made, removed and outer folders, held against what the line really wri
       });
     }
 
-    // The control: with the folder there, the copy lands in d/src and nothing covered is written.
+    // With the folder there, the copy lands in d/src and nothing covered is written.
     it('the plain form writes nothing covered and is let through', async () => {
       const command = 'mkdir d && cp -r src d';
       expect(runInCopy(g.dir, command, covered).written).toEqual([]);
@@ -4580,8 +4580,8 @@ describe('made, removed and outer folders, held against what the line really wri
   });
 
   /**
-   * The same reading when the folder is on disk before the line:
-   * a removal on the line does not take it out of the folders `mkdir` made.
+   * The same when the folder is on disk before the line: once the line removed it, it is no
+   * folder for the copy that follows.
    */
   describe('a folder on disk that the line removes, and mkdir names in another branch', () => {
     const scopes = ['out/keys/**'];
@@ -4607,10 +4607,9 @@ describe('made, removed and outer folders, held against what the line really wri
   });
 
   /**
-   * A copy or move INTO a folder above the project is read as
-   * that folder written with all it holds, so the whole project counts as written: a file moved
-   * to the parent folder, or to a home that holds the project, is blocked for every enforced
-   * rule, also one that covers nothing that is there.
+   * A copy or move into a folder above the project writes one name there, not the folder with
+   * all it holds: a file moved to the parent folder, or to a home that holds the project, touches
+   * nothing the project's rules cover.
    */
   describe('a copy or move into a folder above the project', () => {
     /** Runs the line in a copy of the project alone in a folder; the covered files it changed. */
@@ -4710,9 +4709,9 @@ describe('made, removed and outer folders, held against what the line really wri
   });
 
   /**
-   * `git checkout -- <folder>` and `git restore <folder>` put
-   * back tracked files only. With nothing but an untracked (or ignored) covered file under the
-   * folder, the line is blocked though git leaves that file alone.
+   * `git checkout -- <folder>` and `git restore <folder>` put back tracked files only. With
+   * nothing but an untracked (or ignored) covered file under the folder, git leaves that file
+   * alone and the line is not blocked.
    */
   describe('git puts back the tracked files of a folder that holds an untracked covered file', () => {
     const scopes = ['**/.env'];
@@ -4768,10 +4767,9 @@ describe('made, removed and outer folders, held against what the line really wri
     "printf 'trees/\\n.env\\n' > .gitignore && git add -A && git commit -qm ignore && git worktree add -q trees/w1";
 
   /**
-   * From a linked worktree kept inside the main checkout, a change of
-   * mode over the main checkout as a whole: the folder written is the top of another working tree
-   * and lies above the session's own. Only the trees below the folder are looked at, not the tree
-   * the folder is the top of.
+   * From a linked worktree kept inside the main checkout, a change of mode over the main checkout
+   * as a whole: the folder written is the top of another working tree and lies above the
+   * session's own. That tree is looked at too, not only the trees below the folder.
    */
   describe('from a nested worktree, the main checkout changed as a whole', () => {
     const scopes = ['**/.env'];
@@ -4828,16 +4826,15 @@ describe('made, removed and outer folders, held against what the line really wri
       expect(answerOf(r)).not.toBe('allow');
     });
 
-    // The control: from the main checkout itself the same change is warned about.
+    // From the main checkout itself the same change is warned about.
     it('is warned about from the main checkout', async () => {
       expect(answerOf(await g.shell('chmod -R 700 .'))).toBe('warn');
     });
   });
 
   /**
-   * The other side of 2: from a nested worktree, a copy into the
-   * top of the main checkout is held against the session's own tree as a whole, and what lands in
-   * the main checkout is not looked at.
+   * From a nested worktree, a copy into the top of the main checkout: what lands there is placed
+   * in the main checkout and held against the rules by its name in it.
    */
   describe('from a nested worktree, a copy into the top of the main checkout', () => {
     const scopes = ['keys/*.pem'];
@@ -4867,9 +4864,9 @@ describe('made, removed and outer folders, held against what the line really wri
   });
 
   /**
-   * `git clean` with `-f` twice removes the working trees kept
-   * under an ignored folder of the checkout. Their files are held against the rules by their names
-   * in the main checkout only, so a rule that names a folder from the top of a tree is not reached.
+   * `git clean` with `-f` twice removes the working trees kept under an ignored folder of the
+   * checkout. Their files are held against the rules by their names in their own tree, so a rule
+   * that names a folder from the top of a tree is reached.
    */
   describe('git clean -ff from the main checkout, over a nested worktree', () => {
     const scopes = ['certs/*.pem'];
@@ -4899,11 +4896,10 @@ describe('made, removed and outer folders, held against what the line really wri
   });
 
   /**
-   * docs/security.md says a file of a worktree kept inside the
-   * main checkout answers to its name in that worktree, "and a rule for `trees/**` in the main
-   * checkout is no rule for it". That holds for a path named in full and for a tool call. A
-   * wildcard over the worktrees is also searched from the main checkout, into the ignored folder,
-   * and the worktrees' files are held against the rule by their names in the main checkout.
+   * A file of a worktree kept inside the main checkout answers to its name in that worktree, and
+   * a rule for `trees/**` in the main checkout is no rule for it (docs/security.md). That holds
+   * for a path named in full, for a tool call, and for a wildcard over the worktrees: the search
+   * from the main checkout does not go into them.
    */
   describe('a rule for the folder the worktrees are kept in, and a wildcard into them', () => {
     const scopes = ['trees/**'];
@@ -4934,10 +4930,9 @@ describe('made, removed and outer folders, held against what the line really wri
   });
 
   /**
-   * Time. Each copy of a line lists its source folder anew, so a
-   * line of many recursive copies of one large folder runs to the end of the time the hook gives
-   * itself (900 ms), well past half a second. Best of three; 30 rules of 5 scopes; the line is
-   * under 2 KB.
+   * Time. A source folder is listed once for a line, so a line of many recursive copies of one
+   * large folder stays well under half a second. Best of three; 30 rules of 5 scopes; the line
+   * is under 2 KB.
    */
   describe('the time a line of many copies of one large folder takes', () => {
     const rules: Record<string, string[]> = {};
@@ -4984,7 +4979,7 @@ describe('made, removed and outer folders, held against what the line really wri
       expect(await bestOfThree(command), 'milliseconds, best of three').toBeLessThan(600);
     }, 120_000);
 
-    // The control: one copy of the same folder is answered at once.
+    // One copy of the same folder is answered at once.
     it('one copy of it', async () => {
       expect(await bestOfThree('mkdir b0 && cp -r src b0')).toBeLessThan(200);
     }, 120_000);
