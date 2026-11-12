@@ -45,12 +45,12 @@ describe('a token in a URL password, after an assignment', () => {
       }
       return best;
     };
-    // Measured against half the text, so a slow machine passes: twice the text may take up to
-    // three times as long, where reading it again for every assignment takes four.
-    const half = fastest(input(125_000));
+    // Measured against a quarter of the text, so a slow machine passes: four times the text
+    // takes about four times as long, where reading it again for every assignment takes sixteen.
+    const quarter = fastest(input(62_500));
     const whole = fastest(input(250_000));
-    expect(whole).toBeLessThan(Math.max(3 * half, 20));
-    expect(whole).toBeLessThan(600);
+    expect(whole).toBeLessThan(Math.max(9 * quarter, 30));
+    expect(whole).toBeLessThan(1500);
   });
 });
 
@@ -121,21 +121,22 @@ describe('JWT heads in a row', () => {
     ['a-eyJ'],
     ['a-eyJaaaaaaaa'],
   ])('reads 250 KB of %j in linear time', (unit) => {
-    const best = (size: number): number => {
-      const text = unit.repeat(Math.ceil(size / unit.length));
-      let fastest = Infinity;
+    const fastest = (text: string): number => {
+      let best = Infinity;
       for (let i = 0; i < 3; i++) {
         const started = performance.now();
         redact(text);
-        fastest = Math.min(fastest, performance.now() - started);
+        best = Math.min(best, performance.now() - started);
       }
-      return fastest;
+      return best;
     };
-    // Twice the text takes twice the time, give or take; a search that starts over at each
-    // `eyJ` takes four times. Measured against the half, so a slow machine passes.
-    const half = best(125_000);
-    const whole = best(250_000);
-    expect(whole).toBeLessThan(Math.max(3 * half, 20));
-    expect(whole).toBeLessThan(600);
+    const text = unit.repeat(Math.ceil(250_000 / unit.length));
+    // The same text without a JWT's first letters costs the same when JWTs are found in one
+    // pass. A search from every `eyJ` made it three times as slow and more. Measured against
+    // that text, so a slow machine passes.
+    const plain = fastest(text.split('eyJ').join('exJ'));
+    const withHeads = fastest(text);
+    expect(withHeads).toBeLessThan(2 * plain + 10);
+    expect(withHeads).toBeLessThan(1500);
   });
 });
