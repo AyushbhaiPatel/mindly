@@ -681,6 +681,22 @@ export class KvRepo {
       .run(key, toJson(value), this.clock.now());
   }
 
+  /**
+   * Deletes at most `max` keys starting with `prefix` that were last written before `before`.
+   * Returns how many went. The prefix is matched literally (`%` and `_` in it are not wildcards).
+   */
+  deleteStale(prefix: string, before: number, max = 200): number {
+    const like = `${prefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    return Number(
+      this.db
+        .prepare(
+          `DELETE FROM kv WHERE key IN (
+             SELECT key FROM kv WHERE key LIKE ? ESCAPE '\\' AND updated_at < ? LIMIT ?)`,
+        )
+        .run(like, before, Math.max(0, Math.trunc(max))).changes,
+    );
+  }
+
   delete(key: string): void {
     this.db.prepare('DELETE FROM kv WHERE key = ?').run(key);
   }
@@ -701,14 +717,6 @@ export class KvRepo {
     const r = this.db
       .prepare('DELETE FROM kv WHERE key IN (SELECT ? || id FROM sessions WHERE project_id = ?)')
       .run(prefix, projectId);
-    return Number(r.changes);
-  }
-
-  /** Deletes the keys starting with `prefix` last written before `before`; returns how many. */
-  deleteStale(prefix: string, before: number): number {
-    const r = this.db
-      .prepare('DELETE FROM kv WHERE substr(key, 1, length(?)) = ? AND updated_at < ?')
-      .run(prefix, prefix, before);
     return Number(r.changes);
   }
 }

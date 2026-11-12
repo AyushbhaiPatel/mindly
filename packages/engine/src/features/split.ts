@@ -36,6 +36,7 @@ import type { z } from 'zod';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import type { TaskService } from '../coordination/work.js';
 import type { WriteGuardResult } from '../hooks/handler.js';
+import { patternsMayOverlap } from '../hooks/scope.js';
 import type { Kernel } from '../kernel.js';
 import { cleanScopePaths, USER, type MemoryService } from '../memory/service.js';
 import type { Mindly, MindlyModule } from '../mindly.js';
@@ -1560,7 +1561,11 @@ export class SplitService {
   // ------------------------------------------------------------------ hooks into the engine
 
   /** Write guard: warns (or, in strict mode, denies) writes to files owned by another part. */
-  guard(session: Session, paths: readonly string[]): WriteGuardResult {
+  guard(
+    session: Session,
+    paths: readonly string[],
+    whole: readonly string[] = [],
+  ): WriteGuardResult {
     const none: WriteGuardResult = { warnings: [], deny: null };
     const part = this.partForSession(session);
     if (!part) return none;
@@ -1577,6 +1582,16 @@ export class SplitService {
       denied.push(`${path} (part "${owner.title}", ${owner.agentKind})`);
       warnings.push(
         `${path} is owned by part "${owner.title}" (${owner.agentKind}) of this split; your part "${part.title}" owns ${part.owns.join(', ')}. Coordinate with the user before changing another part's files.`,
+      );
+    }
+    // A directory or wildcard written as a whole (`rm -r dir`): decided by what it can match,
+    // segment by segment, so a top-level `*.log` does not reach into another part's folders.
+    for (const pattern of whole) {
+      const owner = others.find((o) => o.owns.some((g) => patternsMayOverlap(pattern, g, NOCASE)));
+      if (!owner) continue;
+      denied.push(`${pattern} (part "${owner.title}", ${owner.agentKind})`);
+      warnings.push(
+        `${pattern} reaches files owned by part "${owner.title}" (${owner.agentKind}) of this split; your part "${part.title}" owns ${part.owns.join(', ')}. Coordinate with the user before changing another part's files.`,
       );
     }
     const deny =
@@ -1867,7 +1882,7 @@ export const splitModule: MindlyModule = (mindly) => {
   if (registered.has(mindly)) return;
   registered.add(mindly);
   const svc = splitOf(mindly);
-  mindly.hooks.useWriteGuard((_project, session, paths) => svc.guard(session, paths));
+  mindly.hooks.useWriteGuard((_project, session, paths, whole) => svc.guard(session, paths, whole));
   serviceOf(
     mindly,
     'impact',

@@ -37,6 +37,8 @@ const MAX_WRITE_NOTES = 8;
 const WRITE_NOTE_PREFIX = 'checkpoints:writing:';
 /** A write whose post-tool hook has not come by then is no longer waited for. */
 const WRITE_NOTE_TTL_MS = 5 * 60_000;
+/** The most sessions' notes one sweep removes; what is left goes with the next one. */
+const WRITE_NOTE_SWEEP_MAX = 10_000;
 /** Files larger than this are not hashed: their size and modification time stand in. */
 const MAX_HASHED_FILE_BYTES = 8 * 1024 * 1024;
 
@@ -174,7 +176,12 @@ export class CheckpointService {
    */
   sweepWrites(): number {
     try {
-      return this.k.store.kv.deleteStale(WRITE_NOTE_PREFIX, this.k.clock.now() - WRITE_NOTE_TTL_MS);
+      // One row per session; the bound is far above what a sweep finds.
+      return this.k.store.kv.deleteStale(
+        WRITE_NOTE_PREFIX,
+        this.k.clock.now() - WRITE_NOTE_TTL_MS,
+        WRITE_NOTE_SWEEP_MAX,
+      );
     } catch (err) {
       this.k.logger.warn('write notes not swept', { error: describeError(err) });
       return 0;

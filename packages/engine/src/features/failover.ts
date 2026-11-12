@@ -275,7 +275,7 @@ export interface HandoffExtras {
 export async function buildHandoffPacket(
   k: Kernel,
   session: Session,
-  extras: HandoffExtras = {},
+  extras: HandoffExtras & { decisionIds?: readonly string[] } = {},
 ): Promise<{ packet: HandoffPacket; taskId: string | null }> {
   const now = k.clock.now();
   const task =
@@ -289,11 +289,14 @@ export async function buildHandoffPacket(
     limit: 3,
   });
   const recentPrompts = promptSummaries(prompts);
+  const decisionIds = extras.decisionIds ? new Set(extras.decisionIds) : null;
   const decisions = k.store.memories
     .list(session.projectId, { updatedSince: now - DAY_MS, limit: 200 })
     .filter(
       (m) =>
-        m.source.sessionId === session.id && m.createdAt >= now - DAY_MS && m.trust !== 'rejected',
+        (decisionIds ? decisionIds.has(m.id) : m.source.sessionId === session.id) &&
+        m.createdAt >= now - DAY_MS &&
+        m.trust !== 'rejected',
     )
     .map((m) => m.title)
     .slice(0, 10);
@@ -328,6 +331,14 @@ export interface ManualHandoffInput {
   summary: string;
   nextSteps?: string[];
   blockers?: string[];
+  /**
+   * Whose work the packet describes (task, prompts, files, memories), when that is not the
+   * session the handoff is filed from: an MCP server that speaks for a session it only guessed
+   * at hands off its own work, never the other window's.
+   */
+  workOf?: Session;
+  /** The memories this work recorded, when they cannot be found by session (see `workOf`). */
+  decisionIds?: readonly string[];
 }
 
 /** Manual handoffs: create, list and cancel. */
@@ -354,7 +365,8 @@ export class HandoffService {
         .filter((s) => s.length > 0);
     const nextSteps = cleanList(input.nextSteps);
     const blockers = cleanList(input.blockers);
-    const { packet, taskId } = await buildHandoffPacket(this.k, session, {
+    const { packet, taskId } = await buildHandoffPacket(this.k, input.workOf ?? session, {
+      ...(input.decisionIds ? { decisionIds: input.decisionIds } : {}),
       goal: summary,
       ...(nextSteps ? { nextSteps } : {}),
       ...(blockers ? { blockers } : {}),

@@ -30,6 +30,7 @@ export {
   findPatchText,
   MAX_PATCH_BYTES,
   parseApplyPatch,
+  readApplyPatch,
 } from './codex/index.js';
 export type { CodexAdapterOptions } from './codex/index.js';
 export {

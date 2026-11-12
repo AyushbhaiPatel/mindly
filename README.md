@@ -136,6 +136,12 @@ prisma/migrations/20261103_add_currency/migration.sql.
 
 Rules can be scoped to paths and branches. Agents can only propose rules; you approve them.
 
+The block covers editing tools and shell commands whose text shows the write (`sed -i`, `rm`,
+`mv`, `cp`, `tee`, `git checkout -- path`, a `>` redirection), also when a whole directory goes
+at once. A file that is only handed to a program Mindly does not know gets a warning instead,
+because the program may just read it. Reading the command is not a sandbox: a script can still
+write a file it never names, and a path kept in a variable or passed through a pipe is not seen.
+
 ### Finds the exact agent edit that broke your build
 
 Your test suite passed this morning. Since then three agents made 140 edits and nothing was

@@ -389,15 +389,19 @@ describe('briefs and ownership through hook events (acceptance 2)', () => {
     });
     const read = await hook(sb, api, 'api-session', 'PreToolUse', bash('cat src/app/page.ts'));
     expect(read.hookSpecificOutput?.permissionDecision).toBeUndefined();
-    const denied = await hook(
+    const denied = await hook(sb, api, 'api-session', 'PreToolUse', bash('rm src/app/page.ts'));
+    expect(denied.hookSpecificOutput?.permissionDecision).toBe('deny');
+    expect(denied.hookSpecificOutput?.permissionDecisionReason).toContain('src/app/page.ts');
+    // A program whose writes are not modelled (sed) is not read fully: warned about, not blocked.
+    const warned = await hook(
       sb,
       api,
       'api-session',
       'PreToolUse',
       bash("sed -i '' 's/x/y/' src/app/page.ts"),
     );
-    expect(denied.hookSpecificOutput?.permissionDecision).toBe('deny');
-    expect(denied.hookSpecificOutput?.permissionDecisionReason).toContain('src/app/page.ts');
+    expect(warned.hookSpecificOutput?.permissionDecision).toBeUndefined();
+    expect(warned.hookSpecificOutput?.additionalContext ?? '').toContain('src/app/page.ts');
     const own = await hook(sb, api, 'api-session', 'PreToolUse', bash('echo x > src/api/new.ts'));
     expect(own.hookSpecificOutput?.permissionDecision).toBeUndefined();
   });

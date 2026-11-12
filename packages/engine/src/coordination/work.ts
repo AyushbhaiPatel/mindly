@@ -135,6 +135,9 @@ export class TaskService {
 // Intents and overlap detection
 // ---------------------------------------------------------------------------------------------
 
+/** Prefix of the keys that mark an intent as declared explicitly (not the hooks' rolling one). */
+export const DECLARED_INTENT_PREFIX = 'intent:declared:';
+
 export interface OverlapReport {
   conflicts: Conflict[];
   /** Human-readable warnings for the acting agent. */
@@ -156,17 +159,24 @@ export class IntentService {
     files: string[],
     symbols: string[] = [],
   ): { intent: Intent; overlap: OverlapReport } {
+    // What an agent says it is about to do is stored, shown to other agents and written to the
+    // event log, so it goes through the redactor like any other agent text.
+    const redaction = { extraPatterns: this.k.config.redaction.extraPatterns };
     const intent = this.k.store.intents.declare({
       projectId: session.projectId,
       sessionId: session.id,
       taskId: session.currentTaskId,
-      summary: sanitizeLine(summary, 300),
+      summary: sanitizeLine(redactText(summary, redaction), 300),
       targets: {
         files: files.filter((f) => !hasUnsafeChars(f) && f.length <= 1024).slice(0, 100),
-        symbols: symbols.slice(0, 100).map((s) => sanitizeLine(s, 120)),
+        symbols: symbols.slice(0, 100).map((s) => sanitizeLine(redactText(s, redaction), 120)),
       },
       ttlMs: INTENT_TTL_MS,
     });
+    // Declared in so many words: never the rolling "Editing …" intent that hooks add the files a
+    // session writes to, whatever its summary says. (An MCP server that guessed which session it
+    // speaks for may have declared it on another window's session.)
+    this.k.store.kv.set(`${DECLARED_INTENT_PREFIX}${intent.id}`, true);
     this.k.store.events.append({
       projectId: session.projectId,
       sessionId: session.id,
@@ -188,7 +198,11 @@ export class IntentService {
     if (files.length === 0) return { conflicts: [], warnings: [], overlaps: [] };
     const existing = this.k.store.intents
       .activeForSession(session.id)
-      .find((i) => i.summary.startsWith('Editing'));
+      .find(
+        (i) =>
+          i.summary.startsWith('Editing') &&
+          this.k.store.kv.get<boolean>(`${DECLARED_INTENT_PREFIX}${i.id}`) === null,
+      );
     if (existing) {
       this.k.store.intents.addTargets(existing.id, { files });
       this.k.store.intents.refresh(existing.id, INTENT_TTL_MS);
