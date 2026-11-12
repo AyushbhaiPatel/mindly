@@ -45,7 +45,12 @@ describe('a token in a URL password, after an assignment', () => {
       }
       return best;
     };
-    expect(fastest(input(250_000))).toBeLessThan(200);
+    // Measured against half the text, so a slow machine passes: twice the text may take up to
+    // three times as long, where reading it again for every assignment takes four.
+    const half = fastest(input(125_000));
+    const whole = fastest(input(250_000));
+    expect(whole).toBeLessThan(Math.max(3 * half, 20));
+    expect(whole).toBeLessThan(600);
   });
 });
 
@@ -116,13 +121,21 @@ describe('JWT heads in a row', () => {
     ['a-eyJ'],
     ['a-eyJaaaaaaaa'],
   ])('reads 250 KB of %j in linear time', (unit) => {
-    const text = unit.repeat(Math.ceil(250_000 / unit.length));
-    let best = Infinity;
-    for (let i = 0; i < 3; i++) {
-      const started = performance.now();
-      redact(text);
-      best = Math.min(best, performance.now() - started);
-    }
-    expect(best).toBeLessThan(200);
+    const best = (size: number): number => {
+      const text = unit.repeat(Math.ceil(size / unit.length));
+      let fastest = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const started = performance.now();
+        redact(text);
+        fastest = Math.min(fastest, performance.now() - started);
+      }
+      return fastest;
+    };
+    // Twice the text takes twice the time, give or take; a search that starts over at each
+    // `eyJ` takes four times. Measured against the half, so a slow machine passes.
+    const half = best(125_000);
+    const whole = best(250_000);
+    expect(whole).toBeLessThan(Math.max(3 * half, 20));
+    expect(whole).toBeLessThan(600);
   });
 });
