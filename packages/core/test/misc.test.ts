@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { loadUserConfig, parseUserConfigUpdate, unusableNotifyChannels } from '../src/config.js';
 import { codename, isUuid, parseCodename, uuidv7 } from '../src/ids.js';
 import { REDACTED, redactText } from '../src/redact.js';
-import { cutMiddle, sanitizeForContext, sanitizeLine, truncate } from '../src/text.js';
+import { cutMiddle, sanitizeForContext, sanitizeLine, sliceChars, truncate } from '../src/text.js';
 
 describe('uuidv7', () => {
   it('produces valid, strictly increasing ids', () => {
@@ -86,6 +86,26 @@ describe('sanitizeForContext', () => {
   it('caps length', () => {
     expect(sanitizeForContext('x'.repeat(100), 10)).toHaveLength(10);
     expect(truncate('hello', 3)).toBe('he…');
+  });
+  it('never cuts a character outside the BMP in half', () => {
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const text = `${'a'.repeat(8)}🚀${'b'.repeat(8)}`;
+    // Every cut, including the two that land inside the surrogate pair.
+    for (let max = 0; max <= text.length + 1; max++) {
+      for (const out of [
+        truncate(text, max),
+        sliceChars(text, max),
+        sanitizeLine(text, max),
+        sanitizeForContext(text, max),
+      ]) {
+        expect(lone.test(out), `${max}: ${JSON.stringify(out)}`).toBe(false);
+        expect(out.length).toBeLessThanOrEqual(Math.max(max, 0));
+        expect(Buffer.from(out, 'utf8').toString('utf8')).toBe(out);
+      }
+    }
+    expect(sliceChars(text, 9)).toBe('a'.repeat(8));
+    expect(sliceChars(text, 10)).toBe(`${'a'.repeat(8)}🚀`);
+    expect(truncate(text, 10)).toBe(`${'a'.repeat(8)}…`);
   });
 });
 

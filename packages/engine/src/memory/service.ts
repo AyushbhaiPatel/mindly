@@ -5,13 +5,13 @@ import {
   invalidInput,
   isDeniedPath,
   isRepoFileSource,
-  normalizeLine,
   redactText,
   sanitizeForContext,
   sanitizeLine,
   MindlyError,
   tryResolveInsideRoot,
   type Memory,
+  type MemoryEvidence,
   type MemoryKind,
   type MemorySource,
   type Trust,
@@ -19,7 +19,10 @@ import {
 import type { MemoryFilter, MemoryPatch, MemorySearchHit } from '@mindly/store';
 import type { Kernel } from '../kernel.js';
 import { evidenceHash } from './evidence-hash.js';
+import { excerptState, normalizeBlock } from './excerpts.js';
 import { stripManagedSection } from './managed-section.js';
+
+export { normalizeBlock } from './excerpts.js';
 
 export const MAX_TITLE = 160;
 export const MAX_BODY = 4000;
@@ -50,6 +53,84 @@ export interface RememberInput {
   pinned?: boolean;
   evidence?: EvidenceInput[];
   reason?: string | null;
+}
+
+/**
+ * What {@link MemoryService.rememberResult} did. Every `kept_` outcome leaves the memory exactly as
+ * it was and attaches nothing to it; apart from `kept_rejected`, the occurrence is recorded.
+ *
+ * - `kept_rejected`: the user rejected a memory with this title.
+ * - `kept_approved`: the user approved a memory with this title.
+ * - `kept_user_decision`: the user pinned or enforced the memory. Only the user changes it.
+ *
+ * `updated` from an agent means it changed a memory its own kind proposed. Its trust is worked out
+ * again from the evidence given, as for a new memory, so a verified or stale fact can be corrected.
+ * - `kept_other_author`: a different agent proposed a memory with this title.
+ *
+ * Callers that go on to approve, enforce, announce or link the result must do so only for
+ * `created` and `updated`: a kept memory is someone else's.
+ */
+export type RememberOutcome =
+  | 'created'
+  | 'updated'
+  | 'kept_approved'
+  | 'kept_rejected'
+  | 'kept_user_decision'
+  | 'kept_other_author';
+
+/** Why a source other than the user may not change a memory (see {@link agentLock}). */
+type AgentLock = 'rejected' | 'approved' | 'decided' | 'other_author';
+
+/**
+ * Whether `by`, a source other than the user, may change `m`; null when it may. Once the user
+ * approved, rejected, pinned, enforced or archived a memory (states only the user sets), it is the
+ * user's. Otherwise the agent kind that proposed it may change it, including when the code has
+ * marked it verified or stale: those say whether its evidence still matches, not that its text is
+ * right, and its author must be able to correct it. `takesOver` (a repository file restating an
+ * agent's proposal) lifts only the author check. The one rule behind both
+ * {@link MemoryService.rememberResult} and {@link MemoryService.update}.
+ */
+function agentLock(m: Memory, by: MemorySource, takesOver = false): AgentLock | null {
+  if (m.trust === 'rejected') return 'rejected';
+  if (m.trust === 'approved') return 'approved';
+  if (m.status !== 'active' || m.enforce || m.pinned) return 'decided';
+  return takesOver || sameAuthor(m.source, by) ? null : 'other_author';
+}
+
+const KEPT: Record<AgentLock, RememberOutcome> = {
+  rejected: 'kept_rejected',
+  approved: 'kept_approved',
+  decided: 'kept_user_decision',
+  other_author: 'kept_other_author',
+};
+
+/** Evidence rows one memory keeps. */
+const MAX_EVIDENCE_ROWS = 20;
+
+/** Whose word wins when two sources write the same title: the user, then a repository file. */
+function authority(source: MemorySource): number {
+  if (source.type === 'user') return 3;
+  return isRepoFileSource(source) ? 2 : 1;
+}
+
+/** How long one `restated` event stands for every restatement by the same session. */
+const RESTATED_WINDOW_MS = 60 * 60 * 1000;
+
+/** Evidence that passed {@link MemoryService.checkEvidence}. */
+interface CheckedEvidence {
+  rel: string;
+  excerpt: string | null;
+  hash: string | null;
+}
+
+/** Whether two sources are the same author: the user, the system, or agents of one kind. */
+function sameAuthor(a: MemorySource, b: MemorySource): boolean {
+  return a.type === b.type && a.agentKind === b.agentKind;
+}
+
+export interface RememberResult {
+  memory: Memory;
+  outcome: RememberOutcome;
 }
 
 /**
@@ -174,9 +255,15 @@ export class MemoryService {
 
   /**
    * Stores a memory. If an active memory of the same kind with the same normalised title already
-   * exists, it is updated as a new version instead of creating a duplicate.
+   * exists, it is updated as a new version instead of creating a duplicate. Callers that must tell
+   * the author when nothing was stored use {@link rememberResult}.
    */
   remember(input: RememberInput): Memory {
+    return this.rememberResult(input).memory;
+  }
+
+  /** {@link remember}, also saying what happened to the memory (see {@link RememberOutcome}). */
+  rememberResult(input: RememberInput): RememberResult {
     const title = sanitizeLine(
       redactText(input.title, { extraPatterns: this.k.config.redaction.extraPatterns }),
       MAX_TITLE,
@@ -204,13 +291,29 @@ export class MemoryService {
     if (input.kind === 'fact' && substantial && trust === 'proposed') trust = 'verified';
 
     const existing = this.findSameTitle(input.projectId, input.kind, title, input.branch ?? null);
-    if (existing && agentLocked(existing) && input.source.type !== 'user') {
-      // Restating a user memory would otherwise let an agent rewrite it while keeping user trust.
-      throw new MindlyError(
-        'forbidden',
-        'a user memory with this title exists; propose the change under a different title',
-      );
+    // The user outranks a repository file, which outranks an agent: a write from higher up
+    // replaces the memory and takes it over, so its text is never left under another name.
+    const takesOver = existing !== null && authority(input.source) > authority(existing.source);
+    if (existing && input.source.type !== 'user') {
+      if (agentLocked(existing) && !takesOver) {
+        // Restating a user memory would otherwise let an agent rewrite it while keeping user
+        // trust.
+        throw new MindlyError(
+          'forbidden',
+          'a user memory with this title exists; propose the change under a different title',
+        );
+      }
+      // Saying it again changes a memory exactly when `update()` would let this source change
+      // it. What the user decided stays decided, and a memory stays in the words of whoever it is
+      // attributed to: nobody else puts their text under that name or hangs evidence on it that
+      // would later make it go stale. The caller is told, so nothing is dropped unknowingly.
+      const lock = agentLock(existing, input.source, takesOver);
+      if (lock === 'rejected') return { memory: existing, outcome: 'kept_rejected' };
+      if (lock) return { memory: this.restated(existing, input), outcome: KEPT[lock] };
     }
+    // A repository file replaces an agent's proposal whole; the agent's version stays in the
+    // history. The user's own write keeps what it did not mention, as it always has.
+    const replaces = takesOver && input.source.type !== 'user';
     const memory = this.k.store.transaction(() => {
       let m: Memory;
       if (existing) {
@@ -218,13 +321,14 @@ export class MemoryService {
           existing.id,
           {
             body,
-            tags: [...new Set([...existing.tags, ...tags])].slice(0, 12),
-            ...(scopePaths.length ? { scope: { paths: scopePaths } } : {}),
+            tags: replaces ? tags : [...new Set([...existing.tags, ...tags])].slice(0, 12),
+            ...(replaces || scopePaths.length ? { scope: { paths: scopePaths } } : {}),
             // Re-stating a memory never downgrades user trust, and never upgrades agent claims.
             trust:
               rankTrust(existing.trust) >= rankTrust(trust) && existing.source.type === 'user'
                 ? existing.trust
                 : trust,
+            ...(takesOver ? { source: input.source } : {}),
             ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
             ...(enforce ? { enforce } : {}),
           },
@@ -246,16 +350,8 @@ export class MemoryService {
           reason: input.reason ?? null,
         });
       }
-      for (const e of evidence) {
-        this.k.store.memories.addEvidence({
-          memoryId: m.id,
-          projectId: input.projectId,
-          type: 'file',
-          ref: e.rel,
-          excerpt: e.excerpt,
-          contentHash: e.hash,
-        });
-      }
+      if (existing) this.reviseEvidence(existing, input, takesOver, evidence);
+      this.attachEvidence(m.id, input.projectId, evidence);
       this.k.store.events.append({
         projectId: input.projectId,
         sessionId: input.source.sessionId,
@@ -271,7 +367,138 @@ export class MemoryService {
       return m;
     });
     this.rulesChanged(memory);
-    return memory;
+    return { memory, outcome: existing ? 'updated' : 'created' };
+  }
+
+  /**
+   * Records that a memory was stated again by someone who may not change it. The memory itself is
+   * untouched, and no evidence is attached to it: a memory goes stale when any of its evidence
+   * stops matching, so evidence from someone else would let them take it out of circulation by
+   * pointing it at a line that is bound to change. The trace is a `restated` event, at most one
+   * per memory and session in {@link RESTATED_WINDOW_MS}, so a command failing in a loop does not
+   * fill the event log.
+   */
+  private restated(existing: Memory, input: RememberInput): Memory {
+    this.k.store.transaction(() => {
+      const noted = this.k.store.events
+        .query(input.projectId, {
+          types: ['memory.updated'],
+          since: this.k.clock.now() - RESTATED_WINDOW_MS,
+          order: 'desc',
+          limit: 1000,
+        })
+        .some(
+          (e) =>
+            e.sessionId === input.source.sessionId &&
+            e.payload['memoryId'] === existing.id &&
+            e.payload['restated'] === true,
+        );
+      if (noted) return;
+      this.k.store.events.append({
+        projectId: input.projectId,
+        sessionId: input.source.sessionId,
+        type: 'memory.updated',
+        payload: {
+          memoryId: existing.id,
+          kind: existing.kind,
+          title: existing.title,
+          trust: existing.trust,
+          source: existing.source.type,
+          restated: true,
+          reason: input.reason ?? 'restated',
+        },
+      });
+    });
+    return existing;
+  }
+
+  /**
+   * Settles which evidence a restated memory keeps, before the new evidence is attached.
+   *
+   * - Taken over from an agent or from Mindly itself (by the user or a repository file): that
+   *   evidence goes with the claim it backed. Left attached, it could later make the new
+   *   author's memory go stale.
+   * - Otherwise (its own author restating it, or the user taking over a rule imported from an
+   *   instruction file) a row is dropped when it no longer holds, or, on a takeover, when the new
+   *   author gives evidence for the same file. Rows that hold stay: an imported rule's row is the
+   *   record of the file it came from, which keeps rules sync from writing it there again and
+   *   marks the rule stale when its line is removed.
+   *
+   * Whether a row holds is judged at the project root only, by {@link judgeEvidence}, exactly as
+   * the self-healing sweep judges it, even when the restatement comes from a linked worktree where
+   * the row still holds. A memory is about the project as the sweep sees it: a row kept because
+   * it holds on another branch would make the next sweep mark the memory just restated stale
+   * again, and that sweep never restores trust. Do not add the restater's checkout here.
+   */
+  private reviseEvidence(
+    existing: Memory,
+    input: RememberInput,
+    takesOver: boolean,
+    incoming: readonly CheckedEvidence[],
+  ): void {
+    const repo = this.k.store.memories;
+    if (takesOver && authority(existing.source) === 1) {
+      repo.clearEvidence(existing.id);
+      return;
+    }
+    const replaced = new Set(takesOver ? incoming.map((e) => e.rel) : []);
+    const root = this.k.store.projects.get(input.projectId).root;
+    const deny = this.k.config.redaction.denyPaths;
+    for (const e of repo.evidenceFor(existing.id)) {
+      if (replaced.has(e.ref) || evidenceState(root, deny, e) === 'invalid') {
+        repo.deleteEvidence(e.id);
+      }
+    }
+  }
+
+  /**
+   * Adds file evidence to a memory. A row it already has is skipped: the same file and excerpt,
+   * or an excerpt that is part of one it already holds for that file. A memory keeps its newest
+   * {@link MAX_EVIDENCE_ROWS} rows, so restating it with ever different excerpts cannot grow it
+   * without bound.
+   */
+  private attachEvidence(
+    memoryId: string,
+    projectId: string,
+    evidence: readonly CheckedEvidence[],
+  ): void {
+    if (evidence.length === 0) return;
+    const repo = this.k.store.memories;
+    const have = repo.evidenceFor(memoryId).map((e) => ({
+      id: e.id,
+      ref: e.ref,
+      hash: e.contentHash,
+      text: e.excerpt === null ? null : normalizeBlock(e.excerpt),
+    }));
+    for (const e of evidence) {
+      const text = e.excerpt === null ? null : normalizeBlock(e.excerpt);
+      const at = have.findIndex(
+        (h) =>
+          h.ref === e.rel &&
+          (h.hash === e.hash || (text !== null && h.text !== null && h.text.includes(text))),
+      );
+      if (at >= 0) {
+        // Stated again: the row counts as new, so trimming below never drops what was just said.
+        const [known] = have.splice(at, 1);
+        if (known) {
+          repo.touchEvidence(known.id);
+          have.push(known);
+        }
+        continue;
+      }
+      const row = repo.addEvidence({
+        memoryId,
+        projectId,
+        type: 'file',
+        ref: e.rel,
+        excerpt: e.excerpt,
+        contentHash: e.hash,
+      });
+      have.push({ id: row.id, ref: e.rel, hash: e.hash, text });
+    }
+    for (const old of have.slice(0, Math.max(0, have.length - MAX_EVIDENCE_ROWS))) {
+      repo.deleteEvidence(old.id);
+    }
   }
 
   /** The active memory of `kind` with the same normalised title on `branch`, if any. */
@@ -282,11 +509,12 @@ export class MemoryService {
     branch: string | null,
   ): Memory | null {
     const norm = normalizeTitle(title);
-    const candidates = this.k.store.memories.search(projectId, title, { kinds: [kind], limit: 10 });
-    for (const { memory } of candidates) {
-      if (normalizeTitle(memory.title) === norm && memory.scope.branch === branch) return memory;
-    }
-    return null;
+    return this.k.store.memories.findByTitle(
+      projectId,
+      kind,
+      branch,
+      (other) => normalizeTitle(other) === norm,
+    );
   }
 
   /** Validates a piece of file evidence: path containment, deny-list, size, and excerpt presence. */
@@ -301,7 +529,11 @@ export class MemoryService {
       throw new MindlyError('forbidden', 'evidence path is on the deny-list');
     }
     const excerpt = e.excerpt ? e.excerpt.slice(0, 2000) : null;
-    if (!excerpt) return { rel: resolved.rel, excerpt: null, hash: null, valid: true };
+    if (!excerpt) {
+      // Without an excerpt the file itself is the evidence, so it has to be there.
+      if (!isFile(resolved.abs)) throw invalidInput('evidence file does not exist in the project');
+      return { rel: resolved.rel, excerpt: null, hash: null, valid: true };
+    }
     const content = readBounded(resolved.abs);
     const normExcerpt = normalizeBlock(excerpt);
     const valid =
@@ -335,13 +567,23 @@ export class MemoryService {
     if (patch.scope?.paths !== undefined) {
       clean.scope = { ...patch.scope, paths: cleanScopePaths(patch.scope.paths) };
     }
+    // Who a memory is attributed to changes only when a higher authority restates it.
+    delete clean.source;
     if (by.type !== 'user') {
-      // Agents may refine content of their own proposals but cannot change trust or enforcement.
       if (agentLocked(cur)) throw new MindlyError('forbidden', 'agents cannot edit user memories');
+      // An agent may refine or archive what its own kind proposed (from any of its sessions) while
+      // nobody has settled it (see agentLock). This is refused out loud: a dropped field would
+      // look like success to the caller.
+      if (agentLock(cur, by)) {
+        throw new MindlyError(
+          'forbidden',
+          'agents can only change memories they proposed that the user has not decided on',
+        );
+      }
+      // Trust and enforcement are never an agent's to set.
       delete clean.trust;
       delete clean.enforce;
       delete clean.pinned;
-      if (patch.status === 'archived' && cur.source.sessionId !== by.sessionId) delete clean.status;
     }
     if (clean.enforce && cur.kind !== 'rule') delete clean.enforce;
     const m = this.k.store.memories.update(id, clean, by, reason, record && by.type === 'user');
@@ -449,13 +691,63 @@ function normalizeTitle(t: string): string {
     .trim();
 }
 
-/** Normalises a multi-line block for excerpt matching (whitespace-insensitive per line). */
-export function normalizeBlock(text: string): string {
-  return text
-    .split(/\r?\n/)
-    .map(normalizeLine)
-    .filter((l) => l.length > 0)
-    .join('\n');
+/**
+ * A file evidence points at, as read for judging it: its text without Mindly's own section (rules
+ * Mindly wrote into an instruction file are not evidence for those same rules), gone, or
+ * `unreadable` when it cannot be looked at (outside the project, behind a link leaving it, on the
+ * deny-list, too large or unreadable).
+ */
+export type EvidenceFile =
+  { kind: 'present'; content: string } | { kind: 'missing' } | { kind: 'unreadable' };
+
+/** Reads the file at `rel` under `projectRoot` for {@link judgeEvidence}. */
+export function readEvidenceFile(
+  projectRoot: string,
+  denyPaths: readonly string[],
+  rel: string,
+): EvidenceFile {
+  const p = tryResolveInsideRoot(projectRoot, rel);
+  if (!p || p.rel === '' || isDeniedPath(p.rel, denyPaths)) return { kind: 'unreadable' };
+  if (!isFile(p.abs)) return { kind: 'missing' };
+  const content = readBounded(p.abs);
+  return content === null
+    ? { kind: 'unreadable' }
+    : { kind: 'present', content: stripManagedSection(content) };
+}
+
+/**
+ * Whether an evidence row holds in `file`: `unknown` when the file cannot be looked at, or when
+ * evidence stored in an earlier form could not be placed but is not shown to be gone; `invalid`
+ * when the file is gone or no longer holds the excerpt; `valid` otherwise. Excerpts are read by
+ * the same functions the self-healing sweep uses (see `excerpts.ts`), so a restatement and the
+ * sweep do not disagree about a row.
+ */
+export function judgeEvidence(
+  file: EvidenceFile,
+  e: Pick<MemoryEvidence, 'excerpt' | 'contentHash'>,
+): 'valid' | 'invalid' | 'unknown' {
+  if (file.kind === 'unreadable') return 'unknown';
+  if (file.kind === 'missing') return 'invalid';
+  if (e.excerpt === null) return 'valid';
+  const state = excerptState(file.content, e.excerpt, e.contentHash);
+  return state === 'present' ? 'valid' : state === 'absent' ? 'invalid' : 'unknown';
+}
+
+/** {@link judgeEvidence} of one row, its file read under `projectRoot`. */
+export function evidenceState(
+  projectRoot: string,
+  denyPaths: readonly string[],
+  e: Pick<MemoryEvidence, 'ref' | 'excerpt' | 'contentHash'>,
+): 'valid' | 'invalid' | 'unknown' {
+  return judgeEvidence(readEvidenceFile(projectRoot, denyPaths, e.ref), e);
+}
+
+function isFile(abs: string): boolean {
+  try {
+    return statSync(abs).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export function readBounded(abs: string, max = MAX_EVIDENCE_FILE_BYTES): string | null {

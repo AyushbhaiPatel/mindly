@@ -13,6 +13,7 @@ import {
   installDefaultModules,
   Mindly,
   splitOf,
+  USER,
 } from '@mindly/engine';
 import { createGitPort } from '@mindly/runtime';
 import {
@@ -300,6 +301,58 @@ describe('mindly MCP server', () => {
     expect(h.mindly.store.memories.list(pidOf(h, m.id))).toHaveLength(1);
   });
 
+  it('says so when a memory the user approved or rejected is not rewritten', async () => {
+    const h = await harness();
+    const first = await h.call('mindly_remember', {
+      kind: 'decision',
+      title: 'Sessions live in Redis',
+      body: 'Chosen for expiry.',
+    });
+    const id = (first.structured?.['memory'] as { id: string }).id;
+    expect(first.text).not.toMatch(/Not stored/);
+    expect(first.structured).toMatchObject({ stored: true, outcome: 'created' });
+    h.mindly.memory.approve(id);
+
+    const corrected = await h.call('mindly_remember', {
+      kind: 'decision',
+      title: 'sessions live in Redis.',
+      body: 'Actually they live in Postgres.',
+    });
+    expect(corrected.isError).toBe(false);
+    expect(corrected.text).toMatch(/Not stored: an approved memory with this title exists/);
+    expect(corrected.text).toMatch(/different title or ask the user/);
+    expect(corrected.structured).toMatchObject({
+      stored: false,
+      outcome: 'kept_approved',
+      memory: { id, trust: 'approved' },
+    });
+    expect(h.mindly.store.memories.get(id).body).toBe('Chosen for expiry.');
+
+    const pitfall = await h.call('mindly_record_mistake', {
+      what: 'Mocking the database in integration tests',
+      instead: 'Use the test container',
+    });
+    const mistakeId = (pitfall.structured?.['memory'] as { id: string }).id;
+    h.mindly.memory.update(mistakeId, { trust: 'rejected' }, USER, 'not true here');
+    for (const call of [
+      h.call('mindly_record_mistake', {
+        what: 'Mocking the database in integration tests',
+        instead: 'Never mock anything',
+      }),
+      h.call('mindly_remember', {
+        kind: 'mistake',
+        title: 'Mocking the database in integration tests',
+        body: 'again',
+      }),
+    ]) {
+      const out = await call;
+      expect(out.isError).toBe(false);
+      expect(out.text).toMatch(/Not stored: the user rejected a memory with this title/);
+      expect(out.structured).toMatchObject({ stored: false, outcome: 'kept_rejected' });
+    }
+    expect(h.mindly.store.memories.get(mistakeId)).toMatchObject({ trust: 'rejected', version: 2 });
+  });
+
   it('validates evidence paths and verifies facts backed by real excerpts', async () => {
     const h = await harness();
     for (const path of ['../outside.txt', '/etc/passwd', 'src/../../x']) {
@@ -334,6 +387,24 @@ describe('mindly MCP server', () => {
     expect(missing.isError).toBe(true);
     expect(missing.text).toMatch(/^invalid_input:/);
     expect(missing.text).not.toMatch(/\bat\s+\S+\s+\(/);
+
+    // A file named as evidence has to exist, with or without an excerpt.
+    for (const path of ['src/no-such-file.ts', 'src']) {
+      const absent = await h.call('mindly_remember', {
+        kind: 'fact',
+        title: `Evidence at ${path}`,
+        evidence: [{ path }],
+      });
+      expect(absent.isError).toBe(true);
+      expect(absent.text).toMatch(/^invalid_input: evidence file does not exist/);
+    }
+    const present = await h.call('mindly_remember', {
+      kind: 'fact',
+      title: 'Auth lives in one file',
+      evidence: [{ path: 'src/auth.ts' }],
+    });
+    expect(present.isError).toBe(false);
+    expect((present.structured?.['memory'] as { trust: string }).trust).toBe('proposed');
   });
 
   it('lets agents refine only their own proposals', async () => {
@@ -361,6 +432,143 @@ describe('mindly MCP server', () => {
       body: 'x',
     });
     expect(unknown.text).toMatch(/^not_found:/);
+  });
+
+  it('archives a proposal of its own agent kind from a later session', async () => {
+    const h = await harness();
+    const seed = await h.call('mindly_remember', { kind: 'note', title: 'Seed note' });
+    const pid = pidOf(h, (seed.structured?.['memory'] as { id: string }).id);
+    // Proposed by the same agent kind in an earlier session.
+    const earlier = h.mindly.memory.remember({
+      projectId: pid,
+      projectRoot: h.root,
+      kind: 'note',
+      title: 'Note from an earlier session',
+      body: 'x',
+      source: { type: 'agent', sessionId: null, agentKind: 'claude-code' },
+    });
+    const out = await h.call('mindly_update_memory', { id: earlier.id, archive: true });
+    expect(out.isError).toBe(false);
+    expect(out.text).toContain('Archived memory');
+    expect(out.structured).toMatchObject({ memory: { id: earlier.id, status: 'archived' } });
+    expect(h.mindly.store.memories.get(earlier.id).status).toBe('archived');
+
+    const other = h.mindly.memory.remember({
+      projectId: pid,
+      projectRoot: h.root,
+      kind: 'note',
+      title: 'Note from another agent',
+      body: 'x',
+      source: { type: 'agent', sessionId: null, agentKind: 'codex' },
+    });
+    const denied = await h.call('mindly_update_memory', { id: other.id, archive: true });
+    expect(denied.isError).toBe(true);
+    expect(denied.text).toMatch(/^forbidden:/);
+    expect(h.mindly.store.memories.get(other.id).status).toBe('active');
+  });
+
+  it('lets an agent correct its own verified fact and says it was updated', async () => {
+    const h = await harness();
+    writeFileSync(
+      join(h.root, 'src', 'server.ts'),
+      'export const PORT_NUMBER_FOR_SERVER = 8080;\n',
+    );
+    const evidence = [{ path: 'src/server.ts', excerpt: 'PORT_NUMBER_FOR_SERVER = 8080' }];
+    const title = 'The server listens on its port';
+    const first = await h.call('mindly_remember', {
+      kind: 'fact',
+      title,
+      body: 'listens on 3000',
+      evidence,
+    });
+    const id = (first.structured?.['memory'] as { id: string; trust: string }).id;
+    expect(first.structured).toMatchObject({ stored: true, outcome: 'created' });
+    expect((first.structured?.['memory'] as { trust: string }).trust).toBe('verified');
+
+    const fixed = await h.call('mindly_remember', {
+      kind: 'fact',
+      title,
+      body: 'listens on 9090',
+    });
+    expect(fixed.isError).toBe(false);
+    expect(fixed.text).toContain('Updated your earlier memory with this title (now version 2).');
+    expect(fixed.text).toContain('It is proposed; the user can approve it.');
+    expect(fixed.structured).toMatchObject({
+      stored: true,
+      outcome: 'updated',
+      memory: { id, trust: 'proposed', version: 2 },
+    });
+    expect(h.mindly.store.memories.get(id).body).toBe('listens on 9090');
+
+    const codex = await harness({ agentKind: 'codex' }, { root: h.root, mindly: h.mindly });
+    const other = await codex.call('mindly_remember', {
+      kind: 'fact',
+      title,
+      body: 'listens on 1',
+    });
+    expect(other.structured).toMatchObject({ stored: false, outcome: 'kept_other_author' });
+  });
+
+  it('does not rewrite its own proposal once the user pinned it', async () => {
+    const h = await harness();
+    const first = await h.call('mindly_remember', { kind: 'rule', title: 'Use pnpm', body: 'v1' });
+    const id = (first.structured?.['memory'] as { id: string }).id;
+    h.mindly.memory.update(id, { pinned: true }, USER, null);
+    const again = await h.call('mindly_remember', { kind: 'rule', title: 'Use pnpm', body: 'v2' });
+    expect(again.isError).toBe(false);
+    expect(again.text).toMatch(/Not stored: the user pinned or enforced a memory with this title/);
+    expect(again.text).not.toMatch(/Not stored:[^\n]*verified/);
+    expect(again.structured).toMatchObject({
+      stored: false,
+      outcome: 'kept_user_decision',
+      memory: { id, version: 1 },
+    });
+    expect(h.mindly.store.memories.get(id)).toMatchObject({ body: 'v1', pinned: true });
+    const edit = await h.call('mindly_update_memory', { id, body: 'v2' });
+    expect(edit.text).toMatch(/^forbidden:/);
+  });
+
+  it('leaves the proposal of another agent in its own words', async () => {
+    const h = await harness();
+    const first = await h.call('mindly_remember', {
+      kind: 'fact',
+      title: 'Plain proposed fact from A',
+      body: 'Written by the first agent.',
+    });
+    const id = (first.structured?.['memory'] as { id: string }).id;
+    const codex = await harness({ agentKind: 'codex' }, { root: h.root, mindly: h.mindly });
+    const second = await codex.call('mindly_remember', {
+      kind: 'fact',
+      title: 'Plain proposed fact from A!',
+      body: 'REWRITTEN BY B',
+      evidence: [{ path: 'src/auth.ts' }],
+    });
+    expect(second.isError).toBe(false);
+    expect(second.text).toMatch(/Not stored: another agent already proposed a memory/);
+    expect(second.text).not.toContain('REWRITTEN BY B');
+    expect(second.structured).toMatchObject({
+      stored: false,
+      outcome: 'kept_other_author',
+      memory: { id, version: 1 },
+    });
+    expect(h.mindly.store.memories.get(id)).toMatchObject({
+      body: 'Written by the first agent.',
+      version: 1,
+      source: { agentKind: 'claude-code' },
+    });
+    expect(h.mindly.store.memories.evidenceFor(id)).toEqual([]);
+
+    // The agent that proposed it can still refine it by saying it again.
+    const refined = await h.call('mindly_remember', {
+      kind: 'fact',
+      title: 'Plain proposed fact from A',
+      body: 'Refined by the first agent.',
+    });
+    expect(refined.structured).toMatchObject({ stored: true, outcome: 'updated' });
+    expect(h.mindly.store.memories.get(id)).toMatchObject({
+      body: 'Refined by the first agent.',
+      version: 2,
+    });
   });
 
   it('searches memory with kind and trust filters', async () => {

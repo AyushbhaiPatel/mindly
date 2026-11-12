@@ -111,6 +111,8 @@ export interface MemoryPatch {
   enforce?: boolean;
   pinned?: boolean;
   lastVerifiedAt?: number | null;
+  /** Who the memory is attributed to from now on (a higher authority took it over). */
+  source?: MemorySource;
 }
 
 export interface MemoryFilter {
@@ -214,6 +216,7 @@ export class MemoryRepo {
         status: patch.status ?? cur.status,
         enforce: patch.enforce ?? cur.enforce,
         pinned: patch.pinned ?? cur.pinned,
+        source: patch.source ?? cur.source,
         lastVerifiedAt:
           patch.lastVerifiedAt === undefined ? cur.lastVerifiedAt : patch.lastVerifiedAt,
       };
@@ -224,14 +227,15 @@ export class MemoryRepo {
         toJson(next.tags) !== toJson(cur.tags) ||
         toJson(next.scope) !== toJson(cur.scope) ||
         next.trust !== cur.trust ||
-        next.status !== cur.status;
+        next.status !== cur.status ||
+        toJson(next.source) !== toJson(cur.source);
       const now = this.clock.now();
       next.version = versioned ? cur.version + 1 : cur.version;
       this.db
         .prepare(
           `UPDATE memories SET title = ?, body = ?, tags = ?, scope_paths = ?, scope_branch = ?,
              trust = ?, status = ?, enforce = ?, pinned = ?, version = ?, last_verified_at = ?,
-             updated_at = ?
+             updated_at = ?, source_type = ?, source_session_id = ?, source_agent_kind = ?
            WHERE id = ?`,
         )
         .run(
@@ -247,6 +251,9 @@ export class MemoryRepo {
           next.version,
           next.lastVerifiedAt,
           versioned ? now : cur.updatedAt,
+          next.source.type,
+          next.source.sessionId,
+          next.source.agentKind,
           id,
         );
       const saved = this.get(id);
@@ -349,6 +356,30 @@ export class MemoryRepo {
       )
       .all(match, ...params, limit(f.limit, 30, 200)) as Row[];
     return rows.map((r) => ({ memory: toMemory(r), rank: num(r, 'rank') }));
+  }
+
+  /**
+   * The most recently updated active memory of `kind` on `branch` whose title `matches`. Reads
+   * titles only, so callers can compare normalised titles exactly instead of relying on search
+   * ranking, which drops a long memory out of the first hits once enough similar ones exist.
+   */
+  findByTitle(
+    projectId: string,
+    kind: MemoryKind,
+    branch: string | null,
+    matches: (title: string) => boolean,
+  ): Memory | null {
+    const rows = this.db
+      .prepare(
+        `SELECT id, title FROM memories
+         WHERE project_id = ? AND kind = ? AND status = 'active' AND scope_branch IS ?
+         ORDER BY updated_at DESC, id DESC`,
+      )
+      .iterate(projectId, kind, branch) as Iterable<Row>;
+    for (const r of rows) {
+      if (matches(str(r, 'title'))) return this.get(str(r, 'id'));
+    }
+    return null;
   }
 
   versions(id: string): MemoryVersion[] {
@@ -462,10 +493,35 @@ export class MemoryRepo {
     return toEvidence(this.db.prepare('SELECT * FROM memory_evidence WHERE id = ?').get(id) as Row);
   }
 
+  /**
+   * Makes an evidence row its memory's newest, as if it had just been added (it was stated again):
+   * now, or just after the newest row when that one is from the same millisecond.
+   */
+  touchEvidence(id: string): void {
+    this.db
+      .prepare(
+        `UPDATE memory_evidence SET created_at = MAX(?1, COALESCE((
+           SELECT MAX(e.created_at) + 1 FROM memory_evidence e
+           WHERE e.memory_id = memory_evidence.memory_id AND e.id <> memory_evidence.id), ?1))
+         WHERE id = ?2`,
+      )
+      .run(this.clock.now(), id);
+  }
+
+  deleteEvidence(id: string): void {
+    this.db.prepare('DELETE FROM memory_evidence WHERE id = ?').run(id);
+  }
+
+  /** Removes every evidence row of a memory (its text was replaced by another author's). */
+  clearEvidence(memoryId: string): void {
+    this.db.prepare('DELETE FROM memory_evidence WHERE memory_id = ?').run(memoryId);
+  }
+
+  /** Evidence of a memory, oldest first. */
   evidenceFor(memoryId: string): MemoryEvidence[] {
     return (
       this.db
-        .prepare('SELECT * FROM memory_evidence WHERE memory_id = ? ORDER BY created_at')
+        .prepare('SELECT * FROM memory_evidence WHERE memory_id = ? ORDER BY created_at, id')
         .all(memoryId) as Row[]
     ).map(toEvidence);
   }

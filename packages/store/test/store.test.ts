@@ -273,6 +273,66 @@ describe('memories', () => {
     expect(store.memories.search(project.id, 'title:pnpm OR NEAR(a b)')).toBeInstanceOf(Array);
   });
 
+  it('finds an active memory by its title, per kind and branch', () => {
+    const { store, project } = setup();
+    const make = (title: string, extra: { kind?: 'rule' | 'fact'; branch?: string } = {}) =>
+      store.memories.create({
+        projectId: project.id,
+        kind: extra.kind ?? 'rule',
+        title,
+        body: '',
+        trust: 'approved',
+        source: user,
+        ...(extra.branch ? { scope: { branch: extra.branch } } : {}),
+      });
+    const shared = make('Use pnpm');
+    const branched = make('Use pnpm', { branch: 'feat/x' });
+    make('Use pnpm', { kind: 'fact' });
+    const lower = (t: string): boolean => t.toLowerCase() === 'use pnpm';
+    expect(store.memories.findByTitle(project.id, 'rule', null, lower)?.id).toBe(shared.id);
+    expect(store.memories.findByTitle(project.id, 'rule', 'feat/x', lower)?.id).toBe(branched.id);
+    expect(store.memories.findByTitle(project.id, 'rule', 'feat/y', lower)).toBeNull();
+    expect(store.memories.findByTitle(project.id, 'mistake', null, lower)).toBeNull();
+    store.memories.update(shared.id, { status: 'archived' }, user, null);
+    expect(store.memories.findByTitle(project.id, 'rule', null, lower)).toBeNull();
+  });
+
+  it('hands a memory over to another source and removes evidence rows', () => {
+    const { store, project } = setup();
+    const m = store.memories.create({
+      projectId: project.id,
+      kind: 'rule',
+      title: 'Use pnpm',
+      body: 'agent text',
+      trust: 'proposed',
+      source: { type: 'agent', sessionId: null, agentKind: 'codex' },
+    });
+    const taken = store.memories.update(
+      m.id,
+      { body: 'user text', source: user },
+      user,
+      'restated',
+    );
+    expect(taken).toMatchObject({ source: user, body: 'user text', version: 2 });
+    expect(store.memories.versions(m.id).map((v) => v.body)).toEqual(['agent text', 'user text']);
+    // A patch without a source leaves the attribution alone.
+    expect(store.memories.update(m.id, { body: 'again' }, user, null).source).toEqual(user);
+
+    const rows = ['a.ts', 'b.ts', 'c.ts'].map((ref) =>
+      store.memories.addEvidence({ memoryId: m.id, projectId: project.id, type: 'file', ref }),
+    );
+    store.memories.deleteEvidence(rows[1]!.id);
+    expect(store.memories.evidenceFor(m.id).map((e) => e.ref)).toEqual(['a.ts', 'c.ts']);
+    // Touching a row makes it the newest, even within the same millisecond.
+    store.memories.touchEvidence(rows[0]!.id);
+    expect(store.memories.evidenceFor(m.id).map((e) => e.ref)).toEqual(['c.ts', 'a.ts']);
+    store.memories.deleteEvidence(rows[2]!.id);
+    store.memories.touchEvidence(rows[0]!.id);
+    expect(store.memories.evidenceFor(m.id).map((e) => e.ref)).toEqual(['a.ts']);
+    store.memories.clearEvidence(m.id);
+    expect(store.memories.evidenceFor(m.id)).toEqual([]);
+  });
+
   it('promotes branch memories', () => {
     const { store, project } = setup();
     const m = store.memories.create({

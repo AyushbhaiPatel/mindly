@@ -11,12 +11,25 @@ export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
+/**
+ * The first `max` UTF-16 units of `text`, never ending in half of a surrogate pair: a character
+ * outside the BMP (an emoji) that straddles the cut is dropped whole. A lone surrogate would be
+ * written to disk as U+FFFD.
+ */
+export function sliceChars(text: string, max: number): string {
+  if (max <= 0) return '';
+  if (text.length <= max) return text;
+  const last = text.charCodeAt(max - 1);
+  const cutsPair = last >= 0xd800 && last <= 0xdbff;
+  return text.slice(0, cutsPair ? max - 1 : max);
+}
+
 /** Truncates to at most `max` characters, appending an ellipsis marker when cut. */
 export function truncate(text: string, max: number): string {
   if (max <= 0) return '';
   if (text.length <= max) return text;
   if (max <= 1) return '…';
-  return `${text.slice(0, max - 1).trimEnd()}…`;
+  return `${sliceChars(text, max - 1).trimEnd()}…`;
 }
 
 // C0/C1 control characters except TAB and LF.
@@ -63,10 +76,7 @@ export function sanitizeForContext(text: string, maxChars = 4000): string {
 
 /** Single-line variant for titles and labels. */
 export function sanitizeLine(text: string, maxChars = 200): string {
-  return sanitizeForContext(text, maxChars * 2)
-    .replace(/\s+/g, ' ')
-    .slice(0, maxChars)
-    .trim();
+  return sliceChars(sanitizeForContext(text, maxChars * 2).replace(/\s+/g, ' '), maxChars).trim();
 }
 
 /** Normalises a source line for hunk hashing: trims and collapses inner whitespace. */

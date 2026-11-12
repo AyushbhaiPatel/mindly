@@ -1,10 +1,19 @@
-import { copyFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  renameSync,
+  symlinkSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { normalizeLine, redactText, sanitizeForContext, sha256 } from '@mindly/core';
 import { describe, expect, it, vi } from 'vitest';
 import {
   EARLIER_FORM_WORK,
   EVIDENCE_SCAN_WORK,
+  evidenceState,
   excerptPresent,
   excerptsPresent,
   excerptsWork,
@@ -100,6 +109,46 @@ describe('self-healing memory', () => {
     expect(excerptPresent(content, 'const key = "[REDACTED]";\nconnect(key);', hash)).toBe(true);
     expect(excerptPresent('other', 'const key = "[REDACTED]";\nconnect(key);', hash)).toBe(false);
     expect(excerptPresent('a\n   b   c\n', 'b c', null)).toBe(true);
+  });
+
+  it('judges evidence the same way on a restatement as in a sweep', async () => {
+    const { root, mindly, pid, write } = await featureSetup();
+    write('src/kept.ts', 'export const KEPT_VALUE_FOR_TEST = 1;\n');
+    write('src/changed.ts', 'export const CHANGED_VALUE_FOR_TEST = 1;\n');
+    write('src/gone.ts', 'export const GONE_VALUE_FOR_TEST = 1;\n');
+    write('.env', 'SECRET_VALUE_FOR_TEST=1\n');
+    symlinkSync(tmpdir(), join(root, 'outside'));
+    const rows = [
+      { ref: 'src/kept.ts', excerpt: 'KEPT_VALUE_FOR_TEST = 1', contentHash: null },
+      { ref: 'src/changed.ts', excerpt: 'CHANGED_VALUE_FOR_TEST = 1', contentHash: null },
+      { ref: 'src/gone.ts', excerpt: 'GONE_VALUE_FOR_TEST = 1', contentHash: null },
+      { ref: 'src/gone.ts', excerpt: null, contentHash: null },
+      { ref: '.env', excerpt: 'SECRET_VALUE_FOR_TEST=1', contentHash: null },
+      { ref: 'outside/x.ts', excerpt: null, contentHash: null },
+    ];
+    // Stored directly: the deny-listed and outside paths could never be given as evidence now.
+    const m = mindly.store.memories.create({
+      projectId: pid,
+      kind: 'fact',
+      title: 'Parity',
+      body: '',
+      trust: 'approved',
+      source: { type: 'user', sessionId: null, agentKind: null },
+    });
+    for (const r of rows) {
+      mindly.store.memories.addEvidence({ memoryId: m.id, projectId: pid, type: 'file', ...r });
+    }
+    write('src/changed.ts', 'export const CHANGED_VALUE_FOR_TEST = 2;\n');
+    unlinkSync(join(root, 'src', 'gone.ts'));
+    const deny = mindly.config.redaction.denyPaths;
+    const before = mindly.store.memories.evidenceFor(m.id);
+    const states = before.map((e) => evidenceState(root, deny, e));
+    expect(states).toEqual(['valid', 'invalid', 'invalid', 'invalid', 'unknown', 'unknown']);
+    selfHealingOf(mindly).sweep(pid);
+    // The sweep marks exactly the rows a restatement would drop; the rest keep their validity.
+    expect(mindly.store.memories.evidenceFor(m.id).map((e) => e.valid)).toEqual(
+      states.map((s) => s !== 'invalid'),
+    );
   });
 
   it('keeps a redacted excerpt that is part of a longer line valid while the file is unchanged', async () => {

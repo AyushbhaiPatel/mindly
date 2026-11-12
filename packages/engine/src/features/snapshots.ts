@@ -324,7 +324,10 @@ export class SnapshotService {
             trust: then.trust,
             status: 'active',
           },
-          RESTORE_SOURCE,
+          // The restored version is credited to whoever wrote the one it brings back, not to the
+          // user. A rule Mindly picked up from a prompt was never approved by hand; restoring it
+          // must not count as that approval, which is what puts a rule into instruction files.
+          then.changedBy,
           reason,
         );
         result.memoriesRestored++;

@@ -1,7 +1,7 @@
 import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
-import { isDeniedPath, sanitizeLine, tryResolveInsideRoot } from '@mindly/core';
-import { findSection } from './managed-section.js';
+import { isDeniedPath, sanitizeLine, sliceChars, tryResolveInsideRoot } from '@mindly/core';
+import { findSection, nextFence, type Fence } from './managed-section.js';
 import { cleanScopePaths, MAX_TITLE } from './service.js';
 
 /*
@@ -193,7 +193,7 @@ function readInstructionFile(abs: string, rel: string, agents: string): Instruct
     if (st.size > MAX_FILE_BYTES) return { ...base, skipped: 'too_large' };
     const buf = readFileSync(abs);
     utf16 = (buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff);
-    content = decodeText(buf);
+    content = utf16 ? decodeText(buf) : decodeOutsideSection(buf);
   } catch {
     return { ...base, skipped: 'unreadable' };
   }
@@ -227,6 +227,22 @@ export function decodeText(buf: Buffer): string | null {
   return text.includes('\0') || text.includes('\uFFFD') ? null : text;
 }
 
+/**
+ * Decodes a UTF-8 file like {@link decodeText}, but accepts replacement characters inside the
+ * section Mindly manages. Mindly replaces that section as a whole and never reads rules from it,
+ * so a bad character there must not make the user's own text around it unreadable: the next sync
+ * (or turning sync off) repairs the file.
+ */
+export function decodeOutsideSection(buf: Buffer): string | null {
+  const text = buf.toString('utf8');
+  if (text.includes('\0')) return null;
+  if (!text.includes('\uFFFD')) return text;
+  const bounds = findSection(text);
+  if (bounds === null || bounds === 'damaged') return null;
+  const outside = text.slice(0, bounds.start) + text.slice(bounds.end);
+  return outside.includes('\uFFFD') ? null : text;
+}
+
 interface Item {
   line: number;
   excerpt: string;
@@ -239,7 +255,6 @@ interface Item {
   heading?: { level: number; text: string };
 }
 
-const FENCE = /^\s*(```|~~~)/;
 const HEADING = /^\s{0,3}(#{1,6})(\s|$)/;
 /** Wording that turns the items under it into prohibitions ("Don'ts", "Never:", "Avoid"). */
 const NEGATION =
@@ -260,7 +275,7 @@ export function parseInstructions(content: string): ParsedInstructions {
   const meta = frontMatter(lines);
   const items: Item[] = [];
   let current: Item | null = null;
-  let inFence = false;
+  let fence: Fence | null = null;
   let inComment = false;
   const flush = (): void => {
     if (current) items.push(current);
@@ -276,12 +291,15 @@ export function parseInstructions(content: string): ParsedInstructions {
       if (raw.includes('-->')) inComment = false;
       continue;
     }
-    if (FENCE.test(raw)) {
-      inFence = !inFence;
-      breakBlock();
+    // A code block inside a list item or a quote is indented with it, so the indent is not what
+    // makes a fence here; its character and length are (a ``` line inside a ~~~ or ```` block is
+    // code, not the end of the block).
+    const wasInFence = fence !== null;
+    fence = nextFence(fence, raw.replace(/^[\s>]+/, ''));
+    if (wasInFence || fence !== null) {
+      if (wasInFence !== (fence !== null)) breakBlock();
       continue;
     }
-    if (inFence) continue;
     const stripped = stripComments(raw);
     inComment = stripped.open;
     const line = stripped.text.replace(/^\s{0,3}>\s?/, '');
@@ -439,40 +457,141 @@ function words(text: string): number {
 
 /** Removes emphasis and link syntax, keeping code spans as written. */
 function inline(text: string): string {
-  return stripStrong(
-    text
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label: string, url: string) =>
-        label === url ? url : `${label} (${url})`,
-      ),
-  )
-    .replace(/\s+/g, ' ')
-    .trim();
+  const images = outsideCode(text, /!\[([^\]]*)\]\([^)]*\)/g, (m) => m[1] ?? '');
+  const links = outsideCode(images, /\[([^\]]+)\]\(([^)\s]+)\)/g, (m) =>
+    m[1] === m[2] ? (m[2] ?? '') : `${m[1] ?? ''} (${m[2] ?? ''})`,
+  );
+  return stripStrong(links).replace(/\s+/g, ' ').trim();
+}
+
+/** Replaces the matches of `pattern` that do not start inside a code span. */
+function outsideCode(
+  text: string,
+  pattern: RegExp,
+  replacement: (match: RegExpExecArray) => string,
+): string {
+  const code = codeSpans(text);
+  let out = '';
+  let copied = 0;
+  for (const m of text.matchAll(pattern)) {
+    if (code?.[m.index]) continue;
+    out += text.slice(copied, m.index) + replacement(m);
+    copied = m.index + m[0].length;
+  }
+  return out + text.slice(copied);
+}
+
+/**
+ * Marks the characters of `text` that belong to a code span (its backticks included): a run of
+ * backticks up to the next run of the same length, as in CommonMark; a run without a partner is
+ * plain text. Null when the text has no code span. Linear: each run looks for its partner in a
+ * per-length list that is only ever read forwards.
+ */
+function codeSpans(text: string): Uint8Array | null {
+  if (!text.includes('`')) return null;
+  const runs: { at: number; length: number }[] = [];
+  const byLength = new Map<number, number[]>();
+  for (let k = 0; k < text.length; k++) {
+    if (text.charAt(k) !== '`') continue;
+    let end = k;
+    while (text.charAt(end) === '`') end++;
+    const sameLength = byLength.get(end - k) ?? [];
+    sameLength.push(runs.length);
+    byLength.set(end - k, sameLength);
+    runs.push({ at: k, length: end - k });
+    k = end - 1;
+  }
+  const next = new Map<number, number>();
+  let code: Uint8Array | null = null;
+  for (let r = 0; r < runs.length; r++) {
+    const open = runs[r] as { at: number; length: number };
+    const sameLength = byLength.get(open.length) ?? [];
+    let n = next.get(open.length) ?? 0;
+    while (n < sameLength.length && (sameLength[n] as number) <= r) n++;
+    next.set(open.length, n);
+    const partner = sameLength[n];
+    if (partner === undefined) continue;
+    const close = runs[partner] as { at: number; length: number };
+    code ??= new Uint8Array(text.length);
+    code.fill(1, open.at, close.at + close.length);
+    r = partner;
+  }
+  return code;
 }
 
 /** `text` cut to {@link MAX_ITEM_CHARS}; used for headings, which are only context. */
 function bounded(text: string): string {
-  return text.length > MAX_ITEM_CHARS ? text.slice(0, MAX_ITEM_CHARS) : text;
+  return sliceChars(text, MAX_ITEM_CHARS);
 }
 
 const SPACE = /\s/;
 const LINE_BREAK = /[\n\r\u2028\u2029]/;
+const WORD = /[\p{L}\p{N}]/u;
+const DUNDER = /^[a-z][a-z0-9_]*$/;
+/** Names that are written between double underscores far more often than they are emphasised. */
+const DUNDER_NAMES = new Set([
+  'all',
+  'dirname',
+  'file',
+  'filename',
+  'fixtures',
+  'init',
+  'main',
+  'mocks',
+  'name',
+  'pycache',
+  'snapshots',
+  'tests',
+  'version',
+]);
 
 /**
- * Removes `**strong**` and `__strong__` markers. Gives the same result as replacing
- * `/(\*\*|__)(\S(?:.*?\S)?)\1/g` with `$2`, but in linear time: every possible closing marker
- * (one after a non-space character) is listed once up front, so looking for the closer of an
- * opener never rescans the text. The regex is quadratic on text such as `' **a'` repeated.
- * Exported for tests.
+ * Whether `__name__` (opener at `open`, closer at `close`) is a name rather than emphasis: a
+ * lower-case identifier that is a well-known one (`__init__`, `__tests__`) or part of a path or
+ * file name (`__generated__/`, `__setup__.py`). The underscores then belong to the name.
+ */
+function isDunderName(text: string, open: number, close: number): boolean {
+  if (close - open > 66) return false;
+  const name = text.slice(open + 2, close);
+  if (!DUNDER.test(name)) return false;
+  const before = text.charAt(open - 1);
+  const after = text.charAt(close + 2);
+  const inPath =
+    before === '/' ||
+    before === '.' ||
+    after === '/' ||
+    (after === '.' && WORD.test(text.charAt(close + 3)));
+  return inPath || DUNDER_NAMES.has(name);
+}
+
+/**
+ * Removes `**strong**` and `__strong__` markers. Outside code spans it gives the same result as
+ * replacing `/\*\*(\S(?:.*?\S)?)\*\*|(?<![\p{L}\p{N}])__(\S(?:.*?\S)?)__(?![\p{L}\p{N}])/gu` with
+ * its content, but in linear time: every possible closing marker (one after a non-space character)
+ * is listed once up front, so looking for the closer of an opener never rescans the text. The
+ * regex is quadratic on text such as `' **a'` repeated.
+ *
+ * Underscores are emphasis only around a word, never inside one (`MY__ENV__VAR` is a name), and a
+ * name written between them (`__init__.py`, `__tests__/`; see {@link isDunderName}) is kept as
+ * written. Markers inside a code span are code. Exported for tests.
  */
 export function stripStrong(text: string): string {
+  const code = codeSpans(text);
+  const marker = (k: number): string | null => {
+    const pair = text.slice(k, k + 2);
+    if (pair !== '**' && pair !== '__') return null;
+    return code && (code[k] || code[k + 1]) ? null : pair;
+  };
+  /** A marker that can end a strong span: after a non-space, and for `__` not inside a word. */
+  const closes = (k: number, pair: string): boolean =>
+    marker(k) === pair &&
+    !SPACE.test(text.charAt(k - 1)) &&
+    !(pair === '__' && WORD.test(text.charAt(k + 2)));
   const closers: Record<string, number[]> = { '**': [], __: [] };
   const nextCloser: Record<string, number> = { '**': 0, __: 0 };
   for (let k = 1; k + 1 < text.length; k++) {
-    const pair = text.slice(k, k + 2);
-    if ((pair === '**' || pair === '__') && !SPACE.test(text.charAt(k - 1))) {
-      closers[pair]?.push(k);
-    }
+    const pair = marker(k);
+    if (pair !== null && closes(k, pair)) closers[pair]?.push(k);
   }
   // `.` in the regex stops at line breaks: an opener never pairs with a closer past one.
   const breaks: number[] = [];
@@ -482,9 +601,11 @@ export function stripStrong(text: string): string {
   let copied = 0;
   let i = 0;
   while (i + 2 < text.length) {
-    const pair = text.slice(i, i + 2);
-    const list = closers[pair];
-    if (list && !SPACE.test(text.charAt(i + 2))) {
+    const pair = marker(i);
+    const list = pair === null ? undefined : closers[pair];
+    const opens =
+      !SPACE.test(text.charAt(i + 2)) && !(pair === '__' && WORD.test(text.charAt(i - 1)));
+    if (pair !== null && list && opens) {
       let n = nextCloser[pair] ?? 0;
       // Like the regex's greedy `(?:.*?\S)?`: the nearest closer leaving at least two characters
       // of content (from i + 4), and only without one a single character of content (i + 3).
@@ -494,9 +615,9 @@ export function stripStrong(text: string): string {
       const limit = breaks[nextBreak] ?? Infinity;
       let close = list[n];
       if (close === undefined || close > limit) {
-        close = text.startsWith(pair, i + 3) ? i + 3 : undefined;
+        close = closes(i + 3, pair) ? i + 3 : undefined;
       }
-      if (close !== undefined) {
+      if (close !== undefined && !(pair === '__' && isDunderName(text, i, close))) {
         out += text.slice(copied, i) + text.slice(i + 2, close);
         i = close + 2;
         copied = i;
@@ -563,7 +684,7 @@ function keep(text: string): boolean {
 
 function titleOf(text: string): string {
   const line = sanitizeLine(text.replace(/[.!]+$/, ''), MAX_TITLE * 2);
-  return line.length <= MAX_TITLE ? line : `${line.slice(0, MAX_TITLE - 1).trimEnd()}…`;
+  return line.length <= MAX_TITLE ? line : `${sliceChars(line, MAX_TITLE - 1).trimEnd()}…`;
 }
 
 interface FrontMatter {

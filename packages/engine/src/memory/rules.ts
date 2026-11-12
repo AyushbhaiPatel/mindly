@@ -362,7 +362,7 @@ export class RuleService {
       try {
         // The repository wrote the rule, not the user: it is stored as a proposal from the file,
         // and becomes approved only through the user's own approval.
-        const stored = this.memory.remember({
+        const { memory: stored, outcome } = this.memory.rememberResult({
           projectId,
           projectRoot,
           kind: 'rule',
@@ -375,6 +375,9 @@ export class RuleService {
           evidence: [r.excerpt === null ? { path: r.file } : { path: r.file, excerpt: r.excerpt }],
           reason: `imported from ${r.file}`,
         });
+        // A rule the user already approved or rejected under this title was left as it is: it is
+        // not this import's rule, so it is neither approved here nor reported as imported.
+        if (outcome !== 'created' && outcome !== 'updated') continue;
         out.push(trust === 'approved' ? this.memory.approve(stored.id) : stored);
       } catch {
         // The file changed since it was read, or the path is now denied: skip that rule.
