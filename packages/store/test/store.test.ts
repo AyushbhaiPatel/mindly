@@ -71,6 +71,59 @@ describe('sessions', () => {
     expect(again.session.branch).toBe('main');
   });
 
+  it('moves only the rows nobody else changed, and leaves current tasks alone', () => {
+    const { store, project, clock, a, b } = setup();
+    const mine = store.tasks.create({
+      projectId: project.id,
+      title: 'mine',
+      status: 'in_progress',
+      ownerSessionId: a.id,
+    });
+    const touched = store.tasks.create({
+      projectId: project.id,
+      title: 'touched by the other window',
+      status: 'in_progress',
+      ownerSessionId: a.id,
+    });
+    const intent = store.intents.declare({
+      projectId: project.id,
+      sessionId: a.id,
+      taskId: null,
+      summary: 'mine',
+      targets: { files: ['a.ts'], symbols: [] },
+      ttlMs: 60_000,
+    });
+    const sameMs = store.tasks.create({
+      projectId: project.id,
+      title: 'changed in the same millisecond',
+      status: 'in_progress',
+      ownerSessionId: a.id,
+    });
+    store.sessions.setCurrentTask(a.id, touched.id);
+    const stamp = (kind: 'task' | 'intent', id: string) => ({
+      id,
+      ...store.sessions.rowStamp(kind, id)!,
+    });
+    const seen = [stamp('task', mine.id), stamp('task', touched.id), stamp('task', sameMs.id)];
+    const seenIntent = stamp('intent', intent.id);
+    // Changed by the other window: once later, once within the same millisecond.
+    store.tasks.update(sameMs.id, { status: 'blocked' });
+    clock.advance(10);
+    store.tasks.update(touched.id, { status: 'blocked' });
+    const moved = store.sessions.moveRows(a.id, b.id, {
+      intents: [seenIntent],
+      tasks: seen,
+      messages: [],
+    });
+    expect(store.tasks.get(sameMs.id).ownerSessionId).toBe(a.id);
+    expect(moved.tasks).toEqual([mine.id]);
+    expect(moved.intents).toEqual([intent.id]);
+    expect(store.tasks.get(mine.id).ownerSessionId).toBe(b.id);
+    expect(store.tasks.get(touched.id).ownerSessionId).toBe(a.id);
+    expect(store.sessions.get(a.id).currentTaskId).toBe(touched.id);
+    expect(store.sessions.get(b.id).currentTaskId).toBeNull();
+  });
+
   it('lists live sessions and ends stale ones', () => {
     const { store, project, clock, a } = setup();
     clock.advance(60_000);
