@@ -10,6 +10,23 @@ import './quiet-warnings.js';
  */
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  const [{ quietOnClosedPipe, whileRunning }, { failsOpen, loadSqliteWithFts5, nodeProblem }] =
+    await Promise.all([import('./closed-pipe.js'), import('./node-check.js')]);
+  // The MCP server ends its session when its client stops reading: it handles that itself.
+  if (argv[0] !== 'mcp') quietOnClosedPipe();
+  const problem = await nodeProblem(argv, {
+    version: process.version,
+    loadSqlite: loadSqliteWithFts5,
+  });
+  if (problem !== null) {
+    if (failsOpen(argv)) {
+      process.exitCode = 0;
+      return;
+    }
+    process.stderr.write(`${problem}\n`);
+    process.exitCode = 1;
+    return;
+  }
   if (argv.length === 1 && argv[0] === 'statusline') {
     const [{ processIo }, { runStatusLine }] = await Promise.all([
       import('./io.js'),
@@ -21,7 +38,10 @@ async function main(): Promise<void> {
   }
   if (argv[0] === 'mcp') quietUntilServerStarts();
   const [{ processIo }, { run }] = await Promise.all([import('./io.js'), import('./run.js')]);
+  // Cut off by a closed pipe before it finishes, a command has not succeeded; hooks still fail open.
+  whileRunning(failsOpen(argv) ? 0 : 1);
   const code = await run(argv, processIo());
+  whileRunning(null);
   if (argv[0] === 'hook') {
     process.stdout.write('', () => process.exit(code));
     return;
