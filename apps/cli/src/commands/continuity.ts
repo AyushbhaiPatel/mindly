@@ -1,5 +1,10 @@
 import { AGENT_KIND_RE, codename } from '@mindly/core';
-import { failoverService, isValidBranchName, snapshotService } from '@mindly/engine';
+import {
+  failoverService,
+  HANDOFF_SUMMARY_MAX_CHARS,
+  isValidBranchName,
+  snapshotService,
+} from '@mindly/engine';
 import { z } from 'zod';
 import { pickSession, withProject, type ProjectScope } from '../context.js';
 import { resolveId } from '../ids.js';
@@ -12,7 +17,15 @@ import { parseOptions } from './memory.js';
 
 const HandoffOptions = z.object({
   to: z.string().regex(AGENT_KIND_RE, 'invalid agent kind').optional(),
-  summary: z.string().trim().min(1).max(2000),
+  // The same limit the service keeps: a longer summary would be cut without a word.
+  summary: z
+    .string()
+    .trim()
+    .min(1)
+    .max(
+      HANDOFF_SUMMARY_MAX_CHARS,
+      `the summary can be at most ${HANDOFF_SUMMARY_MAX_CHARS} characters; put the rest in --next`,
+    ),
   next: z.array(z.string().trim().min(1).max(300)).max(20).optional(),
   blocker: z.array(z.string().trim().min(1).max(300)).max(20).optional(),
   session: z.string().optional(),

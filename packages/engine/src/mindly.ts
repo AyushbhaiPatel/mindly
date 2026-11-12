@@ -100,6 +100,8 @@ export class Mindly {
   }
 
   static open(options: MindlyOptions = {}): Mindly {
+    // Wall-clock, not `clock`: it measures how much of a hook's deadline is used up.
+    const openedAt = Date.now();
     const clock = options.clock ?? systemClock;
     const ports: Ports = {
       git: options.ports?.git ?? nullGit,
@@ -117,6 +119,7 @@ export class Mindly {
           logger,
           ports,
           headless: options.headless ?? false,
+          openedAt,
         },
         null,
       );
@@ -128,7 +131,7 @@ export class Mindly {
       createLogger({ sink: fileSink(join(paths.logs, 'mindly.log')), level: 'info' });
     const store = Store.open(paths.db, { clock, busyTimeoutMs: 5000 });
     return new Mindly(
-      { store, config, clock, logger, ports, headless: options.headless ?? false },
+      { store, config, clock, logger, ports, headless: options.headless ?? false, openedAt },
       paths,
     );
   }

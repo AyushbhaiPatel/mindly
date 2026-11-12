@@ -1,4 +1,10 @@
-import { REPO_FILE_SOURCE, sanitizeLine, type Memory, type Session } from '@mindly/core';
+import {
+  REPO_FILE_SOURCE,
+  redactText,
+  sanitizeLine,
+  type Memory,
+  type Session,
+} from '@mindly/core';
 import { DELIVERY_TTL_MS, LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
 import {
   dedupeRules,
@@ -6,7 +12,17 @@ import {
   type InstructionFile,
   type InstructionRule,
 } from './instructions.js';
-import type { MemoryService } from './service.js';
+import { MAX_TITLE, type MemoryService } from './service.js';
+
+/**
+ * The title a memory is stored and looked up under: what `MemoryService.remember` does to a
+ * title before it looks for an existing memory (redaction with the user's extra patterns, then
+ * one sanitised line). Looking a memory up by its raw title misses one whose title held anything
+ * redacted.
+ */
+export function storedTitle(title: string, extraPatterns: readonly string[]): string {
+  return sanitizeLine(redactText(title, { extraPatterns }), MAX_TITLE);
+}
 
 /** What importing the project's instruction files would do. */
 export interface InstructionImportPlan {
@@ -33,6 +49,17 @@ export interface DetectedRule {
 }
 
 const MAX_SENTENCE = 220;
+/** Longest the model may take to confirm the corrections of one prompt, in milliseconds. */
+export const MAX_MODEL_BUDGET_MS = 600;
+/** Share of the hook deadline the model may use; the hook still has its context to build. */
+const MODEL_BUDGET_SHARE = 0.4;
+/** Time kept back for what the hook does after the model (building the context it answers with). */
+const MODEL_RESERVE_MS = 250;
+/** Below this there is no point asking: the model is left out and the heuristic decides. */
+const MIN_MODEL_BUDGET_MS = 100;
+
+/** Reasons already logged by this process: the log says once that the model is not working. */
+const loggedModelFailures = new Set<string>();
 /** Rules from prompts longer than this are proposed rather than approved. */
 export const MAX_APPROVABLE_PROMPT = 500;
 
@@ -92,6 +119,24 @@ export function detectRules(prompt: string): DetectedRule[] {
   return out;
 }
 
+/**
+ * True when everything `glob` can match is already inside `scope`: an empty scope is the whole
+ * project; otherwise `glob` must equal one of its patterns or sit below a `<folder>/**` one.
+ * Anything else counts as possibly wider.
+ */
+export function scopeCovers(scope: readonly string[], glob: string): boolean {
+  if (scope.length === 0) return true;
+  const g = glob.replace(/^\.\//, '');
+  if (g.split('/').includes('..')) return false;
+  return scope.some((s) => {
+    const o = s.replace(/^\.\//, '');
+    if (o === g || o === '**') return true;
+    if (!o.endsWith('/**')) return false;
+    const base = o.slice(0, -2);
+    return !/[*?{[]/.test(base) && g.startsWith(base) && g.length > base.length;
+  });
+}
+
 /** Turns "no, use pnpm instead of npm." into a clean rule title. */
 export function ruleTitle(text: string): string {
   const t = text
@@ -123,16 +168,17 @@ export class RuleService {
     // there are only ever proposed, never auto-approved.
     const mayApprove =
       input.prompt.length <= MAX_APPROVABLE_PROMPT && !input.prompt.includes('```');
+    const verdicts = await this.confirmWithModel(detected);
     const out: Memory[] = [];
-    for (const d of detected) {
-      let strength = d.strength;
-      let scopeGlobs: string[] = [];
-      if (strength === 'medium' && this.k.ports.llm.available) {
-        const verdict = await this.k.ports.llm.classifyCorrection(d.text);
-        if (verdict && !verdict.isRule) continue;
-        if (verdict && verdict.confidence >= 0.8) strength = 'strong';
-        if (verdict) scopeGlobs = verdict.scopeGlobs.slice(0, 5);
-      }
+    for (const [i, d] of detected.entries()) {
+      const verdict = verdicts[i] ?? null;
+      // The model may say a medium-strength sentence is not a rule, or narrow its scope. It
+      // never raises its trust: weaker phrasing stays proposed until the user approves it.
+      if (verdict && !verdict.isRule) continue;
+      const strength = d.strength;
+      const scopeGlobs = verdict
+        ? this.modelScope(input.projectId, ruleTitle(d.text), verdict.scopeGlobs.slice(0, 5))
+        : [];
       let rule: Memory;
       try {
         rule = this.memory.remember({
@@ -161,6 +207,98 @@ export class RuleService {
       this.broadcast(input.projectId, input.session, rule);
     }
     return out;
+  }
+
+  /**
+   * Asks the model about the medium-strength candidates, all at once and within a share of the
+   * hook's deadline. A candidate the model did not answer for in time keeps its heuristic result,
+   * so the rule is stored exactly as it would be with no model configured.
+   */
+  private async confirmWithModel(
+    detected: readonly DetectedRule[],
+  ): Promise<(Awaited<ReturnType<Kernel['ports']['llm']['classifyCorrection']>> | null)[]> {
+    const llm = this.k.ports.llm;
+    const none = detected.map(() => null);
+    if (!llm.available) {
+      if (llm.unavailableReason && detected.some((d) => d.strength === 'medium')) {
+        this.logModelFailure(`the configured model cannot be used: ${llm.unavailableReason}`);
+      }
+      return none;
+    }
+    if (!detected.some((d) => d.strength === 'medium')) return none;
+    const timeoutMs = this.k.config.hooks.timeoutMs;
+    // What is left of the hook's deadline, counted from when this instance opened (a hook
+    // process opens one per hook): work done before this point (a slow rescan) leaves less.
+    const left =
+      this.k.openedAt === undefined
+        ? timeoutMs
+        : this.k.openedAt + timeoutMs - Date.now() - MODEL_RESERVE_MS;
+    const budget = Math.min(MAX_MODEL_BUDGET_MS, Math.floor(timeoutMs * MODEL_BUDGET_SHARE), left);
+    if (budget < MIN_MODEL_BUDGET_MS) {
+      this.logModelFailure('out of time');
+      return none;
+    }
+    const controller = new AbortController();
+    const deadline = Date.now() + budget;
+    const timer = setTimeout(() => controller.abort(), budget);
+    timer.unref?.();
+    const extraPatterns = this.k.config.redaction.extraPatterns;
+    try {
+      return await Promise.all(
+        detected.map((d) =>
+          d.strength === 'medium'
+            ? llm
+                .classifyCorrection(redactText(d.text, { extraPatterns }), {
+                  signal: controller.signal,
+                  deadline,
+                  redactPatterns: extraPatterns,
+                  onFailure: (reason) => this.logModelFailure(reason),
+                })
+                .catch(() => null)
+            : Promise.resolve(null),
+        ),
+      );
+    } finally {
+      clearTimeout(timer);
+      // Whatever is still in flight is not waited for.
+      controller.abort();
+    }
+  }
+
+  /**
+   * The scope a model suggested, as far as it may be used. A new rule takes it. A rule that
+   * already exists keeps its scope (an empty list leaves it unchanged), unless it is still only
+   * proposed and the suggestion stays inside it: the model may narrow a proposal, never widen
+   * one, and never touches a rule the user decided on.
+   */
+  private modelScope(projectId: string, title: string, suggested: readonly string[]): string[] {
+    if (suggested.length === 0) return [];
+    const existing = this.memory.findSameTitle(
+      projectId,
+      'rule',
+      storedTitle(title, this.k.config.redaction.extraPatterns),
+      null,
+    );
+    if (!existing) return [...suggested];
+    const decided =
+      existing.trust !== 'proposed' ||
+      existing.enforce ||
+      existing.pinned ||
+      existing.status !== 'active';
+    if (decided) return [];
+    const current = existing.scope.paths;
+    return suggested.every((g) => scopeCovers(current, g)) ? [...suggested] : [];
+  }
+
+  private logModelFailure(reason: string): void {
+    const text = sanitizeLine(reason, 200);
+    if (loggedModelFailures.has(text)) return;
+    loggedModelFailures.add(text);
+    if (text === 'out of time') {
+      this.k.logger.debug('model did not confirm a rule in time; kept the heuristic result');
+    } else {
+      this.k.logger.warn('model call failed; rules are captured without it', { reason: text });
+    }
   }
 
   /**

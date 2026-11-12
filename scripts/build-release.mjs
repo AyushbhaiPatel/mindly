@@ -247,7 +247,7 @@ const manifest = {
   type: 'module',
   bin: { mindly: 'dist/main.js' },
   files: ['dist', 'dashboard', 'NOTICE'],
-  engines: { node: '>=22.13.0' },
+  engines: { node: '^22.16.0 || >=24.0.0' },
   dependencies,
 };
 writeFileSync(join(out, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);

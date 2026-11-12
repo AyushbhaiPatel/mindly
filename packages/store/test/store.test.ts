@@ -498,7 +498,7 @@ describe('deliveries', () => {
 
 describe('misc repos', () => {
   it('claims handoffs atomically', () => {
-    const { store, project, a, b } = setup();
+    const { store, project, a, b, clock } = setup();
     const packet = {
       goal: 'g',
       plan: [],
@@ -520,6 +520,25 @@ describe('misc repos', () => {
       packet,
     });
     expect(store.handoffs.pendingFor(project.id, 'codex', b.id)).toHaveLength(1);
+    // A usage-limit handoff ages out; a manual one does not.
+    const manual = store.handoffs.create({
+      projectId: project.id,
+      fromSessionId: a.id,
+      toAgentKind: 'codex',
+      taskId: null,
+      reason: 'manual',
+      summary: 'm',
+      packet,
+    });
+    const ids = (hs: { id: string }[]) => hs.map((x) => x.id).sort();
+    expect(ids(store.handoffs.pendingFor(project.id, 'codex', b.id, null, 60_000))).toEqual(
+      ids([h, manual]),
+    );
+    clock.advance(60_001);
+    expect(ids(store.handoffs.pendingFor(project.id, 'codex', b.id, null, 60_000))).toEqual([
+      manual.id,
+    ]);
+    expect(store.handoffs.pendingFor(project.id, 'codex', b.id)).toHaveLength(2);
     expect(store.handoffs.claim(h.id, b.id)).toBe(true);
     expect(store.handoffs.claim(h.id, a.id)).toBe(false);
   });

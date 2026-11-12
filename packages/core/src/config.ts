@@ -169,7 +169,12 @@ export const UserConfigSchema = z.object({
   llm: z
     .object({
       provider: z.enum(['none', 'ollama', 'anthropic', 'openai']).default('none'),
-      model: z.string().max(200).optional(),
+      /** An empty or blank name means the provider's default model. */
+      model: z
+        .string()
+        .max(200)
+        .optional()
+        .transform((m) => m?.trim()),
       /** Only used by `ollama`; must point at localhost unless allowRemote is set. */
       baseUrl: z.url().optional(),
       allowRemote: z.boolean().default(false),

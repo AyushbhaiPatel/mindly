@@ -66,7 +66,9 @@ describe('init / uninstall', () => {
 
     const settings = readFileSync(join(sb.home, '.claude', 'settings.json'), 'utf8');
     expect(settings).toContain('hook claude-code SessionStart');
-    expect(settings).toContain(process.execPath);
+    // Node is recorded by a path that survives upgrades when one leads to the running binary.
+    const node = /"command":\s*"(\S+) /.exec(settings)?.[1] ?? '';
+    expect(statSync(node).ino).toBe(statSync(process.execPath).ino);
     const mcp = json<{ mcpServers: Record<string, { args: string[] }> }>(
       readFileSync(join(sb.home, '.claude.json'), 'utf8'),
     );
@@ -1333,6 +1335,10 @@ describe('doctor, config, export, misc', () => {
     );
     expect((await cli(sb, ['xray'])).code).toBe(1);
     expect((await cli(sb, ['handoff', '--summary', 'continue'])).code).toBe(1);
+    // A summary longer than what is kept is refused, not cut.
+    const long = await cli(sb, ['handoff', '--summary', 'x'.repeat(301)]);
+    expect(long.code).toBe(2);
+    expect(long.stderr).toContain('at most 300 characters');
   });
 
   it('daemon status and stop point to start when daemon.json outlived its daemon', async () => {

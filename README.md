@@ -12,10 +12,10 @@
 
 [![npm](https://img.shields.io/npm/v/mindly-cli?color=2b7489&label=npm)](https://www.npmjs.com/package/mindly-cli)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![node](https://img.shields.io/badge/node-%E2%89%A522.13-43853d)](#quickstart)
+[![node](https://img.shields.io/badge/node-%E2%89%A522.16-43853d)](#quickstart)
 
 ```bash
-npx mindly-cli init
+npm i -g mindly-cli && mindly init
 ```
 
 </div>
@@ -53,13 +53,17 @@ team that never talks to each other:
 
 ## Quickstart
 
-You need **Node.js 22.13 or newer** and **git**, on macOS or Linux.
+You need **Node.js 22.16 or newer, or 24 or newer** (Node 23 is not supported) and **git**, on macOS or Linux.
 
 **1. Install**
 
 ```bash
 npm i -g mindly-cli
 ```
+
+`npx mindly-cli <command>` works for one-off commands such as `npx mindly-cli doctor`, but not for
+`init`: npx runs Mindly from a cache npm can clear at any time, so `init` refuses to point your
+agents' hooks there and asks for the global install instead.
 
 **2. Connect your agents** (run inside your repository)
 
@@ -312,6 +316,12 @@ track record stays on your machine and is never part of a saves card.
 
 When Claude Code hits its usage limit mid-task, the next agent you open starts with the goal, the
 plan, the files already changed and the next steps, instead of a blank session.
+
+A limit is recognised from the notice the agent prints, not from an agent writing about rate
+limits in your code. If the limited agent is asked to carry on and gets work done in a later turn,
+the handoff is withdrawn; one that nobody picked up is dropped after a week. With more than two agents in
+`failover.order`, the work goes to the one after the limited agent, skipping agents that hit their
+own limit in the last day.
 
 ### Shows its work
 

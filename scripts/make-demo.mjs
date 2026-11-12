@@ -24,8 +24,17 @@
 /* global document, Image, NodeFilter -- used only inside page.evaluate(), which runs in the browser */
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,6 +77,17 @@ const env = {
   COLUMNS: '84',
 };
 const REPO_LABEL = '~/acme-billing';
+
+/** A TCP port nothing listens on right now. */
+const freePort = () =>
+  new Promise((done, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => done(port));
+    });
+  });
 
 const git = (...args) =>
   execFileSync('git', ['-c', 'user.name=demo', '-c', 'user.email=demo@example.invalid', ...args], {
@@ -416,6 +436,11 @@ export function taxFor(region: string, amount: number) {
   };
 
   // ---------------------------------------------------------------- Mission Control screenshot
+  // A port of its own: the default one may be taken by the developer's own background service.
+  const configFile = join(env.MINDLY_HOME, 'config.json');
+  const config = existsSync(configFile) ? JSON.parse(readFileSync(configFile, 'utf8')) : {};
+  config.daemon = { ...config.daemon, port: await freePort() };
+  writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   mindly(['daemon', 'start']);
   daemonStarted = true;
   const state = JSON.parse(readFileSync(join(env.MINDLY_HOME, 'daemon.json'), 'utf8'));

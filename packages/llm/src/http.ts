@@ -7,6 +7,8 @@ export const DEFAULT_TIMEOUT_MS = 20_000;
 export const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 /** Base delay before the single retry; the actual delay adds up to 100% jitter. */
 export const DEFAULT_RETRY_DELAY_MS = 500;
+/** Longest `Retry-After` honoured; a server asking for a longer pause gets no retry at all. */
+export const DEFAULT_MAX_RETRY_WAIT_MS = 5_000;
 
 const MAX_ATTEMPTS = 2;
 
@@ -16,6 +18,8 @@ export interface HttpSettings {
   timeoutMs: number;
   maxResponseBytes: number;
   retryDelayMs: number;
+  /** A retry the server asks to delay longer than this is not made (default 5 000). */
+  maxRetryWaitMs?: number | undefined;
   random: () => number;
 }
 
@@ -26,9 +30,26 @@ export interface PostJsonRequest {
   headers: Record<string, string>;
   body: unknown;
   signal?: AbortSignal | undefined;
+  /** When the caller stops waiting (ms since the epoch); a retry that cannot finish by then is not made. */
+  deadline?: number | undefined;
 }
 
-type Attempt = { kind: 'ok'; json: unknown } | { kind: 'http_error'; status: number };
+type Attempt =
+  | { kind: 'ok'; json: unknown }
+  | { kind: 'http_error'; status: number; retryAfterMs: number | null };
+
+/**
+ * The pause a `Retry-After` header asks for, in milliseconds: delay-seconds or an HTTP date.
+ * Null when the header is missing or unreadable.
+ */
+export function retryAfterMs(value: string | null, now: number = Date.now()): number | null {
+  if (value === null) return null;
+  const v = value.trim();
+  if (/^\d{1,9}$/.test(v)) return Number(v) * 1000;
+  const at = Date.parse(v);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, at - now);
+}
 
 function isRetryable(status: number): boolean {
   return status === 429 || status >= 500;
@@ -102,7 +123,11 @@ async function attemptOnce(req: PostJsonRequest, http: HttpSettings): Promise<At
     });
     if (!res.ok) {
       await res.body?.cancel().catch(() => undefined);
-      return { kind: 'http_error', status: res.status };
+      return {
+        kind: 'http_error',
+        status: res.status,
+        retryAfterMs: retryAfterMs(res.headers.get('retry-after')),
+      };
     }
     const text = await readCappedText(res, http.maxResponseBytes, req.provider);
     try {
@@ -130,15 +155,20 @@ async function attemptOnce(req: PostJsonRequest, http: HttpSettings): Promise<At
 
 /**
  * POSTs JSON and returns the parsed JSON response. Enforces a per-attempt timeout, a streaming
- * response size cap, refuses redirects and retries once on 429/5xx with jittered backoff.
+ * response size cap, refuses redirects and retries once on 429/5xx with jittered backoff. A
+ * `Retry-After` the server sends is honoured; one longer than `maxRetryWaitMs` means no retry.
  * Errors are `MindlyError`s whose messages never contain headers, bodies or URLs with secrets.
  */
 export async function postJson(req: PostJsonRequest, http: HttpSettings): Promise<unknown> {
   for (let attempt = 1; ; attempt++) {
     const outcome = await attemptOnce(req, http);
     if (outcome.kind === 'ok') return outcome.json;
-    if (isRetryable(outcome.status) && attempt < MAX_ATTEMPTS) {
-      const delay = http.retryDelayMs * (1 + Math.min(1, Math.max(0, http.random())));
+    const jitter = http.retryDelayMs * (1 + Math.min(1, Math.max(0, http.random())));
+    const delay = outcome.retryAfterMs ?? jitter;
+    const maxWait = http.maxRetryWaitMs ?? DEFAULT_MAX_RETRY_WAIT_MS;
+    // A pause that would end after the caller stops waiting is not worth starting.
+    const inTime = req.deadline === undefined || Date.now() + delay < req.deadline;
+    if (isRetryable(outcome.status) && attempt < MAX_ATTEMPTS && delay <= maxWait && inTime) {
       await abortableSleep(delay, req.signal);
       continue;
     }

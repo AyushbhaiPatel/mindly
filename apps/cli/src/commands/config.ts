@@ -79,10 +79,17 @@ function unwrap(schema: z.ZodType): Setting {
   let cur = schema;
   let optional = false;
   let hasDefault = false;
-  while (WRAPPERS.has(cur.def.type)) {
-    if (cur.def.type === 'optional') optional = true;
-    if (cur.def.type === 'default' || cur.def.type === 'prefault') hasDefault = true;
-    cur = (cur.def as unknown as { innerType: z.ZodType }).innerType;
+  for (;;) {
+    if (WRAPPERS.has(cur.def.type)) {
+      if (cur.def.type === 'optional') optional = true;
+      if (cur.def.type === 'default' || cur.def.type === 'prefault') hasDefault = true;
+      cur = (cur.def as unknown as { innerType: z.ZodType }).innerType;
+    } else if (cur.def.type === 'pipe') {
+      // A setting changed after it is read (`llm.model` is trimmed): what is typed is its input.
+      cur = (cur.def as unknown as { in: z.ZodType }).in;
+    } else {
+      break;
+    }
   }
   return { schema: cur, optional: optional && !hasDefault };
 }
