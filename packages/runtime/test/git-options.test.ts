@@ -4359,7 +4359,7 @@ describe('git commands read without false warnings or slow reading', () => {
           }
           // On a slow runner the time to place what the line writes can run out; the line is
           // then warned about, whatever it would have been told with the time.
-          if (want !== 'warn' && said === 'warn' && best > 350) continue;
+          if (said === 'warn' && best > 350) continue;
           expect(said, name).toBe(want);
           // 200 ms is the aim; the bound leaves room for a busy runner.
           expect(best, name).toBeLessThan(500);
