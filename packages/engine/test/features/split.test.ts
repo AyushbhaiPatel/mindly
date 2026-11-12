@@ -508,13 +508,162 @@ describe('split through hook events', () => {
     const read = await shell('cat src/app/page.ts | grep page');
     expect(read.decision ?? null).toBeNull();
     expect(read.context ?? '').not.toContain('owned by part');
-    for (const command of ['sed -i "" s/a/b/ src/app/page.ts', 'cat tpl > src/app/page.ts']) {
-      const r = await shell(command);
-      expect(r.decision ?? null).toBeNull();
-      expect(r.context).toContain('src/app/page.ts is owned by part "Part page"');
-    }
+    const named = await shell('cat tpl > src/app/page.ts');
+    expect(named.decision ?? null).toBeNull();
+    expect(named.context).toContain('src/app/page.ts is owned by part "Part page"');
+    // A line not read fully (sed is not modelled completely) may write anything: a warning.
+    const sed = await shell('sed -i "" s/a/b/ src/app/page.ts');
+    expect(sed.decision ?? null).toBeNull();
+    expect(sed.context).toContain('reaches files owned by part "Part page"');
     const own = await shell('echo x > src/api/new.ts');
     expect(own.context ?? '').not.toContain('owned by part');
+  });
+
+  it("in strict mode blocks shell writes to another part's files and lets reads through", async () => {
+    const { mindly, svc, pid } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      strict: true,
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const pageWt = created.parts[1]!.worktree;
+    mkdirSync(join(pageWt, 'src', 'api'), { recursive: true });
+    writeFileSync(join(pageWt, 'src', 'api', 'billing.ts'), 'export const plan = 1;\n');
+    await mindly.hooks.handle(event(pageWt, 'claude-code', 'page-1', 'session_start'));
+    const shell = (command: string) =>
+      mindly.hooks.handle(
+        event(pageWt, 'claude-code', 'page-1', 'pre_tool', { tool: shellTool(command) }),
+      );
+    for (const command of [
+      'cat src/api/billing.ts',
+      'cat src/api/billing.ts 2>/dev/null',
+      'cat src/api/billing.ts || true',
+      'grep -n plan src/api/billing.ts | head',
+      'git diff main -- src/api/billing.ts > /tmp/api.diff',
+      'echo x > src/app/page.ts',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision ?? null, command).toBeNull();
+      expect(r.context ?? '', command).not.toContain('owned by part');
+    }
+    // A line not read fully (a program not modelled completely, a loop, code fed to a shell, a
+    // brace expansion) may write anything: the guard warns, and never blocks, even in strict mode.
+    for (const command of [
+      'sed -n 1,40p src/api/billing.ts',
+      'grep -n plan src/api/billing.ts | sort | uniq',
+      'npx vitest run src/api/billing.test.ts',
+      'npx tsc --noEmit -p src/api/tsconfig.json',
+      'cd src/api && sed -i s/a/b/ billing.ts',
+      "find . -name '*.ts' -delete",
+      "find . -name '*.js' -delete",
+      'for f in src/*.ts; do echo $f; done',
+      'black .',
+      'gofmt -w .',
+      "bash -c 'echo x > src/api/billing.ts'",
+      'rm -rf src/{api,app}',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision ?? null, command).toBeNull();
+      expect(r.context ?? '', command).toContain('reaches files owned by part "Part api"');
+    }
+    for (const [command, what] of [
+      ['echo x>src/api/billing.ts', 'src/api/billing.ts'],
+      ['mv src/api/billing.ts src/app/billing.ts', 'src/api/billing.ts'],
+      // A whole directory is judged by what it can reach, not by listing it.
+      ['rm -rf src/api', 'src/api/**'],
+      ['rm -rf src', 'src/**'],
+      ['rm -rf src/api/not-there-yet', 'src/api/not-there-yet/**'],
+      // The tracked files git puts back are what is asked about, by name.
+      ['git checkout HEAD~1 src', 'src/api/billing.ts'],
+      // A wildcard stands for the files it expands to.
+      ['rm src/api/*.ts', 'src/api/billing.ts'],
+      ['rm -f src/**/*.ts', 'src/api/billing.ts'],
+      ['cd src && rm -rf *', 'src/api/billing.ts'],
+    ] as const) {
+      const r = await shell(command);
+      expect(r.decision, command).toBe('deny');
+      expect(r.reason, command).toContain(`${what} (part "Part api", claude-code)`);
+    }
+    // Its own folders, folders nobody owns and wildcards that match none of another part's
+    // files can go, at the top level too.
+    for (const command of [
+      'rm -rf src/app/old',
+      'rm -rf dist',
+      'rm -rf node_modules dist',
+      'rm src/app/*.bak',
+      'rm -f *.log',
+      'rm -rf *.tsbuildinfo',
+      'rm -rf ./dist/*',
+      'rm -rf **/*.log',
+      'rm -rf **/dist',
+      'rm -rf **/node_modules',
+      'rm -f src/**/*.js',
+      'rm -rf src/*/dist',
+      'rm -rf packages/*/dist',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision ?? null, command).toBeNull();
+      expect(r.context ?? '', command).not.toContain('owned by part');
+      expect(r.context ?? '', command).not.toContain('reaches files owned');
+    }
+    // Files of unknown names put into the tree may land on another part's files: a warning.
+    for (const command of [
+      'tar xzf /tmp/file.tgz',
+      'unzip -q /tmp/a.zip',
+      'cp -R /tmp/tpl/* .',
+      'cp -r /tmp/api src/',
+    ]) {
+      const r = await shell(command);
+      expect(r.decision ?? null, command).toBeNull();
+      expect(r.context ?? '', command).toContain('reaches files owned');
+    }
+    for (const command of [] as string[]) {
+      const r = await shell(command);
+      expect(r.decision ?? null, command).toBeNull();
+      expect(r.context ?? '', command).not.toContain('owned by part');
+      expect(r.context ?? '', command).not.toContain('reaches files owned');
+    }
+    // A program Mindly does not know is not read fully: warned about, not blocked.
+    const unknown = await shell('node scripts/codemod.js src/api/billing.ts');
+    expect(unknown.decision ?? null).toBeNull();
+    expect(unknown.context).toContain('reaches files owned by part "Part api"');
+  });
+
+  it("guards writes that reach into another part's worktree or the main checkout", async () => {
+    const { mindly, svc, pid, root } = await setup();
+    const created = await svc.create({
+      projectId: pid,
+      plan: PLAN,
+      slug: 'billing',
+      strict: true,
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const [apiWt, pageWt] = created.parts.map((p) => p.worktree) as [string, string];
+    await mindly.hooks.handle(event(apiWt, 'claude-code', 'api-1', 'session_start'));
+    const pre = (tool: ReturnType<typeof writeTool>) =>
+      mindly.hooks.handle(event(apiWt, 'claude-code', 'api-1', 'pre_tool', { tool }));
+    for (const path of [
+      join(pageWt, 'src/app/page.ts'),
+      join(root, 'src/app/page.ts'),
+      `../${basename(pageWt)}/src/app/page.ts`,
+    ]) {
+      const r = await pre(writeTool(path, 'x'));
+      expect(r.decision, path).toBe('deny');
+      expect(r.reason, path).toContain('src/app/page.ts (part "Part page", claude-code)');
+    }
+    const shell = await pre(shellTool(`echo x > ../${basename(pageWt)}/src/app/page.ts`));
+    expect(shell.decision).toBe('deny');
+    // Its own files stay writable wherever they are; nothing about the other tree is recorded.
+    const own = await pre(writeTool(join(root, 'src/api/billing.ts'), 'x'));
+    expect(own.decision ?? null).toBeNull();
+    expect(JSON.stringify(mindly.store.intents.active(pid))).not.toContain('src/app/page.ts');
+    // A path outside every tree of the project is still none of Mindly's business.
+    const elsewhere = await pre(writeTool(join(tmpdir(), 'elsewhere', 'src/app/page.ts'), 'x'));
+    expect(elsewhere.decision ?? null).toBeNull();
   });
 
   it('keeps other decisions untouched, shows the contract as it is now and archives it on abort', async () => {

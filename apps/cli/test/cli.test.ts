@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { codename, shortId } from '@mindly/core';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary, runHook, styleFor } from '../src/index.js';
+import { ToolNameScan } from '../src/io.js';
 import { cli, fixture, sandbox, tempDir, testIo, write, type Sandbox } from './helpers.js';
 
 function json<T = Record<string, unknown>>(text: string): T {
@@ -425,6 +426,68 @@ describe('hook', () => {
       const r = await cli(sb, [...argv], { stdin });
       expect(r).toEqual({ code: 0, stdout: '', stderr: '' });
     }
+  });
+
+  it('refuses a write too large to read, and lets any other oversized event through', async () => {
+    const sb = sandbox();
+    const big = 'x'.repeat(3 * 1024 * 1024);
+    const write = JSON.stringify({
+      ...fixture('claude-code.PostToolUse.Write'),
+      hook_event_name: 'PreToolUse',
+      cwd: sb.repo,
+      tool_input: { file_path: join(sb.repo, 'a.ts'), content: big },
+    });
+    const io = testIo(sb, { stdin: write });
+    expect(await runHook('claude-code', 'PreToolUse', io)).toBe(0);
+    const out = JSON.parse(io.out.join(''));
+    expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain('too large to check');
+    // The tool is told by the payload's own tool name, wherever it comes, and never by a key of
+    // that name inside what the tool is given.
+    const late = JSON.stringify({
+      session_id: 's',
+      cwd: sb.repo,
+      tool_input: { file_path: join(sb.repo, 'a.ts'), content: big, tool_name: 'Read' },
+      tool_name: 'Write',
+    });
+    const after = testIo(sb, { stdin: late });
+    expect(await runHook('claude-code', 'PreToolUse', after)).toBe(0);
+    expect(JSON.parse(after.out.join('')).hookSpecificOutput.permissionDecision).toBe('deny');
+    // A large call of a tool that reads is let through as before.
+    const read = JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      session_id: 's',
+      cwd: sb.repo,
+      tool_input: { file_path: join(sb.repo, 'a.ts'), padding: big, tool_name: 'Write' },
+      tool_name: 'Read',
+    });
+    const other = testIo(sb, { stdin: read });
+    expect(await runHook('claude-code', 'PreToolUse', other)).toBe(0);
+    expect(other.out.join('')).toBe('');
+    for (const native of ['PostToolUse', 'UserPromptSubmit']) {
+      const other = testIo(sb, { stdin: write });
+      expect(await runHook('claude-code', native, other)).toBe(0);
+      expect(other.out.join('')).toBe('');
+    }
+  });
+
+  it('finds the top-level tool name of a payload read piece by piece', () => {
+    const name = (text: string, step: number): string | null => {
+      const scan = new ToolNameScan();
+      const bytes = Buffer.from(text, 'utf8');
+      for (let i = 0; i < bytes.length; i += step) scan.feed(bytes.subarray(i, i + step));
+      return scan.name;
+    };
+    const payload = JSON.stringify({
+      a: ['tool_name', { tool_name: 'Read' }],
+      note: 'say "tool_name": "Read", \\ é',
+      tool_input: { tool_name: 'Read', nested: [{ toolName: 'Read' }] },
+      tool_name: 'Edit',
+    });
+    for (const step of [1, 2, 3, 7, 1024]) expect(name(payload, step), String(step)).toBe('Edit');
+    expect(name(JSON.stringify({ toolName: 'Bash', x: 1 }), 1)).toBe('Bash');
+    expect(name(JSON.stringify({ tool_input: { tool_name: 'Write' } }), 5)).toBeNull();
+    expect(name(JSON.stringify({ tool: { name: 'Write' } }), 5)).toBeNull();
   });
 
   it('a hook that exceeds the deadline exits 0 quickly with no output', async () => {

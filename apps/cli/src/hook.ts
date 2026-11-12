@@ -15,6 +15,7 @@ import {
   loadUserConfig,
   mindlyHome,
   nullSink,
+  type AgentAdapter,
   type HookResult,
   type Logger,
   type NormalizedHookEvent,
@@ -83,7 +84,11 @@ export async function runHook(
   try {
     raw = await readStdin(io.stdin, MAX_HOOK_STDIN_BYTES);
   } catch (err) {
-    return fail(err instanceof StdinTooLarge ? 'payload too large' : 'stdin unreadable');
+    if (!(err instanceof StdinTooLarge)) return fail('stdin unreadable');
+    // A write too large to read cannot be checked: refused, not let through unchecked.
+    const refused = refuseUnreadWrite(adapter, nativeEvent, io.cwd, err.toolName);
+    if (refused !== null) io.stdout.write(refused.stdout);
+    return refused === null ? fail('payload too large') : refused.exitCode;
   }
   let payload: unknown;
   try {
@@ -197,5 +202,40 @@ function closeQuietly(mindly: Pick<Mindly, 'close'> | null): void {
     mindly?.close();
   } catch {
     // Closing must never turn a successful hook into a failure.
+  }
+}
+
+/**
+ * The answer to a pre-tool event of a writing or shell tool whose payload was too large to read:
+ * a refusal, rendered as the agent expects. Null for any other event, and when the tool cannot
+ * be told from how the payload starts: those fail open.
+ */
+function refuseUnreadWrite(
+  adapter: AgentAdapter,
+  nativeEvent: string,
+  cwd: string,
+  name: string | null,
+): { stdout: string; exitCode: number } | null {
+  try {
+    // Only the event name and the payload's tool name are known: a stand-in payload tells what
+    // kind of event and tool it is.
+    const stand = { session_id: 'x', conversation_id: 'x', cwd, workspace_roots: [cwd] };
+    const input = { file_path: 'x', content: '', command: 'x' };
+    // Without a name, only an event that is a write or a shell command whatever the tool counts.
+    const evt = adapter.parse(nativeEvent, {
+      ...stand,
+      tool_name: name ?? 'Read',
+      tool_input: input,
+    });
+    if (evt?.event !== 'pre_tool' || !(evt.tool?.writes || evt.tool?.shell)) return null;
+    return adapter.render(evt, {
+      context: null,
+      userMessage: null,
+      decision: 'deny',
+      reason:
+        'Mindly could not check this change: it is too large to check. Make the change in smaller steps.',
+    });
+  } catch {
+    return null;
   }
 }
