@@ -66,6 +66,14 @@ export function guarded(scopes: Record<string, string[]>) {
   })();
   // A test that stops before asking closes the store under it: that is not an error of its own.
   ready.catch(() => undefined);
+  // The rules are saved in the background. A hook asked before they are there finds none and
+  // lets everything through, so every question to this instance waits for them first, also one
+  // a test asks of `mindly.hooks` directly.
+  const handle = mindly.hooks.handle.bind(mindly.hooks);
+  mindly.hooks.handle = async (evt) => {
+    await ready;
+    return handle(evt);
+  };
   const shell = async (command: string, cwd = dir) => {
     await ready;
     return mindly.hooks.handle({
