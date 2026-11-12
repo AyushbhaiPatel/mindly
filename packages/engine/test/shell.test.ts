@@ -1070,6 +1070,7 @@ describe('write targets of a shell command', () => {
         follows: false,
         intoFolder: false,
         parents: false,
+        nested: false,
         glob: true,
         dotfiles: false,
         nocase: false,

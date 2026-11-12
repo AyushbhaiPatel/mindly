@@ -310,6 +310,26 @@ memory, which is then injected into every other agent.
   not listed by git: it is walked for the files a rule covers, as the repository is when it is
   written as a whole.
 
+  A folder `mkdir` made counts as a folder for the commands joined to it by `&&`, and after
+  them only when the `mkdir` ran whatever came before it: one behind `&&` or `||`, or inside
+  an `if`, may not have run (after a leading `cd dir &&`, the whole chain runs or none of it
+  does). It stops counting once a later command removes or renames it, or a folder above it,
+  and a folder on disk the line removed is no folder for a later copy either. A copy to such a
+  name is not read fully (`mkdir d && rm -rf d && cp -r src d`,
+  `test -f x && mkdir d; cp -r src d`). The destination of a copy or move that lies above the
+  project is not a folder written as a whole: each source lands there under its own name,
+  which is checked where it lands, in another working tree of the project when it lands in
+  one (`mv a.log ..` writes nothing of the project). A folder changed as a whole that is the
+  top of another working tree is checked in that tree (`chmod -R 700 ../..` from a worktree
+  kept inside the main checkout). `git checkout` and `git restore` given paths put tracked
+  files back and leave what git does not track alone, so only the tracked files under the
+  paths are held against the rules; with a revision named, a file may come that the index
+  does not hold, and what the paths name is a possible write, warned about. `git clean` with
+  `-f` twice also removes the repositories and working trees kept under what it cleans, with
+  all they hold: the project's working trees there are checked whole, as a possible write.
+  A walk through a folder git ignores leaves out the working trees of the project kept in
+  it; their files are judged in their own tree.
+
   A rule reaches into `node_modules` or `.git` only when its scope names that folder. A line
   that removes or rewrites one of those folders as a whole, or a folder in it, is not checked
   against other rules (`rm -rf node_modules` under a rule for `**/*.pem` is let through, also
