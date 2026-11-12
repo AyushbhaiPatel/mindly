@@ -58,6 +58,14 @@ export class SaveRepo {
     private readonly clock: Clock,
   ) {}
 
+  /** The save of a project with this fingerprint, if any. */
+  findByFingerprint(projectId: string, fingerprint: string): Save | null {
+    const r = this.db
+      .prepare('SELECT * FROM saves WHERE project_id = ? AND fingerprint = ?')
+      .get(projectId, fingerprint) as Row | undefined;
+    return r ? toSave(r) : null;
+  }
+
   /** Records a save unless one with the same fingerprint exists (then that one is returned). */
   record(input: SaveCreate): { save: Save; created: boolean } {
     const now = this.clock.now();
