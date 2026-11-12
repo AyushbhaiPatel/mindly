@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { MindlyError, isDeniedPath } from '@mindly/core';
 import { copyIndex } from './capture.js';
+import { entryExists } from './checkpoints.js';
 import { driverOverrides, runGit } from './exec.js';
 import { assertValidRevision } from './refs.js';
 import { findRepoRoot, gitCommonDir, resolveCommit } from './repo.js';
@@ -359,7 +360,8 @@ export interface RevertStepResult {
  * copy of the index that holds the current working tree content, so the real index is never
  * touched and nothing is committed or staged; only the step's own paths are written. With
  * `apply: false` the merge is only checked. Refuses when the current lines have changed since
- * the step (a conflict), or when the step touches a file on the deny-list.
+ * the step (a conflict), when the step touches a file on the deny-list, or when the step has no
+ * parent: the first step of a working tree holds every file, so undoing it would delete them all.
  */
 export async function revertStep(
   worktree: string,
@@ -368,7 +370,15 @@ export async function revertStep(
   options: { apply: boolean; extraDeny?: readonly string[]; timeoutMs?: number },
 ): Promise<RevertStepResult> {
   assertValidRevision(commit);
-  if (parent !== null) assertValidRevision(parent);
+  if (parent === null) {
+    return {
+      paths: [],
+      applied: false,
+      conflicts: [],
+      reason: 'it is the first step of this checkout, so there is no earlier state to go back to',
+    };
+  }
+  assertValidRevision(parent);
   const root = await findRepoRoot(worktree);
   const timeoutMs = options.timeoutMs ?? 120_000;
   const changes = await stepChanges(root, parent, commit);
@@ -416,8 +426,8 @@ export async function revertStep(
     else await runGit(['read-tree', '--empty'], common);
     // The private index gets the current working tree content of the step's paths, so the 3-way
     // merge sees what is on disk now (including unstaged edits).
-    const present = paths.filter((p) => existsSync(resolve(root, p)));
-    const missing = paths.filter((p) => !existsSync(resolve(root, p)));
+    const present = paths.filter((p) => entryExists(resolve(root, p)));
+    const missing = paths.filter((p) => !entryExists(resolve(root, p)));
     if (present.length > 0) {
       await runGit(['add', '-A', '--force', '--pathspec-from-file=-', '--pathspec-file-nul'], {
         ...common,

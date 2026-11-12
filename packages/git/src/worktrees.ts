@@ -1,8 +1,19 @@
-import { existsSync, realpathSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
-import { MindlyError } from '@mindly/core';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  type Dirent,
+  type Stats,
+} from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
+import { DEFAULT_DENY_PATHS, MindlyError, isDeniedPath, sanitizeLine } from '@mindly/core';
 import { commitTree } from './capture.js';
-import { driverOverrides, gitVersion, runGit, versionAtLeast } from './exec.js';
+import { driverOverrides, gitVersion, runGit, runGitRecords, versionAtLeast } from './exec.js';
 import { MIN_MERGE_TREE_VERSION, parseMergeTreeOutput } from './merge.js';
 import { assertValidBranchName } from './refs.js';
 import { findRepoRoot, gitCommonDir, listWorktrees, resolveCommit } from './repo.js';
@@ -63,11 +74,21 @@ export async function addWorktree(
 }
 
 /**
- * Removes the linked worktree at `path` (uncommitted changes included) and prunes its
- * administrative files. The worktree must belong to the repository at `repoRoot` and must not be
- * its main working tree. A folder that is no longer a worktree is left alone (returns false).
+ * Removes the linked worktree at `path` and prunes its administrative files. The worktree must
+ * belong to the repository at `repoRoot` and must not be its main working tree. A folder that is
+ * no longer a worktree is left alone (returns false).
+ *
+ * With `force` (the default) uncommitted changes go with it, and a locked worktree too. Without
+ * it git itself refuses a worktree with modified or untracked files (files flagged skip-worktree
+ * or assume-unchanged included), with submodules, or that is locked. A refusal throws `conflict`
+ * with `details.refused`, git's reason and, for a locked worktree, `details.locked`; nothing is
+ * removed. Ignored files go either way.
  */
-export async function removeWorktree(repoRoot: string, path: string): Promise<boolean> {
+export async function removeWorktree(
+  repoRoot: string,
+  path: string,
+  options: { force?: boolean } = {},
+): Promise<boolean> {
   const root = await findRepoRoot(repoRoot);
   const target = assertAbsoluteOutside(path, root);
   const known = (await listWorktrees(root)).some((w) => {
@@ -84,30 +105,806 @@ export async function removeWorktree(repoRoot: string, path: string): Promise<bo
   if (existsSync(target) && (await gitCommonDir(target)) !== (await gitCommonDir(root))) {
     throw new MindlyError('invalid_input', 'worktree does not belong to this repository');
   }
-  await runGit(['worktree', 'remove', '--force', target], { cwd: root, timeoutMs: 60_000 });
+  const force = options.force !== false;
+  // git's check reads the status, which skips files flagged skip-worktree or assume-unchanged:
+  // unflag the ones on disk, so that an edit to one is seen like any other.
+  const flagged = !force && existsSync(target) ? await unflagPresent(target) : [];
+  // `--force` twice also removes a locked worktree.
+  const res = await runGit(
+    ['worktree', 'remove', ...(force ? ['--force', '--force'] : []), target],
+    { cwd: root, timeoutMs: 60_000, okExitCodes: [128] },
+  );
+  if (res.exitCode !== 0) {
+    await reflag(target, flagged).catch(() => undefined);
+    const reason = sanitizeLine(
+      res.stderr
+        .split('\n')
+        .map((l) => l.replace(/^(fatal|error): /, '').trim())
+        .filter((l) => l !== '' && !l.startsWith('hint:'))
+        .join('; ') || 'git refused to remove it',
+      300,
+    );
+    const locked = /\blocked\b/i.test(res.stderr);
+    throw new MindlyError('conflict', `git did not remove the worktree: ${reason}`, {
+      details: { path: target, refused: true, reason, locked },
+    });
+  }
   await runGit(['worktree', 'prune'], { cwd: root, timeoutMs: 30_000 });
   return true;
+}
+
+/** An index entry flagged skip-worktree or assume-unchanged. */
+interface FlaggedEntry {
+  path: string;
+  mode: string;
+  object: string;
+  skipWorktree: boolean;
+  assumeUnchanged: boolean;
+}
+
+/**
+ * Index entries of the working tree at `root` flagged skip-worktree or assume-unchanged: git's
+ * status, and so `git worktree remove`, does not look at their files.
+ */
+async function flaggedEntries(root: string, gitlinks?: string[]): Promise<FlaggedEntry[]> {
+  const res = await runGit(['ls-files', '-v', '-s', '-z'], { cwd: root, timeoutMs: 60_000 });
+  const out: FlaggedEntry[] = [];
+  for (const rec of res.stdout.split('\0')) {
+    const m = /^(\S) ([0-7]{6}) ([0-9a-f]+) \d\t([\s\S]+)$/.exec(rec);
+    if (!m) continue;
+    if (m[2] === '160000') gitlinks?.push(m[4] as string);
+    const tag = m[1] as string;
+    // `S`: skip-worktree; a lower-case tag: assume-unchanged.
+    const skipWorktree = tag.toUpperCase() === 'S';
+    const assumeUnchanged = tag !== tag.toUpperCase();
+    if (!skipWorktree && !assumeUnchanged) continue;
+    out.push({
+      path: m[4] as string,
+      mode: m[2] as string,
+      object: m[3] as string,
+      skipWorktree,
+      assumeUnchanged,
+    });
+  }
+  return out;
+}
+
+/**
+ * The entry at `rel` (repository-relative) under `root`, if there is one: nothing when a folder on
+ * the way is missing, a symbolic link or not a folder (git does not look past those either).
+ */
+function lstatInTree(root: string, rel: string): Stats | null {
+  const parts = rel.split('/');
+  let at = root;
+  try {
+    for (let i = 0; i < parts.length - 1; i++) {
+      at = join(at, parts[i] as string);
+      if (!lstatSync(at).isDirectory()) return null;
+    }
+    return lstatSync(join(at, parts[parts.length - 1] as string));
+  } catch {
+    return null;
+  }
+}
+
+/** Clears both flags of the flagged entries whose file is on disk; returns them. */
+async function unflagPresent(worktree: string): Promise<FlaggedEntry[]> {
+  const present = (await flaggedEntries(worktree)).filter(
+    (e) => lstatInTree(worktree, e.path) !== null,
+  );
+  await setFlags(worktree, present, false);
+  return present;
+}
+
+/** Sets the flags `unflagPresent` cleared again. */
+async function reflag(worktree: string, entries: readonly FlaggedEntry[]): Promise<void> {
+  await setFlags(worktree, entries, true);
+}
+
+/**
+ * Sets (`on`) or clears each entry's own flags. One flag per call: given both, `update-index`
+ * applies only the first.
+ */
+async function setFlags(
+  worktree: string,
+  entries: readonly FlaggedEntry[],
+  on: boolean,
+): Promise<void> {
+  for (const [flag, list] of [
+    [on ? '--skip-worktree' : '--no-skip-worktree', entries.filter((e) => e.skipWorktree)],
+    [on ? '--assume-unchanged' : '--no-assume-unchanged', entries.filter((e) => e.assumeUnchanged)],
+  ] as const) {
+    if (list.length === 0) continue;
+    await runGit(['update-index', flag, '-z', '--stdin'], {
+      cwd: worktree,
+      input: `${list.map((e) => e.path).join('\0')}\0`,
+      timeoutMs: 60_000,
+    });
+  }
+}
+
+/**
+ * Files of the working tree at `cwd` flagged skip-worktree or assume-unchanged (a local config
+ * kept out of commits) whose content differs from the index: uncommitted work that git's status
+ * does not show. `uninitialised`: the same for the top-level entries of the folders of
+ * uninitialised submodules, which git lists nowhere. Repository-relative. Deny-listed ones (on the built-in list or `extraDeny`) are
+ * never read: they count whenever they are on disk, and are also returned in `denied`.
+ */
+export async function flaggedChanges(
+  cwd: string,
+  extraDeny: readonly string[] = [],
+): Promise<{ changed: string[]; denied: string[]; uninitialised: string[] }> {
+  const root = await findRepoRoot(cwd);
+  const changed: string[] = [];
+  const denied: string[] = [];
+  const toHash: FlaggedEntry[] = [];
+  const gitlinks: string[] = [];
+  const flagged = await flaggedEntries(root, gitlinks);
+  // Files in the folders of uninitialised submodules: git lists nothing under a gitlink.
+  const uninitialised = [...inUninitialisedSubmodules(root, gitlinks).values()].flat().sort();
+  for (const e of flagged) {
+    if (e.mode === '160000') continue;
+    const st = lstatInTree(root, e.path);
+    // Not on disk (a sparse checkout): there is nothing to lose.
+    if (!st) continue;
+    if (isDeniedPath(e.path, extraDeny)) {
+      changed.push(e.path);
+      denied.push(e.path);
+    } else if (st.isSymbolicLink()) {
+      const res = await runGit(['hash-object', '--stdin'], {
+        cwd: root,
+        input: readlinkSync(join(root, e.path)),
+        timeoutMs: 30_000,
+      });
+      if (e.mode !== '120000' || res.stdout.trim() !== e.object) changed.push(e.path);
+    } else if (!st.isFile() || e.mode === '120000' || e.path.includes('\n')) {
+      changed.push(e.path);
+    } else toHash.push(e);
+  }
+  if (toHash.length > 0) {
+    const res = await runGit(['hash-object', '--stdin-paths'], {
+      cwd: root,
+      input: `${toHash.map((e) => e.path).join('\n')}\n`,
+      config: await driverOverrides(root),
+      timeoutMs: 120_000,
+    });
+    const hashes = res.stdout.split('\n');
+    toHash.forEach((e, i) => {
+      if (hashes[i]?.trim() !== e.object) changed.push(e.path);
+    });
+  }
+  return { changed: [...new Set(changed)].sort(), denied: denied.sort(), uninitialised };
+}
+
+/**
+ * Puts `paths` of the worktree back to its HEAD in the index, and writes the committed ones that
+ * are missing from disk; a file that is on disk is never overwritten. Used after the files a user
+ * confirmed were deleted, so that git's own check of the worktree only finds what was not listed.
+ */
+export async function restoreFromHead(worktree: string, paths: readonly string[]): Promise<void> {
+  if (paths.length === 0) return;
+  const root = await findRepoRoot(worktree);
+  const common = {
+    cwd: root,
+    input: `${paths.join('\0')}\0`,
+    config: await driverOverrides(root),
+    timeoutMs: 120_000,
+    // A path neither committed nor in the index, or a file in the way: git's check sees to it.
+    okExitCodes: [1],
+  };
+  await runGit(['reset', '-q', 'HEAD', '--pathspec-from-file=-', '--pathspec-file-nul'], common);
+  await runGit(['checkout-index', '-q', '-z', '--stdin'], common);
+}
+
+/** Drops the paths that sit inside another one of `paths`; sorts the rest. */
+function outermostPaths(paths: Iterable<string>): string[] {
+  const all = new Set(paths);
+  return [...all]
+    .filter((p) => {
+      for (let i = p.indexOf('/'); i !== -1; i = p.indexOf('/', i + 1)) {
+        if (all.has(p.slice(0, i))) return false;
+      }
+      return true;
+    })
+    .sort();
+}
+
+/** What a look at a worktree finds that removing it would lose (see `worktreeScan`). */
+export interface WorktreeScan {
+  /** Untracked files (not ignored), repository-relative. */
+  untracked: string[];
+  /** Ignored files on the secret deny-list or `secretDeny`, except installed ones. */
+  ignoredDenied: string[];
+  /** Git data no listing of files can stand for (see `worktreeScan`). */
+  gitData: string[];
+}
+
+/** The worktree's own git directory, from its `.git` entry: no git run. */
+function ownGitDir(root: string): string | null {
+  try {
+    const dotgit = join(root, '.git');
+    const st = lstatSync(dotgit);
+    if (st.isDirectory()) return dotgit;
+    const m = /^gitdir: (.+)$/m.exec(readFileSync(dotgit, 'utf8'));
+    return m ? resolve(root, (m[1] as string).trim()) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Adds every folder above `path` (not the top level) to `into`; stops at one already there. */
+function addFolders(path: string, into: Set<string>): void {
+  for (let i = path.lastIndexOf('/'); i > 0; i = path.lastIndexOf('/', i - 1)) {
+    const dir = path.slice(0, i);
+    if (into.has(dir)) break;
+    into.add(dir);
+  }
+}
+
+/** Adds the folder holding `path` to `heads` when the entry is named `HEAD` (not at the top). */
+function noteHead(path: string, heads: Set<string>): void {
+  const slash = path.lastIndexOf('/');
+  if (slash > 0 && path.slice(slash + 1) === 'HEAD') heads.add(path.slice(0, slash));
+}
+
+/**
+ * Notes, for a `path` that is not as in the last commit (staged, modified, deleted, untracked or
+ * ignored), every folder it is inside of (not the top level) in `newUnder`; a `HEAD` does not
+ * count for its own folder (only for the ones above). Stops at a folder already there, whose own
+ * folders are then there too: linear in the listing.
+ */
+function noteNew(path: string, newUnder: Set<string>): void {
+  let end = path.lastIndexOf('/');
+  if (end > 0 && path.slice(end + 1) === 'HEAD') end = path.lastIndexOf('/', end - 1);
+  for (let i = end; i > 0; i = path.lastIndexOf('/', i - 1)) {
+    const dir = path.slice(0, i);
+    if (newUnder.has(dir)) break;
+    newUnder.add(dir);
+  }
+}
+
+/** How a git directory whose storage is reached through a link is named in `gitData`. */
+export const linkedGitDirLabel = (path: string): string =>
+  `${path}, whose git storage is reached through a link and cannot be checked`;
+
+/**
+ * How a git directory whose storage is elsewhere (a `commondir`, a `gitdir`, alternate object
+ * stores) is named in `gitData`.
+ */
+export const elsewhereGitDirLabel = (path: string): string =>
+  `${path}, whose git storage is reached elsewhere and cannot be checked, even committed`;
+
+/** Files that tell a git directory keeps (some of) its storage elsewhere, by path from it. */
+const ELSEWHERE_FILES = ['/commondir', '/gitdir', '/objects/info/alternates'];
+
+/** Notes in `into` the folder `path` shows to keep its git storage elsewhere, with the file. */
+function noteElsewhere(path: string, into: Map<string, Set<string>>): void {
+  for (const tail of ELSEWHERE_FILES) {
+    if (!path.endsWith(tail) || path.length <= tail.length) continue;
+    const dir = path.slice(0, -tail.length);
+    const tails = into.get(dir) ?? new Set<string>();
+    tails.add(tail);
+    into.set(dir, tails);
+  }
+}
+
+/**
+ * What `dir` (not the top level), which holds an entry named `HEAD` (tracked, untracked or
+ * ignored), is. `elsewhere` when it also holds a `commondir`, a `gitdir` or an
+ * `objects/info/alternates` (`elsewhereStorage`, any status) that, with its `HEAD`, is on disk
+ * now: its storage, or part of it, is in another folder (a linked worktree's git directory has
+ * no `objects` of its own), which is not looked for. git reads those files its own way (quoted,
+ * chained, through links), so they are not read here: committed and unchanged or not, such a
+ * folder counts while it is on disk. Otherwise only
+ * with an `objects` that is a folder on disk (through a link too): `linked` when its `objects`
+ * or `refs` is a link, or holds a tracked one, or its `packed-refs` is one (`linkedStorage`):
+ * what it stores may then be anywhere, and no link is followed to look; `changed` when something
+ * in it other than that `HEAD` is not as in the last commit (`newUnder`: staged, modified,
+ * deleted, untracked or ignored; a link elsewhere in it counts only by changing itself).
+ * Otherwise null: a fully tracked, unchanged one holds nothing that is not in a commit. Nothing
+ * is read.
+ */
+function gitDirKind(
+  root: string,
+  dir: string,
+  newUnder: ReadonlySet<string>,
+  linkedStorage: ReadonlySet<string>,
+  elsewhereStorage: ReadonlyMap<string, ReadonlySet<string>>,
+): 'elsewhere' | 'linked' | 'changed' | null {
+  if (dir === '') return null;
+  const tails = elsewhereStorage.get(dir);
+  if (tails && existsOrLink(join(root, dir, 'HEAD'))) {
+    for (const tail of tails) {
+      if (existsOrLink(join(root, dir, tail.slice(1)))) return 'elsewhere';
+    }
+  }
+  const objects = join(root, dir, 'objects');
+  try {
+    if (!statSync(objects).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  if (linkedStorage.has(dir)) return 'linked';
+  for (const part of ['objects', 'refs']) {
+    try {
+      if (lstatSync(join(root, dir, part)).isSymbolicLink()) return 'linked';
+    } catch {
+      // No such entry.
+    }
+  }
+  return newUnder.has(dir) ? 'changed' : null;
+}
+
+/** How an uninitialised submodule folder that holds files is named in `gitData`. */
+export const uninitialisedSubmoduleLabel = (path: string): string =>
+  `files in the uninitialised submodule folder ${path}`;
+
+/** Folders an uninitialised submodule's content check reads at most before it counts it. */
+const HOLDS_FILE_LIMIT = 10_000;
+
+/**
+ * True when the entry at `abs` is something other than empty folders: a file, a link, anything
+ * but a folder, or a folder with one of those somewhere below. Stops at the first one, and counts
+ * a tree too large to look through in full as holding something.
+ */
+function holdsFile(abs: string): boolean {
+  const stack = [abs];
+  let budget = HOLDS_FILE_LIMIT;
+  while (stack.length > 0) {
+    const at = stack.pop() as string;
+    let st: Stats;
+    try {
+      st = lstatSync(at);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) return true;
+    if (--budget < 0) return true;
+    let entries: string[];
+    try {
+      entries = readdirSync(at);
+    } catch {
+      return true;
+    }
+    for (const e of entries) stack.push(join(at, e));
+  }
+  return false;
+}
+
+/**
+ * The top-level entries of the folders of uninitialised submodules (`gitlinks`, from the index,
+ * with no `.git`) under `root` that hold a file: work written there, which git lists nowhere (a
+ * gitlink hides what is under it) and removes with the worktree. A gitlink path that is not a
+ * folder of the worktree (a link: a type change, listed as such) is not looked into; empty
+ * folders do not count.
+ */
+function inUninitialisedSubmodules(
+  root: string,
+  gitlinks: readonly string[],
+): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const path of gitlinks) {
+    if (!lstatInTree(root, path)?.isDirectory()) continue;
+    if (existsOrLink(join(root, path, '.git'))) continue;
+    let entries: string[];
+    try {
+      entries = readdirSync(join(root, path));
+    } catch {
+      continue;
+    }
+    const holding = entries.filter((e) => holdsFile(join(root, path, e))).sort();
+    if (holding.length > 0)
+      out.set(
+        path,
+        holding.map((e) => `${path}/${e}`),
+      );
+  }
+  return out;
+}
+
+/**
+ * One look at the working tree at `cwd`, from two git listings read as they come (its status,
+ * with untracked and ignored files one by one, and its index), one `lstat` per folder they name
+ * and one `readdir` per uninitialised submodule; nothing in any file is read.
+ *
+ * `gitData`: git data that removing the worktree would destroy and no listing of files can stand
+ * for: repositories inside it (new ones and ones in ignored folders, as git lists them: folders
+ * it does not descend into), populated submodules and committed repositories (from the index),
+ * a `.git` file, folder or link in any folder that holds a tracked, untracked or ignored file
+ * (git looks past those, and past a `.git` it does not accept), git directories holding
+ * anything not committed, or whose storage is reached through a link (a `--separate-git-dir`, a
+ * bare repository: see `gitDirKind`), files
+ * in the folder of an uninitialised submodule
+ * (git lists nothing under a gitlink), and a non-empty `modules` folder in the worktree's own
+ * git directory (the git directories of its submodules, initialised or not). Only the outermost
+ * of nested ones; repository-relative, but that `modules` folder is absolute. Never the worktree
+ * itself.
+ */
+export async function worktreeScan(
+  cwd: string,
+  secretDeny: readonly string[] = [],
+): Promise<WorktreeScan> {
+  const root = await findRepoRoot(cwd);
+  const opts = { cwd: root, timeoutMs: 300_000 };
+  const found = new Set<string>();
+  const listedIn = new Set<string>();
+  // Folders holding an entry named `HEAD` (any status), and folders with something untracked or
+  // ignored inside.
+  const heads = new Set<string>();
+  const newUnder = new Set<string>();
+  // Folders holding a `commondir`, a `gitdir` or an `objects/info/alternates`.
+  const elsewhereStorage = new Map<string, Set<string>>();
+  // Untracked (`??`) and ignored (`!!`) files one by one, repositories as folders, in one listing
+  // read as it comes (every ignored file is in it), keeping only what counts.
+  const untracked: string[] = [];
+  const ignoredDenied: string[] = [];
+  await runGitRecords(
+    [
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--no-renames',
+      '--untracked-files=all',
+      '--ignored=traditional',
+      '--ignore-submodules=all',
+    ],
+    opts,
+    (rec) => {
+      const kind = rec.slice(0, 3);
+      const path = rec.slice(3);
+      if (kind !== '?? ' && kind !== '!! ') {
+        // Staged, modified or deleted: not as in the last commit either.
+        if (path !== '') noteNew(path, newUnder);
+        return false;
+      }
+      // A folder: a repository git did not descend into.
+      if (path.endsWith('/')) {
+        if (path.length > 1) found.add(path.slice(0, -1));
+        noteNew(path.slice(0, -1), newUnder);
+        return false;
+      }
+      addFolders(path, listedIn);
+      noteHead(path, heads);
+      noteElsewhere(path, elsewhereStorage);
+      noteNew(path, newUnder);
+      if (kind === '?? ') untracked.push(path);
+      else if (isDeniedPath(path, secretDeny) && !installed(root, path)) ignoredDenied.push(path);
+      return false;
+    },
+  );
+  // The index: submodules, and every folder that holds a tracked file.
+  const gitlinks: string[] = [];
+  const tracked = new Set<string>();
+  const trackedLinks: string[] = [];
+  await runGitRecords(['ls-files', '-z', '-s'], opts, (rec) => {
+    const path = rec.slice(rec.indexOf('\t') + 1);
+    noteHead(path, heads);
+    noteElsewhere(path, elsewhereStorage);
+    if (rec.startsWith('160000 ')) gitlinks.push(path);
+    else addFolders(path, tracked);
+    if (rec.startsWith('120000 ')) trackedLinks.push(path);
+    return false;
+  });
+  for (const dir of tracked) listedIn.add(dir);
+  // Folders holding a `HEAD` with a tracked link under their `objects/` or `refs/`: one pass
+  // over each link's own path.
+  const linkedStorage = new Set<string>();
+  for (const link of trackedLinks) {
+    if (link.endsWith('/packed-refs')) {
+      const dir = link.slice(0, -'/packed-refs'.length);
+      if (heads.has(dir)) linkedStorage.add(dir);
+    }
+    const parts = link.split('/');
+    for (let i = 1; i < parts.length - 1; i++) {
+      if (parts[i] !== 'objects' && parts[i] !== 'refs') continue;
+      const dir = parts.slice(0, i).join('/');
+      if (heads.has(dir)) linkedStorage.add(dir);
+    }
+  }
+  // A git directory (a `--separate-git-dir`, a bare clone) with something not in a commit, or
+  // whose storage cannot be checked.
+  const labelled = new Map<string, string>();
+  for (const dir of heads) {
+    const kind = gitDirKind(root, dir, newUnder, linkedStorage, elsewhereStorage);
+    if (kind) found.add(dir);
+    if (kind === 'linked') labelled.set(dir, linkedGitDirLabel(dir));
+    if (kind === 'elsewhere') labelled.set(dir, elsewhereGitDirLabel(dir));
+  }
+  // One `readdir` per folder named, and per folder below one that git names nothing in (only
+  // empty folders, or ones holding nothing but a `.git` git does not accept): a `.git` in any of
+  // them, whatever git makes of it. Repositories git named and submodules are not gone into.
+  const notInto = new Set<string>([...found, ...gitlinks]);
+  const seen = new Set<string>(['', ...listedIn]);
+  const stack = ['', ...listedIn];
+  while (stack.length > 0) {
+    const dir = stack.pop() as string;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir === '' ? root : join(root, dir), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (e.name === '.git') {
+        if (dir !== '') found.add(dir);
+        continue;
+      }
+      if (!e.isDirectory()) continue;
+      const sub = dir === '' ? e.name : `${dir}/${e.name}`;
+      if (seen.has(sub) || notInto.has(sub)) continue;
+      seen.add(sub);
+      stack.push(sub);
+    }
+  }
+  for (const path of gitlinks) if (existsOrLink(join(root, path, '.git'))) found.add(path);
+  found.delete('');
+  const gitData = outermostPaths(found).map((p) => labelled.get(p) ?? p);
+  for (const path of inUninitialisedSubmodules(root, gitlinks).keys()) {
+    gitData.push(uninitialisedSubmoduleLabel(path));
+  }
+  const own = ownGitDir(root);
+  if (own) {
+    const modules = join(own, 'modules');
+    try {
+      if (readdirSync(modules).length > 0) gitData.push(modules);
+    } catch {
+      // No such folder.
+    }
+  }
+  return { untracked: untracked.sort(), ignoredDenied: ignoredDenied.sort(), gitData };
+}
+
+/** True when there is an entry at `abs`, a dangling link included. */
+function existsOrLink(abs: string): boolean {
+  try {
+    lstatSync(abs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The `gitData` of `worktreeScan`. */
+export async function gitDataPaths(cwd: string): Promise<string[]> {
+  return (await worktreeScan(cwd)).gitData;
 }
 
 /**
  * Deletes `refs/heads/<branch>` whatever its merge state. Returns false when it did not exist and
  * refuses (`conflict`) a branch that is checked out in any working tree, so work under someone's
- * HEAD is never dropped.
+ * HEAD is never dropped. With `expectedTip`, also refuses (`conflict`) a branch that has moved
+ * since it was looked at, so commits made in between are never dropped either.
  */
-export async function deleteBranch(repoRoot: string, branch: string): Promise<boolean> {
+export async function deleteBranch(
+  repoRoot: string,
+  branch: string,
+  expectedTip?: string,
+): Promise<boolean> {
   assertValidBranchName(branch);
   const root = await findRepoRoot(repoRoot);
   const ref = `refs/heads/${branch}`;
   const commit = await resolveCommit(root, ref);
   if (!commit) return false;
+  const moved = (): MindlyError =>
+    new MindlyError('conflict', `branch ${branch} has commits made after it was checked`, {
+      details: { branch, moved: true },
+    });
+  if (expectedTip !== undefined && commit !== expectedTip) throw moved();
   const checkedOut = (await listWorktrees(root)).find((w) => w.branch === ref);
   if (checkedOut) {
     throw new MindlyError('conflict', `branch ${branch} is checked out at ${checkedOut.path}`, {
       details: { branch, path: checkedOut.path },
     });
   }
-  await runGit(['update-ref', '-d', ref, commit], { cwd: root });
+  // Deletes only if the branch is still at `commit`: one that moved in between is kept.
+  const res = await runGit(['update-ref', '-d', ref, commit], {
+    cwd: root,
+    okExitCodes: [1, 128],
+  });
+  if (res.exitCode !== 0) {
+    if ((await resolveCommit(root, ref)) !== null) throw moved();
+    return false;
+  }
   return true;
+}
+
+/** A commit that only one branch holds (see `branchOnlyWork`). */
+export interface BranchOnlyCommit {
+  commit: string;
+  subject: string;
+}
+
+/** What deleting a branch would lose (see `branchOnlyWork`). */
+export interface BranchOnlyWork {
+  /** The branch tip that was looked at; null when the branch does not exist. */
+  tip: string | null;
+  /** Commits no other branch, tag or remote-tracking branch has, newest first, at most `max`. */
+  commits: BranchOnlyCommit[];
+  /** True when there are more such commits than `commits` lists. */
+  more: boolean;
+}
+
+const ONLY_WORK_CACHE = new Map<string, BranchOnlyWork>();
+const ONLY_WORK_CACHE_MAX = 256;
+/** Unique tips passed to one `merge-base` call: keeps the command line short. */
+const MERGE_BASE_CHUNK = 2000;
+
+/**
+ * What deleting `refs/heads/<branch>` would lose: its commits that no other branch, tag or
+ * remote-tracking branch reaches. Branches in `ignoring` (deleted together with it) do not count
+ * as holding a commit. Only reachability counts: a commit whose changes another branch has under
+ * a different id (a squash or rebase merge) is still lost with the branch.
+ *
+ * A walk from the branch with every other ref negated trusts commit dates, and the merge commits
+ * of `split merge` carry a fixed old one: it would list commits those refs do have. Instead the
+ * newest commits the other refs share with the branch are found with `merge-base`, which does
+ * not stop early on dates, and only the branch's own history above them is walked. Results are
+ * cached per state of the refs, so asking again is cheap until a ref moves.
+ */
+export async function branchOnlyWork(
+  repoRoot: string,
+  branch: string,
+  options: { ignoring?: readonly string[]; max?: number } = {},
+): Promise<BranchOnlyWork> {
+  assertValidBranchName(branch);
+  const ignoring = options.ignoring ?? [];
+  for (const b of ignoring) assertValidBranchName(b);
+  const limit = Math.max(1, Math.floor(options.max ?? 50));
+  const root = await findRepoRoot(repoRoot);
+  const ref = `refs/heads/${branch}`;
+  const tip = await resolveCommit(root, ref);
+  if (!tip) return { tip: null, commits: [], more: false };
+  const refs = await runGit(
+    [
+      'for-each-ref',
+      '--format=%(objectname) %(objecttype) %(*objectname) %(*objecttype) %(refname)',
+      'refs/heads',
+      'refs/tags',
+      'refs/remotes',
+    ],
+    { cwd: root, timeoutMs: 30_000 },
+  );
+  const key = createHash('sha256')
+    .update(JSON.stringify([root, ref, tip, [...ignoring].sort(), limit, refs.stdout]))
+    .digest('hex');
+  const cached = ONLY_WORK_CACHE.get(key);
+  if (cached) return cached;
+
+  const going = new Set([branch, ...ignoring].map((b) => `refs/heads/${b}`));
+  const others = new Set<string>();
+  for (const line of refs.stdout.split('\n')) {
+    const [id, type, peeledId, peeledType, ...rest] = line.split(' ');
+    const name = rest.join(' ');
+    if (!id || !name || going.has(name)) continue;
+    const commit = type === 'commit' ? id : peeledType === 'commit' ? peeledId : undefined;
+    if (commit) others.add(commit);
+  }
+
+  // The newest commits of the branch that some other ref also has.
+  const bases = new Set<string>();
+  if (others.has(tip)) bases.add(tip);
+  else {
+    const tips = [...others];
+    for (let i = 0; i < tips.length; i += MERGE_BASE_CHUNK) {
+      const res = await runGit(
+        ['merge-base', '--all', tip, ...tips.slice(i, i + MERGE_BASE_CHUNK)],
+        {
+          cwd: root,
+          timeoutMs: 120_000,
+          okExitCodes: [1],
+        },
+      );
+      for (const id of res.stdout.split('\n')) if (id) bases.add(id);
+    }
+  }
+  const commits: BranchOnlyCommit[] = [];
+  if (!bases.has(tip)) {
+    // Every commit above the bases is the branch's own. Without bases the whole history is: a
+    // plain walk then stops at `max`.
+    const res = await runGit(
+      [
+        'log',
+        '--no-color',
+        '--format=%H%x09%s',
+        ...(bases.size > 0 ? ['--topo-order'] : []),
+        `--max-count=${limit + 1}`,
+        tip,
+        ...[...bases].map((b) => `^${b}`),
+        '--',
+      ],
+      { cwd: root, timeoutMs: 120_000 },
+    );
+    for (const line of res.stdout.split('\n')) {
+      const tab = line.indexOf('\t');
+      if (tab > 0) commits.push({ commit: line.slice(0, tab), subject: line.slice(tab + 1) });
+    }
+  }
+
+  const more = commits.length > limit;
+  const out: BranchOnlyWork = { tip, commits: commits.slice(0, limit), more };
+  if (ONLY_WORK_CACHE.size >= ONLY_WORK_CACHE_MAX) {
+    const oldest = ONLY_WORK_CACHE.keys().next().value;
+    if (oldest !== undefined) ONLY_WORK_CACHE.delete(oldest);
+  }
+  ONLY_WORK_CACHE.set(key, out);
+  return out;
+}
+
+/**
+ * Folders that hold installed packages: ignored files in them (certifi's `cacert.pem`, test keys
+ * of a package) were installed, not written by anyone, and are never listed as work.
+ */
+export const PACKAGE_DIRS: readonly string[] = ['node_modules', 'site-packages'];
+
+/**
+ * Dependency and tool trees: ignored deny-listed files in them are not listed, except `.env*`
+ * files and key files, which count wherever they are (outside `PACKAGE_DIRS`). `venv`, `.venv`
+ * and `env` are such a tree only when they hold a `pyvenv.cfg`.
+ */
+export const DEPENDENCY_DIRS: readonly string[] = [
+  '__pycache__',
+  '.tox',
+  '.gradle',
+  'vendor/bundle',
+  'venv',
+  '.venv',
+  'env',
+];
+
+const VENV_DIRS = new Set(['venv', '.venv', 'env']);
+const ALWAYS_COUNTED = /^(\.env.*|.*\.(key|pem|p12|pfx|keystore|kdbx)|id_(rsa|ed25519|ecdsa).*)$/i;
+
+/** Whether an ignored deny-listed file is installed tooling rather than someone's work. */
+function installed(root: string, rel: string): boolean {
+  const parts = rel.split('/');
+  const dirs = parts.slice(0, -1);
+  const lower = dirs.map((d) => d.toLowerCase());
+  if (lower.some((d) => PACKAGE_DIRS.includes(d))) return true;
+  if (ALWAYS_COUNTED.test(parts[parts.length - 1] ?? '')) return false;
+  for (let i = 0; i < lower.length; i++) {
+    const d = lower[i] as string;
+    if (d === '__pycache__' || d === '.tox' || d === '.gradle') return true;
+    if (d === 'vendor' && lower[i + 1] === 'bundle') return true;
+    if (VENV_DIRS.has(d) && existsSync(join(root, ...dirs.slice(0, i + 1), 'pyvenv.cfg'))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Ignored files of the working tree at `cwd` that are on the secret deny-list or on `extraDeny`
+ * (a local `.env`, a key; any letter case): not part of any commit, but lost with the worktree.
+ * Repository-relative; their content is never read. Other ignored files, and installed ones
+ * (in `PACKAGE_DIRS`, or in `DEPENDENCY_DIRS` unless they are `.env*` or key files), are not
+ * listed.
+ */
+export async function ignoredDeniedFiles(
+  cwd: string,
+  extraDeny: readonly string[] = [],
+): Promise<string[]> {
+  const root = await findRepoRoot(cwd);
+  const patterns = [...DEFAULT_DENY_PATHS, ...extraDeny].filter(
+    (p) => typeof p === 'string' && p !== '' && !p.includes('\0'),
+  );
+  const res = await runGit(
+    [
+      'ls-files',
+      '-z',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '--',
+      ...patterns.map((p) => `:(icase,glob)${p}`),
+      ...PACKAGE_DIRS.map((d) => `:(exclude,icase,glob)**/${d}/**`),
+    ],
+    // The deny-list is made of globs: let git read these pathspecs as such.
+    { cwd: root, timeoutMs: 60_000, env: { GIT_LITERAL_PATHSPECS: '0' } },
+  );
+  return res.stdout
+    .split('\0')
+    .filter((p) => p !== '' && isDeniedPath(p, extraDeny) && !installed(root, p))
+    .sort();
 }
 
 /** Tracked and untracked (non-ignored) files of the working tree at `cwd`, repository-relative. */

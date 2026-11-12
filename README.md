@@ -203,6 +203,63 @@ writes into another part's files are flagged (or blocked with `--strict`). In th
 Mindly keeps checking that all the parts still merge and pass your checks. `mindly split merge`
 combines them into one new branch, in dependency order, and never pushes.
 
+The merge takes what each agent committed on its part's branch. If a part's worktree still holds
+work that is not committed there, `mindly split merge` stops and names the files (`--force`
+merges without them). Before or after a merge, `mindly split abort` removes nothing while the
+parts hold work no other branch has: uncommitted files (secrets such as a local `.env` included,
+listed by name only), or commits only on a part branch. After a squash or rebase merge of the
+merged branch, every part commit is like that. Run `mindly split abort --keep-branches` to remove
+the worktrees and keep the part branches, so that no commit is lost; `mindly split abort --yes
+--discard` deletes it all. When you confirm an abort on the terminal, it deletes only the files
+it listed, each only if it still holds what it held when you were asked: anything new or changed
+since stops it.
+
+An abort never moves, rewrites or deletes git data inside a part's worktree, short of `--yes
+--discard`: a nested repository (a new one, one in an ignored folder such as a dependency
+checkout in `deps/` or `node_modules`, one made in a folder the part tracks), a submodule, a
+`.git` file, folder or link in any folder that holds a file (even one git does not accept as a
+repository), a git directory among untracked or ignored files (a `--separate-git-dir`, a bare
+clone: a folder with a `HEAD` and an `objects` folder, holding anything not as in the last
+commit, staged, changed or new; or one whose `objects`, `refs` or `packed-refs` is a link or
+holds one, since what it stores may then be anywhere and no link is followed to check; or one
+with a `commondir`, a `gitdir` or an `objects/info/alternates`, whose storage is elsewhere
+and is not looked for; a committed fixture of that shape, such as a linked worktree's git
+directory or an alternates repository kept in a test suite, holds every abort while it is on
+disk, so move it out of the worktree first or use `--yes --discard`), files
+written into the folder of an uninitialised submodule (git lists nothing there; empty folders
+do not count), or the git directories of the part's submodules, initialised or not. A part holding any of it keeps its worktree and branch, the
+abort stays unfinished, and it says, naming each path (the worktree itself as "the worktree's
+own folder"):
+
+```text
+it holds git data that abort never deletes: <paths>. Move it out of the worktree (or delete it
+yourself if it is a throwaway checkout) and run mindly split abort again, or delete everything
+with mindly split abort --yes --discard
+```
+
+The other parts are removed as usual. A new nested repository, an edit in a folder holding a
+`.git`, a submodule moved to another commit, or a file in the folder of an uninitialised
+submodule also counts as work not on the part branch: `mindly split merge` stops and names it,
+and `--force` merges without it and says so. The git directory rule errs on the safe side: a
+folder of your own with a `HEAD` entry and an `objects` folder, holding anything not committed
+(unusual outside git itself), is taken for one, and the abort asks you to move it out. So is a
+git directory with a link in its `objects` or `refs`, even fully committed: such layouts are rare,
+and moving the repository out (or `--yes --discard`) is the way past. One fully
+tracked and unchanged holds nothing outside a commit and does not count. A `.git` git does not
+accept is found too, even alone in a folder git lists nothing in.
+
+Then worktrees are removed the way `git worktree remove` does without `--force`: git refuses one
+with modified or untracked files (an edited file flagged skip-worktree or assume-unchanged
+included), with submodules or that is locked, and the abort keeps it and says why. Only `--yes
+--discard` overrules that. Ignored files go with a worktree. The ignored ones on the secret
+deny-list or your `redaction.denyPaths` count as work, except installed ones: anything in
+`node_modules` or `site-packages`, and, apart from `.env*` and key files, anything in
+`__pycache__`, `.tox`, `.gradle`, `vendor/bundle` or a virtualenv (a `venv`, `.venv` or `env`
+folder holding `pyvenv.cfg`). Right before git removes a worktree, the abort looks once more for
+untracked files, counted ignored files and git data, keeping the worktree if any appeared;
+git's own check covers untracked files after that, but an ignored file written in between goes
+with the worktree. When an abort keeps something, run `mindly split abort` again to finish.
+
 ### Which agent is better at what, in your repo
 
 ```bash
@@ -438,8 +495,9 @@ for its scratch copy, run again only when a lockfile or manifest changes:
 Agents call Mindly through their own hooks at session start, on each prompt, and around each tool
 call. Mindly answers with a short block of context, marked as reference information and never as
 instructions, or with a block when an enforced rule is broken. Each hook call takes about 0.2
-seconds on a laptop, and if Mindly fails or takes longer than 10 seconds the agent carries on
-without it. More detail: [docs/architecture.md](docs/architecture.md).
+seconds on a laptop, and if Mindly fails or takes longer than its deadline (1.5 seconds by
+default, `hooks.timeoutMs`) the agent carries on without it. More detail:
+[docs/architecture.md](docs/architecture.md).
 
 ## Privacy and security
 

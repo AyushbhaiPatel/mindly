@@ -321,7 +321,10 @@ export class HookHandler {
     session: Session,
     evt: NormalizedHookEvent,
   ): Promise<HookResult> {
-    this.k.store.sessions.endStale(project.project.id, LIVE_WINDOW_MS * 4);
+    // Sessions ended here never had their end hook: their writes in flight go with them.
+    for (const id of this.k.store.sessions.endStale(project.project.id, LIVE_WINDOW_MS * 4)) {
+      this.d.checkpoints.forgetWrites(id);
+    }
     this.k.store.intents.expire();
     this.k.store.deliveries.expire();
     this.k.store.events.append({
@@ -1353,6 +1356,8 @@ export class HookHandler {
       if (rule) return this.ruleDenial(rule, context);
       const denied = guard.deny ?? outside.deny;
       if (denied) return { ...EMPTY_HOOK_RESULT, decision: 'deny', reason: denied, context };
+      // A rescan that takes this edit before the post-tool hook can only come after this point.
+      await this.d.checkpoints.noteWriteStart(session.id, evt.cwd, paths);
       return withEnforcementWarning({ ...EMPTY_HOOK_RESULT, context }, linked(plainTitle));
     }
     if (tool.shell && tool.command) {
@@ -1613,6 +1618,10 @@ export class HookHandler {
       order: 'desc',
       limit: 1,
     })[0];
+    // The working tree the edit is made in: a rescan credits the edit only to that tree's steps.
+    const worktree = this.d.checkpoints.enabled
+      ? await this.d.checkpoints.worktreeOf(evt.cwd)
+      : null;
     const changed: ChangedFile[] = [];
     let firstChangeId: string | null = null;
     for (const edit of tool.edits.slice(0, MAX_RECORDED_PATHS)) {
@@ -1630,6 +1639,7 @@ export class HookHandler {
         addedLines: countLines(edit.addedText),
         removedLines: countLines(edit.removedText),
         promptEventId: promptEvent?.id ?? null,
+        worktree,
       });
       firstChangeId ??= recorded.id;
       changed.push({
@@ -1751,7 +1761,7 @@ export class HookHandler {
   /** The comparable key of a shell command (program and subcommand), redacted. */
   private commandKey(command: string): string {
     return sanitizeLine(
-      redactText(commandKey(command), { extraPatterns: this.k.config.redaction.extraPatterns }),
+      commandKey(command, { extraPatterns: this.k.config.redaction.extraPatterns }),
       120,
     );
   }
@@ -1883,6 +1893,7 @@ export class HookHandler {
   private async sessionEnd(project: ProjectContext, session: Session): Promise<HookResult> {
     this.k.store.sessions.setStatus(session.id, 'ended');
     this.d.intents.closeSession(session);
+    this.d.checkpoints.forgetWrites(session.id);
     this.k.store.events.append({
       projectId: project.project.id,
       sessionId: session.id,

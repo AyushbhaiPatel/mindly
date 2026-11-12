@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { utimes } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import {
   defaultUserConfig,
@@ -10,6 +11,7 @@ import {
   type UserConfig,
 } from '@mindly/core';
 import {
+  LIVE_WINDOW_MS,
   Mindly,
   PRUNE_INTERVAL_MS,
   type CheckpointCaptureInput,
@@ -28,7 +30,15 @@ function fakeCheckpointGit(root: string) {
   const captures: CheckpointCaptureInput[] = [];
   const deleted: { worktree: string; refs: string[] }[] = [];
   const refs: CheckpointRefEntry[] = [];
-  const state = { commits: 0, busy: false, failing: false, rescanChanges: [] as string[], now: 0 };
+  const state = {
+    commits: 0,
+    busy: false,
+    failing: false,
+    /** The next capture by path finds the tree already equal to the previous step. */
+    alreadyTaken: false,
+    rescanChanges: [] as string[],
+    now: 0,
+  };
   const parseRef = (ref: string) => {
     const [worktreeId, seq] = ref.slice('refs/mindly/steps/'.length).split('/');
     return { worktreeId: worktreeId as string, seq: Number(seq) };
@@ -40,8 +50,10 @@ function fakeCheckpointGit(root: string) {
     capture: async (input) => {
       captures.push(input);
       if (state.failing) throw new Error('git index locked');
-      const changedPaths = input.paths ? [...input.paths] : state.rescanChanges;
-      state.rescanChanges = [];
+      const taken = state.alreadyTaken && input.paths !== null;
+      state.alreadyTaken = false;
+      const changedPaths = taken ? [] : input.paths ? [...input.paths] : state.rescanChanges;
+      if (!input.paths) state.rescanChanges = [];
       const changed = input.parent === null || changedPaths.length > 0;
       if (!changed && !input.always) {
         return {
@@ -290,9 +302,9 @@ describe('checkpoints through hooks', () => {
   it('skips a step when the lock is busy or git fails, and marks the next one as a gap', async () => {
     const { root, mindly, fake, rows } = make();
     await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
-    const edit = (text: string) =>
+    const edit = (text: string, path = 'src/auth.ts') =>
       mindly.hooks.handle(
-        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', text) }),
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool(path, text) }),
       );
 
     fake.state.busy = true;
@@ -300,23 +312,351 @@ describe('checkpoints through hooks', () => {
     expect(fake.captures).toHaveLength(1);
     expect(rows()).toHaveLength(1);
     fake.state.busy = false;
-    await edit('after busy');
-    expect(rows().map((c) => [c.seq, c.gap])).toEqual([
-      [1, false],
-      [2, true],
+    // The step after a skipped one scans the whole tree, so it holds the edit that was missed.
+    fake.state.rescanChanges = ['src/auth.ts', 'src/other.ts'];
+    await edit('after busy', 'src/other.ts');
+    expect(fake.captures.at(-1)).toMatchObject({ paths: null });
+    expect(rows().map((c) => [c.seq, c.kind, c.gap, c.paths])).toEqual([
+      [1, 'baseline', false, []],
+      [2, 'agent', true, ['src/auth.ts', 'src/other.ts']],
     ]);
+    // Nothing is left over for a later rescan to pin on nobody.
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'go on' }));
+    expect(rows()).toHaveLength(2);
     await edit('plain');
+    expect(fake.captures.at(-1)).toMatchObject({ paths: ['src/auth.ts'] });
     expect(rows().at(-1)).toMatchObject({ seq: 3, gap: false });
 
     fake.state.failing = true;
     await expect(edit('failing')).resolves.toEqual(EMPTY_HOOK_RESULT);
-    expect(fake.captures).toHaveLength(4);
     expect(rows()).toHaveLength(3);
     fake.state.failing = false;
+    fake.state.rescanChanges = ['src/auth.ts'];
     await edit('after failure');
+    expect(fake.captures.at(-1)).toMatchObject({ paths: null });
     expect(rows().at(-1)).toMatchObject({ seq: 4, gap: true, paths: ['src/auth.ts'] });
     await edit('plain again');
     expect(rows().at(-1)).toMatchObject({ seq: 5, gap: false });
+  });
+
+  it('credits a step a rescan took first to the agent, as a gap when it holds more', async () => {
+    const { root, clock, mindly, fake, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const prompt = async () => {
+      clock.advance(10);
+      await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'something else' }));
+    };
+    let n = 0;
+    const write = async () => {
+      await mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'a') }),
+      );
+      writeFileSync(join(root, 'src', 'auth.ts'), `export const n = ${++n};\n`);
+    };
+    const lateEdit = () => {
+      fake.state.alreadyTaken = true;
+      return mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'a') }),
+      );
+    };
+    // Another session's prompt rescans between the write and its hook: the step is the edit.
+    await write();
+    fake.state.rescanChanges = ['src/auth.ts'];
+    await prompt();
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', gap: false });
+    await lateEdit();
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'agent', tool: 'Edit', gap: false });
+    // The same race, but the rescan also picked up a file nobody's edit explains.
+    await write();
+    fake.state.rescanChanges = ['src/auth.ts', 'src/other.ts'];
+    await prompt();
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside', gap: false });
+    await lateEdit();
+    expect(rows().at(-1)).toMatchObject({
+      seq: 3,
+      kind: 'agent',
+      gap: true,
+      paths: ['src/auth.ts', 'src/other.ts'],
+    });
+    expect(rows()).toHaveLength(3);
+  });
+
+  it('keeps an outside step taken before the write began, or by a write of other paths', async () => {
+    const { root, clock, mindly, fake, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const write = (path: string) =>
+      mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool(path, 'a') }),
+      );
+    const unchangedWrite = () => {
+      fake.state.alreadyTaken = true;
+      return mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'a') }),
+      );
+    };
+    // A hand edit is rescanned into a step; later the agent writes the same content again.
+    fake.state.rescanChanges = ['src/auth.ts'];
+    clock.advance(10);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look' }));
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside' });
+    clock.advance(10);
+    await write('src/auth.ts');
+    clock.advance(10);
+    await unchangedWrite();
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', sessionId: null });
+    // No pre-tool hook was seen for this write: when it began cannot be told.
+    await unchangedWrite();
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', sessionId: null });
+    // The pre-tool hook named another file than the one written.
+    await write('src/other.ts');
+    fake.state.rescanChanges = ['src/auth.ts'];
+    clock.advance(10);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look again' }));
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside' });
+    await unchangedWrite();
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside', sessionId: null });
+  });
+
+  it('keeps a hand edit rescanned while a write that changed nothing was on its way', async () => {
+    const { root, clock, mindly, fake, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    // The file is edited by hand; the agent starts a write that leaves it as it now is.
+    writeFileSync(join(root, 'src', 'auth.ts'), 'export const hand = 1;\n');
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'a') }),
+    );
+    // Another session's prompt rescans the hand edit before the write's post-tool hook.
+    fake.state.rescanChanges = ['src/auth.ts'];
+    clock.advance(10);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look' }));
+    fake.state.alreadyTaken = true;
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'a') }),
+    );
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', sessionId: null });
+  });
+
+  it('gives overlapping writes of one file in one session each their own note', async () => {
+    const { root, clock, mindly, fake, pid, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const cc = () => mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!.id;
+    const pre = () =>
+      mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'a') }),
+      );
+    const post = (taken: boolean) => {
+      fake.state.alreadyTaken = taken;
+      return mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'a') }),
+      );
+    };
+    // Subagent A writes auth.ts and a rescan takes it; subagent B starts a write of the same
+    // file before A's post-tool hook comes.
+    clock.advance(10);
+    await pre();
+    writeFileSync(join(root, 'src', 'auth.ts'), 'export const a = 1;\n');
+    fake.state.rescanChanges = ['src/auth.ts'];
+    clock.advance(10);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look' }));
+    clock.advance(10);
+    await pre();
+    await post(true);
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'agent', sessionId: cc() });
+    // B's note is still there for B's own write.
+    clock.advance(10);
+    writeFileSync(join(root, 'src', 'auth.ts'), 'export const b = 1;\n');
+    fake.state.rescanChanges = ['src/auth.ts'];
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look again' }));
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'outside' });
+    await post(true);
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'agent', sessionId: cc() });
+  });
+
+  it('does not let a write that never finished stand in for a later one', async () => {
+    const { root, clock, mindly, fake, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const pre = () =>
+      mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'a') }),
+      );
+    // A write the user denied: its pre-tool hook ran, its post-tool hook never comes.
+    clock.advance(10);
+    await pre();
+    // The file is edited by hand; the agent then writes it with that same content.
+    writeFileSync(join(root, 'src', 'auth.ts'), 'export const hand = 1;\n');
+    clock.advance(10);
+    await pre();
+    fake.state.rescanChanges = ['src/auth.ts'];
+    clock.advance(10);
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look' }));
+    fake.state.alreadyTaken = true;
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'a') }),
+    );
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'outside', sessionId: null });
+  });
+
+  it('tells a write of a large file by its size and modification time', async () => {
+    const { root, clock, mindly, fake, pid, rows } = make();
+    const big = join(root, 'src', 'data.json');
+    writeFileSync(big, 'x'.repeat(9 * 1024 * 1024));
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const cc = () => mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!.id;
+    let writes = 0;
+    const write = async (content: string | null) => {
+      clock.advance(10);
+      await mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/data.json', 'y') }),
+      );
+      if (content !== null) {
+        writeFileSync(big, content.repeat(9 * 1024 * 1024));
+        // Writes in one tick of the file system's clock would look the same: one minute apart.
+        const at = new Date(Date.UTC(2030, 0, 1) + 60_000 * ++writes);
+        await utimes(big, at, at);
+      }
+      fake.state.rescanChanges = ['src/data.json'];
+      clock.advance(10);
+      await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look' }));
+      fake.state.alreadyTaken = true;
+      await mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/data.json', 'y') }),
+      );
+      return rows().at(-1);
+    };
+    expect(await write('y')).toMatchObject({ seq: 2, kind: 'agent', sessionId: cc() });
+    // A write that left it as it was takes nothing.
+    expect(await write(null)).toMatchObject({ seq: 3, kind: 'outside', sessionId: null });
+  });
+
+  it('matches each write of a session with its own pre-tool hook', async () => {
+    const { root, clock, mindly, fake, pid, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const pre = (path: string) =>
+      mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool(path, 'a') }),
+      );
+    const post = (path: string, taken: boolean) => {
+      fake.state.alreadyTaken = taken;
+      return mindly.hooks.handle(
+        event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool(path, 'a') }),
+      );
+    };
+    const rescan = async () => {
+      fake.state.rescanChanges = ['src/auth.ts'];
+      clock.advance(10);
+      await mindly.hooks.handle(event(root, 'codex', 'cx', 'prompt', { prompt: 'look' }));
+    };
+    const cc = () => mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!.id;
+    // Two subagents of one session: A writes auth.ts, a rescan takes it, B starts another write.
+    await pre('src/auth.ts');
+    writeFileSync(join(root, 'src', 'auth.ts'), 'export const a = 1;\n');
+    await rescan();
+    await pre('src/other.ts');
+    await post('src/auth.ts', true);
+    expect(rows().at(-1)).toMatchObject({ seq: 2, kind: 'agent', sessionId: cc() });
+    writeFileSync(join(root, 'src', 'other.ts'), 'export const b = 1;\n');
+    await post('src/other.ts', false);
+    expect(rows().at(-1)).toMatchObject({ seq: 3, kind: 'agent', paths: ['src/other.ts'] });
+    // A write whose post-tool hook never came (denied by the user) is forgotten after a while.
+    await pre('src/auth.ts');
+    clock.advance(6 * 60_000);
+    writeFileSync(join(root, 'src', 'auth.ts'), 'export const a = 2;\n');
+    await rescan();
+    await post('src/auth.ts', true);
+    expect(rows().at(-1)).toMatchObject({ seq: 4, kind: 'outside', sessionId: null });
+    // And when the session ends.
+    await pre('src/auth.ts');
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_end'));
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc()}`)).toBeNull();
+  });
+
+  it('drops the notes of writes in flight of a session ended as stale', async () => {
+    const { root, clock, mindly, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const cc = mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!.id;
+    // A write whose post-tool hook never comes, in a window killed without its end hook.
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'x') }),
+    );
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc}`)).not.toBeNull();
+    // A later session's start ends it as stale.
+    clock.advance(LIVE_WINDOW_MS * 4 + 1);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc2', 'session_start'));
+    expect(mindly.store.sessions.get(cc).status).toBe('ended');
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc}`)).toBeNull();
+  });
+
+  it('prunes the notes of writes in flight once they expired, however the session ended', async () => {
+    const { root, clock, mindly, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    await mindly.hooks.handle(event(root, 'codex', 'cx', 'session_start'));
+    const cc = mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!.id;
+    const cx = mindly.store.sessions.findByExternal(pid(), 'codex', 'cx')!.id;
+    const pre = (agent: string, id: string) =>
+      mindly.hooks.handle(
+        event(root, agent, id, 'pre_tool', { tool: writeTool('src/auth.ts', 'x') }),
+      );
+    await pre('claude-code', 'cc');
+    clock.advance(6 * 60_000);
+    await pre('codex', 'cx');
+    // An unrelated key with the same start is left alone.
+    mindly.store.kv.set('checkpoints:pruned:x', 1);
+    await mindly.checkpoints.pruneAll();
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc}`)).toBeNull();
+    expect(mindly.store.kv.get(`checkpoints:writing:${cx}`)).not.toBeNull();
+    expect(mindly.store.kv.get('checkpoints:pruned:x')).toBe(1);
+    // The daily prune of the hooks (no daemon) sweeps them too.
+    clock.advance(PRUNE_INTERVAL_MS);
+    expect(await mindly.checkpoints.pruneIfDue(pid())).not.toBeNull();
+    expect(mindly.store.kv.get(`checkpoints:writing:${cx}`)).toBeNull();
+  });
+
+  it('credits a rescan only with edits recorded in its working tree', async () => {
+    const { root, clock, mindly, fake, pid, rows } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const session = mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!;
+    const record = (worktree: string | null | undefined) => {
+      clock.advance(10);
+      mindly.store.fileChanges.record({
+        projectId: pid(),
+        sessionId: session.id,
+        path: 'src/auth.ts',
+        tool: 'Edit',
+        hunkHashes: [],
+        addedLines: 1,
+        removedLines: 0,
+        promptEventId: null,
+        ...(worktree === undefined ? {} : { worktree }),
+      });
+    };
+    const rescan = async () => {
+      fake.state.rescanChanges = ['src/auth.ts'];
+      clock.advance(10);
+      await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'prompt', { prompt: 'go' }));
+      return rows().at(-1)!;
+    };
+    // An edit recorded in another working tree, while the session now runs here.
+    record(`${root}-feature`);
+    expect(await rescan()).toMatchObject({ kind: 'outside', sessionId: null, gap: false });
+    // An edit recorded before its working tree was kept: it may be here, so nobody is blamed.
+    record(undefined);
+    expect(await rescan()).toMatchObject({ kind: 'outside', sessionId: null, gap: true });
+    record(null);
+    record(root);
+    expect(await rescan()).toMatchObject({ kind: 'agent', sessionId: session.id, gap: true });
+    record(root);
+    expect(await rescan()).toMatchObject({ kind: 'agent', sessionId: session.id, gap: false });
+  });
+
+  it('records the working tree of every agent edit', async () => {
+    const { root, mindly, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'x') }),
+    );
+    expect(mindly.store.fileChanges.forPath(pid(), 'src/auth.ts')[0]).toMatchObject({
+      worktree: root,
+    });
   });
 
   it('records nothing when checkpoints are disabled', async () => {
@@ -376,6 +716,36 @@ describe('checkpoints through hooks', () => {
     expect(rows()).toEqual([]);
   });
 
+  it('leaves a ref without a row alone until it is an hour old', async () => {
+    const { root, clock, mindly, fake, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    // A capture in another process has created the ref of step 2; its row is still to come.
+    const ref = `refs/mindly/steps/${basename(root)}/2`;
+    fake.refs.push({
+      worktreeId: basename(root),
+      seq: 2,
+      ref,
+      commit: 'commit-x',
+      createdAt: clock.now(),
+    });
+    clock.advance(60_000);
+    expect(await mindly.checkpoints.prune(pid())).toEqual({ refsDeleted: 0, rowsDeleted: 0 });
+    expect(fake.refs.map((r) => r.seq)).toEqual([1, 2]);
+    clock.advance(3_600_000);
+    expect(await mindly.checkpoints.prune(pid())).toEqual({ refsDeleted: 1, rowsDeleted: 0 });
+    expect(fake.deleted).toEqual([{ worktree: root, refs: [ref] }]);
+  });
+
+  it('leaves a ref without a row alone when its age cannot be told', async () => {
+    const { root, clock, mindly, fake, pid } = make();
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const ref = `refs/mindly/steps/${basename(root)}/2`;
+    fake.refs.push({ worktreeId: basename(root), seq: 2, ref, commit: 'commit-x', createdAt: 0 });
+    clock.advance(30 * DAY_MS);
+    await mindly.checkpoints.prune(pid());
+    expect(fake.refs.map((r) => r.ref)).toContain(ref);
+  });
+
   it('keeps only the newest maxPerWorktree checkpoints', async () => {
     const { root, mindly, pid, rows } = make((c) => {
       c.checkpoints.maxPerWorktree = 2;
@@ -421,7 +791,14 @@ describe('checkpoints through hooks', () => {
       event(root, 'claude-code', 'cc', 'post_tool', { tool: writeTool('src/auth.ts', 'x') }),
     );
     expect(await mindly.checkpoints.stats(pid())).toEqual({ count: 2, diskBytes: 4096 });
+    // A write whose post-tool hook never came: its note goes with the project.
+    await mindly.hooks.handle(
+      event(root, 'claude-code', 'cc', 'pre_tool', { tool: writeTool('src/auth.ts', 'y') }),
+    );
+    const cc = mindly.store.sessions.findByExternal(pid(), 'claude-code', 'cc')!.id;
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc}`)).not.toBeNull();
     expect(await mindly.checkpoints.forget(pid())).toEqual({ refsDeleted: 2, rowsDeleted: 2 });
+    expect(mindly.store.kv.get(`checkpoints:writing:${cc}`)).toBeNull();
     expect(fake.deleted).toHaveLength(1);
     expect(fake.deleted[0]!.refs).toHaveLength(2);
     expect(mindly.store.checkpoints.count(pid())).toBe(0);

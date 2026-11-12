@@ -157,6 +157,17 @@ function killTree(pid: number | undefined, signal: NodeJS.Signals): void {
   }
 }
 
+/** True while any process of the child's group is still running (POSIX only). */
+function groupAlive(pid: number | undefined): boolean {
+  if (pid === undefined || process.platform === 'win32') return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 function assertCwd(cwd: string): void {
   if (typeof cwd !== 'string' || cwd === '' || cwd.includes('\0') || !isAbsolute(cwd)) {
     throw new MindlyError('invalid_input', 'runner cwd must be an absolute path');
@@ -207,12 +218,21 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     let aborted = false;
     let settled = false;
     let spawnError: string | null = null;
+    let exited = false;
     const timers: NodeJS.Timeout[] = [];
+    // The SIGKILL that follows a SIGTERM. It is not in `timers`: it must outlive `finish` while
+    // anything in the group is still running.
+    let killTimer: NodeJS.Timeout | null = null;
 
     const finish = (exitCode: number | null, signal: NodeJS.Signals | null): void => {
       if (settled) return;
       settled = true;
       for (const t of timers) clearTimeout(t);
+      // The leader may exit on SIGTERM while a group member ignores it: keep the escalation.
+      if (killTimer && !groupAlive(child.pid)) {
+        clearTimeout(killTimer);
+        killTimer = null;
+      }
       options.signal?.removeEventListener('abort', onAbort);
       resolve({
         exitCode,
@@ -240,10 +260,18 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
 
     const terminate = (): void => {
       killTree(child.pid, 'SIGTERM');
-      timers.push(setTimeout(() => killTree(child.pid, 'SIGKILL'), killGraceMs));
+      killTimer = setTimeout(() => {
+        killTimer = null;
+        killTree(child.pid, 'SIGKILL');
+      }, killGraceMs);
     };
     function onAbort(): void {
       if (settled || aborted || timedOut) return;
+      // The program already ended: its result stands, only what it left running is stopped.
+      if (exited) {
+        killTree(child.pid, 'SIGKILL');
+        return;
+      }
       aborted = true;
       terminate();
     }
@@ -255,7 +283,9 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
 
     timers.push(
       setTimeout(() => {
-        if (settled || aborted) return;
+        // A program that ended in time did not time out, even if a background process it
+        // started still holds its output open.
+        if (settled || aborted || exited) return;
         timedOut = true;
         terminate();
       }, options.timeoutMs),
@@ -270,6 +300,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
       finish(null, null);
     });
     child.on('exit', () => {
+      exited = true;
       if (settled) return;
       // Grandchildren may hold the pipes open; reap the group and stop waiting shortly after.
       timers.push(

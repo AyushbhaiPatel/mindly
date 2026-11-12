@@ -1,6 +1,8 @@
 import { describeError } from '@mindly/core';
 import { needsYouCount, savesOf, selfHealingOf, standupService, trackOf } from '@mindly/engine';
 import type { JobContext } from './context.js';
+import { DECLARED_INTENT_PREFIX } from '@mindly/engine';
+import { HOOK_ANCESTRY_PREFIX, HOOK_ANCESTRY_TTL_MS } from '@mindly/core';
 
 const DAY_MS = 86_400_000;
 /** Sessions not seen for this long are marked ended. */
@@ -54,10 +56,21 @@ export function housekeepingTick(ctx: JobContext): HousekeepingResult {
     saves: { confirmed: 0, expired: 0, rejected: 0 },
   };
   for (const p of store.projects.list().slice(0, MAX_PROJECTS)) {
-    result.sessionsEnded += store.sessions.endStale(p.id, STALE_SESSION_MS).length;
+    const ended = store.sessions.endStale(p.id, STALE_SESSION_MS);
+    // They never had their end hook: their notes of writes in flight go with them.
+    for (const id of ended) ctx.mindly.checkpoints.forgetWrites(id);
+    result.sessionsEnded += ended.length;
   }
   result.saves = savesOf(ctx.mindly).sweep();
-  ctx.logger.info('housekeeping', { ...result });
+  // Which processes started the hooks of sessions that ended without saying so.
+  const ancestry = store.kv.deleteStale(HOOK_ANCESTRY_PREFIX, now - HOOK_ANCESTRY_TTL_MS, 1000);
+  // Marks of declared intents outlive the intents (which expire within the hour) by a day.
+  const marks = store.kv.deleteStale(DECLARED_INTENT_PREFIX, now - DAY_MS, 5000);
+  ctx.logger.info('housekeeping', {
+    ...result,
+    ancestryDeleted: ancestry,
+    intentMarksDeleted: marks,
+  });
   return result;
 }
 

@@ -1,5 +1,11 @@
 import { readFileSync, statSync } from 'node:fs';
-import { invalidInput, isDeniedPath, sanitizeLine, tryResolveInsideRoot } from '@mindly/core';
+import {
+  invalidInput,
+  isDeniedPath,
+  matchesAnyGlob,
+  sanitizeLine,
+  tryResolveInsideRoot,
+} from '@mindly/core';
 import {
   TRACK_MAX_ROWS,
   type PendingSurvival,
@@ -55,7 +61,7 @@ export const TRACK_EXPLAIN = {
   breakages:
     'Broke: the three above added up, out of the edits in the area. Agents are compared on this only, and only when the higher count comes from at least 2 sessions. Outcomes involving several sessions count for nobody; dismissed conflicts do not count.',
   ruleAttempts:
-    'Tried to break a rule: confirmed saves where an enforced rule blocked a write of this agent. A count of attempts, not damage, and not a rate: blocked writes are not edits.',
+    'Tried to break a rule: writes of this agent that an enforced rule blocked and that stayed blocked (the session did not write those files afterwards), once per session and rule. A count of attempts, not damage, and not a rate: blocked writes are not edits.',
   kept: 'Kept: of the lines this agent added or changed at least 7 days ago (tracked lines, whole lines of the file), how many are still in the file on the branch it worked on. Later rewrites by anyone count as not kept; deny-listed files and files over 512 KB are skipped.',
   usageLimits:
     'Usage limits: sessions of this agent seen in the window that hit a usage limit or handed work off because of one. Per agent, not per area.',
@@ -224,6 +230,14 @@ export interface TrackReport {
   survival: { pending: number; checkedNow: number };
   /** True when a query hit its row limit, so some data was left out. */
   truncated: boolean;
+  /**
+   * Set when the window reaches back further than the kept event log (events are deleted after
+   * `retention.eventsDays`, edits are not): the time the kept events start. Broken decisions,
+   * failed merge checks, blocked writes and usage limits before it are not in the counts, so
+   * those counts and the rates built on them are too low for the window.
+   * Equal to `window.to` when no event of the window is kept at all.
+   */
+  eventsSince: number | null;
 }
 
 /** An outcome pinned to one session of one agent, with the paths it is about. */
@@ -253,6 +267,7 @@ export interface TrackReportOptions {
   agent?: string | null;
   survivalPending?: number;
   checkedNow?: number;
+  eventsSince?: number | null;
 }
 
 interface Acc {
@@ -406,6 +421,7 @@ export function buildTrackReport(inputs: TrackInputs, o: TrackReportOptions): Tr
     ),
     survival: { pending: o.survivalPending ?? 0, checkedNow: o.checkedNow ?? 0 },
     truncated: inputs.truncated === true,
+    eventsSince: o.eventsSince ?? null,
   };
 }
 
@@ -601,6 +617,8 @@ interface Tree {
 export class TrackService {
   /** Where the all-projects survival scan stopped, so edits it cannot read never block others. */
   private cursor: { createdAt: number; id: string } | null = null;
+  /** Scopes of the rules looked up while one report is built. */
+  private readonly ruleScopes = new Map<string, readonly string[] | null>();
 
   constructor(private readonly k: Kernel) {}
 
@@ -646,6 +664,7 @@ export class TrackService {
             ? store.track.countPendingSurvival(projectId, survivedBefore, from)
             : 0,
         checkedNow: o.checkedNow ?? 0,
+        eventsSince: store.track.eventsStartAfter(projectId, from, now),
       },
     );
   }
@@ -760,21 +779,85 @@ export class TrackService {
     return out;
   }
 
-  /** Confirmed saves where an enforced rule blocked a write (the blocked session is the first). */
+  /**
+   * Writes an enforced rule blocked and that stayed blocked: one attempt per session and rule in
+   * the window, however often that session retried. It counts when the session did not write
+   * the protected files it was stopped on afterwards (an edit, or a shell command that touched
+   * one), whatever other sessions did. Decided per session from its own events: a save is
+   * recorded once per rule and files, so its outcome is the first session's. An attempt is about
+   * the protected files that session was stopped on.
+   */
   private ruleAttempts(
     projectId: string,
     from: number,
     agentKinds: ReadonlyMap<string, string>,
   ): TrackOutcome[] & { truncated?: boolean } {
     const out: TrackOutcome[] & { truncated?: boolean } = [];
-    const saves = this.k.store.track.confirmedSaves(projectId, 'rule_enforced', from);
-    out.truncated = saves.length >= TRACK_MAX_ROWS;
+    this.ruleScopes.clear();
+    const store = this.k.store.track;
+    const denials = store.ruleDenials(projectId, from);
+    const saves = store.confirmedSaves(projectId, 'rule_enforced', from);
+    out.truncated = saves.length >= TRACK_MAX_ROWS || denials.length >= TRACK_MAX_ROWS;
+    /** Per session and rule: when it was first stopped, and on which protected files. */
+    const attempts = new Map<
+      string,
+      { sessionId: string; ruleId: string; since: number; paths: Set<string> }
+    >();
+    for (const d of denials) {
+      const stopped = this.protectedPaths(d.ruleId, d.paths);
+      if (stopped.length === 0) continue;
+      const key = `${d.sessionId}\u0000${d.ruleId}`;
+      let a = attempts.get(key);
+      if (!a) {
+        attempts.set(
+          key,
+          (a = { sessionId: d.sessionId, ruleId: d.ruleId, since: d.at, paths: new Set() }),
+        );
+      }
+      a.since = Math.min(a.since, d.at);
+      for (const p of stopped) a.paths.add(p);
+    }
+    const counted: { sessionId: string; paths: string[] }[] = [];
+    for (const a of attempts.values()) {
+      const paths = [...a.paths];
+      if (!store.sessionWrote(a.sessionId, a.since, paths)) {
+        counted.push({ sessionId: a.sessionId, paths });
+      }
+    }
+    // A confirmed save of the window whose denial is no longer in the event log: the rule held
+    // for the session it was recorded for.
     for (const s of saves) {
-      const sessionId = s.sessionIds[0] ?? '';
-      const agent = agentKinds.get(sessionId);
-      if (agent) out.push({ agent, sessionId, paths: s.paths, measure: 'ruleAttempts' });
+      const sessionId = s.sessionIds[0];
+      if (!s.ruleId || !sessionId || attempts.has(`${sessionId}\u0000${s.ruleId}`)) continue;
+      counted.push({ sessionId, paths: [...this.protectedPaths(s.ruleId, s.paths)] });
+    }
+    for (const c of counted) {
+      const agent = agentKinds.get(c.sessionId);
+      if (agent)
+        out.push({ agent, sessionId: c.sessionId, paths: c.paths, measure: 'ruleAttempts' });
     }
     return out;
+  }
+
+  /**
+   * The paths of a rule save that the rule's scope covers. Saves used to hold every path of the
+   * denied call; the others were never protected and say nothing about where the rule was hit.
+   * All of them are kept when the rule can no longer be read.
+   */
+  private protectedPaths(ruleId: string, paths: readonly string[]): readonly string[] {
+    let scope = this.ruleScopes.get(ruleId);
+    if (scope === undefined) {
+      scope = this.k.store.memories.find(ruleId)?.scope.paths ?? null;
+      this.ruleScopes.set(ruleId, scope);
+    }
+    if (!scope || scope.length === 0) return paths;
+    const globs = scope;
+    try {
+      const covered = paths.filter((p) => matchesAnyGlob(p, globs));
+      return covered.length > 0 ? covered : paths;
+    } catch {
+      return paths;
+    }
   }
 
   /**

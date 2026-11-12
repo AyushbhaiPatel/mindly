@@ -1,4 +1,4 @@
-import { MindlyError, sanitizeForContext, sanitizeLine } from '@mindly/core';
+import { MindlyError, cutMiddle, sanitizeForContext, sanitizeLine } from '@mindly/core';
 import { styleFor, type CliIo, type Style } from './io.js';
 import { screenFor, type Screen } from './present/terminal.js';
 
@@ -66,6 +66,15 @@ export function outFor(io: CliIo): Out {
  */
 export function clean(text: string | null | undefined, max = 200): string {
   return text ? sanitizeLine(text, max) : '';
+}
+
+/**
+ * {@link clean} for an entry whose end says what it is (`<path>, whose git storage …`) or whose
+ * start does (`files in the … folder <path>`): over `max` characters, it is cut in the middle,
+ * so both ends stay readable.
+ */
+export function cleanEntry(text: string | null | undefined, max = 400): string {
+  return cutMiddle(clean(text, 100_000), max);
 }
 
 /** Multi-line variant of {@link clean}. */

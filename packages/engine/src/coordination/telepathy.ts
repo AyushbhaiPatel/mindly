@@ -35,8 +35,9 @@ export class TelepathyService {
   constructor(private readonly k: Kernel) {}
 
   send(input: SendInput): Delivery[] {
-    const title = sanitizeLine(redactText(input.title), 200);
-    const body = sanitizeForContext(redactText(input.body), 1500);
+    const redaction = { extraPatterns: this.k.config.redaction.extraPatterns };
+    const title = sanitizeLine(redactText(input.title, redaction), 200);
+    const body = sanitizeForContext(redactText(input.body, redaction), 1500);
     const base = {
       projectId: input.projectId,
       kind: input.kind,

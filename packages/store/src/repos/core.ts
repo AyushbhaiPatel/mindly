@@ -1,4 +1,5 @@
 import {
+  fingerprint,
   notFound,
   uuidv7,
   type Clock,
@@ -8,7 +9,18 @@ import {
   type SessionStatus,
   type MindlyEvent,
 } from '@mindly/core';
-import { json, limit, num, numOrNull, str, strOrNull, toJson, type Db, type Row } from '../db.js';
+import {
+  json,
+  limit,
+  num,
+  numOrNull,
+  str,
+  strOrNull,
+  toJson,
+  transaction,
+  type Db,
+  type Row,
+} from '../db.js';
 
 // ---------------------------------------------------------------------------------------------
 // Projects
@@ -209,6 +221,167 @@ export class SessionRepo {
 
   setLabel(id: string, label: string | null): void {
     this.db.prepare('UPDATE sessions SET label = ? WHERE id = ?').run(label, id);
+  }
+
+  /**
+   * Hands everything one session still has going to another session of the same agent: its
+   * unfinished tasks, its active intents and the messages addressed to it that are not
+   * acknowledged yet. Used when the two turn out to be one agent (an MCP server that started on
+   * a session of its own and then found the session its client's hooks made). Call it inside a
+   * transaction. Returns how many rows moved.
+   */
+  /**
+   * What a task or an intent looks like now, to tell later whether anyone changed it: its
+   * `updated_at` and a fingerprint of its content (two writes in one millisecond leave the time
+   * as it was). Null when there is no such row.
+   */
+  rowStamp(kind: 'task' | 'intent', id: string): { updatedAt: number; sig: string } | null {
+    if (kind === 'task') {
+      const r = this.db
+        .prepare(
+          `SELECT updated_at, title, description, status, owner_session_id, parent_id, plan, blockers
+             FROM tasks WHERE id = ?`,
+        )
+        .get(id) as Row | undefined;
+      if (!r) return null;
+      const sig = fingerprint(
+        'task',
+        str(r, 'title'),
+        str(r, 'description'),
+        str(r, 'status'),
+        strOrNull(r, 'owner_session_id') ?? '',
+        strOrNull(r, 'parent_id') ?? '',
+        str(r, 'plan'),
+        str(r, 'blockers'),
+      );
+      return { updatedAt: num(r, 'updated_at'), sig };
+    }
+    const r = this.db
+      .prepare(
+        `SELECT updated_at, summary, status, session_id, task_id, expires_at,
+                (SELECT count(*) FROM intent_targets t WHERE t.intent_id = intents.id) AS targets
+           FROM intents WHERE id = ?`,
+      )
+      .get(id) as Row | undefined;
+    if (!r) return null;
+    const sig = fingerprint(
+      'intent',
+      str(r, 'summary'),
+      str(r, 'status'),
+      str(r, 'session_id'),
+      strOrNull(r, 'task_id') ?? '',
+      String(num(r, 'expires_at')),
+      String(num(r, 'targets')),
+    );
+    return { updatedAt: num(r, 'updated_at'), sig };
+  }
+
+  /**
+   * Moves particular rows from one session to another, for an MCP server that spoke for a
+   * session it only guessed at and leaves it. Intents and tasks are given as they looked after
+   * that server last wrote them (`rowStamp`), and move only while they still belong to `fromId`
+   * and look just the same; messages move while `fromId` is still their sender. Anything else
+   * stays where it is: when it is not clear whose a row is, it is left. Current tasks are not
+   * touched. Returns the ids that moved.
+   */
+  moveRows(
+    fromId: string,
+    toId: string,
+    rows: {
+      intents: readonly { id: string; updatedAt: number; sig: string }[];
+      tasks: readonly { id: string; updatedAt: number; sig: string }[];
+      messages: readonly string[];
+      /**
+       * Handoffs re-filed in the name of `toId`, so it cannot pick them up itself: pending ones,
+       * and ones `toId` itself already picked up (they are put back as pending).
+       */
+      handoffs?: readonly string[];
+    },
+  ): { intents: string[]; tasks: string[]; messages: string[]; handoffs: string[] } {
+    const out = {
+      intents: [] as string[],
+      tasks: [] as string[],
+      messages: [] as string[],
+      handoffs: [] as string[],
+    };
+    if (fromId === toId) return out;
+    const now = this.clock.now();
+    transaction(this.db, () => {
+      const unchanged = (
+        kind: 'task' | 'intent',
+        r: { id: string; updatedAt: number; sig: string },
+      ): boolean => {
+        const stamp = this.rowStamp(kind, r.id);
+        return stamp !== null && stamp.updatedAt === r.updatedAt && stamp.sig === r.sig;
+      };
+      const intent = this.db.prepare(
+        `UPDATE intents SET session_id = ?, updated_at = ?
+           WHERE id = ? AND session_id = ? AND status = 'active'`,
+      );
+      for (const r of rows.intents.slice(0, 500)) {
+        if (!unchanged('intent', r)) continue;
+        if (Number(intent.run(toId, now, r.id, fromId).changes) > 0) out.intents.push(r.id);
+      }
+      const task = this.db.prepare(
+        `UPDATE tasks SET owner_session_id = ?, updated_at = ?
+           WHERE id = ? AND owner_session_id = ? AND status IN ('open', 'in_progress', 'blocked')`,
+      );
+      for (const r of rows.tasks.slice(0, 500)) {
+        if (!unchanged('task', r)) continue;
+        if (Number(task.run(toId, now, r.id, fromId).changes) > 0) out.tasks.push(r.id);
+      }
+      const message = this.db.prepare(
+        'UPDATE deliveries SET source_session_id = ? WHERE id = ? AND source_session_id = ?',
+      );
+      for (const id of rows.messages.slice(0, 500)) {
+        if (Number(message.run(toId, id, fromId).changes) > 0) out.messages.push(id);
+      }
+      const handoff = this.db.prepare(
+        `UPDATE handoffs SET from_session_id = ?, status = 'pending',
+             claimed_by_session_id = NULL, claimed_at = NULL
+           WHERE id = ? AND from_session_id = ?
+             AND (status = 'pending' OR (status = 'claimed' AND claimed_by_session_id = ?))`,
+      );
+      for (const id of (rows.handoffs ?? []).slice(0, 500)) {
+        if (Number(handoff.run(toId, id, fromId, toId).changes) > 0) out.handoffs.push(id);
+      }
+    });
+    return out;
+  }
+
+  moveWork(fromId: string, toId: string): number {
+    if (fromId === toId) return 0;
+    const now = this.clock.now();
+    let moved = 0;
+    moved += Number(
+      this.db
+        .prepare(
+          `UPDATE tasks SET owner_session_id = ?, updated_at = ?
+             WHERE owner_session_id = ? AND status IN ('open', 'in_progress', 'blocked')`,
+        )
+        .run(toId, now, fromId).changes,
+    );
+    moved += Number(
+      this.db
+        .prepare(
+          `UPDATE intents SET session_id = ?, updated_at = ? WHERE session_id = ? AND status = 'active'`,
+        )
+        .run(toId, now, fromId).changes,
+    );
+    moved += Number(
+      this.db
+        .prepare(
+          `UPDATE OR IGNORE deliveries SET target_session_id = ?
+             WHERE target_session_id = ? AND status IN ('pending', 'delivered')`,
+        )
+        .run(toId, fromId).changes,
+    );
+    const from = this.find(fromId);
+    const to = this.find(toId);
+    if (from?.currentTaskId && to && !to.currentTaskId) {
+      this.setCurrentTask(toId, from.currentTaskId);
+    }
+    return moved;
   }
 
   /** Marks sessions not seen for `staleMs` as ended. Returns affected ids. */
