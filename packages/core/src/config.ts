@@ -17,17 +17,50 @@ import { sha256 } from './text.js';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 
+/** True for `localhost`, `127.0.0.0/8` and `::1`. Hostnames are not resolved. */
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '::1') return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+/**
+ * Why a notification channel URL cannot be used, or null. The same rules are enforced again when
+ * a notification is sent; checking here means a URL that could never work is refused when it is
+ * set, with the reason, and not only skipped later. The message never repeats the URL.
+ */
+export function channelUrlProblem(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return 'url is not valid';
+  }
+  if (url.username || url.password) return 'url must not contain credentials';
+  if (url.protocol === 'https:') return null;
+  if (url.protocol === 'http:' && isLoopbackHost(url.hostname)) return null;
+  return 'url must use https (http only for localhost)';
+}
+
+const ChannelUrl = z.url().superRefine((raw, ctx) => {
+  const problem = channelUrlProblem(raw);
+  if (problem) ctx.addIssue({ code: 'custom', message: problem });
+});
+
 const NotifyChannelSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('desktop') }),
   z.object({
     type: z.literal('ntfy'),
-    /** Base URL of an ntfy server (self-hosted or ntfy.sh). Must be https unless localhost. */
-    url: z.url(),
+    /**
+     * Base URL of an ntfy server (self-hosted or ntfy.sh). Must be https unless localhost. A
+     * query string is kept (`?auth=...` carries an access token).
+     */
+    url: ChannelUrl,
     topic: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/, 'topic must be 8-64 url-safe characters'),
   }),
   z.object({
     type: z.literal('webhook'),
-    url: z.url(),
+    url: ChannelUrl,
   }),
 ]);
 export type NotifyChannel = z.infer<typeof NotifyChannelSchema>;
@@ -40,6 +73,17 @@ export const NOTIFY_TRIGGERS = [
   'review_ready',
   'standup',
 ] as const;
+
+/**
+ * Sent by default once a channel is configured: an agent out of usage, a critical conflict, a
+ * check that started failing. (`agent_blocked` is accepted for older config files; nothing
+ * sends it.)
+ */
+const DEFAULT_NOTIFY_TRIGGERS: (typeof NOTIFY_TRIGGERS)[number][] = [
+  'rate_limited',
+  'conflict_critical',
+  'check_failed',
+];
 
 export const UserConfigSchema = z.object({
   context: z
@@ -82,7 +126,11 @@ export const UserConfigSchema = z.object({
   notify: z
     .object({
       channels: z.array(NotifyChannelSchema).max(10).default([]),
-      triggers: z.array(z.enum(NOTIFY_TRIGGERS)).default(['agent_blocked', 'rate_limited']),
+      /**
+       * What is sent once a channel is configured. The scheduled standup (`standup.time`) is
+       * sent whatever is listed here: setting its time is asking for it.
+       */
+      triggers: z.array(z.enum(NOTIFY_TRIGGERS)).default(DEFAULT_NOTIFY_TRIGGERS),
     })
     .prefault({}),
   failover: z
@@ -197,9 +245,79 @@ function readBoundedJson(path: string): unknown {
   }
 }
 
+/**
+ * The notification channels of a raw config whose URL cannot be used, with the reason. A config
+ * file written before URLs were checked may hold one; it never worked.
+ */
+function unusableChannels(raw: unknown): { index: number; type: string; problem: string }[] {
+  const channels = (raw as { notify?: { channels?: unknown } } | null)?.notify?.channels;
+  if (!Array.isArray(channels)) return [];
+  const out: { index: number; type: string; problem: string }[] = [];
+  channels.forEach((c: unknown, index) => {
+    const ch = c as { type?: unknown; url?: unknown } | null;
+    if (typeof ch?.url !== 'string' || (ch.type !== 'webhook' && ch.type !== 'ntfy')) return;
+    const problem = channelUrlProblem(ch.url);
+    if (problem) out.push({ index, type: ch.type, problem });
+  });
+  return out;
+}
+
+/** A notification channel in the config file that is left out when it is read. */
+export interface UnusableChannel {
+  /** Its position in `notify.channels` as written in the file. */
+  index: number;
+  type: string;
+  problem: string;
+}
+
+/** The channels in the config file at `path` that are left out when it is read, with the reason. */
+export function unusableNotifyChannels(path: string): UnusableChannel[] {
+  if (!existsSync(path)) return [];
+  try {
+    return unusableChannels(readBoundedJson(path));
+  } catch {
+    return [];
+  }
+}
+
+/** The channels of a raw config object that are left out when it is read, with the reason. */
+export function unusableChannelsIn(raw: unknown): UnusableChannel[] {
+  return unusableChannels(raw);
+}
+
+/**
+ * Validates a raw config file after `key` was set in it. A notification channel that cannot be
+ * used and that this change did not touch is ignored, as when the file is read: it may come from
+ * a version that did not check channel URLs, and must not block every other setting. A change to
+ * the channels themselves is held to the full rules.
+ */
+export function parseUserConfigUpdate(
+  raw: Record<string, unknown>,
+  key: string,
+): ReturnType<typeof UserConfigSchema.safeParse> {
+  const touchesChannels =
+    key === 'notify' || key === 'notify.channels' || key.startsWith('notify.channels.');
+  return UserConfigSchema.safeParse(touchesChannels ? raw : withoutUnusableChannels(raw));
+}
+
+function withoutUnusableChannels(raw: unknown): unknown {
+  const unusable = new Set(unusableChannels(raw).map((c) => c.index));
+  if (unusable.size === 0) return raw;
+  const src = raw as { notify: { channels: unknown[] } };
+  return {
+    ...src,
+    notify: { ...src.notify, channels: src.notify.channels.filter((_, i) => !unusable.has(i)) },
+  };
+}
+
+/**
+ * Reads the user config. A notification channel whose URL cannot be used is left out, so a file
+ * written before URLs were checked does not stop every command; `mindly config set` refuses such
+ * a URL and `mindly notify test` names the channels that were left out.
+ */
 export function loadUserConfig(path: string): UserConfig {
   if (!existsSync(path)) return defaultUserConfig();
-  const parsed = UserConfigSchema.safeParse(readBoundedJson(path));
+  const parsed = UserConfigSchema.safeParse(withoutUnusableChannels(readBoundedJson(path)));
   if (!parsed.success) {
     throw new MindlyError('invalid_input', `invalid config: ${z.prettifyError(parsed.error)}`);
   }

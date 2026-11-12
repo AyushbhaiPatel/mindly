@@ -1,0 +1,3338 @@
+{
+  "about": [
+    "Command lines for the redaction tests.",
+    "`commands`: each holds the secret S3CR3T; `parentRedacted` says whether redaction as of",
+    "b9305ce removed it, and `mustRedact` whether it must be removed now. `knownMiss` marks",
+    "a secret b9305ce removed that the line rule does not (a value on the next line).",
+    "`exact`: generated command lines in which only the secret Zq9S3CR3Tw7 may change.",
+    "`benign`: lines with no secret. `parent` is what b9305ce made of one it changed, and",
+    "`expected` what it must become now: a line that names a client before another",
+    "program's `-u x:y` has that value redacted too, the documented trade-off."
+  ],
+  "commands": [
+    {
+      "text": "curl -u admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Run `curl -u admin:S3CR3T https://x` to test.",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "TOKEN=$(curl -su admin:S3CR3T https://x/token)",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "TOKEN=`curl -su admin:S3CR3T https://x/token`",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "echo \"$(curl -u admin:S3CR3T https://x)\"",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl https://x \\\n  -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl https://x ^\n  -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl https://x ^\r\n  -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl.exe https://x `\n  -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl https://x^\n-u admin:S3CR3T",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl https://x \\\\\r\n-u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl https://x \\\\\n-u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl https://x\t-u\tadmin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "héllo 😀😀 wörld; curl -u admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "😀 curl -H \"Authorization: Bearer S3CR3T\" https://x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "😀 curl -H 'Authorization: Bearer S3CR3T' https://x 😀",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "sh -c \"curl -u admin:S3CR3T https://x\"",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "sh -c 'ssh host \"curl -u admin:S3CR3T https://x\"'",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "bash -c \"sh -c 'ssh h \\\"curl -u admin:S3CR3T x\\\"'\"",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "ssh host 'bash -c \"sh -c \\\"curl -u admin:S3CR3T x\\\"\"'",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "env FOO=1 BAR=\"a b\" curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "xargs -n1 curl -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "watch -n 5 curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "nohup curl -u admin:S3CR3T x &",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "cd /tmp; curl -u admin:S3CR3T x; ls",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x && docker run -u 1000:1000 img",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "docker run -u 1000:1000 img",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "ps -u root:wheel",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "sort -u a:b",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "git log -u",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x | sort -u",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "rsync -avu user@host:/data /tmp",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x; rsync -avu user@host:/data /tmp",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x && rsync -avu user@host:/data /tmp",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -o f x && ionice -c3 rsync -avu user@host:/data /tmp",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Use curl or docker run -u 1000:1000 img",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u 'admin:S3CR3T' x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u \"admin:S3 CR3T\" x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:\"S3CR3T\" x",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T\\ more x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl --user=admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -uadmin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -sSuadmin:S3CR3T x",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u :S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u S3CR3T: x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl --proxy-user admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -U admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl --cert c.pem:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl --pass S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl --oauth2-bearer S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl --oauth2-bearer=S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -H \"Authorization: Basic S3CR3T\" x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -H Authorization:\"Bearer S3CR3T\" x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl --header \"Proxy-Authorization: Bearer S3CR3T\" x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl --header=\"Authorization: Bearer S3CR3T\" x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl \"-HAuthorization: Bearer S3CR3T\" x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "http -a admin:S3CR3T example.org",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "http -A bearer -a S3CR3T example.org",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "xh --bearer S3CR3T example.org",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "xh -va admin:S3CR3T example.org",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "http example.org Authorization:S3CR3T",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "http example.org \"Authorization: Bearer S3CR3T\"",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "sudo -u deploy http -a admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "time http --auth=admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "$CURL -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "${CURL_BIN} -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "$HTTP_CLIENT -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "wget --user=admin --password=S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "wget --http-password=S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "aria2c --http-user=a --http-passwd=S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "lftp -u admin,S3CR3T ftp.example.com",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "ab -A admin:S3CR3T http://x/",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -d '{\"a\":1}' -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "cat <<EOF\ncurl -u admin:S3CR3T x\nEOF",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "cat <<'EOF' | sh\ncurl https://x\n  -u admin:S3CR3T\nEOF",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "- curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "1. Run curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "> curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "$ curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "PS C:\\> curl.exe -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "C:\\Users\\me>curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x -u admin:S3CR3T#comment",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "(curl -u admin:S3CR3T x)",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "{ curl -u admin:S3CR3T x; }",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "if true; then curl -u admin:S3CR3T x; fi",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "for i in 1 2; do curl -u admin:S3CR3T x; done",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T x>out.txt",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T>out.txt x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T 2>&1",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T&",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T&&ls",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T|jq .",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T;ls",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "\"curl\" -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "'curl' -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "\\curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "c\\url -u admin:S3CR3T x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "command curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "exec curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "eval curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "eval \"curl -u admin:S3CR3T x\"",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "eval 'curl -u admin:S3CR3T x'",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "CURL_OPTS=\"--user admin:S3CR3T\" ./run.sh",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "alias c='curl -u admin:S3CR3T'",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "const cmd = `curl -u admin:S3CR3T ${url}`;",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "subprocess.run([\"curl\", \"-u\", \"admin:S3CR3T\", url])",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "exec.Command(\"curl\", \"-u\", \"admin:S3CR3T\", url)",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "os.system(\"curl -u admin:S3CR3T \" + url)",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "\"command\": \"curl -u admin:S3CR3T https://x\"",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "{\"cmd\":\"curl -u admin:S3CR3T https://x\",\"x\":1}",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "{\"cmd\":\"curl -H \\\"Authorization: Bearer S3CR3T\\\" https://x\"}",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "RUN curl -u admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "- run: curl -u admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "script: [\"curl -u admin:S3CR3T https://x\"]\n",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "{\"command\":\"ssh prod \\\"sh -c 'curl -u admin:S3CR3T x'\\\"\"}",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "{\"tool_input\":{\"command\":\"kubectl exec api -- sh -c \\\"curl -u admin:S3CR3T http://x\\\"\"}}",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "{\"tool_input\":{\"command\":\"docker exec web bash -c \\\"curl -H 'Authorization: Bearer S3CR3T' http://x\\\"\"}}",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "\"{\\\"command\\\":\\\"curl -u admin:S3CR3T x\\\"}\"",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "{\"msg\":\"{\\\"command\\\":\\\"sh -c 'curl -u admin:S3CR3T x'\\\"}\"}",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "ssh host \"sudo -u app bash -c 'curl -u admin:S3CR3T x'\"",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Run `curl -u admin:S3CR3T x`",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "X=$(curl -u admin:S3CR3T x)",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "X=`curl -u admin:S3CR3T x`",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "echo $(curl -u admin:S3CR3T)",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "(curl -u admin:S3CR3T)",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "I tried \"curl -u admin:S3CR3T x\" and it failed",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Don't run curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "It's broken: curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "it's what's broken, they're saying: curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "The user's token didn't work, so it's \"curl -u admin:S3CR3T x\" now",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T x # it's fine",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "echo 'start; curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -X POST -d \"{\\\"a\\\": \\\"b\\\"}\" -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -d 'it'\"'\"'s' -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -d \"$(cat f)\" -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -d \"$(echo \"a b\")\" -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -d \"${A:-\"x y\"}\" -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -H \"X: a\" -H \"Authorization: Bearer S3CR3T\" -H \"Y: b\" x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -H \"Authorization: Bearer $TOKEN\" x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -H 'Authorization: token S3CR3T' x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -H \"authorization:S3CR3T\" x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -H \"Authorization:   Bearer   S3CR3T\" x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -H \"Authorization: Bearer S3CR3T, X\" x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -H @headers.txt x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T --data-binary @- x <<EOF\nbody\nEOF",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x \\\n  -H 'Content-Type: json' \\\n  -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x \\\n  # comment\n  -u admin:S3CR3T",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x\n\n  -u admin:S3CR3T",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "    curl x \\\n      -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x \\\n-d @f \\\n-u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x \\\\ \n  -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x\r\n  -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x \\\\\r\n  -u admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u\r\nadmin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true,
+      "knownMiss": true
+    },
+    {
+      "text": "sudo -E curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "sudo -u root -- curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "timeout 30 curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "env -S 'curl -u admin:S3CR3T' x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "nice -n 10 ionice -c3 curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "xargs -I{} curl -u admin:S3CR3T {}",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "find . | xargs -n1 -P4 curl -u admin:S3CR3T -T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "parallel curl -u admin:S3CR3T ::: a b",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "watch -n1 'curl -u admin:S3CR3T x'",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -K - -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -vu admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -#u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -ku admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -su \"admin:S3CR3T\" x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -su'admin:S3CR3T' x",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin@example.com:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin@example.com:/S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -su admin@example.com:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -su admin:/S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x; ssh h; curl -su admin@example.com:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -d 'ssh' -su admin@example.com:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl --proto-default sftp -su admin@example.com:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -o /tmp/scp -su admin@example.com:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl x -H \"ssh: 1\" -su admin@ex.com:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl https://ssh.example.com -su admin@ex.com:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -L rsync -su admin@ex.com:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -F file=@/tmp/scp -su admin@ex.com:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "echo rsync && curl -su admin@ex.com:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl --url ssh -su admin@ex.com:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl ssh -su admin@ex.com:S3CR3T",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "docker run --rm curlimages/curl -u admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "docker run -u 1000:1000 -v /x:/x curlimages/curl x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "docker run -u 1000:1000 alpine sh -c \"apk add curl\"",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "docker run -u 1000:1000 alpine wget x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "docker run -u 1000:1000 alpine sh -c \"wget x && echo -u a:b\"",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Install curl, then run docker run -u 1000:1000 img.",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "We use curl and ps -u root:wheel to check.",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "apt install curl; useradd -u 1001:1001 app",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "apt-get install -y curl wget && chown -R app:app /srv",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -O x && tar -xzf a.tgz && install -u root:root a /usr/bin",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "pip install httpie && sort -u a:b",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "http :8080/api -a admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "http POST :8080 Authorization:\"Bearer S3CR3T\"",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "http --auth-type=bearer --auth S3CR3T x",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "http -A jwt -a S3CR3T x",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "xh -A bearer -a S3CR3T x",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "xh --bearer=S3CR3T x",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "https -a admin:S3CR3T x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "python -m http.server -a 0.0.0.0:8000",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "ls -a /etc/http: -a x:y",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Visit http and run ls -a a:b",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "The http request in curl x failed; tar -a foo:bar",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "php -S localhost:8000 http -a x:y\n",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Here's the command: curl -d 'a b' -u admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Here's the command: curl -d 'a b' -H \"Authorization: Bearer S3CR3T\" https://x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "I've tried curl -X POST -d 'x=1' -u admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Don't forget: curl -H 'Accept: json' -u admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "That's it: curl -H 'Accept: json' --user admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "it's failing: http POST x 'a=b' -a admin:S3CR3T",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "It's `curl -d 'a' -u admin:S3CR3T x`",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Here's the fix: curl -u 'admin:S3CR3T' https://x and then it's done",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "I couldn't reach it; curl -u admin:S3CR3T 'x'",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "user's note: curl -d '{\"a\": 1}' -u admin:S3CR3T https://x\n",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "it's sh -c \"curl -u \\\"admin:S3CR3T\\\" -H \\\"X: y\\\" https://x\"",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "Here's what failed: sh -c \"curl -u \\\"admin:S3CR3T\\\" https://x\" and the log",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "It's ssh prod \"curl -u 'admin:S3CR3T' https://x\" that fails, see the log above",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "it's sh -c 'curl -o out -u '\\''admin:S3CR3T'\\'' -o out https://x/é'",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "Here's the job: ssh h 'curl -u \"admin:S3CR3T\" https://x' && echo ok; echo done\n",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Run `curl -u admin:S3CR3T` first.",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "Run `curl -su admin:S3CR3T`, then check.",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "| `curl -u admin:S3CR3T` | works |",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -sH \"Authorization: S3CR3TS3CR3T\" https://x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -sSH 'Authorization: Digest S3CR3T' https://x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -H \"Authorization: S3CR3TS3CR3T\" https://x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "\"$(command -v curl)\" -u admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "\"$(which curl)\" -u admin:S3CR3T https://x",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -X POST https://x \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"name\": \"x\"\n  }' \\\n  -u admin:S3CR3T",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -d '{\n  \"a\": 1\n}' -u admin:S3CR3T https://x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "curl -d \"line1\nline2\" -u admin:S3CR3T https://x",
+      "parentRedacted": false,
+      "mustRedact": false
+    },
+    {
+      "text": "ab -A admin:S3CR3T -n 10 http://x/",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "lftp -u admin,S3CR3T sftp://x",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "lftp -e 'mirror' -u admin,S3CR3T x",
+      "parentRedacted": false,
+      "mustRedact": true
+    },
+    {
+      "text": "curl -u admin:S3CR3T https://x`n",
+      "parentRedacted": true,
+      "mustRedact": true
+    },
+    {
+      "text": "curl https://x -H \"Authorization: Bearer\" -d a\n",
+      "parentRedacted": true,
+      "mustRedact": true
+    }
+  ],
+  "exact": [
+    {
+      "text": "日本語の説明: {\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl  -u 'admin:Zq9S3CR3Tw7'  https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c '{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -su admin:Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c 'A=\"p q\" curl -o out.txt -su admin:Zq9S3CR3Tw7 -d '\\''x \"y\" z'\\'' https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c 'time curl -H \\\"X-Héllo: 😀\\\" -u \\\"admin:Zq9S3CR3Tw7\\\"  https://x/é'\"} 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\nsh -c 'sh -c \"echo \\\\\\$x && curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"'\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'sh -c \"echo '\\''x y'\\''; curl  -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d '\\''x \\\"y\\\" z'\\'' https://x/é\"'",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é'\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"echo 'x y'; curl -o out.txt -u admin:Zq9S3CR3Tw7  https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c '{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d '\\''x \\\"y\\\" z'\\'' --user=admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"}' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c 'sh -c \"sudo -u me curl -o out.txt -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c \"sh -c \\\"echo \\\\\\\\\\\\\\$x && curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" --user admin:Zq9S3CR3Tw7 -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c \\\"echo \\\\\\\\\\\\$x && curl -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -H \\\"X-Héllo: 😀\\\" -u admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c 'curl -d \"\\$HOME \\\\ end\" -u admin:Zq9S3CR3Tw7  https://x/é' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"{\\\"command\\\":\\\"curl -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -su admin:Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c \"echo \\\\\\$x && curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" --user=admin:Zq9S3CR3Tw7 -d 'x \\\"y\\\" z' https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"sh -c 'env B=1 curl -d '\\\\''x \\\"y\\\" z'\\\\'' -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é'\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'sh -c \"time curl -d '\\''x \\\"y\\\" z'\\'' --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\"'",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c 'sudo -u me curl -H \"X-Héllo: 😀\" -su admin:Zq9S3CR3Tw7 -d \"a b \\\"c\\\"\" https://x/é'",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'sudo -u me curl -d \"\\$HOME \\\\ end\" -u admin:Zq9S3CR3Tw7 -d \"a b \\\"c\\\"\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'echo '\\''x y'\\''; curl -d '\\''x \"y\" z'\\'' -u '\\''admin:Zq9S3CR3Tw7'\\'' -d \"a b \\\"c\\\"\" https://x/é' # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "😀😀 {\"command\":\"sh -c 'sudo -u me curl  --user=admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"{\\\"command\\\":\\\"echo \\\\\\\\$x && curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"}\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'sudo -u me curl -o out.txt --oauth2-bearer Zq9S3CR3Tw7 -d \"\\$HOME \\\\ end\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "env B=1 curl  --user admin:Zq9S3CR3Tw7  https://x/é\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c \"sudo -u me curl -d 'x \\\"y\\\" z' --user admin:Zq9S3CR3Tw7 -o out.txt https://x/é\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"sh -c \\\"echo 'x y'; curl  --user=admin:Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; A=\"p q\" curl -H \"X-Héllo: 😀\" -u \"admin:Zq9S3CR3Tw7\" -d 'x \"y\" z' https://x/é\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"env B=1 curl -o out.txt --user admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"sh -c 'echo \\\\$x && curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é'\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"{\\\"command\\\":\\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -o out.txt -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"}\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c '{\"command\":\"sudo -u me curl  -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"echo 'x y'; curl -H \\\"X-Héllo: 😀\\\" --user admin:Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"curl -H \\\"X-Héllo: 😀\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -H \\\"X-Héllo: 😀\\\" https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'env B=1 curl -o out.txt --oauth2-bearer Zq9S3CR3Tw7  https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c \"{\\\"command\\\":\\\"sudo -u me curl -d \\\\\\\"\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -H 'Authorization: Bearer Zq9S3CR3Tw7' -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c '{\"command\":\"time curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}'",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"sh -c \\\"sudo -u me curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\"  https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c \"sh -c \\\"curl -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"\"\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "\tsh -c 'echo '\\''x y'\\''; curl -d \"\\$HOME \\\\ end\" --oauth2-bearer Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'sh -c \"echo '\\''x y'\\''; curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -o out.txt https://x/é\"'\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "héllo wörld sh -c 'sh -c \"echo '\\''x y'\\''; curl  -u '\\''admin:Zq9S3CR3Tw7'\\'' -o out.txt https://x/é\"' 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "$ sh -c \"echo \\\\\\$x && curl -H \\\"X-Héllo: 😀\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d 'x \\\"y\\\" z' https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c 'echo '\\''x y'\\''; curl -d \"a b \\\"c\\\"\" --oauth2-bearer Zq9S3CR3Tw7 -d \"\\$HOME \\\\ end\" https://x/é'",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's {\"command\":\"A=\\\"p q\\\" curl -d 'x \\\"y\\\" z' -u \\\"admin:Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"} # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"echo \\\\$x && curl -d 'x \\\"y\\\" z' -u \\\"admin:Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"}\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\n{\"command\":\"{\\\"command\\\":\\\"echo 'x y'; curl -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\\\"}\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"{\\\"command\\\":\\\"env B=1 curl -d 'x \\\\\\\"y\\\\\\\" z' -su admin:Zq9S3CR3Tw7  https://x/é\\\"}\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"env B=1 curl -d 'x \\\"y\\\" z' -u admin:Zq9S3CR3Tw7 -d 'x \\\"y\\\" z' https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"sh -c 'env B=1 curl  -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é'\"}",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -o out.txt -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -o out.txt https://x/é\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tcurl -H \"X-Héllo: 😀\" -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \"\\$HOME \\\\ end\" https://x/é\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"sh -c 'A=\\\"p q\\\" curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -su admin:Zq9S3CR3Tw7  https://x/é'\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"echo 'x y'; curl -d 'x \\\"y\\\" z' -u \\\"admin:Zq9S3CR3Tw7\\\" -d 'x \\\"y\\\" z' https://x/é\" 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "\"quoted\" sh -c 'A=\"p q\" curl -o out.txt --user=admin:Zq9S3CR3Tw7 -d '\\''x \"y\" z'\\'' https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'sh -c '\\''echo '\\''\\'\\'''\\''x y'\\''\\'\\'''\\''; curl  --oauth2-bearer Zq9S3CR3Tw7  https://x/é'\\'''",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nenv B=1 curl  -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c \"sh -c 'curl  --user=admin:Zq9S3CR3Tw7  https://x/é'\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c \"sh -c \\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl  -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" --user admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c \"{\\\"command\\\":\\\"echo 'x y'; curl -o out.txt -su admin:Zq9S3CR3Tw7 -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\"} # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "日本語の説明: curl -d 'x \"y\" z' -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \"\\$HOME \\\\ end\" https://x/é 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c \"echo 'x y'; curl  -u 'admin:Zq9S3CR3Tw7' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"sh -c \\\"sudo -u me curl  -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\"\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "sh -c 'sh -c '\\''time curl -o out.txt -u admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é'\\''' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'sh -c \"curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -su admin:Zq9S3CR3Tw7 -d '\\''x \\\"y\\\" z'\\'' https://x/é\"'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'sh -c \"time curl -o out.txt -u admin:Zq9S3CR3Tw7  https://x/é\"' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c \"sh -c \\\"echo \\\\\\\\\\\\\\$x && curl  -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c \"sh -c 'curl -o out.txt -su admin:Zq9S3CR3Tw7 -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -o out.txt -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c 'A=\"p q\" curl  -u \"admin:Zq9S3CR3Tw7\" -H \"X-Héllo: 😀\" https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c 'sh -c '\\''sudo -u me curl -d '\\''\\'\\'''\\''x \"y\" z'\\''\\'\\'''\\'' --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é'\\'''",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c \"sudo -u me curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d 'x \\\"y\\\" z' https://x/é\" # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "a ; sh -c \"sh -c \\\"sudo -u me curl -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -u admin:Zq9S3CR3Tw7 -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'sh -c '\\''echo \"a \\\"b\\\" c\"; curl  --user admin:Zq9S3CR3Tw7 -d \"a b \\\"c\\\"\" https://x/é'\\''' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"echo 'x y'; curl  -u 'admin:Zq9S3CR3Tw7'  https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c \"time curl -o out.txt -H 'Authorization: Bearer Zq9S3CR3Tw7' -d 'x \\\"y\\\" z' https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"sh -c \\\"env B=1 curl  -u admin:Zq9S3CR3Tw7  https://x/é\\\"\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c \"sh -c \\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7  https://x/é\\\"\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'sh -c \"echo \\\\\\$x && curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" --oauth2-bearer Zq9S3CR3Tw7  https://x/é\"' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"sudo -u me curl -o out.txt -u \\\"admin:Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"} 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "héllo wörld sh -c \"curl -o out.txt -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"{\\\"command\\\":\\\"curl  -u 'admin:Zq9S3CR3Tw7' -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"time curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\"  https://x/é\"} # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "\"quoted\" sh -c \"echo \\\\\\$x && curl -H \\\"X-Héllo: 😀\\\" -H 'Authorization: Bearer Zq9S3CR3Tw7' -o out.txt https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; env B=1 curl -H \"X-Héllo: 😀\" --user=admin:Zq9S3CR3Tw7 -d 'x \"y\" z' https://x/é # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'sh -c '\\''A=\"p q\" curl -d \"a b \\\"c\\\"\" --user=admin:Zq9S3CR3Tw7 -o out.txt https://x/é'\\''' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c \"sh -c \\\"curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"echo \\\\$x && curl -d 'x \\\"y\\\" z' -H 'Authorization: Bearer Zq9S3CR3Tw7' -H \\\"X-Héllo: 😀\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c 'sudo -u me curl  -u \"admin:Zq9S3CR3Tw7\" -d '\\''x \"y\" z'\\'' https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"time curl -o out.txt -u 'admin:Zq9S3CR3Tw7'  https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"A=\\\"p q\\\" curl  --user admin:Zq9S3CR3Tw7  https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"{\\\"command\\\":\\\"curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --user admin:Zq9S3CR3Tw7  https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 curl -H \"X-Héllo: 😀\" -u admin:Zq9S3CR3Tw7 -d 'x \"y\" z' https://x/é",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d 'x \\\"y\\\" z' -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -su admin:Zq9S3CR3Tw7  https://x/é\\\"}\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's {\"command\":\"sh -c 'curl  -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -o out.txt https://x/é'\"} 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "sh -c \"sh -c \\\"time curl -d 'x \\\\\\\"y\\\\\\\" z' --oauth2-bearer Zq9S3CR3Tw7  https://x/é\\\"\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"sh -c 'echo \\\\\\$x && curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u admin:Zq9S3CR3Tw7  https://x/é'\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c '{\"command\":\"env B=1 curl -H \\\"X-Héllo: 😀\\\" -u admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c \"curl -o out.txt -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -o out.txt https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c 'sudo -u me curl -o out.txt -H \"Authorization: Bearer Zq9S3CR3Tw7\"  https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 curl -d \"\\$HOME \\\\ end\" -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sh -c \\\"time curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c \"sh -c 'A=\\\"p q\\\" curl -d '\\\\''x \\\"y\\\" z'\\\\'' -H '\\\\''Authorization: Bearer Zq9S3CR3Tw7'\\\\'' -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c \"curl -d 'x \\\"y\\\" z' -u 'admin:Zq9S3CR3Tw7'  https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; echo \"a \\\"b\\\" c\"; curl -o out.txt -H 'Authorization: Bearer Zq9S3CR3Tw7' -d 'x \"y\" z' https://x/é\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c \"{\\\"command\\\":\\\"curl  --oauth2-bearer Zq9S3CR3Tw7 -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'sh -c '\\''A=\"p q\" curl -d '\\''\\'\\'''\\''x \"y\" z'\\''\\'\\'''\\'' -su admin:Zq9S3CR3Tw7 -d '\\''\\'\\'''\\''x \"y\" z'\\''\\'\\'''\\'' https://x/é'\\''' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's {\"command\":\"sh -c 'echo \\\\$x && curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é'\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"{\\\"command\\\":\\\"curl -o out.txt --user admin:Zq9S3CR3Tw7 -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"}\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"sh -c \\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl  --user=admin:Zq9S3CR3Tw7 -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --user admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sh -c 'curl  -u admin:Zq9S3CR3Tw7 -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c 'curl -d '\\''x \"y\" z'\\'' -u \"admin:Zq9S3CR3Tw7\" -d \"a b \\\"c\\\"\" https://x/é' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"{\\\"command\\\":\\\"curl -d 'x \\\\\\\"y\\\\\\\" z' -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"}\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c \"sh -c 'sudo -u me curl  -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\"\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "héllo wörld time curl -H \"X-Héllo: 😀\" --user admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"sh -c 'echo '\\\\''x y'\\\\''; curl -o out.txt -su admin:Zq9S3CR3Tw7  https://x/é'\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sh -c \\\"A=\\\\\\\"p q\\\\\\\" curl -o out.txt --user=admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: echo \\$x && curl -d \"a b \\\"c\\\"\" -u 'admin:Zq9S3CR3Tw7'  https://x/é",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c 'sh -c '\\''curl  --oauth2-bearer Zq9S3CR3Tw7 -d \"a b \\\"c\\\"\" https://x/é'\\''' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"sh -c 'time curl -d '\\\\''x \\\"y\\\" z'\\\\'' -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -H \\\"X-Héllo: 😀\\\" https://x/é'\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sh -c \\\"env B=1 curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\"  https://x/é\\\"\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"A=\\\"p q\\\" curl  -u 'admin:Zq9S3CR3Tw7' -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"{\\\"command\\\":\\\"echo \\\\\\\\$x && curl -d 'x \\\\\\\"y\\\\\\\" z' -u 'admin:Zq9S3CR3Tw7' -o out.txt https://x/é\\\"}\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"sh -c \\\"env B=1 curl  -u 'admin:Zq9S3CR3Tw7'  https://x/é\\\"\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"sh -c 'A=\\\"p q\\\" curl -H \\\"X-Héllo: 😀\\\" -su admin:Zq9S3CR3Tw7 -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"sh -c 'A=\\\"p q\\\" curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c \"time curl -o out.txt -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"",
+      "parentRedacted": false
+    },
+    {
+      "text": "$ sh -c \"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d '\\\\''x \\\"y\\\" z'\\\\'' -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\"",
+      "parentRedacted": false
+    },
+    {
+      "text": "😀😀 {\"command\":\"{\\\"command\\\":\\\"time curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"sh -c \\\"echo 'x y'; curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"{\\\"command\\\":\\\"sudo -u me curl -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -u admin:Zq9S3CR3Tw7 -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"sh -c \\\"sudo -u me curl -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c \"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -o out.txt -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\" 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "a\r\nb\r\nsh -c \"sh -c 'env B=1 curl -o out.txt -su admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl  -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c \"sh -c \\\"echo 'x y'; curl -o out.txt -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"sudo -u me curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --user admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"sh -c 'A=\\\"p q\\\" curl -H \\\"X-Héllo: 😀\\\" -u admin:Zq9S3CR3Tw7 -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"sh -c \\\"env B=1 curl -d 'x \\\\\\\"y\\\\\\\" z' -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\" 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "\"quoted\" sh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\" # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "😀😀 sh -c \"{\\\"command\\\":\\\"echo \\\\\\\\\\$x && curl -o out.txt -u 'admin:Zq9S3CR3Tw7' -d \\\\\\\"\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"}\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; echo 'x y'; curl -o out.txt --oauth2-bearer Zq9S3CR3Tw7 -d 'x \"y\" z' https://x/é # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"env B=1 curl -o out.txt -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c '{\"command\":\"sudo -u me curl  -su admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d 'x \\\"y\\\" z' -u 'admin:Zq9S3CR3Tw7' -d 'x \\\"y\\\" z' https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's {\"command\":\"sh -c \\\"echo \\\\\\\\\\\\$x && curl -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -u 'admin:Zq9S3CR3Tw7' -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c '{\"command\":\"sudo -u me curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"{\\\"command\\\":\\\"time curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -su admin:Zq9S3CR3Tw7  https://x/é\\\"}\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"{\\\"command\\\":\\\"echo 'x y'; curl -d 'x \\\\\\\"y\\\\\\\" z' -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -o out.txt https://x/é\\\"}\"} # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"env B=1 curl  -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c 'sh -c '\\''time curl -H \"X-Héllo: 😀\" -H \"Authorization: Bearer Zq9S3CR3Tw7\" -o out.txt https://x/é'\\''' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's {\"command\":\"env B=1 curl -H \\\"X-Héllo: 😀\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl  --user=admin:Zq9S3CR3Tw7 -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"}\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'echo \"a \\\"b\\\" c\"; curl -H \"X-Héllo: 😀\" --oauth2-bearer Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"echo 'x y'; curl -H \\\"X-Héllo: 😀\\\" --user=admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c 'echo '\\''x y'\\''; curl -d '\\''x \"y\" z'\\'' -H \"Authorization: Bearer Zq9S3CR3Tw7\" -d '\\''x \"y\" z'\\'' https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"sh -c \\\"echo 'x y'; curl -d 'x \\\\\\\"y\\\\\\\" z' -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\" # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\n{\"command\":\"sh -c 'echo \\\\$x && curl -H \\\"X-Héllo: 😀\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -o out.txt https://x/é'\"}\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"sh -c 'echo \\\\\\$x && curl -H \\\"X-Héllo: 😀\\\" --user=admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é'\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c 'sh -c \"sudo -u me curl -d '\\''x \\\"y\\\" z'\\'' -u admin:Zq9S3CR3Tw7  https://x/é\"'",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c '{\"command\":\"curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -H \\\"X-Héllo: 😀\\\" https://x/é\"}' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c \"time curl -H \\\"X-Héllo: 😀\\\" --oauth2-bearer Zq9S3CR3Tw7 -d 'x \\\"y\\\" z' https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'curl -d \"a b \\\"c\\\"\" -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -H \"X-Héllo: 😀\" https://x/é' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"{\\\"command\\\":\\\"curl -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"}\"} # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"sh -c 'time curl -H \\\"X-Héllo: 😀\\\" -H '\\\\''Authorization: Bearer Zq9S3CR3Tw7'\\\\'' -o out.txt https://x/é'\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c \"time curl  -u 'admin:Zq9S3CR3Tw7' -d 'x \\\"y\\\" z' https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c \"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --user=admin:Zq9S3CR3Tw7  https://x/é'\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"{\\\"command\\\":\\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -d 'x \\\\\\\"y\\\\\\\" z' -u 'admin:Zq9S3CR3Tw7' -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'sh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d '\\''x \\\"y\\\" z'\\'' --user admin:Zq9S3CR3Tw7  https://x/é\"' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"sh -c 'time curl -H \\\"X-Héllo: 😀\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'echo \"a \\\"b\\\" c\"; curl -d '\\''x \"y\" z'\\'' -su admin:Zq9S3CR3Tw7  https://x/é'",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'sh -c \"echo '\\''x y'\\''; curl -H \\\"X-Héllo: 😀\\\" -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"curl -o out.txt -H 'Authorization: Bearer Zq9S3CR3Tw7' -o out.txt https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"sh -c 'curl -o out.txt -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\"}",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\nsh -c 'env B=1 curl -d \"\\$HOME \\\\ end\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -o out.txt https://x/é' # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "日本語の説明: sh -c '{\"command\":\"A=\\\"p q\\\" curl -H \\\"X-Héllo: 😀\\\" --user=admin:Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c \\\"curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -u 'admin:Zq9S3CR3Tw7' -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"sh -c 'echo '\\\\''x y'\\\\''; curl  -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -o out.txt https://x/é'\"} 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "\"quoted\" sh -c \"sh -c 'env B=1 curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --user=admin:Zq9S3CR3Tw7 -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c \"sh -c \\\"echo 'x y'; curl -d 'x \\\\\\\"y\\\\\\\" z' --user admin:Zq9S3CR3Tw7  https://x/é\\\"\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"echo 'x y'; curl -d 'x \\\"y\\\" z' -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'sudo -u me curl -d \"\\$HOME \\\\ end\" -u \"admin:Zq9S3CR3Tw7\" -o out.txt https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c '{\"command\":\"env B=1 curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --oauth2-bearer Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"}'",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"sh -c \\\"time curl -d 'x \\\\\\\"y\\\\\\\" z' -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -o out.txt https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c 'sh -c \"curl  --user admin:Zq9S3CR3Tw7  https://x/é\"'",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c \\\"A=\\\\\\\"p q\\\\\\\" curl  -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c 'time curl -d \"a b \\\"c\\\"\" -u \"admin:Zq9S3CR3Tw7\"  https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c 'sudo -u me curl  --user admin:Zq9S3CR3Tw7  https://x/é'",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"time curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}",
+      "parentRedacted": false
+    },
+    {
+      "text": "{\"command\":\"echo \\\\$x && curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c \"sh -c \\\"echo 'x y'; curl  -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c \"{\\\"command\\\":\\\"sudo -u me curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"}\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'curl -H \"X-Héllo: 😀\" -H \"Authorization: Bearer Zq9S3CR3Tw7\" -H \"X-Héllo: 😀\" https://x/é' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's {\"command\":\"{\\\"command\\\":\\\"time curl  -u admin:Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"}\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's {\"command\":\"sh -c \\\"env B=1 curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -u admin:Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c '{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d '\\''x \\\"y\\\" z'\\'' -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"}'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c \"sh -c \\\"curl -d 'x \\\\\\\"y\\\\\\\" z' -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\"  https://x/é\\\"\" # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'A=\"p q\" curl -d \"\\$HOME \\\\ end\" -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\''  https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c '{\"command\":\"echo '\\''x y'\\''; curl -d '\\''x \\\"y\\\" z'\\'' --user=admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"}'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sh -c \\\"A=\\\\\\\"p q\\\\\\\" curl -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"sh -c \\\"sudo -u me curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\"  https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"sh -c \\\"echo \\\\\\\\\\\\$x && curl -d 'x \\\\\\\"y\\\\\\\" z' --user=admin:Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c 'env B=1 curl -d \"\\$HOME \\\\ end\" -u admin:Zq9S3CR3Tw7 -d \"a b \\\"c\\\"\" https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"sh -c 'echo '\\\\''x y'\\\\''; curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'sh -c \"curl -d '\\''x \\\"y\\\" z'\\'' -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c \"echo 'x y'; curl  -u 'admin:Zq9S3CR3Tw7' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl  -H 'Authorization: Bearer Zq9S3CR3Tw7' -d 'x \\\"y\\\" z' https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"sh -c 'sudo -u me curl -o out.txt -su admin:Zq9S3CR3Tw7 -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'time curl -d '\\''x \"y\" z'\\'' -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -d \"a b \\\"c\\\"\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c \"sh -c \\\"echo \\\\\\\\\\\\\\$x && curl -d 'x \\\\\\\"y\\\\\\\" z' -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" echo \"a \\\"b\\\" c\"; curl  --user=admin:Zq9S3CR3Tw7 -d \"a b \\\"c\\\"\" https://x/é",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c '{\"command\":\"A=\\\"p q\\\" curl -H \\\"X-Héllo: 😀\\\" -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -d '\\''x \\\"y\\\" z'\\'' https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c \"sh -c \\\"sudo -u me curl -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\"  https://x/é\\\"\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"sh -c \\\"echo 'x y'; curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -u 'admin:Zq9S3CR3Tw7' -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"{\\\"command\\\":\\\"curl  -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"A=\\\"p q\\\" curl -d 'x \\\"y\\\" z' -H 'Authorization: Bearer Zq9S3CR3Tw7' -o out.txt https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sudo -u me curl -H \"X-Héllo: 😀\" --user=admin:Zq9S3CR3Tw7 -d \"\\$HOME \\\\ end\" https://x/é # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c \"sudo -u me curl -d 'x \\\"y\\\" z' --user=admin:Zq9S3CR3Tw7 -d 'x \\\"y\\\" z' https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c 'sh -c '\\''A=\"p q\" curl -d \"a b \\\"c\\\"\" -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é'\\''' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"{\\\"command\\\":\\\"time curl -o out.txt -u 'admin:Zq9S3CR3Tw7' -o out.txt https://x/é\\\"}\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c '{\"command\":\"env B=1 curl -H \\\"X-Héllo: 😀\\\" --user admin:Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}'",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"sh -c 'curl  -u admin:Zq9S3CR3Tw7 -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'sh -c '\\''sudo -u me curl -H \"X-Héllo: 😀\" -su admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é'\\'''\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c 'sh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d '\\''x \\\"y\\\" z'\\'' -u '\\''admin:Zq9S3CR3Tw7'\\'' -d '\\''x \\\"y\\\" z'\\'' https://x/é\"'\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\"} # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "日本語の説明: sh -c 'sh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl  --user admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's {\"command\":\"echo 'x y'; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -su admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"echo 'x y'; curl -d 'x \\\"y\\\" z' --user=admin:Zq9S3CR3Tw7 -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c 'sh -c '\\''echo '\\''\\'\\'''\\''x y'\\''\\'\\'''\\''; curl -d \"\\$HOME \\\\ end\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é'\\''' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"A=\\\"p q\\\" curl  --user admin:Zq9S3CR3Tw7 -d 'x \\\"y\\\" z' https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c 'curl -d \"\\$HOME \\\\ end\" -u \"admin:Zq9S3CR3Tw7\" -d '\\''x \"y\" z'\\'' https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c \"echo \\\\\\$x && curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --user=admin:Zq9S3CR3Tw7 -d 'x \\\"y\\\" z' https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c '{\"command\":\"echo \\\\$x && curl  --user admin:Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c 'sudo -u me curl -d \"\\$HOME \\\\ end\" --user admin:Zq9S3CR3Tw7 -d \"\\$HOME \\\\ end\" https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c 'sh -c \"env B=1 curl -d '\\''x \\\"y\\\" z'\\'' -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c '{\"command\":\"sudo -u me curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --user=admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c '{\"command\":\"time curl -o out.txt -u admin:Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c '{\"command\":\"echo \\\\$x && curl -H \\\"X-Héllo: 😀\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"}'\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\nsh -c 'sh -c '\\''env B=1 curl -o out.txt --user=admin:Zq9S3CR3Tw7 -o out.txt https://x/é'\\'''\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"curl -d 'x \\\"y\\\" z' -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c \"sh -c \\\"echo 'x y'; curl  -u 'admin:Zq9S3CR3Tw7' -o out.txt https://x/é\\\"\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"{\\\"command\\\":\\\"sudo -u me curl -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -u admin:Zq9S3CR3Tw7 -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c \"sh -c 'echo '\\\\''x y'\\\\''; curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -o out.txt https://x/é'\" # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c \\\"sudo -u me curl  -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -o out.txt https://x/é\\\"\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c \"curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -su admin:Zq9S3CR3Tw7  https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c \"A=\\\"p q\\\" curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"sh -c 'env B=1 curl  -H '\\\\''Authorization: Bearer Zq9S3CR3Tw7'\\\\'' -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é'\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c '{\"command\":\"time curl  -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -H \\\"X-Héllo: 😀\\\" https://x/é\"}'",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c '{\"command\":\"sudo -u me curl  --oauth2-bearer Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c '{\"command\":\"curl -d '\\''x \\\"y\\\" z'\\'' --user admin:Zq9S3CR3Tw7  https://x/é\"}' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'echo \\$x && curl -d \"a b \\\"c\\\"\" --user admin:Zq9S3CR3Tw7 -d \"\\$HOME \\\\ end\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c '{\"command\":\"env B=1 curl -H \\\"X-Héllo: 😀\\\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -o out.txt https://x/é\"}'\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "a ; {\"command\":\"env B=1 curl -d 'x \\\"y\\\" z' --user=admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c 'sh -c '\\''echo \\$x && curl  -u admin:Zq9S3CR3Tw7  https://x/é'\\''' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c \\\"A=\\\\\\\"p q\\\\\\\" curl -o out.txt --oauth2-bearer Zq9S3CR3Tw7 -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c '{\"command\":\"time curl -d '\\''x \\\"y\\\" z'\\'' -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -o out.txt https://x/é\"}' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\techo 'x y'; curl  --user=admin:Zq9S3CR3Tw7 -d 'x \"y\" z' https://x/é 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sh -c 'time curl -H \\\"X-Héllo: 😀\\\" -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é'\"} # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "😀😀 {\"command\":\"{\\\"command\\\":\\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" --user=admin:Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"}\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'A=\"p q\" curl  -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -d \"a b \\\"c\\\"\" https://x/é'",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\" 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "😀😀 sh -c \"{\\\"command\\\":\\\"curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --user=admin:Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"}\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c \"sh -c 'time curl -H \\\"X-Héllo: 😀\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é'\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"{\\\"command\\\":\\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -u 'admin:Zq9S3CR3Tw7'  https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c 'sh -c '\\''echo '\\''\\'\\'''\\''x y'\\''\\'\\'''\\''; curl -H \"X-Héllo: 😀\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é'\\'''",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c \"sh -c 'curl -o out.txt -u admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é'\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"sh -c \\\"curl  --user admin:Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"sh -c 'env B=1 curl -o out.txt -u \\\"admin:Zq9S3CR3Tw7\\\"  https://x/é'\"} # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\n{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl  -u admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"env B=1 curl -o out.txt -u 'admin:Zq9S3CR3Tw7' -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c 'sh -c \"curl -d '\\''x \\\"y\\\" z'\\'' -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d '\\''x \\\"y\\\" z'\\'' https://x/é\"'",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"{\\\"command\\\":\\\"sudo -u me curl -d \\\\\\\"\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"}\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"echo \\\\$x && curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\"  https://x/é\"}\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"time curl -o out.txt --user=admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"sh -c 'sudo -u me curl -H \\\"X-Héllo: 😀\\\" --oauth2-bearer Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é'\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c \"echo 'x y'; curl -o out.txt -u 'admin:Zq9S3CR3Tw7'  https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"env B=1 curl  -u admin:Zq9S3CR3Tw7  https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"{\\\"command\\\":\\\"time curl -d 'x \\\\\\\"y\\\\\\\" z' --user admin:Zq9S3CR3Tw7 -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"}\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sudo -u me curl -o out.txt --user admin:Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"sh -c 'echo \\\\\\$x && curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --user=admin:Zq9S3CR3Tw7  https://x/é'\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"sh -c \\\"echo 'x y'; curl  --user admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"env B=1 curl -H \\\"X-Héllo: 😀\\\" -su admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c 'A=\"p q\" curl  --user admin:Zq9S3CR3Tw7 -d \"a b \\\"c\\\"\" https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -u admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c \"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d '\\\\''x \\\"y\\\" z'\\\\'' -u \\\"admin:Zq9S3CR3Tw7\\\" -H \\\"X-Héllo: 😀\\\" https://x/é'\"",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\n{\"command\":\"{\\\"command\\\":\\\"sudo -u me curl -d 'x \\\\\\\"y\\\\\\\" z' -su admin:Zq9S3CR3Tw7  https://x/é\\\"}\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ curl  --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"echo \\\\$x && curl -d 'x \\\"y\\\" z' -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"{\\\"command\\\":\\\"time curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" --user admin:Zq9S3CR3Tw7 -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c '{\"command\":\"A=\\\"p q\\\" curl -o out.txt -u \\\"admin:Zq9S3CR3Tw7\\\" -d '\\''x \\\"y\\\" z'\\'' https://x/é\"}'\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "{\"command\":\"{\\\"command\\\":\\\"curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"}\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"echo \\\\$x && curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -H 'Authorization: Bearer Zq9S3CR3Tw7' -d 'x \\\"y\\\" z' https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"env B=1 curl -d 'x \\\"y\\\" z' --oauth2-bearer Zq9S3CR3Tw7 -d 'x \\\"y\\\" z' https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c \"sh -c \\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -u 'admin:Zq9S3CR3Tw7' -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"echo 'x y'; curl -H \\\"X-Héllo: 😀\\\" -u 'admin:Zq9S3CR3Tw7' -o out.txt https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 {\"command\":\"sudo -u me curl -H \\\"X-Héllo: 😀\\\" --user=admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c 'sh -c \"curl -o out.txt --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\"'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"sh -c 'env B=1 curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u admin:Zq9S3CR3Tw7 -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'echo \\$x && curl -d \"\\$HOME \\\\ end\" --user admin:Zq9S3CR3Tw7 -d \"a b \\\"c\\\"\" https://x/é'",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"echo 'x y'; curl -o out.txt -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\"  https://x/é\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"sh -c \\\"curl -o out.txt -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"sh -c 'echo '\\\\''x y'\\\\''; curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -su admin:Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é'\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c \"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl -d 'x \\\\\\\"y\\\\\\\" z' -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \\\\\\\"\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"}\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c \"echo 'x y'; curl -d 'x \\\"y\\\" z' -u \\\"admin:Zq9S3CR3Tw7\\\"  https://x/é\"\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\n{\"command\":\"sh -c \\\"curl  -u admin:Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'env B=1 curl -d \"\\$HOME \\\\ end\" -H \"Authorization: Bearer Zq9S3CR3Tw7\"  https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d 'x \\\"y\\\" z' https://x/é\"\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\nsh -c \"curl -d 'x \\\"y\\\" z' -u admin:Zq9S3CR3Tw7 -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c \"sh -c 'A=\\\"p q\\\" curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -H '\\\\''Authorization: Bearer Zq9S3CR3Tw7'\\\\'' -H \\\"X-Héllo: 😀\\\" https://x/é'\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"sh -c \\\"curl -d 'x \\\\\\\"y\\\\\\\" z' --user admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"sh -c \\\"echo 'x y'; curl -o out.txt --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\\\"\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"sh -c 'sudo -u me curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --oauth2-bearer Zq9S3CR3Tw7  https://x/é'\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -H \\\"X-Héllo: 😀\\\" -u admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 echo \"a \\\"b\\\" c\"; curl  -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"time curl -H \\\"X-Héllo: 😀\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c \"sh -c \\\"time curl -o out.txt -u 'admin:Zq9S3CR3Tw7' -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c \"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"}\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c 'sh -c \"curl  -su admin:Zq9S3CR3Tw7 -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "echo 'x y'; curl  -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"sh -c \\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -u admin:Zq9S3CR3Tw7  https://x/é\\\"\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c \"sudo -u me curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"sh -c \\\"time curl -d 'x \\\\\\\"y\\\\\\\" z' -u 'admin:Zq9S3CR3Tw7' -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'echo \\$x && curl -d \"\\$HOME \\\\ end\" --user=admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: curl -o out.txt -u \"admin:Zq9S3CR3Tw7\" -d \"a b \\\"c\\\"\" https://x/é # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c 'env B=1 curl -d \"a b \\\"c\\\"\" -u \"admin:Zq9S3CR3Tw7\" -H \"X-Héllo: 😀\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c '{\"command\":\"curl -o out.txt --user=admin:Zq9S3CR3Tw7 -H \\\"X-Héllo: 😀\\\" https://x/é\"}'",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"echo \\\\$x && curl -o out.txt --user=admin:Zq9S3CR3Tw7 -d 'x \\\"y\\\" z' https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c 'curl -H \"X-Héllo: 😀\" --oauth2-bearer Zq9S3CR3Tw7 -d \"a b \\\"c\\\"\" https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c 'sh -c \"sudo -u me curl  -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -o out.txt https://x/é\"' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"sh -c \\\"echo \\\\\\\\\\\\$x && curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -su admin:Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"env B=1 curl -H \\\"X-Héllo: 😀\\\" --user=admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c 'env B=1 curl -o out.txt --user=admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'sh -c '\\''env B=1 curl -H \"X-Héllo: 😀\" -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é'\\'''",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sh -c \\\"env B=1 curl -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -u 'admin:Zq9S3CR3Tw7' -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsudo -u me curl -o out.txt --user admin:Zq9S3CR3Tw7  https://x/é\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"sh -c 'A=\\\"p q\\\" curl -d '\\\\''x \\\"y\\\" z'\\\\'' -H '\\\\''Authorization: Bearer Zq9S3CR3Tw7'\\\\''  https://x/é'\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"sh -c \\\"sudo -u me curl  -u admin:Zq9S3CR3Tw7 -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"time curl -H \\\"X-Héllo: 😀\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"} # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "héllo wörld {\"command\":\"sh -c \\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -o out.txt -u 'admin:Zq9S3CR3Tw7' -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c '{\"command\":\"time curl  --user admin:Zq9S3CR3Tw7  https://x/é\"}' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c 'sh -c \"env B=1 curl  --user=admin:Zq9S3CR3Tw7 -d '\\''x \\\"y\\\" z'\\'' https://x/é\"'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c 'sh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -H \\\"X-Héllo: 😀\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d '\\''x \\\"y\\\" z'\\'' https://x/é\"' # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's {\"command\":\"echo \\\\$x && curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"} 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "\tsh -c \"sh -c \\\"echo 'x y'; curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --user=admin:Zq9S3CR3Tw7 -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -H \\\"X-Héllo: 😀\\\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"{\\\"command\\\":\\\"echo 'x y'; curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -u admin:Zq9S3CR3Tw7 -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"sh -c \\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\"  https://x/é\\\"\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c \"sh -c \\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"sh -c 'env B=1 curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\"  https://x/é'\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c \"sh -c \\\"sudo -u me curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"\"\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "$ {\"command\":\"sh -c \\\"sudo -u me curl -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7  https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c \"sh -c 'env B=1 curl -H \\\"X-Héllo: 😀\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -o out.txt https://x/é'\"",
+      "parentRedacted": false
+    },
+    {
+      "text": "a ; sh -c \"{\\\"command\\\":\\\"echo \\\\\\\\\\$x && curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -u 'admin:Zq9S3CR3Tw7' -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"}\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c '{\"command\":\"A=\\\"p q\\\" curl  -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"{\\\"command\\\":\\\"echo 'x y'; curl -d 'x \\\\\\\"y\\\\\\\" z' -u \\\\\\\"admin:Zq9S3CR3Tw7\\\\\\\" -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"}\"}",
+      "parentRedacted": false
+    },
+    {
+      "text": "{\"command\":\"env B=1 curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" --user admin:Zq9S3CR3Tw7 -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"curl -H \\\"X-Héllo: 😀\\\" --user admin:Zq9S3CR3Tw7 -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"{\\\"command\\\":\\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -d \\\\\\\"\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"}\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'sh -c '\\''time curl -o out.txt -H '\\''\\'\\'''\\''Authorization: Bearer Zq9S3CR3Tw7'\\''\\'\\'''\\'' -o out.txt https://x/é'\\'''\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\t{\"command\":\"{\\\"command\\\":\\\"curl  -su admin:Zq9S3CR3Tw7  https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 echo \\$x && curl -d \"a b \\\"c\\\"\" --user=admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"echo 'x y'; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -H 'Authorization: Bearer Zq9S3CR3Tw7' -o out.txt https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c \"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d '\\\\''x \\\"y\\\" z'\\\\'' -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é'\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"echo \\\\\\$x && curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -H \\\"X-Héllo: 😀\\\" https://x/é\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c 'env B=1 curl -o out.txt -H '\\\\''Authorization: Bearer Zq9S3CR3Tw7'\\\\'' -H \\\"X-Héllo: 😀\\\" https://x/é'\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"{\\\"command\\\":\\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" --user=admin:Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"}\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c 'curl -H \"X-Héllo: 😀\" -H '\\''Authorization: Bearer Zq9S3CR3Tw7'\\'' -d '\\''x \"y\" z'\\'' https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'time curl -d \"a b \\\"c\\\"\" -u \"admin:Zq9S3CR3Tw7\"  https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c \"sh -c 'env B=1 curl -d '\\\\''x \\\"y\\\" z'\\\\'' --user=admin:Zq9S3CR3Tw7 -o out.txt https://x/é'\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -su admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ echo 'x y'; curl -d \"a b \\\"c\\\"\" -u 'admin:Zq9S3CR3Tw7' -d 'x \"y\" z' https://x/é # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c \"{\\\"command\\\":\\\"curl -o out.txt -u 'admin:Zq9S3CR3Tw7' -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"}\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"sudo -u me curl -o out.txt -u 'admin:Zq9S3CR3Tw7' -H \\\"X-Héllo: 😀\\\" https://x/é\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ curl -o out.txt --oauth2-bearer Zq9S3CR3Tw7 -d 'x \"y\" z' https://x/é 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sh -c 'env B=1 curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -H \\\"X-Héllo: 😀\\\" https://x/é'\"} 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "{\"command\":\"sh -c \\\"echo 'x y'; curl -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" --user admin:Zq9S3CR3Tw7  https://x/é\\\"\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"sh -c 'curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\"}",
+      "parentRedacted": false
+    },
+    {
+      "text": "\"quoted\" sh -c \"{\\\"command\\\":\\\"echo 'x y'; curl -o out.txt --user admin:Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"}\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c '{\"command\":\"time curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}'",
+      "parentRedacted": false
+    },
+    {
+      "text": "\"quoted\" sh -c \"env B=1 curl -d 'x \\\"y\\\" z' -su admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'sh -c '\\''echo '\\''\\'\\'''\\''x y'\\''\\'\\'''\\''; curl -d \"a b \\\"c\\\"\" --user admin:Zq9S3CR3Tw7 -d \"\\$HOME \\\\ end\" https://x/é'\\''' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c \"A=\\\"p q\\\" curl -o out.txt -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -o out.txt https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c \"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -H 'Authorization: Bearer Zq9S3CR3Tw7' -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"}\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c \"echo 'x y'; curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'sudo -u me curl  -u '\\''admin:Zq9S3CR3Tw7'\\'' -d '\\''x \"y\" z'\\'' https://x/é'\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\n{\"command\":\"sh -c \\\"echo 'x y'; curl -o out.txt --oauth2-bearer Zq9S3CR3Tw7 -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'sudo -u me curl -H \"X-Héllo: 😀\" -u \"admin:Zq9S3CR3Tw7\" -d \"\\$HOME \\\\ end\" https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'env B=1 curl -d \"\\$HOME \\\\ end\" -H \"Authorization: Bearer Zq9S3CR3Tw7\" -d \"\\$HOME \\\\ end\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c \"sh -c 'echo '\\\\''x y'\\\\''; curl -d '\\\\''x \\\"y\\\" z'\\\\'' --user=admin:Zq9S3CR3Tw7 -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é'\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"sh -c \\\"env B=1 curl -o out.txt -u admin:Zq9S3CR3Tw7 -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" https://x/é\\\"\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c \"A=\\\"p q\\\" curl  -u \\\"admin:Zq9S3CR3Tw7\\\" -o out.txt https://x/é\" 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'echo \\$x && curl -d \"a b \\\"c\\\"\" --user admin:Zq9S3CR3Tw7  https://x/é' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c 'echo '\\''x y'\\''; curl -d \"a b \\\"c\\\"\" -u admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é' # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl -d \\\\\\\"a b \\\\\\\\\\\\\\\"c\\\\\\\\\\\\\\\"\\\\\\\" -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -H \\\\\\\"X-Héllo: 😀\\\\\\\" https://x/é\\\"}\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "sudo -u me curl -d \"a b \\\"c\\\"\" -H \"Authorization: Bearer Zq9S3CR3Tw7\" -H \"X-Héllo: 😀\" https://x/é 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c \"sh -c 'time curl -d '\\\\''x \\\"y\\\" z'\\\\'' --user=admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c \"A=\\\"p q\\\" curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "$ sh -c 'echo \\$x && curl -d '\\''x \"y\" z'\\'' -u admin:Zq9S3CR3Tw7  https://x/é' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --oauth2-bearer Zq9S3CR3Tw7 -d 'x \\\"y\\\" z' https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c 'sudo -u me curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é'\"}\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\nsh -c \"{\\\"command\\\":\\\"time curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -u admin:Zq9S3CR3Tw7  https://x/é\\\"}\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c \"A=\\\"p q\\\" curl -H \\\"X-Héllo: 😀\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c \"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -o out.txt --user=admin:Zq9S3CR3Tw7  https://x/é'\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"sudo -u me curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -su admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c \"curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --user admin:Zq9S3CR3Tw7  https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"A=\\\"p q\\\" curl -d 'x \\\"y\\\" z' -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"A=\\\"p q\\\" curl  -u 'admin:Zq9S3CR3Tw7' -H \\\"X-Héllo: 😀\\\" https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's env B=1 curl -H \"X-Héllo: 😀\" -H 'Authorization: Bearer Zq9S3CR3Tw7' -H \"X-Héllo: 😀\" https://x/é",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'sh -c '\\''echo \\$x && curl -o out.txt -u '\\''\\'\\'''\\''admin:Zq9S3CR3Tw7'\\''\\'\\'''\\'' -d \"\\$HOME \\\\ end\" https://x/é'\\'''",
+      "parentRedacted": false
+    },
+    {
+      "text": "😀😀 sh -c 'curl  -su admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "a\r\nb\r\nsh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --user admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\" 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c 'sh -c \"curl  --oauth2-bearer Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"'",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"sh -c \\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -d \\\\\\\"\\\\\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" -H 'Authorization: Bearer Zq9S3CR3Tw7' -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "😀😀 sh -c 'echo \\$x && curl -d \"\\$HOME \\\\ end\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é'",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c '{\"command\":\"env B=1 curl -d '\\''x \\\"y\\\" z'\\'' --user admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"sh -c \\\"curl  -H \\\\\\\"Authorization: Bearer Zq9S3CR3Tw7\\\\\\\" -d 'x \\\\\\\"y\\\\\\\" z' https://x/é\\\"\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c \"sudo -u me curl -o out.txt -u admin:Zq9S3CR3Tw7 -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sh -c '{\"command\":\"curl  -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"}' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\t{\"command\":\"{\\\"command\\\":\\\"A=\\\\\\\"p q\\\\\\\" curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\\\"}\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c 'curl -d \"a b \\\"c\\\"\" --user admin:Zq9S3CR3Tw7  https://x/é' 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; sh -c '{\"command\":\"env B=1 curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"}'",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ sh -c 'sudo -u me curl -d \"\\$HOME \\\\ end\" --user=admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é'\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" sh -c 'sh -c '\\''env B=1 curl -d \"\\$HOME \\\\ end\" -u '\\''\\'\\'''\\''admin:Zq9S3CR3Tw7'\\''\\'\\'''\\'' -d \"a b \\\"c\\\"\" https://x/é'\\''' # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "$ sudo -u me curl -d \"a b \\\"c\\\"\" --user admin:Zq9S3CR3Tw7 -d 'x \"y\" z' https://x/é\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "\"quoted\" {\"command\":\"time curl -H \\\"X-Héllo: 😀\\\" -H \\\"Authorization: Bearer Zq9S3CR3Tw7\\\" -o out.txt https://x/é\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"sh -c 'echo '\\\\''x y'\\\\''; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\" # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "a\r\nb\r\n{\"command\":\"sh -c \\\"env B=1 curl -o out.txt --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\\\"\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\nsh -c 'env B=1 curl -d \"a b \\\"c\\\"\" -u '\\''admin:Zq9S3CR3Tw7'\\''  https://x/é'",
+      "parentRedacted": false
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"sh -c \\\"curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --user=admin:Zq9S3CR3Tw7  https://x/é\\\"\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "{\"command\":\"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" --user admin:Zq9S3CR3Tw7  https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: sudo -u me curl -d \"\\$HOME \\\\ end\" -u admin:Zq9S3CR3Tw7 -o out.txt https://x/é 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "a ; {\"command\":\"echo 'x y'; curl -d 'x \\\"y\\\" z' -u 'admin:Zq9S3CR3Tw7'  https://x/é\"} # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "$ {\"command\":\"{\\\"command\\\":\\\"sudo -u me curl -H \\\\\\\"X-Héllo: 😀\\\\\\\" --oauth2-bearer Zq9S3CR3Tw7 -d \\\\\\\"\\\\\\\\$HOME \\\\\\\\\\\\\\\\ end\\\\\\\" https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c 'sh -c '\\''A=\"p q\" curl -d \"\\$HOME \\\\ end\" -su admin:Zq9S3CR3Tw7 -H \"X-Héllo: 😀\" https://x/é'\\'''\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld {\"command\":\"{\\\"command\\\":\\\"echo \\\\\\\"a \\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\" c\\\\\\\"; curl -o out.txt -H 'Authorization: Bearer Zq9S3CR3Tw7' -o out.txt https://x/é\\\"}\"}",
+      "parentRedacted": true
+    },
+    {
+      "text": "x\n{\"command\":\"curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" --oauth2-bearer Zq9S3CR3Tw7 -o out.txt https://x/é\"} 😀",
+      "parentRedacted": true
+    },
+    {
+      "text": "日本語の説明: {\"command\":\"time curl  --user=admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "time curl -d \"a b \\\"c\\\"\" -u 'admin:Zq9S3CR3Tw7' -d \"a b \\\"c\\\"\" https://x/é # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "sh -c \"sh -c 'A=\\\"p q\\\" curl  --user admin:Zq9S3CR3Tw7 -o out.txt https://x/é'\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "\tsh -c '{\"command\":\"sudo -u me curl -H \\\"X-Héllo: 😀\\\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -o out.txt https://x/é\"}'",
+      "parentRedacted": false
+    },
+    {
+      "text": "x\nsh -c \"sh -c 'curl  --user admin:Zq9S3CR3Tw7 -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é'\"\r\n",
+      "parentRedacted": true
+    },
+    {
+      "text": "Ünïcødé 🎉\tsh -c \"echo 'x y'; curl -d 'x \\\"y\\\" z' --user=admin:Zq9S3CR3Tw7 -o out.txt https://x/é\"",
+      "parentRedacted": true
+    },
+    {
+      "text": "héllo wörld sh -c \"echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -su admin:Zq9S3CR3Tw7 -o out.txt https://x/é\" # done",
+      "parentRedacted": true
+    },
+    {
+      "text": "it's sh -c 'A=\"p q\" curl -d \"\\$HOME \\\\ end\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -d \"\\$HOME \\\\ end\" https://x/é'\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'sh -c \"curl -o out.txt -u '\\''admin:Zq9S3CR3Tw7'\\'' -o out.txt https://x/é\"'",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'sh -c '\\''A=\"p q\" curl -o out.txt -u '\\''\\'\\'''\\''admin:Zq9S3CR3Tw7'\\''\\'\\'''\\'' -d \"\\$HOME \\\\ end\" https://x/é'\\''' 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c \"echo 'x y'; curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -H \\\"X-Héllo: 😀\\\" https://x/é\"\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c \"sh -c 'echo \\\\\\$x && curl  -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -H \\\"X-Héllo: 😀\\\" https://x/é'\"",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c \"sh -c 'echo '\\\\''x y'\\\\''; curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\"",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'sh -c '\\''curl -o out.txt -u '\\''\\'\\'''\\''admin:Zq9S3CR3Tw7'\\''\\'\\'''\\'' -H \"X-Héllo: 😀\" https://x/é'\\'''",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'sh -c \"echo \\\\\\$x && curl  -u '\\''admin:Zq9S3CR3Tw7'\\'' -o out.txt https://x/é\"' 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'sh -c '\\''curl -d \"a b \\\"c\\\"\" -u '\\''\\'\\'''\\''admin:Zq9S3CR3Tw7'\\''\\'\\'''\\'' -H \"X-Héllo: 😀\" https://x/é'\\''' 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c \"sh -c 'echo \\\\\\$x && curl -H \\\"X-Héllo: 😀\\\" -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -H \\\"X-Héllo: 😀\\\" https://x/é'\"",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c \"sh -c 'time curl -o out.txt -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -o out.txt https://x/é'\" 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'env B=1 curl -H \"X-Héllo: 😀\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -d '\\''x \"y\" z'\\'' https://x/é'\r\n",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's {\"command\":\"sh -c 'echo \\\\$x && curl -o out.txt -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -o out.txt https://x/é'\"}",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c \"sh -c 'echo \\\\\\$x && curl -d \\\"a b \\\\\\\"c\\\\\\\"\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d '\\\\''x \\\"y\\\" z'\\\\'' https://x/é'\"",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c \"sh -c 'echo '\\\\''x y'\\\\''; curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -u \\\"admin:Zq9S3CR3Tw7\\\" -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é'\" # done",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'sh -c \"env B=1 curl -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -d \\\"\\\\\\$HOME \\\\\\\\ end\\\" https://x/é\"' 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'env B=1 curl -d \"\\$HOME \\\\ end\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -d '\\''x \"y\" z'\\'' https://x/é' 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c 'time curl -d \"a b \\\"c\\\"\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -H \"X-Héllo: 😀\" https://x/é' 😀",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's {\"command\":\"sh -c 'echo \\\"a \\\\\\\"b\\\\\\\" c\\\"; curl  -u '\\\\''admin:Zq9S3CR3Tw7'\\\\'' -d \\\"\\\\$HOME \\\\\\\\ end\\\" https://x/é'\"}",
+      "parentRedacted": false
+    },
+    {
+      "text": "it's sh -c '{\"command\":\"env B=1 curl -d \\\"\\\\$HOME \\\\\\\\ end\\\" -u '\\''admin:Zq9S3CR3Tw7'\\'' -d \\\"a b \\\\\\\"c\\\\\\\"\\\" https://x/é\"}' # done",
+      "parentRedacted": false
+    }
+  ],
+  "benign": [
+    {
+      "text": "Use curl or docker run -u 1000:1000 img",
+      "parent": "Use curl or docker run -u 1000:[REDACTED] img",
+      "expected": "Use curl or docker run -u 1000:[REDACTED] img"
+    },
+    {
+      "text": "Install curl and wget, then run `ps -u root:wheel`.",
+      "parent": "Install curl and wget, then run `ps -u root:[REDACTED]`.",
+      "expected": "Install curl and wget, then run `ps -u root:[REDACTED]`."
+    },
+    {
+      "text": "curl is installed; docker run -u 1000:1000 alpine id",
+      "expected": "curl is installed; docker run -u 1000:[REDACTED] alpine id"
+    },
+    {
+      "text": "The curl docs say -u user:password is unsafe; use --netrc. Also sort -u a:b works.",
+      "parent": "The curl docs say -u user:[REDACTED] is unsafe; use --netrc. Also sort -u a:b works.",
+      "expected": "The curl docs say -u user:[REDACTED] is unsafe; use --netrc. Also sort -u a:[REDACTED] works."
+    },
+    {
+      "text": "We fetch with curl. Then git log -u --since=2:00",
+      "parent": "We fetch with curl. Then git log -u --since=2:[REDACTED]"
+    },
+    {
+      "text": "rsync -avu user@host:/data /tmp && curl -o x y"
+    },
+    {
+      "text": "curl -o f x; rsync -avu user@host:/data /tmp"
+    },
+    {
+      "text": "curl -sS http://x | ssh host rsync -avu user@host:/srv/data /tmp"
+    },
+    {
+      "text": "curl x | xargs rsync -avu user@host:/srv /tmp"
+    },
+    {
+      "text": "curl x && sudo rsync -avu deploy@host:/srv /tmp"
+    },
+    {
+      "text": "curl x && time rsync -avu deploy@host:/srv /tmp"
+    },
+    {
+      "text": "curl -L https://x -o a.tgz && scp -Cu me@host:/a /b"
+    },
+    {
+      "text": "http :8080 && tar -a cf a:b"
+    },
+    {
+      "text": "curl https://x\n  -o out\nsort -u a:b"
+    },
+    {
+      "text": "docker run -u 1000:1000 \\\n  -e http_proxy=http://p:3128 \\\n  img"
+    },
+    {
+      "text": "docker run --rm -u 1000:1000 -v $PWD:/w curlimages/curl:8.5.0 https://x"
+    },
+    {
+      "text": "docker run --rm -u \"$(id -u):$(id -g)\" curlimages/curl https://x"
+    },
+    {
+      "text": "kubectl run tmp --image=curlimages/curl -- -u admin:pass",
+      "parent": "kubectl run tmp --image=curlimages/curl -- -u admin:[REDACTED]",
+      "expected": "kubectl run tmp --image=curlimages/curl -- -u admin:[REDACTED]"
+    },
+    {
+      "text": "curl https://x  # then: docker run -u 1000:1000 img",
+      "parent": "curl https://x  # then: docker run -u 1000:[REDACTED] img",
+      "expected": "curl https://x  # then: docker run -u 1000:[REDACTED] img"
+    },
+    {
+      "text": "Use http or https; for ls -a a:b see docs.",
+      "expected": "Use http or https; for ls -a a:[REDACTED] see docs."
+    },
+    {
+      "text": "python -m http.server 8000 & ls -a x:y"
+    },
+    {
+      "text": "ab -n 100 -c 10 http://localhost:8080/ && ps -u root:wheel",
+      "expected": "ab -n 100 -c 10 http://localhost:8080/ && ps -u root:[REDACTED]"
+    },
+    {
+      "text": "wget -q -O - x | tar -xz && chown -R app:app . && install -u a:b",
+      "expected": "wget -q -O - x | tar -xz && chown -R app:app . && install -u a:[REDACTED]"
+    },
+    {
+      "text": "The URL http://example.com/a?x=1&u=a:b is fine"
+    },
+    {
+      "text": "curl x 2>&1 | tee log; id -u root:x",
+      "expected": "curl x 2>&1 | tee log; id -u root:[REDACTED]"
+    },
+    {
+      "text": "const out = execSync(`curl -s ${url}`); spawn('docker', ['run', '-u', '1000:1000', img]);",
+      "expected": "const out = execSync(`curl -s ${url}`); spawn('docker', ['run', '-u', '1000:[REDACTED]', img]);"
+    },
+    {
+      "text": "lftp -c 'open x; mirror' && sort -u a:b",
+      "expected": "lftp -c 'open x; mirror' && sort -u a:[REDACTED]"
+    },
+    {
+      "text": "curl http://x; cut -d: -f1 /etc/passwd | sort -u"
+    },
+    {
+      "text": "curl -u admin https://x"
+    },
+    {
+      "text": "curl -u $USER:$PASS https://x"
+    },
+    {
+      "text": "curl -u \"$USER:$PASS\" https://x"
+    },
+    {
+      "text": "curl -u ${USER}:${PASS} https://x"
+    },
+    {
+      "text": "curl -u admin:$(cat pw) https://x"
+    },
+    {
+      "text": "curl -H \"Authorization: Bearer $TOKEN\" https://x"
+    },
+    {
+      "text": "curl -H \"Authorization: Bearer ${TOKEN}\" https://x"
+    },
+    {
+      "text": "curl -H \"Authorization: token $(gh auth token)\" https://x"
+    },
+    {
+      "text": "curl --header \"Authorization: Basic $(echo -n a:b | base64)\" x"
+    },
+    {
+      "text": "http -a admin x"
+    },
+    {
+      "text": "http -A bearer -a $TOKEN x"
+    },
+    {
+      "text": "xh --bearer \"$TOKEN\" x"
+    },
+    {
+      "text": "Content-Type: application/json\nAuthorization: required (see docs)\ncurl -H 'Accept: x' https://x"
+    },
+    {
+      "text": "curl https://x -H \"Authorization: Bearer [REDACTED]\""
+    },
+    {
+      "text": "curl -u admin:[REDACTED] x"
+    },
+    {
+      "text": "To use http -a, pass user:pass. curl -u works similarly."
+    },
+    {
+      "text": "curl -X GET 'http://localhost:9200/_cat/indices?v&h=index,docs.count' -u elastic"
+    },
+    {
+      "text": "wget --user-agent=\"Mozilla\" -U x:y http://x",
+      "parent": "wget --user-agent=\"Mozilla\" -U x:[REDACTED] http://x",
+      "expected": "wget --user-agent=\"Mozilla\" -U x:[REDACTED] http://x"
+    },
+    {
+      "text": "curl -A \"Mozilla/5.0 (X11; Linux) a:b\" http://x"
+    },
+    {
+      "text": "curl -sSfL https://get.x.sh | sh -s -- -b /usr/local/bin v1:2"
+    },
+    {
+      "text": "curl --compressed -U proxyuser http://x"
+    },
+    {
+      "text": "curl -o /tmp/a https://x/a:b"
+    },
+    {
+      "text": "curl 'http://x' -H 'Authorization: Bearer' -d 'a'"
+    },
+    {
+      "text": "curl http://x -H \"Authorization: $AUTH_HEADER\""
+    },
+    {
+      "text": "nmap -sU -p 161 host; curl http://host"
+    },
+    {
+      "text": "echo \"use curl\"; useradd -u 1001 bob; usermod -u 1002:x bob",
+      "expected": "echo \"use curl\"; useradd -u 1001 bob; usermod -u 1002:[REDACTED] bob"
+    },
+    {
+      "text": "fetch-with-curl.sh -u admin:pass",
+      "parent": "fetch-with-curl.sh -u admin:[REDACTED]"
+    },
+    {
+      "text": "\"curl\" and \"docker run -u 1000:1000 img\"",
+      "parent": "\"curl\" and \"docker run -u 1000:[REDACTED] img\"",
+      "expected": "\"curl\" and \"docker run -u 1000:[REDACTED] img\""
+    },
+    {
+      "text": "watch -n 1 'curl -s x' ; ps -u postgres:x",
+      "expected": "watch -n 1 'curl -s x' ; ps -u postgres:[REDACTED]"
+    },
+    {
+      "text": "ssh host curl x && ssh other -o User=a sort -u a:b",
+      "expected": "ssh host curl x && ssh other -o User=a sort -u a:[REDACTED]"
+    },
+    {
+      "text": "sudo -u www-data curl http://x"
+    },
+    {
+      "text": "sudo -u www-data:www-data env http_proxy=x curl x"
+    },
+    {
+      "text": "doas -u app:app curl x"
+    },
+    {
+      "text": "timeout -s KILL 5 curl x"
+    },
+    {
+      "text": "env -u FOO:BAR curl x"
+    },
+    {
+      "text": "curl x ; env -u FOO curl -s x"
+    },
+    {
+      "text": "git commit -m \"fix curl -u handling\" -u a:b",
+      "parent": "git commit -m \"fix curl -u handling\" -u a:[REDACTED]",
+      "expected": "git commit -m \"fix curl -u handling\" -u a:[REDACTED]"
+    },
+    {
+      "text": "echo \"curl -u\" -u a:b",
+      "parent": "echo \"curl -u\" -u a:[REDACTED]",
+      "expected": "echo \"curl -u\" -u a:[REDACTED]"
+    },
+    {
+      "text": "Readme: `curl -u admin:password` is a placeholder; `sort -u x:y` is not.",
+      "parent": "Readme: `curl -u admin:[REDACTED]` is a placeholder; `sort -u x:y` is not.",
+      "expected": "Readme: `curl -u admin:[REDACTED]` is a placeholder; `sort -u x:[REDACTED]` is not."
+    },
+    {
+      "text": "grep -r \"curl\" . | sort -u"
+    },
+    {
+      "text": "grep -r \"curl\" . | sort -u a:b",
+      "expected": "grep -r \"curl\" . | sort -u a:[REDACTED]"
+    },
+    {
+      "text": "grep -rn 'curl -u' src/ -u x:y",
+      "parent": "grep -rn 'curl -u' src/ -u x:[REDACTED]",
+      "expected": "grep -rn 'curl -u' src/ -u x:[REDACTED]"
+    },
+    {
+      "text": "git grep \"curl\" -- '*.sh' && git log -u a:b\n",
+      "expected": "git grep \"curl\" -- '*.sh' && git log -u a:[REDACTED]\n"
+    }
+  ]
+}

@@ -1,6 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { MindlyError, redact, sanitizeForContext, sanitizeLine } from '@mindly/core';
+import {
+  MindlyError,
+  MAX_REDACT_INPUT,
+  redact,
+  sanitizeForContext,
+  sanitizeLine,
+} from '@mindly/core';
 import { findRepoRoot } from '@mindly/git';
 import { assertRunnerAgentKind } from './agents.js';
 import type { AgentUsage, RunnerAgentKind } from './agents.js';
@@ -84,7 +90,8 @@ export function prepareDiff(diff: string): {
 } {
   const r = redact(diff);
   let text = r.text.replace(DIFF_CONTROL_RE, '');
-  let truncated = r.text.length < diff.length;
+  // Redaction keeps every character but the secrets, so only its own input cap shortens a diff.
+  let truncated = diff.length > MAX_REDACT_INPUT;
   if (text.length > MAX_REVIEW_DIFF_CHARS) {
     text = text.slice(0, MAX_REVIEW_DIFF_CHARS);
     truncated = true;

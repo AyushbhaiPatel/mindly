@@ -1,3 +1,4 @@
+import { realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -79,12 +80,75 @@ const RequiredSchema = z.object({
   cwd: z.string().min(1).max(MAX_PATH_CHARS),
 });
 
-function firstRoot(payload: Record<string, unknown>): string | null {
-  const roots = payload['workspace_roots'] ?? payload['workspaceRoots'];
-  if (Array.isArray(roots)) {
-    for (const r of roots) if (typeof r === 'string' && r.trim() !== '') return r;
+/** The real path of an existing file or directory; the path itself when it cannot be read. */
+function real(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
   }
-  return readNonEmptyString(payload, ['cwd'], MAX_PATH_CHARS + 1);
+}
+
+/** True when `path` is `root` or lies under it, compared as real paths. */
+function isUnder(root: string, path: string): boolean {
+  const base = real(root).replace(/[\\/]+$/, '');
+  const at = real(path);
+  return at === base || at.startsWith(`${base}/`) || at.startsWith(`${base}\\`);
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The directory an event is read from. Cursor reports every root of a multi-root workspace; the
+ * event belongs to the one that holds the file being written, or else the one that holds the
+ * reported working directory (the first root when neither says). The root only helps to find
+ * the project: the reported working directory is kept whenever it exists, because a shell
+ * command's relative paths start where it runs. Only a write to a file in a root while the
+ * working directory lies elsewhere is read from that root, so the file's project decides.
+ */
+function eventCwd(payload: Record<string, unknown>): string | null {
+  const cwd = readNonEmptyString(payload, ['cwd'], MAX_PATH_CHARS + 1);
+  const root = eventRoot(payload, cwd);
+  if (cwd === null) return root;
+  if (root === null || isUnder(root, cwd)) return cwd;
+  if (!isDirectory(cwd)) return root;
+  return writtenFile(payload) !== null && isUnder(root, writtenFile(payload) as string)
+    ? root
+    : cwd;
+}
+
+/** The file an event writes, when it names one. */
+function writtenFile(payload: Record<string, unknown>): string | null {
+  const input = asRecord(payload['tool_input']);
+  return (
+    readNonEmptyString(payload, ['file_path'], MAX_PATH_CHARS + 1) ??
+    readNonEmptyString(input, ['file_path', 'path', 'target_file'], MAX_PATH_CHARS + 1)
+  );
+}
+
+function eventRoot(payload: Record<string, unknown>, cwd: string | null): string | null {
+  const listed = payload['workspace_roots'] ?? payload['workspaceRoots'];
+  const roots = Array.isArray(listed)
+    ? listed.filter((r): r is string => typeof r === 'string' && r.trim() !== '')
+    : [];
+  if (roots.length === 0) return cwd;
+  if (roots.length > 1) {
+    const file = writtenFile(payload);
+    // The deepest root wins when one root is nested in another.
+    const deepestFirst = [...roots].sort((a, b) => b.length - a.length);
+    for (const at of [file, cwd]) {
+      if (at === null) continue;
+      const holder = deepestFirst.find((r) => isUnder(r, at));
+      if (holder !== undefined) return holder;
+    }
+  }
+  return roots[0] ?? cwd;
 }
 
 function parseCursor(nativeEvent: string, payload: unknown): NormalizedHookEvent | null {
@@ -94,7 +158,7 @@ function parseCursor(nativeEvent: string, payload: unknown): NormalizedHookEvent
     const [name, spec] = found;
     const required = RequiredSchema.safeParse({
       id: readNonEmptyString(payload, ['conversation_id', 'session_id', 'conversationId'], 513),
-      cwd: firstRoot(payload),
+      cwd: eventCwd(payload),
     });
     if (!required.success) return null;
     const ev = baseEvent(KIND, spec.event, name, required.data.id, required.data.cwd);

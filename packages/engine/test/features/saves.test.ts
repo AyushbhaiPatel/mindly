@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import type { Save, SaveKind } from '@mindly/core';
+import { fingerprint, type Save, type SaveKind } from '@mindly/core';
 import {
   createFailoverModule,
   SAVE_WINDOW_MS,
@@ -424,6 +424,91 @@ describe('saves: rule_enforced', () => {
     await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'post_tool', { tool: cat }));
     await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
     expect(only(f.mindly, f.pid, 'rule_enforced').status).toBe('confirmed');
+  });
+});
+
+describe('saves: rule_enforced on a call with several files', () => {
+  /** One denied call that writes a protected file and an ordinary one. */
+  async function mixedSetup() {
+    const f = await featureSetup();
+    f.mindly.memory.remember({
+      projectId: f.pid,
+      projectRoot: f.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'src/generated is produced by codegen',
+      scopePaths: ['src/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const both = writeTool('src/generated/api.ts', 'x');
+    both!.edits.push({ path: 'src/client.ts', addedText: 'y', removedText: '', wholeFile: false });
+    const res = await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'pre_tool', { tool: both }),
+    );
+    expect(res.decision).toBe('deny');
+    f.clock.advance(1000);
+    return f;
+  }
+
+  it('keeps only the files the rule protects', async () => {
+    const f = await mixedSetup();
+    expect(only(f.mindly, f.pid, 'rule_enforced').paths).toEqual(['src/generated/api.ts']);
+  });
+
+  it('is confirmed when the rest of the call is written without the protected file', async () => {
+    const f = await mixedSetup();
+    writeFileSync(join(f.root, 'src', 'client.ts'), 'export const y = 1;\n');
+    await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'post_tool', { tool: writeTool('src/client.ts', 'y') }),
+    );
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'stop'));
+    expect(only(f.mindly, f.pid, 'rule_enforced').status).toBe('confirmed');
+    expect(total(f.mindly, f.pid)).toBe(1);
+  });
+
+  it('recognises a save recorded with every path of the call', async () => {
+    const f = await featureSetup();
+    const rule = f.mindly.memory.remember({
+      projectId: f.pid,
+      projectRoot: f.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'src/generated is produced by codegen',
+      scopePaths: ['src/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    // As an earlier version recorded it: all paths of the denied call, in paths and fingerprint.
+    const all = ['src/client.ts', 'src/generated/api.ts'];
+    const old = f.mindly.store.saves.record({
+      projectId: f.pid,
+      kind: 'rule_enforced',
+      title: 'A write by Codex was blocked by your rule',
+      sessionIds: [f.cx.id],
+      paths: all,
+      evidence: ['e0'],
+      fingerprint: fingerprint('rule_enforced', rule.id, ...all),
+      refs: { ruleId: rule.id },
+    }).save;
+    f.mindly.store.saves.settle(old.id, 'confirmed');
+
+    const both = writeTool('src/generated/api.ts', 'x');
+    both!.edits.push({ path: 'src/client.ts', addedText: 'y', removedText: '', wholeFile: false });
+    const res = await f.mindly.hooks.handle(
+      event(f.root, 'codex', 'cx', 'pre_tool', { tool: both }),
+    );
+    expect(res.decision).toBe('deny');
+    expect(savesOfKind(f.mindly, f.pid, 'rule_enforced').map((s) => s.id)).toEqual([old.id]);
+    expect(total(f.mindly, f.pid)).toBe(1);
+  });
+
+  it('is the same save when the protected file is denied again in another mix', async () => {
+    const f = await mixedSetup();
+    const other = writeTool('src/generated/api.ts', 'x');
+    other!.edits.push({ path: 'src/other.ts', addedText: 'z', removedText: '', wholeFile: false });
+    await f.mindly.hooks.handle(event(f.root, 'codex', 'cx', 'pre_tool', { tool: other }));
+    expect(savesOfKind(f.mindly, f.pid, 'rule_enforced')).toHaveLength(1);
   });
 });
 

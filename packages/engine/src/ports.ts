@@ -26,6 +26,29 @@ export interface GitPort {
    * Optional; falls back to `findRepoRoot`.
    */
   projectRoot?(cwd: string): Promise<string | null>;
+  /**
+   * Canonical roots of every working tree of the repository containing `cwd` (the main checkout
+   * and its linked worktrees), or null when they cannot be listed. Optional: with it, whether a
+   * path outside the session's tree belongs to the project is known from one call.
+   */
+  workingTrees?(cwd: string): Promise<string[] | null>;
+  /**
+   * Paths (relative to `root`, a working tree) that git lists for `pathspecs`, without walking
+   * ignored directories. `known`: tracked files and untracked files that are not ignored.
+   * `ignored`: ignored files, and each ignored directory as one entry ending in `/`. `changed`:
+   * `tracked`: tracked files. `dirs`: untracked directories, each one entry ending in `/`.
+   * `complete` is false when the listing
+   * was cut by the time limit or its size; null when git cannot be asked at all. Optional: with
+   * it, looking for the files a rule covers costs what the rule matches, not the size of the tree.
+   */
+  listFiles?(
+    root: string,
+    query: {
+      kind: 'known' | 'ignored' | 'tracked' | 'dirs';
+      pathspecs: string[];
+      timeoutMs: number;
+    },
+  ): Promise<{ files: string[]; complete: boolean } | null>;
   currentBranch(cwd: string): Promise<string | null>;
   headCommit(cwd: string): Promise<string | null>;
   /** Project-relative paths with uncommitted changes (staged, unstaged, untracked). */
@@ -61,6 +84,11 @@ export interface GitPort {
   ): Promise<{ ref: string; commit: string } | null>;
   /** Optional (time machine): creates a *new* branch `branch` pointing at snapshot `id`. */
   restoreSnapshotToBranch?(repoRoot: string, id: string, branch: string): Promise<void>;
+  /**
+   * Optional (impact radar): whether commit `ancestor` is an ancestor of (or equal to) commit
+   * `descendant`. False when either cannot be read.
+   */
+  isAncestor?(cwd: string, ancestor: string, descendant: string): Promise<boolean>;
   /** Optional (memory branches): whether `branch` is fully merged into `into`. */
   isMerged?(repoRoot: string, branch: string, into: string): Promise<boolean>;
   /** Optional (splits): the operations `mindly split` needs; absent when git is unavailable. */
@@ -164,7 +192,7 @@ export interface CheckpointRefEntry {
   seq: number;
   ref: string;
   commit: string;
-  /** When the checkpoint commit was made (ms since the epoch). */
+  /** When the ref was created (ms since the epoch), or 0 when that cannot be told. */
   createdAt: number;
 }
 
@@ -222,16 +250,92 @@ export interface SplitGitPort {
   branchExists(repoRoot: string, branch: string): Promise<boolean>;
   /** Creates branch `branch` at `startPoint` in a new worktree at `path`; refuses existing ones. */
   addWorktree(repoRoot: string, path: string, branch: string, startPoint: string): Promise<string>;
-  /** Removes a linked worktree (and its uncommitted work). False when it was not a worktree. */
-  removeWorktree(repoRoot: string, path: string): Promise<boolean>;
-  deleteBranch(repoRoot: string, branch: string): Promise<boolean>;
+  /**
+   * Removes a linked worktree. False when it was not a worktree. With `force` (the default) its
+   * uncommitted work goes with it; with `force: false` git refuses (`conflict`, `details.refused`,
+   * and `details.locked` for a locked one) a worktree with modified or untracked files (flagged
+   * skip-worktree or assume-unchanged ones included), with submodules or that is locked. Ignored
+   * files go either way.
+   */
+  removeWorktree(repoRoot: string, path: string, options?: { force?: boolean }): Promise<boolean>;
+  /**
+   * Puts `paths` of `worktree` back to its HEAD in the index and writes the committed ones that
+   * are missing from disk, never overwriting a file: what is left for git's check after the
+   * files a user confirmed were deleted.
+   */
+  restoreFromHead(repoRoot: string, worktree: string, paths: readonly string[]): Promise<void>;
+  /**
+   * Git data in `worktree` that no listing of files can stand for, and that an abort never
+   * deletes short of a discard: nested repositories (new, ignored, or in a tracked folder),
+   * populated submodules and committed repositories, `.git` entries in tracked folders, git
+   * directories among untracked or ignored files, and a non-empty `modules` folder in its own
+   * git directory. Worktree-relative paths (that `modules` folder: absolute).
+   */
+  gitDataIn(repoRoot: string, worktree: string): Promise<string[]>;
+  /**
+   * The last look at `worktree` before it is removed, in one pass: `stray`, what removing it
+   * would delete that a listing counts (untracked files, and ignored files on the deny-list or
+   * `secretDeny`): once the confirmed work is gone, anything here appeared since; `gitData`, as
+   * `gitDataIn`.
+   */
+  lastLook(
+    repoRoot: string,
+    worktree: string,
+    secretDeny: readonly string[],
+  ): Promise<{ stray: string[]; gitData: string[] }>;
+  /** Deletes a branch; with `expectedTip`, refuses (`conflict`) one that has moved since. */
+  deleteBranch(repoRoot: string, branch: string, expectedTip?: string): Promise<boolean>;
+  /**
+   * What deleting `branch` would lose: its tip, and its commits (newest first, at most 50; `more`
+   * when there are others) that no other branch, tag or remote-tracking branch reaches (branches
+   * in `ignoring` do not count). Only reachability counts, not where else the changes are.
+   */
+  branchOnlyWork(
+    repoRoot: string,
+    branch: string,
+    options: { ignoring: readonly string[] },
+  ): Promise<{
+    tip: string | null;
+    commits: { commit: string; subject: string }[];
+    more: boolean;
+  }>;
+  /**
+   * Work in `worktree` that is not on `refs/heads/<branch>`. `paths`: paths whose content differs
+   * from the branch tip, deny-listed ones included. `ignoredDenied`: ignored files on the secret
+   * deny-list (a local `.env`), which no commit has and removing the worktree deletes. `denied`:
+   * every deny-listed path of both, whose content must never be read. Edited files flagged
+   * skip-worktree or assume-unchanged, and new nested repositories (as their folders), are among
+   * `paths`. `extraDeny` adds globs that are never read (the user's and the project's) to the
+   * built-in list; `secretDeny` adds those of them that name secrets, the only ignored files
+   * counted besides the built-in list.
+   */
+  uncommittedWork(
+    repoRoot: string,
+    worktree: string,
+    branch: string,
+    extraDeny: readonly string[],
+    secretDeny: readonly string[],
+    since?: string,
+  ): Promise<{
+    paths: string[];
+    denied: string[];
+    ignoredDenied: string[];
+    /** With `since`: paths that differ between that commit and the worktree, as `changedSince`. */
+    changedSince?: string[];
+  }>;
   /** Paths that differ between `base` and the worktree's current content (committed or not). */
-  changedSince(repoRoot: string, worktree: string, base: string): Promise<string[]>;
+  changedSince(
+    repoRoot: string,
+    worktree: string,
+    base: string,
+    extraDeny: readonly string[],
+  ): Promise<string[]>;
   /** Shadow-merges the sides' worktrees (uncommitted work included) on top of `base`. */
   mergeCheck(
     repoRoot: string,
     base: string,
     sides: readonly SplitMergeSide[],
+    extraDeny: readonly string[],
   ): Promise<SplitMergeCheck>;
   /** Merges `branches` in order onto `base` into the NEW branch `into` with merge commits. */
   mergeBranches(
@@ -290,18 +394,55 @@ export type NotifyTrigger =
   | 'review_ready'
   | 'standup';
 
-export interface NotifierPort {
-  send(n: {
-    trigger: NotifyTrigger;
-    title: string;
-    body: string;
-    projectName?: string;
-    priority?: 'low' | 'default' | 'high';
-    dedupeKey?: string;
-  }): Promise<void>;
+/** A pager notification: titles and counts only, never code or prompt text. */
+export interface PagerNotification {
+  trigger: NotifyTrigger;
+  title: string;
+  body: string;
+  projectName?: string;
+  priority?: 'low' | 'default' | 'high';
+  dedupeKey?: string;
+  /** The same on every attempt to deliver this notification; webhooks receive it as `id`. */
+  id?: string;
 }
 
-export const nullNotifier: NotifierPort = { send: async () => undefined };
+/** What one channel did with a notification. */
+export interface NotifyResult {
+  channel: string;
+  status: 'sent' | 'skipped' | 'failed';
+  /** `trigger_disabled`, `deduped`, `rate_limited`, `unsupported`, or a short description. */
+  reason?: string;
+}
+
+export interface NotifierPort {
+  /**
+   * Sends to every configured channel and never throws. Resolves with one result per channel
+   * (none when no channel is configured); a port that cannot tell resolves with nothing.
+   */
+  send(
+    n: PagerNotification,
+    options?: {
+      /** Send whatever `notify.triggers` lists (a scheduled standup, a test of the channels). */
+      ignoreTriggers?: boolean;
+      /** Skip dedupe and the hourly budget (a test of the channels). */
+      bypassLimits?: boolean;
+    },
+  ): Promise<readonly NotifyResult[] | undefined>;
+}
+
+/**
+ * Whether a notification needs no further attempt: it reached a channel, went out a moment ago
+ * under the same key, or there is nothing to send it to. False when a channel failed and none
+ * took it, or the hourly budget held it back.
+ */
+export function notifySettled(results: readonly NotifyResult[] | undefined): boolean {
+  if (!results || results.length === 0) return true;
+  if (results.some((r) => r.status === 'sent')) return true;
+  if (results.some((r) => r.status === 'failed')) return false;
+  return !results.some((r) => r.reason === 'rate_limited');
+}
+
+export const nullNotifier: NotifierPort = { send: async () => [] };
 
 export const nullLlm: LlmPort = {
   available: false,

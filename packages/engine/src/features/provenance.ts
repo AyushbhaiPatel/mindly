@@ -102,7 +102,10 @@ export class ProvenanceService {
     return {
       path: rel,
       line,
-      text: sanitizeLine(redactText(raw), 500),
+      text: sanitizeLine(
+        redactText(raw, { extraPatterns: this.k.config.redaction.extraPatterns }),
+        500,
+      ),
       changes,
       memories,
     };

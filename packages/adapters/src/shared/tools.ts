@@ -1,5 +1,5 @@
 import type { FileEdit, NormalizedHookEvent } from '@mindly/core';
-import { findPatchText, parseApplyPatch } from '../codex/apply-patch.js';
+import { findPatchText, readApplyPatch } from '../codex/apply-patch.js';
 import {
   capText,
   isRecord,
@@ -69,8 +69,31 @@ function readPath(obj: unknown): string | null {
  * patches. Unknown shapes yield an empty list.
  */
 export function extractEdits(toolName: string, toolInput: unknown): FileEdit[] {
+  return readEdits(toolName, toolInput).edits;
+}
+
+/**
+ * {@link extractEdits}, and whether the input holds more edits than are reported (`cut`): a
+ * patch or edit list beyond the cap changes files that are not in the list.
+ */
+export function readEdits(
+  toolName: string,
+  toolInput: unknown,
+): { edits: FileEdit[]; cut: boolean } {
   const patch = findPatchText(toolInput);
-  if (patch !== null) return parseApplyPatch(patch);
+  if (patch !== null) return readApplyPatch(patch);
+  const listed = isRecord(toolInput) ? toolInput['edits'] : undefined;
+  const edits = editsOf(toolName, toolInput);
+  if (!Array.isArray(listed) || listed.length <= MAX_EDITS) return { edits, cut: false };
+  // Edits beyond the cap only matter when they change a file the reported ones do not: many
+  // edits of one file (MultiEdit) are that file, whatever their number.
+  const reported = new Set(edits.map((e) => e.path));
+  const fallback = readPath(toolInput);
+  const cut = listed.slice(MAX_EDITS).some((e) => !reported.has(readPath(e) ?? fallback ?? ''));
+  return { edits, cut };
+}
+
+function editsOf(toolName: string, toolInput: unknown): FileEdit[] {
   if (!isRecord(toolInput)) return [];
   const path = readPath(toolInput);
   if (path === null) return [];
@@ -159,16 +182,49 @@ export interface BuildToolOptions {
   shell?: boolean;
 }
 
+/** The first line of `apply_patch` given a here-document with a quoted delimiter. */
+const PATCH_HEAD =
+  /^\s*(?:apply_patch|applypatch)[ \t]+<<(-?)[ \t]*(['"])([A-Za-z_][A-Za-z0-9_]*)\2[ \t]*$/;
+
+/**
+ * A shell call that bash never runs: `apply_patch` given a patch in a here-document whose
+ * delimiter is quoted (so nothing in it is expanded), as the whole command, the delimiter ending
+ * it on its last line and on no line before (with `<<-`, after leading tabs too). The agent takes
+ * it as its patch tool. Anything else, a bare patch text or a here-document bash expands or ends
+ * early, is shell code.
+ */
+function isPatchCall(command: string): boolean {
+  if (!command.includes('*** Begin Patch')) return false;
+  const lines = command.replace(/\r\n/g, '\n').replace(/\n+$/, '').split('\n');
+  const head = PATCH_HEAD.exec(lines[0] ?? '');
+  if (head === null || lines.length < 4) return false;
+  const tabs = head[1] === '-';
+  const delimiter = head[3] as string;
+  const ends = (line: string): boolean => (tabs ? line.replace(/^\t+/, '') : line) === delimiter;
+  if (!ends(lines[lines.length - 1] as string)) return false;
+  const body = lines.slice(1, -1);
+  if (body.some(ends)) return false;
+  return (
+    (body[0] ?? '').trimEnd() === '*** Begin Patch' &&
+    (body[body.length - 1] ?? '').trimEnd() === '*** End Patch'
+  );
+}
+
 /** Builds the normalised `tool` section of an event. */
 export function buildTool(opts: BuildToolOptions): NonNullable<NormalizedHookEvent['tool']> {
   const cls = classifyTool(opts.name);
   const command = readCommand(opts.input, ['command', 'cmd']);
   const shell = opts.shell ?? cls.shell;
   let edits: FileEdit[] = [];
+  let editsCut = false;
   let writes = opts.writes ?? cls.writes;
-  if (writes || (shell && command !== null && command.includes('*** Begin Patch'))) {
-    edits = extractEdits(opts.name, opts.input);
-    if (edits.length > 0) writes = true;
+  if (writes) {
+    ({ edits, cut: editsCut } = readEdits(opts.name, opts.input));
+  } else if (shell && command !== null && command.includes('*** Begin Patch')) {
+    // A shell call is the agent's patch only when bash would run nothing of it. Any other line
+    // holding a patch stays a shell line, read as one, and its patch's files are read besides.
+    ({ edits, cut: editsCut } = readEdits(opts.name, opts.input));
+    if (edits.length > 0 && isPatchCall(command)) writes = true;
   }
   const hasResponse = opts.response !== undefined;
   return {
@@ -176,6 +232,7 @@ export function buildTool(opts: BuildToolOptions): NonNullable<NormalizedHookEve
     writes,
     shell,
     edits,
+    ...(editsCut ? { editsCut } : {}),
     command: shell ? command : null,
     failed: opts.failed ?? (hasResponse ? didFail(opts.response) : false),
     outputExcerpt: hasResponse ? outputExcerpt(opts.response) : null,

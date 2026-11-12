@@ -10,7 +10,7 @@ import {
   runChecks,
   shadowMerge,
 } from '../src/index.js';
-import { git, makeRepo, tempDir, write } from './helpers.js';
+import { git, isAlive, makeRepo, tempDir, write } from './helpers.js';
 
 /** Repo with two agent worktrees branching from main. */
 function setup(): { root: string; a: string; b: string } {
@@ -193,6 +193,44 @@ describe('runChecks', () => {
     expect(results[1]?.exitCode).toBe(3);
     expect(results[1]?.output).toContain('boom');
     expect(results[2]?.durationMs).toBeLessThan(10_000);
+  });
+
+  it('kills a group member that ignores SIGTERM after the check itself has exited', async () => {
+    const dir = tempDir();
+    const pidFile = join(dir, 'grandchild.pid');
+    const program = `
+      const cp = require('node:child_process');
+      const c = cp.spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'], { stdio: 'ignore' });
+      require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(c.pid));
+      setInterval(() => {}, 1000);`;
+    const [r] = await runChecks(
+      dir,
+      [{ name: 'slow', argv: [node, '-e', program], timeoutSec: 0.5 }],
+      {
+        killGraceMs: 200,
+      },
+    );
+    expect(r?.status).toBe('timeout');
+    const grandchild = Number(readFileSync(pidFile, 'utf8'));
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(isAlive(grandchild)).toBe(false);
+  });
+
+  it('passes a check that ended in time while a background process held its output', async () => {
+    const dir = tempDir();
+    const program = `
+      require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'inherit' });
+      console.log('done');
+      process.exit(0);`;
+    const [r] = await runChecks(
+      dir,
+      [{ name: 'quick', argv: [node, '-e', program], timeoutSec: 0.6 }],
+      {
+        killGraceMs: 200,
+      },
+    );
+    expect(r?.status).toBe('pass');
+    expect(r?.output).toContain('done');
   });
 
   it('caps captured output to the tail and does not leak the parent environment', async () => {

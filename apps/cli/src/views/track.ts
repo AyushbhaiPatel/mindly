@@ -158,6 +158,20 @@ export function renderTrack(
       'This is a partial record: there was more data than Mindly reads at once. Use a shorter --since or one --area.',
     );
   }
+  if (r.eventsSince !== null) {
+    const missing =
+      'Broken decisions, failed merge checks, blocked writes and usage limits from before are missing, so those counts and rates are too low.';
+    if (r.eventsSince >= r.window.to) {
+      sc.note(
+        `Edits are counted for the whole window, but what went wrong is not known for any of it: the events were removed (retention.eventsDays). ${missing}`,
+      );
+    } else {
+      const kept = Math.max(1, Math.round((r.window.to - r.eventsSince) / 86_400_000));
+      sc.note(
+        `Edits are counted for the whole window, but what went wrong is only known for the last ${kept} ${kept === 1 ? 'day' : 'days'}: older events were removed (retention.eventsDays). ${missing} Use a --since inside that period to compare agents.`,
+      );
+    }
+  }
 
   if (r.usageLimits.length > 0) {
     sc.blank();
