@@ -51,6 +51,7 @@ import {
   type ImportGraph,
 } from '@mindly/git';
 import type { CheckpointGitPort, SplitGitPort, StepGitPort } from '@mindly/engine';
+import { NoneProvider } from '@mindly/llm';
 
 /** `CheckpointGitPort` backed by `@mindly/git`. Errors propagate: the checkpoint service fails open. */
 export function createCheckpointGitPort(): CheckpointGitPort {
@@ -417,7 +418,9 @@ export function createLlmPort(
   const helpers = createLlmHelpers(provider);
   return {
     available: provider.name !== 'none',
-    classifyCorrection: (prompt) => helpers.classifyCorrection(prompt),
+    unavailableReason:
+      config.provider !== 'none' && provider instanceof NoneProvider ? provider.reason : null,
+    classifyCorrection: (prompt, options) => helpers.classifyCorrection(prompt, options),
     summarizeTurn: (input) => helpers.summarizeTurn(input),
   };
 }

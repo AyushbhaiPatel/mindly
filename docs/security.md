@@ -462,6 +462,11 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   (emoji joiners, a Persian zero-width non-joiner, bidi controls in a diff under review). Text that
   one agent's work puts in front of another agent (shared context, memories, coordination
   warnings, file paths) is shown without them.
+- Text sent to a configured model goes through the same redaction as stored text, including
+  `redaction.extraPatterns`, and so does the reply. The model is asked only about short
+  correction sentences from the user's own prompt, within a fraction of the hook's deadline; when
+  it does not answer in time the rule is stored as it would be with no model. A model answer can
+  narrow where a rule applies or say a sentence is not a rule, but never raises its trust.
 
 ### T4. Local network and browser attacks on the daemon
 

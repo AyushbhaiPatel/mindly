@@ -356,10 +356,28 @@ export interface SplitGitPort {
   ): Promise<SplitCheckResult[]>;
 }
 
+/** Per-call options for a model call. The call stays fail-soft: it resolves `null` instead. */
+export interface LlmCallOptions {
+  /** Ends the call early; it then resolves `null`. */
+  signal?: AbortSignal;
+  /** When the caller stops waiting (ms since the epoch); no retry is started that ends later. */
+  deadline?: number;
+  /** The user's `redaction.extraPatterns`, applied to what is sent and to the reply. */
+  redactPatterns?: readonly string[];
+  /** Hears why the call gave no answer (a short reason with no key, prompt or reply). */
+  onFailure?: (reason: string) => void;
+}
+
 export interface LlmPort {
   readonly available: boolean;
+  /**
+   * Why a provider the user configured cannot be used (for example a remote Ollama URL without
+   * `llm.allowRemote`), or null when it can, or when none is configured.
+   */
+  readonly unavailableReason?: string | null;
   classifyCorrection(
     prompt: string,
+    options?: LlmCallOptions,
   ): Promise<{ isRule: boolean; rule: string; scopeGlobs: string[]; confidence: number } | null>;
   summarizeTurn(input: {
     prompts: string[];
