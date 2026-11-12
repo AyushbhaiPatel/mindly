@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -260,6 +268,49 @@ describe('revertStep', () => {
     expect(r.conflicts).toEqual(['secrets.txt']);
     expect(r.reason).toMatch(/deny-list/);
     expect(readFileSync(join(root, 'app.ts'), 'utf8')).toBe('ccc\n');
+  });
+
+  it('refuses a step without a parent, which holds every file of the checkout', async () => {
+    const { root, steps } = await chainRepo();
+    const before = userState(root);
+    for (const apply of [false, true]) {
+      const r = await revertStep(root, null, step(steps, 1), { apply });
+      expect(r.applied).toBe(false);
+      expect(r.paths).toEqual([]);
+      expect(r.reason).toMatch(/first step/);
+    }
+    expect(userState(root)).toEqual(before);
+    expect(existsSync(join(root, 'src', 'a.ts'))).toBe(true);
+    expect(existsSync(join(root, 'src', 'c.ts'))).toBe(true);
+  });
+
+  it('undoes a step that added a link whose target is missing', async () => {
+    const root = makeRepo({ 'a.txt': 'a\n' });
+    const indexFile = join(tempDir(), 'index');
+    const first = await captureCheckpoint({
+      worktree: root,
+      indexFile,
+      parent: null,
+      paths: null,
+      always: true,
+      ref: checkpointRefName(root, 1),
+      message: 'step 1',
+    });
+    symlinkSync('missing.txt', join(root, 'link'));
+    const second = await captureCheckpoint({
+      worktree: root,
+      indexFile,
+      parent: { commit: first.commit as string },
+      paths: ['link'],
+      always: true,
+      ref: checkpointRefName(root, 2),
+      message: 'step 2',
+    });
+    const r = await revertStep(root, first.commit as string, second.commit as string, {
+      apply: true,
+    });
+    expect(r).toMatchObject({ applied: true, paths: ['link'], conflicts: [] });
+    expect(() => lstatSync(join(root, 'link'))).toThrow();
   });
 });
 

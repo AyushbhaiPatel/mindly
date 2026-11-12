@@ -164,7 +164,7 @@ export interface CheckpointRefEntry {
   seq: number;
   ref: string;
   commit: string;
-  /** When the checkpoint commit was made (ms since the epoch). */
+  /** When the ref was created (ms since the epoch), or 0 when that cannot be told. */
   createdAt: number;
 }
 

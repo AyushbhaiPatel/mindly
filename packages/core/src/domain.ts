@@ -347,6 +347,11 @@ export interface FileChange {
   removedLines: number;
   /** Event id of the prompt that triggered this turn, for provenance. */
   promptEventId: string | null;
+  /**
+   * Canonical root of the working tree the edit was made in (`path` is relative to it); null
+   * when it could not be told or the row predates it.
+   */
+  worktree: string | null;
   createdAt: number;
 }
 

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -29,6 +29,16 @@ export const CHECKPOINT_TIMEOUT_MS = 2000;
 export const PRUNE_INTERVAL_MS = DAY_MS;
 /** A ref without a row is deleted by the prune once it is this old (a row may still be coming). */
 const ORPHAN_REF_MIN_AGE_MS = HOUR_MS;
+/** Paths remembered as settled since the latest step of a working tree. */
+const MAX_SETTLED_PATHS = 200;
+/** Writes in flight remembered per session (parallel subagents share one session). */
+const MAX_WRITE_NOTES = 8;
+/** Key prefix of a session's notes of writes in flight (followed by the session id). */
+const WRITE_NOTE_PREFIX = 'checkpoints:writing:';
+/** A write whose post-tool hook has not come by then is no longer waited for. */
+const WRITE_NOTE_TTL_MS = 5 * 60_000;
+/** Files larger than this are not hashed: their size and modification time stand in. */
+const MAX_HASHED_FILE_BYTES = 8 * 1024 * 1024;
 
 /** What one agent edit tells the service. */
 export interface AgentEditInput {
@@ -39,6 +49,17 @@ export interface AgentEditInput {
   promptEventId: string | null;
 }
 
+/**
+ * A write in flight, noted by the agent's pre-tool hook: when it ran, the working tree and paths
+ * it named, and a hash of each file then (`''` for a missing file, null when it was not read).
+ */
+interface WriteNote {
+  at: number;
+  worktree: string;
+  paths: string[];
+  before: (string | null)[];
+}
+
 /** What a prune removed. */
 export interface PruneResult {
   refsDeleted: number;
@@ -46,6 +67,12 @@ export interface PruneResult {
 }
 
 type Step = { kind: 'agent'; session: Session; edit: AgentEditInput } | { kind: 'rescan' };
+
+/** See `CheckpointService.settled`. */
+interface Settled {
+  all: number;
+  paths: Map<string, number>;
+}
 
 export class CheckpointService {
   private readonly roots = new Map<string, Promise<string | null>>();
@@ -103,9 +130,115 @@ export class CheckpointService {
   }
 
   /**
+   * Notes that an agent is about to write `paths` (relative to the working tree of `cwd`): its
+   * pre-tool hook, the start of the window in which a rescan may take the edit before the
+   * agent's own step. One note per write, consumed by the write's post-tool hook (writes of the
+   * same paths may overlap: parallel subagents share their session); at most a few per session,
+   * each dropped after a few minutes.
+   */
+  async noteWriteStart(sessionId: string, cwd: string, paths: readonly string[]): Promise<void> {
+    if (!this.enabled || paths.length === 0) return;
+    try {
+      const worktree = await this.worktreeOf(cwd);
+      if (!worktree) return;
+      const own = paths.slice(0, 50);
+      const note: WriteNote = {
+        at: this.k.clock.now(),
+        worktree,
+        paths: [...own],
+        before: own.map((p) => fileHash(join(worktree, p))),
+      };
+      const key = this.writeKey(sessionId);
+      this.k.store.transaction(() => {
+        this.k.store.kv.set(key, [...this.writeNotes(sessionId), note].slice(-MAX_WRITE_NOTES));
+      });
+    } catch {
+      // Without it a rescan that takes this edit first keeps it as an outside step.
+    }
+  }
+
+  /** Drops the session's notes of writes in flight (it ended, or its project is forgotten). */
+  forgetWrites(sessionId: string): void {
+    try {
+      this.k.store.kv.delete(this.writeKey(sessionId));
+    } catch {
+      // The prune removes them once they expired.
+    }
+  }
+
+  /**
+   * Removes every session's notes of writes in flight that all expired: a session that never
+   * ended through its hook (its window was killed, it was ended as stale) leaves its last ones
+   * behind otherwise. A note is written with its row, so a row untouched for longer than a note
+   * lives holds expired notes only. Returns how many sessions' notes went.
+   */
+  sweepWrites(): number {
+    try {
+      return this.k.store.kv.deleteStale(WRITE_NOTE_PREFIX, this.k.clock.now() - WRITE_NOTE_TTL_MS);
+    } catch (err) {
+      this.k.logger.warn('write notes not swept', { error: describeError(err) });
+      return 0;
+    }
+  }
+
+  /**
+   * A note of this session's write of exactly `paths` in `worktree`, removed; null if none. Of
+   * several, the newest one that began before `stepAt` (the latest step, which a rescan may have
+   * taken from that write), else the oldest: each overlapping write then finds its own.
+   */
+  private takeWriteNote(
+    sessionId: string,
+    worktree: string,
+    paths: readonly string[],
+    stepAt: number | null,
+  ): WriteNote | null {
+    try {
+      return this.k.store.transaction(() => {
+        const notes = this.writeNotes(sessionId);
+        const wanted = { worktree, paths: [...paths] };
+        const mine = notes.filter((n) => sameWrite(n, wanted));
+        const before = stepAt === null ? [] : mine.filter((n) => n.at < stepAt);
+        const note = before.at(-1) ?? mine[0] ?? null;
+        const rest = notes.filter((n) => n !== note);
+        if (rest.length > 0) this.k.store.kv.set(this.writeKey(sessionId), rest);
+        else this.k.store.kv.delete(this.writeKey(sessionId));
+        return note;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /** The session's unexpired notes of writes in flight, oldest first. */
+  private writeNotes(sessionId: string): WriteNote[] {
+    const raw = this.k.store.kv.get<unknown>(this.writeKey(sessionId));
+    const now = this.k.clock.now();
+    const notes: WriteNote[] = [];
+    for (const n of Array.isArray(raw) ? (raw as Partial<WriteNote>[]) : []) {
+      if (
+        typeof n.at === 'number' &&
+        now - n.at <= WRITE_NOTE_TTL_MS &&
+        typeof n.worktree === 'string' &&
+        Array.isArray(n.paths) &&
+        Array.isArray(n.before) &&
+        n.paths.length === n.before.length &&
+        n.paths.every((p) => typeof p === 'string') &&
+        n.before.every((h) => h === null || typeof h === 'string')
+      ) {
+        notes.push({ at: n.at, worktree: n.worktree, paths: n.paths, before: n.before });
+      }
+    }
+    return notes;
+  }
+
+  private writeKey(sessionId: string): string {
+    return `${WRITE_NOTE_PREFIX}${sessionId}`;
+  }
+
+  /**
    * Records one agent edit as a step holding only the paths the tool touched. When the tree
-   * already equals the previous step because a rescan took the edit first, that step is
-   * re-attributed to the agent instead.
+   * already equals the previous step because a rescan took the edit first (an outside step taken
+   * after the write began), that step is re-attributed to the agent instead.
    */
   async afterEdit(
     project: ProjectContext,
@@ -149,12 +282,15 @@ export class CheckpointService {
       const latest = this.k.store.checkpoints.latest(pid, worktree);
       const gap = this.hasGap(pid, worktree);
       const edit = step.kind === 'agent' ? step.edit : null;
+      // After a skipped checkpoint the tree holds an edit no step has: the whole tree is scanned,
+      // so that edit lands in this step (marked as a gap) and not in a later one nobody made.
+      const editPaths = edit && !gap ? edit.paths.slice(0, 50) : null;
       const capture = async (seq: number) =>
         git.capture({
           worktree,
           indexFile: join(dir, 'index'),
           parent: latest ? { commit: latest.commit } : null,
-          paths: edit ? edit.paths.slice(0, 50) : null,
+          paths: editPaths,
           always: false,
           ref: git.refName(worktree, seq),
           message: `mindly step ${seq}`,
@@ -164,6 +300,19 @@ export class CheckpointService {
       // The next free step number: rows and refs may disagree after a crash, a prune without
       // its refs or a reset home, so the high-water mark and the refs themselves are consulted.
       let seq = Math.max(latest?.seq ?? 0, this.highWater(pid, worktree)) + 1;
+      // An edit recorded by now was written before its hook ran, so before the capture below.
+      const scannedAt = this.k.clock.now();
+      // The files as the agent's write left them, read before the capture compares them.
+      const note =
+        step.kind === 'agent'
+          ? this.takeWriteNote(
+              step.session.id,
+              worktree,
+              step.edit.paths,
+              latest?.createdAt ?? null,
+            )
+          : null;
+      const after = note ? note.paths.map((p) => fileHash(join(worktree, p))) : null;
       let result;
       try {
         result = await capture(seq);
@@ -177,14 +326,28 @@ export class CheckpointService {
       // The ref exists now: the number is taken even if the row below never gets written.
       if (result.commit !== null) this.setHighWater(pid, worktree, seq);
       if (result.commit === null) {
-        // The edit was already taken by a rescan that ran between the write and this hook.
-        if (edit && latest && latest.kind === 'outside' && this.covers(latest, edit)) {
+        // The scanned paths equal the previous step: what was recorded on them so far is in that
+        // step (or was undone) and explains nothing a later rescan finds there.
+        this.settle(pid, worktree, editPaths, scannedAt);
+        // The edit was already taken by a rescan that ran between the write and this hook. A
+        // write that changed nothing finds the tree unchanged too: an outside step taken before
+        // the write began is somebody else's edit and stays theirs.
+        if (
+          edit &&
+          latest &&
+          latest.kind === 'outside' &&
+          this.takenDuring(latest, note, after) &&
+          this.covers(latest, edit)
+        ) {
+          const own = new Set(edit.paths);
           return this.k.store.checkpoints.attribute(latest.id, {
             kind: 'agent',
             sessionId: step.kind === 'agent' ? step.session.id : null,
             fileChangeId: edit.fileChangeId,
             promptEventId: edit.promptEventId,
             tool: sanitizeLine(edit.tool, 40),
+            // The rescan may have picked up more than this edit: the step is then not the agent's alone.
+            gap: latest.gap || latest.paths.some((p) => !own.has(p)),
           });
         }
         return null;
@@ -199,7 +362,7 @@ export class CheckpointService {
             // A fresh index means the whole tree was scanned: the step may hold more than this edit.
             gap: gap || result.fresh,
           }
-        : this.attributeRescan(pid, latest, result.changedPaths, gap);
+        : this.attributeRescan(pid, worktree, latest, result.changedPaths, gap);
       const checkpoint = this.k.store.checkpoints.create({
         projectId: pid,
         worktree,
@@ -210,6 +373,7 @@ export class CheckpointService {
         ...who,
       });
       if (gap) this.clearGap(pid, worktree);
+      this.clearSettled(pid, worktree);
       return checkpoint;
     } catch (err) {
       this.markGap(pid, worktree);
@@ -218,6 +382,21 @@ export class CheckpointService {
     } finally {
       lock.release();
     }
+  }
+
+  /**
+   * True when the step may be the agent's write: it was taken after the write began (its
+   * pre-tool hook), and the write changed every file it names (the step holds the files as the
+   * write left them, since nothing changed since). A write that left a file as it was, or one
+   * whose files could not be read, takes nothing.
+   */
+  private takenDuring(
+    step: Checkpoint,
+    note: WriteNote | null,
+    after: readonly (string | null)[] | null,
+  ): boolean {
+    if (note === null || after === null || step.createdAt <= note.at) return false;
+    return note.before.every((h, i) => h !== null && after[i] !== null && after[i] !== h);
   }
 
   /** True when the step's recorded paths include every path of the edit. */
@@ -229,10 +408,15 @@ export class CheckpointService {
   /**
    * Who a rescan's changes belong to: the agent whose recorded edits since the last step cover
    * them (its own checkpoint was skipped), else nobody. Changes from several agents, or an agent
-   * step that may hold more, are marked as a gap.
+   * step that may hold more, are marked as a gap. Recorded edits carry paths relative to the
+   * working tree they were made in, so only edits recorded in this working tree count: the same
+   * path edited in another linked worktree of the project explains nothing here. An edit whose
+   * working tree was not recorded may or may not be here: it is credited to nobody and the step
+   * is marked as a gap.
    */
   private attributeRescan(
     projectId: string,
+    worktree: string,
     latest: Checkpoint | null,
     changedPaths: readonly string[],
     gap: boolean,
@@ -247,11 +431,20 @@ export class CheckpointService {
     const nobody = { sessionId: null, fileChangeId: null, promptEventId: null, tool: null };
     if (!latest) return { kind: 'baseline', ...nobody, gap };
     const changed = new Set(changedPaths);
-    const matches: FileChange[] = this.k.store.fileChanges
-      .since(projectId, latest.createdAt)
-      .filter((c) => changed.has(c.path));
+    const settled = this.settled(projectId, worktree);
+    const matches: FileChange[] = [];
+    let unknown = false;
+    for (const c of this.k.store.fileChanges.since(projectId, latest.createdAt)) {
+      if (!changed.has(c.path)) continue;
+      if (c.createdAt <= Math.max(settled.all, settled.paths.get(c.path) ?? -1)) continue;
+      if (c.worktree === null) unknown = true;
+      else if (c.worktree === worktree) matches.push(c);
+    }
+    const unsure = gap || unknown;
     const sessions = new Set(matches.map((c) => c.sessionId));
-    if (sessions.size !== 1) return { kind: 'outside', ...nobody, gap: gap || sessions.size > 1 };
+    if (sessions.size !== 1) {
+      return { kind: 'outside', ...nobody, gap: unsure || sessions.size > 1 };
+    }
     const newest = matches[0] as FileChange;
     const explained = new Set(matches.map((c) => c.path));
     return {
@@ -260,8 +453,56 @@ export class CheckpointService {
       fileChangeId: newest.id,
       promptEventId: newest.promptEventId,
       tool: sanitizeLine(newest.tool, 40),
-      gap: gap || changedPaths.some((p) => !explained.has(p)),
+      gap: unsure || changedPaths.some((p) => !explained.has(p)),
     };
+  }
+
+  /**
+   * Edits recorded since the latest step that a later scan found already in it: recorded by
+   * `all` on any path, or by `paths.get(p)` on path `p`. Cleared by the next step.
+   */
+  private settled(projectId: string, worktree: string): Settled {
+    const raw = this.k.store.kv.get<{ all?: unknown; paths?: unknown }>(
+      this.kvKey('settled', projectId, worktree),
+    );
+    const all = typeof raw?.all === 'number' ? raw.all : -1;
+    const paths = new Map<string, number>();
+    for (const e of Array.isArray(raw?.paths) ? (raw.paths as unknown[]) : []) {
+      if (Array.isArray(e) && typeof e[0] === 'string' && typeof e[1] === 'number') {
+        paths.set(e[0], e[1]);
+      }
+    }
+    return { all, paths };
+  }
+
+  /** Notes that the scan at `at` found `paths` (null: the whole tree) equal to the latest step. */
+  private settle(
+    projectId: string,
+    worktree: string,
+    paths: readonly string[] | null,
+    at: number,
+  ): void {
+    try {
+      const s = this.settled(projectId, worktree);
+      if (paths === null) {
+        s.all = Math.max(s.all, at);
+        s.paths.clear();
+      } else {
+        for (const p of paths) {
+          s.paths.delete(p);
+          if (at > s.all) s.paths.set(p, at);
+        }
+      }
+      // The newest paths are kept; an older one dropped here still explains a later change.
+      const kept = [...s.paths].slice(-MAX_SETTLED_PATHS);
+      this.k.store.kv.set(this.kvKey('settled', projectId, worktree), { all: s.all, paths: kept });
+    } catch {
+      // Those edits then still count as explaining a later change of their paths.
+    }
+  }
+
+  private clearSettled(projectId: string, worktree: string): void {
+    this.k.store.kv.delete(this.kvKey('settled', projectId, worktree));
   }
 
   private kvKey(what: string, projectId: string, worktree: string): string {
@@ -341,8 +582,9 @@ export class CheckpointService {
         .map((r) => git.refName(r.worktree, r.seq)),
     );
     const now = this.k.clock.now();
+    // A ref whose age cannot be told (0) may be one whose row is still being written: kept.
     const refs = (await git.listRefs(root)).filter(
-      (r) => !kept.has(r.ref) && now - r.createdAt >= ORPHAN_REF_MIN_AGE_MS,
+      (r) => !kept.has(r.ref) && r.createdAt > 0 && now - r.createdAt >= ORPHAN_REF_MIN_AGE_MS,
     );
     const wanted = new Set([
       ...refs.map((r) => r.ref),
@@ -364,6 +606,7 @@ export class CheckpointService {
     const now = this.k.clock.now();
     if (now - last < PRUNE_INTERVAL_MS || this.daemonAlive()) return null;
     this.k.store.kv.set(key, now);
+    this.sweepWrites();
     try {
       return await this.prune(projectId);
     } catch (err) {
@@ -385,8 +628,9 @@ export class CheckpointService {
     }
   }
 
-  /** Prunes every project; failures are logged per project. */
+  /** Prunes every project, and the expired notes of writes in flight; failures are logged. */
   async pruneAll(): Promise<PruneResult> {
+    this.sweepWrites();
     const total: PruneResult = { refsDeleted: 0, rowsDeleted: 0 };
     for (const p of this.k.store.projects.list().slice(0, 500)) {
       try {
@@ -420,6 +664,8 @@ export class CheckpointService {
         this.k.logger.warn('checkpoint refs not deleted', { error: describeError(err) });
       }
     }
+    // Writes in flight of its sessions name its files and what they held.
+    this.k.store.kv.deleteForSessions(WRITE_NOTE_PREFIX, projectId);
     return { refsDeleted, rowsDeleted: this.k.store.checkpoints.delete(rows.map((r) => r.id)) };
   }
 
@@ -433,5 +679,30 @@ export class CheckpointService {
     } catch {
       return { count, diskBytes: null };
     }
+  }
+}
+
+/** True when two notes are of the same write: one working tree, the same set of paths. */
+function sameWrite(
+  a: Pick<WriteNote, 'worktree' | 'paths'>,
+  b: Pick<WriteNote, 'worktree' | 'paths'>,
+): boolean {
+  if (a.worktree !== b.worktree || a.paths.length !== b.paths.length) return false;
+  const set = new Set(a.paths);
+  return b.paths.every((p) => set.has(p));
+}
+
+/**
+ * What a file holds: the sha256 of its bytes, or for a large file its size and modification time
+ * (a write that changes it changes those); `''` when it does not exist, null when it cannot be
+ * read.
+ */
+function fileHash(path: string): string | null {
+  try {
+    const st = statSync(path, { bigint: true });
+    if (st.size > BigInt(MAX_HASHED_FILE_BYTES)) return `stat:${st.size}:${st.mtimeNs}`;
+    return sha256(readFileSync(path));
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? '' : null;
   }
 }
