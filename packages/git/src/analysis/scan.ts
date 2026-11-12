@@ -1,7 +1,7 @@
 import { sha256 } from '@mindly/core';
 
 /** Characters that, at the end of a line, mean the statement continues on the next line. */
-const CONTINUES_AFTER = new Set('=,(+-*/%&|^!?:<.['.split(''));
+const CONTINUES_AFTER = new Set('=,(+-*/%&|^?:<.['.split(''));
 /** Characters that, at the start of the next line, mean the statement continues. */
 const CONTINUES_BEFORE = new Set('.?|&=,:)]}*%'.split(''));
 
@@ -19,12 +19,33 @@ export function skipWs(s: string, i: number): number {
   return i;
 }
 
-function prevNonWs(s: string, i: number, floor: number): string {
+function prevNonWsIndex(s: string, i: number, floor: number): number {
   for (let k = i - 1; k >= floor; k--) {
-    const ch = s[k] as string;
-    if (!/\s/.test(ch)) return ch;
+    if (!/\s/.test(s[k] as string)) return k;
   }
-  return '';
+  return -1;
+}
+
+function prevNonWs(s: string, i: number, floor: number): string {
+  const k = prevNonWsIndex(s, i, floor);
+  return k === -1 ? '' : (s[k] as string);
+}
+
+/**
+ * True when the line ending at `at` (index of its last non-blank character, one of
+ * `CONTINUES_AFTER`) is nevertheless complete: `i++` / `i--`, or a regex literal, whose contents
+ * are blank in masked text (`const RE = /   /`). A trailing binary `+`, `-` or `/` still continues.
+ */
+function endsStatement(s: string, at: number, floor: number): boolean {
+  const ch = s[at];
+  if (ch === '+' || ch === '-') return at > floor && s[at - 1] === ch;
+  if (ch !== '/') return false;
+  for (let k = at - 1; k >= floor; k--) {
+    const c = s[k] as string;
+    if (c === '/') return k < at - 1;
+    if (c !== ' ' && c !== '\t') return false;
+  }
+  return false;
 }
 
 /**
@@ -61,12 +82,14 @@ export function scanStatementEnd(s: string, start: number): number {
     } else if (depth === 0 && ch === ';') {
       return k + 1;
     } else if (depth === 0 && ch === '\n') {
-      const prev = prevNonWs(s, k, start);
+      const prevIdx = prevNonWsIndex(s, k, start);
+      const prev = prevIdx === -1 ? '' : (s[prevIdx] as string);
       const nextIdx = skipWs(s, k);
       if (nextIdx >= s.length) return s.length;
       const next = s[nextIdx] as string;
       const arrow = prev === '>' && s[s.lastIndexOf('>', k) - 1] === '=';
-      if (prev === '' || CONTINUES_AFTER.has(prev) || arrow) continue;
+      const continues = CONTINUES_AFTER.has(prev) && !endsStatement(s, prevIdx, start);
+      if (prev === '' || continues || arrow) continue;
       if (CONTINUES_BEFORE.has(next)) continue;
       if (next === '{' && (prev === ')' || prev === '>')) continue;
       if (/^(extends|implements)\b/.test(s.slice(nextIdx, nextIdx + 11))) continue;

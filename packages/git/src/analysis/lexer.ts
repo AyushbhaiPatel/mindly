@@ -15,7 +15,7 @@ export interface Masked {
   mask: string;
 }
 
-const REGEX_PREFIX_CHARS = new Set('(,=:[!&|?{};+-*%<>~^'.split(''));
+const REGEX_PREFIX_CHARS = new Set('(,=:[!&|?{;+-*%<~^'.split(''));
 const REGEX_PREFIX_WORDS = new Set([
   'return',
   'typeof',
@@ -33,8 +33,52 @@ const REGEX_PREFIX_WORDS = new Set([
   'await',
 ]);
 
+/** Words a string literal may follow without a space (`return'x'`, `from'./a'`, `case"a":`). */
+const STRING_PREFIX_WORDS = new Set([
+  ...REGEX_PREFIX_WORDS,
+  'from',
+  'import',
+  'export',
+  'default',
+  'as',
+  'extends',
+  'keyof',
+  'is',
+]);
+
 function blank(ch: string): string {
   return ch === '\n' || ch === '\r' ? ch : ' ';
+}
+
+/**
+ * True when the `/` at `i` can open a regex literal. JSX is the hard part: `</li>` and `<Foo />`
+ * put a slash where an expression could start, and a regex read from there would run to the end of
+ * the line and hide the brackets on it.
+ */
+function regexMayStart(src: string, i: number, lastSignificant: string, lastWord: string): boolean {
+  const prev = src[i - 1];
+  // `</tag>` closes an element and `/>` ends a self-closing one.
+  if (prev === '<' || src[i + 1] === '>') return false;
+  if (lastSignificant === '') return true;
+  if (lastSignificant === '>') {
+    // Only an arrow (`x => /re/.test(x)`) is followed by an expression; any other `>` closes a JSX
+    // tag or a type argument list.
+    if (prev === '>') return src[i - 2] === '=';
+    let k = i - 1;
+    while (k >= 0 && /\s/.test(src[k] as string)) k -= 1;
+    return src[k - 1] === '=';
+  }
+  if (lastSignificant === '}') {
+    // After a block a regex starts a new statement, so it is on a new line; `{a}/{b}` and
+    // `{count} / {total}` in JSX text or an expression are a division.
+    let k = i - 1;
+    while (k >= 0 && src[k] !== '}') {
+      if (src[k] === '\n') return true;
+      k -= 1;
+    }
+    return false;
+  }
+  return REGEX_PREFIX_CHARS.has(lastSignificant) || REGEX_PREFIX_WORDS.has(lastWord);
 }
 
 /** Lexes JavaScript / TypeScript (including template literals, nested `${}` and regex literals). */
@@ -99,8 +143,20 @@ export function maskJs(src: string): Masked {
   while (i < n) {
     const ch = src[i] as string;
     const next = src[i + 1];
-    if (ch === '/' && next === '/') {
+    // `https://…` in JSX text is not a comment: hiding the rest of the line would hide `</a>}`.
+    const urlScheme =
+      ch === '/' &&
+      next === '/' &&
+      src[i - 1] === ':' &&
+      /[A-Za-z]/.test(src[i - 2] ?? '') &&
+      /[\w[]/.test(src[i + 2] ?? '');
+    if (ch === '/' && next === '/' && !urlScheme) {
       while (i < n && src[i] !== '\n') hideBoth(i++);
+      continue;
+    }
+    if (urlScheme) {
+      keep(i++);
+      keep(i++);
       continue;
     }
     if (ch === '/' && next === '*') {
@@ -113,7 +169,13 @@ export function maskJs(src: string): Masked {
       }
       continue;
     }
-    if (ch === '"' || ch === "'") {
+    // A quote glued to the end of a word is an apostrophe in JSX text (`<p>Don't</p>`), not the
+    // start of a string: masking from it to the end of the line would hide the closing brackets.
+    const apostrophe =
+      (ch === '"' || ch === "'") &&
+      /[A-Za-z0-9_$]/.test(src[i - 1] ?? '') &&
+      !STRING_PREFIX_WORDS.has(lastWord);
+    if ((ch === '"' || ch === "'") && !apostrophe) {
       keep(i++);
       while (i < n && src[i] !== ch && src[i] !== '\n') {
         if (src[i] === '\\' && i + 1 < n) hideMask(i++);
@@ -130,11 +192,7 @@ export function maskJs(src: string): Masked {
       continue;
     }
     if (ch === '/') {
-      const regexAllowed =
-        lastSignificant === '' ||
-        REGEX_PREFIX_CHARS.has(lastSignificant) ||
-        REGEX_PREFIX_WORDS.has(lastWord);
-      if (regexAllowed) {
+      if (regexMayStart(src, i, lastSignificant, lastWord)) {
         keep(i++);
         let inClass = false;
         while (i < n && src[i] !== '\n') {

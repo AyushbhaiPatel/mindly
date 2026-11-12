@@ -46,6 +46,7 @@ import {
   tryLockCheckpoint,
   worktreeId,
   assertValidBranchName,
+  assertValidRevision,
   type ExportedSymbol,
   type ImportGraph,
 } from '@mindly/git';
@@ -369,7 +370,9 @@ export function createGitPort(): GitPort {
     },
     dependentsOf: async (repoRoot, file) => {
       const graph = await graphFor(repoRoot);
-      return graph ? graph.dependentsOf(file).slice(0, 500) : [];
+      // A consumer that imports through a barrel (`export * from './file'`) depends on the file
+      // as much as a direct importer does.
+      return graph ? graph.dependentsOf(file, { throughReexports: true }).slice(0, 500) : [];
     },
     createSnapshotRef: (repoRoot, worktree, id) =>
       safe(async () => {
@@ -379,6 +382,17 @@ export function createGitPort(): GitPort {
     restoreSnapshotToBranch: async (repoRoot, id, branch) => {
       await restoreSnapshotToBranch(repoRoot, id, branch);
     },
+    isAncestor: (cwd, ancestor, descendant) =>
+      safe(async () => {
+        assertValidRevision(ancestor);
+        assertValidRevision(descendant);
+        const res = await runGit(['merge-base', '--is-ancestor', ancestor, descendant], {
+          cwd,
+          okExitCodes: [0, 1],
+          timeoutMs: 5_000,
+        });
+        return res.exitCode === 0;
+      }, false),
     isMerged: (repoRoot, branch, into) =>
       safe(async () => {
         assertValidBranchName(branch);

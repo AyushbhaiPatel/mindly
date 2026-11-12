@@ -31,7 +31,10 @@ describe('git port', () => {
     const git = createGitPort();
     expect(await git.findRepoRoot(dir)).toBe(dir);
     expect(await git.currentBranch(dir)).toBe('main');
-    expect(await git.headCommit(dir)).toMatch(/^[0-9a-f]{40}$/);
+    const head = await git.headCommit(dir);
+    expect(head).toMatch(/^[0-9a-f]{40}$/);
+    expect(await git.isAncestor?.(dir, head!, head!)).toBe(true);
+    expect(await git.isAncestor?.(dir, head!, '0'.repeat(40))).toBe(false);
     expect(await git.dependentsOf(dir, 'auth.ts')).toEqual(['app.ts']);
     const before = git.exportSurface('export function login(user: string) {}', 'auth.ts');
     const after = git.exportSurface(
@@ -40,6 +43,15 @@ describe('git port', () => {
     );
     expect(before && after && git.diffExportSurface(before, after).changed).toEqual(['login']);
     expect(await git.isMerged?.(dir, 'main', 'main')).toBe(true);
+  });
+
+  it('counts files that import through a barrel as dependents', async () => {
+    const dir = repo();
+    writeFileSync(join(dir, 'index.ts'), "export * from './auth';\n");
+    writeFileSync(join(dir, 'page.ts'), "import { login } from './index';\n");
+    writeFileSync(join(dir, 'other.ts'), "import { x } from './app';\n");
+    const git = createGitPort();
+    expect(await git.dependentsOf(dir, 'auth.ts')).toEqual(['app.ts', 'index.ts', 'page.ts']);
   });
 
   it('fails soft outside a repository', async () => {
