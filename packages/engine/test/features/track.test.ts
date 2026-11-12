@@ -28,7 +28,7 @@ import {
   type TrackInputs,
   type TrackReportOptions,
 } from '../../src/index.js';
-import { event, FakeClock, fakeGit } from '../helpers.js';
+import { event, FakeClock, fakeGit, shellTool } from '../helpers.js';
 
 const DAY = 86_400_000;
 const WINDOW = 30 * DAY;
@@ -587,6 +587,39 @@ describe('attribution', () => {
     expect(row(w, 'codex').contracts.count).toBe(1);
   });
 
+  it('says when the window is longer than the kept event log', async () => {
+    const { w } = await twoAgents();
+    await withContract(w);
+    await w.edit('claude-code', 'cc', 'src/api/auth.ts', 'export const ok = true;\n');
+    expect(row(w, 'claude-code').contracts.count).toBe(1);
+    expect(report(w).eventsSince).toBeNull();
+
+    // A week on, retention removes the events of that day; the edits stay.
+    w.clock.advance(7 * DAY);
+    const cutoff = w.clock.now();
+    await w.edit('codex', 'cx', 'src/api/b.ts', 'export const b = 2;\n');
+    w.mindly.store.events.deleteOlderThan(cutoff);
+    const r = report(w, { minEdits: 1 });
+    // The break is no longer known, although the edit behind it is still counted.
+    const cc = r.areas
+      .find((a) => a.area === 'src/api')!
+      .agents.find((a) => a.agent === 'claude-code')!;
+    expect(cc.edits).toBeGreaterThan(0);
+    expect(cc.contracts.count).toBe(0);
+    expect(r.eventsSince).toBeGreaterThanOrEqual(cutoff);
+    // A window inside the kept period is whole.
+    expect(
+      trackOf(w.mindly).report(w.pid, { windowMs: w.clock.now() - cutoff, since: '1h' })
+        .eventsSince,
+    ).toBeNull();
+
+    // With every event gone, nothing of the window is known.
+    w.mindly.store.events.deleteOlderThan(w.clock.now() + 1);
+    const none = report(w, { minEdits: 1 });
+    expect(none.totals.edits).toBeGreaterThan(0);
+    expect(none.eventsSince).toBe(none.window.to);
+  });
+
   it('does not pin a contract break on an edit made in another worktree', async () => {
     const { w } = await twoAgents();
     await withContract(w);
@@ -661,6 +694,228 @@ describe('attribution', () => {
     expect(a.ruleAttempts).toEqual({ count: 1, of: 1, rate: null, interval: null });
     // Attempts, not damage: not part of the breakages.
     expect(a.breakages.count).toBe(0);
+  });
+
+  it('counts a blocked write for every agent the rule stopped, not only the first', async () => {
+    const { w } = await twoAgents();
+    w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const blocked = async (agent: string, id: string) => {
+      const res = await w.mindly.hooks.handle(
+        event(w.root, agent, id, 'pre_tool', {
+          tool: tool(join(w.root, 'src/api/generated/client.ts'), 'x'),
+        }),
+      );
+      expect(res.decision).toBe('deny');
+      w.clock.advance(1000);
+    };
+    // Codex is stopped first and its turn ends: the rule held, the save is confirmed.
+    await blocked('codex', 'cx');
+    await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'stop'));
+    expect(row(w, 'codex').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(0);
+
+    // Claude Code runs into the same rule on the same file, twice in one session and once more
+    // in another: the same problem for saves, but its own attempts here, once per session.
+    await blocked('claude-code', 'cc');
+    await blocked('claude-code', 'cc');
+    await w.session('claude-code', 'cc2');
+    await blocked('claude-code', 'cc2');
+    expect(w.mindly.store.saves.list(w.pid, { kinds: ['rule_enforced'] })).toHaveLength(1);
+    expect(row(w, 'codex').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(2);
+
+    // Weeks later the save is out of the window; a new attempt still counts.
+    w.clock.advance(WINDOW + DAY);
+    await w.edit('claude-code', 'cc2', 'src/api/a.ts', 'export const a = 2;\n');
+    await w.edit('codex', 'cx', 'src/api/b.ts', 'export const b = 2;\n');
+    await blocked('claude-code', 'cc2');
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(1);
+    expect(row(w, 'codex').ruleAttempts.count).toBe(0);
+  });
+
+  it('counts one attempt per session and rule, however many saves the rule has', async () => {
+    const { w } = await twoAgents();
+    w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**', 'src/web/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const blocked = async (agent: string, id: string, ...files: string[]) => {
+      const t = tool(join(w.root, files[0]!), 'x');
+      for (const f of files.slice(1)) {
+        t!.edits.push({ path: join(w.root, f), addedText: 'x', removedText: '', wholeFile: false });
+      }
+      const res = await w.mindly.hooks.handle(event(w.root, agent, id, 'pre_tool', { tool: t }));
+      expect(res.decision).toBe('deny');
+      w.clock.advance(1000);
+    };
+    const A = 'src/api/generated/a.ts';
+    const B = 'src/api/generated/b.ts';
+    // Codex is stopped on one file, then on two: two saves of one rule that share a file.
+    await blocked('codex', 'cx', A);
+    await blocked('codex', 'cx', A, B);
+    await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'stop'));
+    expect(
+      w.mindly.store.saves.list(w.pid, { kinds: ['rule_enforced'] }).map((s) => s.status),
+    ).toEqual(['confirmed', 'confirmed']);
+    // Claude Code is stopped once, on the shared file.
+    await blocked('claude-code', 'cc', A);
+    expect(row(w, 'codex').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(1);
+
+    // The attempt belongs to the area of the file that session was stopped on, not to every
+    // area a save of the rule names.
+    await w.edit('claude-code', 'cc', 'src/web/x.ts', 'export const x = 1;\n');
+    await w.session('gemini', 'gm');
+    await w.edit('gemini', 'gm', 'src/web/y.ts', 'export const y = 1;\n');
+    await w.edit('gemini', 'gm', 'src/api/c.ts', 'export const c = 1;\n');
+    await blocked('gemini', 'gm', 'src/web/generated/w.ts', A);
+    await w.mindly.hooks.handle(event(w.root, 'gemini', 'gm', 'stop'));
+    await blocked('claude-code', 'cc', A);
+    const web = report(w, { minEdits: 1 }).areas.find((a) => a.area === 'src/web')!;
+    expect(web.agents.find((a) => a.agent === 'gemini')!.ruleAttempts.count).toBe(1);
+    expect(web.agents.find((a) => a.agent === 'claude-code')!.ruleAttempts.count).toBe(0);
+    expect(row(w, 'gemini').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(1);
+  });
+
+  it('does not count an attempt in the area of an unprotected file of an earlier save', async () => {
+    const { w, cx } = await twoAgents();
+    await w.edit('codex', 'cx', 'src/web/client.ts', 'export const c = 1;\n');
+    const rule = w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    // As an earlier version recorded it: every path of the denied call.
+    const all = ['src/api/generated/a.ts', 'src/web/client.ts'];
+    const old = w.mindly.store.saves.record({
+      projectId: w.pid,
+      kind: 'rule_enforced',
+      title: 'blocked',
+      sessionIds: [cx.id],
+      paths: all,
+      evidence: ['e0'],
+      fingerprint: 'earlier',
+      refs: { ruleId: rule.id },
+    }).save;
+    w.mindly.store.saves.settle(old.id, 'confirmed');
+    const t = tool(join(w.root, all[0]!), 'x');
+    t!.edits.push({
+      path: join(w.root, all[1]!),
+      addedText: 'x',
+      removedText: '',
+      wholeFile: false,
+    });
+    const res = await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'pre_tool', { tool: t }));
+    expect(res.decision).toBe('deny');
+
+    const areas = report(w, { minEdits: 1 }).areas;
+    const attempts = (area: string) =>
+      areas.find((a) => a.area === area)!.agents.find((a) => a.agent === 'codex')!.ruleAttempts
+        .count;
+    expect(attempts('src/api')).toBe(1);
+    expect(attempts('src/web')).toBe(0);
+  });
+
+  it('decides for each session whether the block held, whatever the first session did', async () => {
+    const { w } = await twoAgents();
+    w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const file = 'src/api/generated/client.ts';
+    const blocked = async (agent: string, id: string) => {
+      const res = await w.mindly.hooks.handle(
+        event(w.root, agent, id, 'pre_tool', { tool: tool(join(w.root, file), 'x') }),
+      );
+      expect(res.decision).toBe('deny');
+      w.clock.advance(1000);
+    };
+    const attempts = (agent: string) => row(w, agent).ruleAttempts.count;
+
+    // Codex is stopped, then writes the file anyway: the save of the rule and file is rejected.
+    await blocked('codex', 'cx');
+    await w.edit('codex', 'cx', file, 'export const c = 1;\n');
+    expect(
+      w.mindly.store.saves.list(w.pid, { kinds: ['rule_enforced'] }).map((s) => s.status),
+    ).toEqual(['rejected']);
+    expect(attempts('codex')).toBe(0);
+
+    // Claude Code is stopped by the same rule on the same file, and the rule holds.
+    await blocked('claude-code', 'cc');
+    await w.mindly.hooks.handle(event(w.root, 'claude-code', 'cc', 'stop'));
+    expect(attempts('claude-code')).toBe(1);
+
+    // Another Claude Code session is the first to be stopped on another protected file, then
+    // copies it over through the shell: that session did not stay blocked.
+    const other = 'src/api/generated/other.ts';
+    await w.session('claude-code', 'cc2');
+    const res = await w.mindly.hooks.handle(
+      event(w.root, 'claude-code', 'cc2', 'pre_tool', { tool: tool(join(w.root, other), 'x') }),
+    );
+    expect(res.decision).toBe('deny');
+    w.clock.advance(1000);
+    const cp = shellTool(`cp /tmp/x ${other}`);
+    await w.mindly.hooks.handle(event(w.root, 'claude-code', 'cc2', 'pre_tool', { tool: cp }));
+    await w.mindly.hooks.handle(event(w.root, 'claude-code', 'cc2', 'post_tool', { tool: cp }));
+    expect(attempts('claude-code')).toBe(1);
+  });
+
+  it('does not count a session that wrote the file after an earlier one held', async () => {
+    const { w } = await twoAgents();
+    w.mindly.memory.remember({
+      projectId: w.pid,
+      projectRoot: w.root,
+      kind: 'rule',
+      title: 'Never edit generated code',
+      body: 'produced by codegen',
+      scopePaths: ['src/api/generated/**'],
+      source: USER,
+      enforce: true,
+    });
+    const file = 'src/api/generated/client.ts';
+    const blocked = async (agent: string, id: string) => {
+      const res = await w.mindly.hooks.handle(
+        event(w.root, agent, id, 'pre_tool', { tool: tool(join(w.root, file), 'x') }),
+      );
+      expect(res.decision).toBe('deny');
+      w.clock.advance(1000);
+    };
+    // Codex is stopped and its turn ends: the save is confirmed.
+    await blocked('codex', 'cx');
+    await w.mindly.hooks.handle(event(w.root, 'codex', 'cx', 'stop'));
+    // Claude Code is stopped, then writes the protected file anyway.
+    await blocked('claude-code', 'cc');
+    await w.edit('claude-code', 'cc', file, 'export const c = 1;\n');
+    await w.mindly.hooks.handle(event(w.root, 'claude-code', 'cc', 'stop'));
+    expect(row(w, 'codex').ruleAttempts.count).toBe(1);
+    expect(row(w, 'claude-code').ruleAttempts.count).toBe(0);
   });
 
   it('counts usage limits per agent from rate-limit events and handoffs', async () => {

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { Store } from '@mindly/store';
@@ -10,7 +10,8 @@ import {
   splitCommandLine,
 } from '../src/commands/bisect.js';
 import { outFor } from '../src/util.js';
-import { cli, git, sandbox, testIo, write, type Sandbox } from './helpers.js';
+import { withProject } from '../src/context.js';
+import { cli, git, sandbox, tempDir, testIo, write, type Sandbox } from './helpers.js';
 
 /*
  * End to end: real hook payloads from two agents produce checkpoints in a sandbox repository, and
@@ -63,17 +64,18 @@ async function hook(
   sessionId: string,
   event: 'SessionStart' | 'UserPromptSubmit' | 'PostToolUse',
   extra: Record<string, unknown> = {},
+  cwd: string = sb.repo,
 ): Promise<void> {
   const payload = {
     session_id: sessionId,
     transcript_path: join(sb.home, `${sessionId}.jsonl`),
-    cwd: sb.repo,
+    cwd,
     permission_mode: 'default',
     hook_event_name: event,
     ...(agent === 'codex' ? { model: 'gpt-5-codex', turn_id: 'turn-1' } : {}),
     ...extra,
   };
-  const r = await cli(sb, ['hook', agent, event], { stdin: JSON.stringify(payload) });
+  const r = await cli(sb, ['hook', agent, event], { stdin: JSON.stringify(payload), cwd });
   expect(r.code).toBe(0);
   expect(r.stderr).toBe('');
 }
@@ -492,6 +494,128 @@ describe('mindly bisect revert', () => {
     expect(conflict.code).toBe(1);
     expect(conflict.stderr).toContain('Cannot undo step 7');
     expect(conflict.stderr).toContain('mindly bisect show 7 --patch');
+  }, 60_000);
+
+  it('refuses the first step of a checkout, which holds every file', async () => {
+    const sb = sandbox();
+    await story(sb, 2, 99);
+    const before = git(sb.repo, 'status', '--porcelain');
+    const refused = await cli(sb, ['bisect', 'revert', '1', '--yes']);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('Cannot undo step 1');
+    expect(refused.stderr).toContain('starting point');
+    expect(git(sb.repo, 'status', '--porcelain')).toBe(before);
+    expect(existsSync(join(sb.repo, 'test.cjs'))).toBe(true);
+    expect(readFileSync(join(sb.repo, 'src', 'calc.js'), 'utf8')).toBe(calcSource(2, false));
+  }, 60_000);
+});
+
+describe('who a step belongs to', () => {
+  async function list(sb: Sandbox, cwd = sb.repo): Promise<StepJson[]> {
+    const io = testIo(sb, { cwd });
+    expect(await bisectList(outFor(io), { json: true })).toBe(0);
+    return (JSON.parse(io.out.join('')) as { steps: StepJson[] }).steps.reverse();
+  }
+
+  async function start(sb: Sandbox): Promise<void> {
+    mkdirSync(join(sb.repo, 'src'), { recursive: true });
+    write(sb.repo, 'test.cjs', TEST_SCRIPT);
+    write(sb.repo, 'src/calc.js', calcSource(0, false));
+    git(sb.repo, 'add', '-A');
+    git(sb.repo, 'commit', '-q', '-m', 'scripts');
+    expect((await cli(sb, ['config', 'set', 'hooks.timeoutMs', '10000'])).code).toBe(0);
+  }
+
+  it('does not credit a change to an agent that edited the same path in another worktree', async () => {
+    const sb = sandbox();
+    await start(sb);
+    const other = join(tempDir('mindly-wt-'), 'feature');
+    git(sb.repo, 'worktree', 'add', '-q', '-b', 'feature', other);
+    await hook(sb, 'claude-code', CC, 'SessionStart', { source: 'startup' });
+    await hook(sb, 'codex', CX, 'SessionStart', { source: 'startup' }, other);
+    await hook(sb, 'claude-code', CC, 'UserPromptSubmit', { prompt: CC_PROMPT });
+    await hook(sb, 'codex', CX, 'UserPromptSubmit', { prompt: CX_PROMPT }, other);
+    // Codex makes a harmless edit to src/calc.js in its own worktree.
+    const previous = readFileSync(join(other, 'src', 'calc.js'), 'utf8');
+    write(other, 'src/calc.js', calcSource(1, false));
+    await hook(
+      sb,
+      'codex',
+      CX,
+      'PostToolUse',
+      {
+        tool_name: 'apply_patch',
+        tool_input: {
+          command: `*** Begin Patch\n*** Update File: src/calc.js\n@@\n-${previous.trimEnd()}\n+${calcSource(1, false).trimEnd()}\n*** End Patch\n`,
+        },
+        tool_response: { output: 'Done!' },
+        tool_use_id: 'call_1',
+      },
+      other,
+    );
+    // Somebody breaks the same path by hand in the main checkout; the next prompt rescans.
+    write(sb.repo, 'src/calc.js', calcSource(7, true));
+    await hook(sb, 'claude-code', CC, 'UserPromptSubmit', { prompt: 'go on' });
+    const main = await list(sb);
+    expect(main.at(-1)).toMatchObject({
+      kind: 'outside',
+      agentKind: null,
+      paths: ['src/calc.js'],
+    });
+    expect((await list(sb, other)).at(-1)).toMatchObject({ kind: 'agent', agentKind: 'codex' });
+    const { report } = await bisect(sb, [NODE, 'test.cjs']);
+    expect(report.status).toBe('found');
+    expect(report.firstBad).toMatchObject({ kind: 'outside', agentKind: null });
+    expect(report.mistakeId).toBeNull();
+  }, 120_000);
+
+  it('puts an edit whose checkpoint was skipped into the next step, marked as a gap', async () => {
+    const sb = sandbox();
+    await start(sb);
+    await hook(sb, 'claude-code', CC, 'SessionStart', { source: 'startup' });
+    await hook(sb, 'codex', CX, 'SessionStart', { source: 'startup' });
+    await hook(sb, 'claude-code', CC, 'UserPromptSubmit', { prompt: CC_PROMPT });
+    await hook(sb, 'codex', CX, 'UserPromptSubmit', { prompt: CX_PROMPT });
+    await edit(sb, 'claude-code', 'src/calc.js', calcSource(1, false));
+    // Another process holds the checkpoint lock while the breaking edit arrives.
+    const dir = join(sb.mindlyHome, 'checkpoints');
+    const lock = join(dir, readdirSync(dir)[0] as string, 'lock');
+    writeFileSync(lock, '1');
+    await edit(sb, 'claude-code', 'src/calc.js', calcSource(2, true));
+    rmSync(lock);
+    await edit(sb, 'codex', 'src/notes.txt', 'hello\n');
+    await hook(sb, 'claude-code', CC, 'UserPromptSubmit', { prompt: 'go on' });
+    const all = await list(sb);
+    expect(all.map((s) => [s.seq, s.kind, s.gap])).toEqual([
+      [1, 'baseline', false],
+      [2, 'agent', false],
+      [3, 'agent', true],
+    ]);
+    expect([...(all[2] as StepJson).paths].sort()).toEqual(['src/calc.js', 'src/notes.txt']);
+    // The break is found at the step that holds it, and nobody is blamed for a step with a gap.
+    const { report } = await bisect(sb, [NODE, 'test.cjs']);
+    expect(report.status).toBe('found');
+    expect(report.firstBad).toMatchObject({ seq: 3, gap: true });
+    expect(report.mistakeId).toBeNull();
+  }, 120_000);
+
+  it('keeps a ref whose row is still being written when a prune runs', async () => {
+    const sb = sandbox();
+    await start(sb);
+    await hook(sb, 'claude-code', CC, 'SessionStart', { source: 'startup' });
+    const [first] = steps(sb);
+    // A capture in another process has just created the ref of step 2.
+    const second = (first as string).replace(/\/1$/, '/2');
+    git(sb.repo, 'update-ref', second, git(sb.repo, 'rev-parse', first as string).trim());
+    const io = testIo(sb);
+    await withProject(io, async (scope) => {
+      expect(await scope.mindly.checkpoints.prune(scope.project.project.id)).toEqual({
+        refsDeleted: 0,
+        rowsDeleted: 0,
+      });
+      return 0;
+    });
+    expect(steps(sb)).toEqual([first, second]);
   }, 60_000);
 });
 

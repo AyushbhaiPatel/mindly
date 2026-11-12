@@ -233,6 +233,65 @@ describe('command contracts', () => {
     const [c] = d.mindly.store.conflicts.list(pid);
     expect(c).toMatchObject({ kind: 'contract_broken', severity: 'critical' });
   });
+
+  it('a timeout between a pass and a fail still opens the conflict, and tells live agents', async () => {
+    t = await testDaemon();
+    const d = t.daemon;
+    const root = repo();
+    const s = seedSession(d, root);
+    const pid = s.projectId;
+    const memory = d.mindly.memory.remember({
+      projectId: pid,
+      projectRoot: root,
+      kind: 'decision',
+      title: 'The build must pass',
+      body: 'checked by a command',
+      source: USER,
+    });
+    write(root, '.mindly/config.json', '{}');
+    d.mindly.projects.trust(pid, d.mindly.projects.byId(pid).configHash ?? '');
+    const contract = contractsOf(d.mindly).create(
+      memory.id,
+      'command',
+      { argv: [node, '-e', 'process.exit(0)'] },
+      USER,
+    );
+    const runWith = async (script: string) => {
+      const spec = { argv: [node, '-e', script], timeoutSec: 1 };
+      d.mindly.store.db
+        .prepare('UPDATE contracts SET spec = ? WHERE id = ?')
+        .run(JSON.stringify(spec), contract.id);
+      d.mindly.store.contracts.approve(contract.id, commandHash(spec.argv));
+      await runCommandContracts(d.jobs, pid);
+      return d.mindly.store.contracts.get(contract.id).state;
+    };
+    const open = () =>
+      d.mindly.store.conflicts
+        .list(pid, { statuses: ['open', 'acknowledged'] })
+        .filter((x) => x.kind === 'contract_broken');
+    const hang = 'setTimeout(() => {}, 60000)';
+
+    expect(await runWith('process.exit(0)')).toBe('passing');
+    expect(await runWith(hang)).toBe('error');
+    expect(open()).toHaveLength(0);
+    expect(await runWith('process.exit(3)')).toBe('failing');
+    expect(open()).toHaveLength(1);
+    const told = d.mindly.store.deliveries
+      .list(pid)
+      .filter((x) => x.kind === 'conflict' && x.targetSessionId === s.id);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.title).toContain("Decision 'The build must pass' no longer holds");
+
+    // Still failing: not reported again. A timeout and then a pass closes it.
+    expect(await runWith('process.exit(3)')).toBe('failing');
+    expect(d.mindly.store.deliveries.list(pid).filter((x) => x.kind === 'conflict')).toHaveLength(
+      1,
+    );
+    expect(await runWith(hang)).toBe('error');
+    expect(open()).toHaveLength(1);
+    expect(await runWith('process.exit(0)')).toBe('passing');
+    expect(open()).toHaveLength(0);
+  });
 });
 
 describe('maintenance and failover', () => {
@@ -249,9 +308,12 @@ describe('maintenance and failover', () => {
     });
     store.db.prepare('UPDATE events SET created_at = ?').run(Date.now() - 40 * 86_400_000);
     store.db.prepare('UPDATE sessions SET last_seen_at = ?').run(Date.now() - 7 * 3_600_000);
+    // A write in flight the session never finished: it goes when the session is ended.
+    store.kv.set(`checkpoints:writing:${s.id}`, [{ at: Date.now() }]);
     const r = housekeepingTick(d.jobs);
     expect(r.promptsCompacted).toBe(1);
     expect(r.sessionsEnded).toBe(1);
+    expect(store.kv.get(`checkpoints:writing:${s.id}`)).toBeNull();
     const [e] = store.events.query(s.projectId, { types: ['prompt.submitted'] });
     expect(e?.payload).toEqual({ summary: 'old' });
   });
@@ -333,6 +395,54 @@ describe('maintenance and failover', () => {
     expect(launches).toHaveLength(1);
     expect(launches[0]?.input).toMatchObject({ agent: 'codex', cwd: root });
     expect(String((launches[0]?.input as { prompt: string }).prompt)).toContain(h.id);
+  });
+
+  it('launches the next agent in the worktree of the session that hit its limit', async () => {
+    const home = tempDir('mindly-failover-wt-home-');
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ failover: { autoLaunch: true } }));
+    t = await testDaemon({ home });
+    const root = repo();
+    const wt = linkedWorktree(root, 'feature');
+    const gone = linkedWorktree(root, 'gone');
+    const packet = {
+      goal: 'g',
+      plan: [],
+      filesChanged: [],
+      recentPrompts: [],
+      decisions: [],
+      blockers: [],
+      nextSteps: [],
+      branch: null,
+      headCommit: null,
+    };
+    const handoffFrom = (worktree: string) => {
+      const s = seedSession(t!.daemon, root, { agentKind: 'claude-code', worktree });
+      return t!.daemon.mindly.store.handoffs.create({
+        projectId: s.projectId,
+        fromSessionId: s.id,
+        toAgentKind: 'codex',
+        taskId: null,
+        reason: 'rate_limit',
+        summary: 'limit',
+        packet,
+      });
+    };
+    const inWorktree = handoffFrom(wt);
+    // A worktree that was removed meanwhile: the main checkout is the fallback.
+    const inGone = handoffFrom(gone);
+    git(root, 'worktree', 'remove', '--force', gone);
+    await failoverTick(t.daemon.jobs);
+    await t.daemon.scheduler.idle();
+    const cwdOf = (handoffId: string): unknown =>
+      (
+        t!.runners.calls.find(
+          (c) =>
+            c.kind === 'launch' &&
+            String((c.input as { prompt: string }).prompt).includes(handoffId),
+        )?.input as { cwd?: string } | undefined
+      )?.cwd;
+    expect(cwdOf(inWorktree.id)).toBe(wt);
+    expect(cwdOf(inGone.id)).toBe(root);
   });
 
   it('cancels runs a previous daemon left queued', async () => {

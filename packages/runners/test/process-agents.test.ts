@@ -11,6 +11,7 @@ import {
   parseClaudeOutput,
   parseCodexOutput,
   runAgent,
+  runProcess,
 } from '../src/index.js';
 import {
   claudeResultBody,
@@ -178,6 +179,53 @@ describe('runAgent', () => {
     const grandchild = Number(readFileSync(pidFile, 'utf8'));
     await sleep(300);
     expect(isAlive(grandchild)).toBe(false);
+  });
+
+  it('still kills a group member that ignores SIGTERM after the program itself has exited', async () => {
+    const pidFile = join(tempDir(), 'grandchild.pid');
+    // The program dies on SIGTERM; its child ignores it and holds none of the pipes.
+    const program = `
+      const cp = require('node:child_process');
+      const c = cp.spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'], { stdio: 'ignore' });
+      require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(c.pid));
+      setInterval(() => {}, 1000);`;
+    for (const how of ['timeout', 'abort'] as const) {
+      const ac = new AbortController();
+      if (how === 'abort') setTimeout(() => ac.abort(), 500);
+      const res = await runProcess({
+        bin: process.execPath,
+        argv: ['-e', program],
+        cwd: tempDir(),
+        env: {},
+        timeoutMs: how === 'timeout' ? 500 : 30_000,
+        killGraceMs: 200,
+        signal: ac.signal,
+      });
+      expect([how, res.timedOut, res.aborted]).toEqual([how, how === 'timeout', how === 'abort']);
+      const grandchild = Number(readFileSync(pidFile, 'utf8'));
+      await sleep(600);
+      expect(isAlive(grandchild)).toBe(false);
+    }
+  });
+
+  it('does not report a timeout for a program that ended in time while a child held its output', async () => {
+    // Exits at once with code 0; its child keeps stdout open past the time limit.
+    const program = `
+      require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'inherit' });
+      console.log('done');
+      process.exit(0);`;
+    const res = await runProcess({
+      bin: process.execPath,
+      argv: ['-e', program],
+      cwd: tempDir(),
+      env: {},
+      timeoutMs: 600,
+      killGraceMs: 200,
+    });
+    expect(res.timedOut).toBe(false);
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain('done');
+    expect(res.durationMs).toBeLessThan(10_000);
   });
 
   it('supports AbortSignal', async () => {

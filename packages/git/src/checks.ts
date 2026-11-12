@@ -127,6 +127,17 @@ function killTree(pid: number | undefined, signal: NodeJS.Signals): void {
   }
 }
 
+/** True while any process of the child's group is still running (POSIX only). */
+function groupAlive(pid: number | undefined): boolean {
+  if (pid === undefined || process.platform === 'win32') return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 function runOne(dir: string, check: CheckSpec, opts: ResolvedOptions) {
   return new Promise<CheckResult>((resolve) => {
     const started = Date.now();
@@ -134,13 +145,22 @@ function runOne(dir: string, check: CheckSpec, opts: ResolvedOptions) {
     let timedOut = false;
     let aborted = false;
     let settled = false;
+    let exited = false;
     const timers: NodeJS.Timeout[] = [];
+    // The SIGKILL that follows a SIGTERM. It is not in `timers`: it must outlive `finish` while
+    // anything in the group is still running.
+    let killTimer: NodeJS.Timeout | null = null;
     let onAbort = (): void => undefined;
 
     const finish = (partial: Pick<CheckResult, 'status' | 'exitCode' | 'signal'>): void => {
       if (settled) return;
       settled = true;
       for (const t of timers) clearTimeout(t);
+      // The leader may exit on SIGTERM while a group member ignores it: keep the escalation.
+      if (killTimer && !groupAlive(child.pid)) {
+        clearTimeout(killTimer);
+        killTimer = null;
+      }
       opts.signal?.removeEventListener('abort', onAbort);
       resolve({
         name: check.name,
@@ -165,15 +185,27 @@ function runOne(dir: string, check: CheckSpec, opts: ResolvedOptions) {
 
     const stop = (): void => {
       killTree(child.pid, 'SIGTERM');
-      timers.push(setTimeout(() => killTree(child.pid, 'SIGKILL'), opts.killGraceMs));
+      killTimer = setTimeout(() => {
+        killTimer = null;
+        killTree(child.pid, 'SIGKILL');
+      }, opts.killGraceMs);
     };
     timers.push(
       setTimeout(() => {
+        // A check that ended in time did not time out, even if a background process it started
+        // still holds its output open.
+        if (settled || aborted || exited) return;
         timedOut = true;
         stop();
       }, check.timeoutSec * 1000),
     );
     onAbort = (): void => {
+      if (settled || aborted || timedOut) return;
+      // The check already ended: its result stands, only what it left running is stopped.
+      if (exited) {
+        killTree(child.pid, 'SIGKILL');
+        return;
+      }
       aborted = true;
       stop();
     };
@@ -185,6 +217,7 @@ function runOne(dir: string, check: CheckSpec, opts: ResolvedOptions) {
       finish({ status: 'error', exitCode: null, signal: null });
     });
     child.on('exit', () => {
+      exited = true;
       if (settled) return;
       // Background grandchildren may keep the pipes open; do not wait for them forever.
       timers.push(

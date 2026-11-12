@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll } from 'vitest';
@@ -61,4 +61,19 @@ export function makeRepo(files: Record<string, string> = { 'README.md': '# test\
   for (const [rel, content] of Object.entries(files)) write(root, rel, content);
   commitAll(root, 'initial');
   return root;
+}
+
+/** True while `pid` is running; a killed process nobody has reaped yet counts as gone. */
+export function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) !== 'Z';
+  } catch {
+    return true;
+  }
 }

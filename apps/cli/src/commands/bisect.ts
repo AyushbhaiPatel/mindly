@@ -408,6 +408,14 @@ export async function bisectRevert(
     const worktree = await worktreeFor(scope, out.io.cwd, o.worktree);
     const step = stepOf(scope, worktree, seq);
     const info = bisectOf(scope.mindly).describe(step);
+    // The first step of a checkout holds every file: undoing it would delete the working tree.
+    if (step.kind === 'baseline' || step.parentCommit === null) {
+      throw new HintedError(
+        'invalid_input',
+        `cannot undo step ${seq}: it is the starting point of this checkout, not an edit`,
+        'List the steps that can be undone with: mindly bisect list',
+      );
+    }
     const extraDeny = [...scope.mindly.config.redaction.denyPaths, ...scope.project.config.ignore];
     const check = await revertStep(worktree, step.parentCommit, step.commit, {
       apply: false,

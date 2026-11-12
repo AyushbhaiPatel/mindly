@@ -1,6 +1,6 @@
 // Redaction keeps every character outside a secret, whatever the text after the secret looks like.
 import { describe, expect, it } from 'vitest';
-import { REDACTED, redactText } from '../src/redact.js';
+import { redact, REDACTED, redactText } from '../src/redact.js';
 
 const KEY_CRLF =
   '-----BEGIN RSA PRIVATE KEY-----\r\nMIIEpAIBAAKCAQEA1234567890abcdef\r\nAbCdEf0123456789xyz\r\n-----END RSA PRIVATE KEY-----\r\n';
@@ -32,5 +32,27 @@ describe('characters around a secret', () => {
     const gh = ['ghp', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'].join('_');
     const text = `x\u0000${key} y ${gh.slice(0, 9)}\u200b${gh.slice(9)} z ${key}\r`;
     expect(redactText(text)).toBe(`x\u0000${REDACTED} y ${REDACTED} z ${REDACTED}\r`);
+  });
+});
+
+describe('credentials on a command line, in text with hidden characters', () => {
+  const zw = '​';
+
+  it('replaces the credential and keeps a hidden character elsewhere in the text', () => {
+    const r = redact(`note${zw} here\ncurl -u alice:s3cretPassw0rd https://example.com/x`);
+    expect(r.text).toBe(`note${zw} here\ncurl -u alice:${REDACTED} https://example.com/x`);
+    expect(r.kinds).toEqual(['cli_credentials']);
+  });
+
+  it('finds the client when a hidden character splits its name', () => {
+    const r = redact(`cu${zw}rl -u alice:s3cretPassw0rd https://example.com/x`);
+    expect(r.text).toBe(`cu${zw}rl -u alice:${REDACTED} https://example.com/x`);
+  });
+
+  it('replaces a credential a hidden character splits, next to a token', () => {
+    const token = `ghp_${'a'.repeat(36)}`;
+    const r = redact(`curl -u alice:s3cr${zw}etPassw0rd https://example.com/x and ${token}`);
+    expect(r.text).toBe(`curl -u alice:${REDACTED} https://example.com/x and ${REDACTED}`);
+    expect(r.count).toBe(2);
   });
 });
