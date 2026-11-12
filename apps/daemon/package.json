@@ -31,7 +31,7 @@
     "@mindly/runtime": "workspace:*",
     "@mindly/store": "workspace:*",
     "fastify": "5.12.8",
-    "ws": "8.22.0",
+    "ws": "8.22.2",
     "zod": "4.6.7"
   },
   "devDependencies": {
