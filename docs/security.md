@@ -74,7 +74,10 @@ memory, which is then injected into every other agent.
   repository's config, variables exported before the session, a remote whose URL is a path on
   this machine, and the files a clone from elsewhere brings.
 - Only a shell command Mindly can read fully is checked exactly, and only such a command is ever
-  blocked. A line is read fully when every part of it is plain and every program on it is one
+  blocked. (One case sits between the two: a line whose text was read fully but with a copy
+  whose sources could not be listed. It is blocked for a covered write it certainly makes,
+  with the rule named and no word about reading; where it makes none for certain, it is warned
+  about like a line not read fully.) A line is read fully when every part of it is plain and every program on it is one
   whose writes Mindly models completely, given only options it reads as the program does. The
   programs read fully are `git` (with its own tables of subcommands and options), `rm`, `mv`,
   `cp`, `mkdir`, `rmdir`, `touch`, `ln`, `chmod`, `chown`, `cat`, `ls`, `head`, `tail`, `wc`,
@@ -122,8 +125,11 @@ memory, which is then injected into every other agent.
   same holds the other way round: what a command makes at a path with such a link among its
   parts is somewhere the text does not tell, so nothing a later command of the line writes is
   read (`current` leads to `stage`, and the line runs
-  `ln -s ../certs current/x && rm -f stage/x/server.pem`). A folder `mkdir` makes there does
-  not count, and a line that ends with that command, or only reads after it, is read fully.
+  `ln -s ../certs current/x && rm -f stage/x/server.pem`). A line that ends with that command, or only reads after it, is read fully.
+  A folder `mkdir` makes there holds nothing and does not count in this way, but it is a folder
+  under its other spelling too: after it, a `cp`, `mv` or `ln` whose destination is neither on
+  disk nor a folder the line made by that spelling makes the line not read fully
+  (`mkdir -p current/n && cp a.txt stage/n/`).
   A path the text does not settle makes the line not read fully as well: a `..`
   after a folder's name in any path written or copied from (`rm -f deep/../server.pem`: the
   system takes `..` off the folder a link before it leads to; a leading `../..` is placed from
@@ -179,7 +185,10 @@ memory, which is then injected into every other agent.
   line is not read fully (`cp -rL docs out/` with `docs/latest` a link to a folder). A
   wildcard source that starts with a dot matches names that start with one (`cp .env* out/`).
   More than 2,000 files brought to a folder that is not there are held against the rules by
-  their names under it, and are not placed one by one.
+  their names under it, and are not placed one by one; every rule that can match under that
+  folder is tried, also when the folder is under `node_modules`, since the names are in hand
+  and nothing is searched. A target named by two commands of a line keeps what either says of
+  it: that a copy follows links, that `mkdir -p` makes its parents.
   A folder `mkdir` made is not counted as written for what lies under it, which was there
   before (`mkdir -p out && mv out/a b`). `ln -s` makes a link under the name of each source
   as written, whether or not the source is there, so a source with a wildcard that matches
@@ -283,6 +292,20 @@ memory, which is then injected into every other agent.
   under `node_modules/pkg` where a package manager made that a link. A copy to a wildcard that
   does match a covered file (`cp b.txt certs/*.pem`) is warned about too, not blocked. Both
   are the known cost of warning rather than guessing.
+
+  A path is held against the rules by its name in the working tree it belongs to, which is the
+  innermost one that holds it: a file of a linked worktree kept inside the main checkout
+  (`trees/w1/certs/server.pem`) is `certs/server.pem` of that worktree, for a tool call and for
+  a shell line, from whichever checkout the session runs in, and a rule for `trees/**` in the
+  main checkout is no rule for it. A folder written as a whole or by a wildcard that holds
+  such worktrees is checked in each of them (`rm -rf trees`, `rm -f trees/*/certs/*.pem`). A
+  folder inside a repository of another project kept in the checkout (`vendor/repo/certs`) is
+  not listed by git: it is walked for the files a rule covers, as the repository is when it is
+  written as a whole.
+
+  One known limit of the reading: on bash 5.1 and earlier, `.*` also matches `.` and `..`, so
+  `cp -r .* out/` brings the whole folder and the one above it. The hook takes `.*` for the
+  names that start with a dot and does not see the rest.
 
 - A shell tool call is read as a shell line, and when its text holds a patch, the files the patch
   names are possible writes besides. Only a call bash would run nothing of, `apply_patch` given a

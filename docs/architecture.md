@@ -169,7 +169,8 @@ higher priority than the user's live instructions.
    the answer is not known and the command gets a warning, not a block. A formatter with its
    fixing flag only counts for the kinds of file it rewrites. Every path of the call is checked,
    also deny-listed files and files in another working tree of the project, which are matched by
-   name and never recorded.
+   name and never recorded. A path belongs to the innermost working tree that holds it: a file
+   of a worktree kept inside the session's checkout is matched by its name in that worktree.
 4. **After a tool runs** – file changes are recorded with provenance; the impact analyser compares
    the exported surface of the changed file before/after and notifies sessions whose work depends
    on it; memories whose evidence covers the file are re-verified (self-healing); contracts bound to

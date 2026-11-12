@@ -3696,6 +3696,7 @@ export function readShellWrites(command: string, options: ShellReadOptions = {})
     through: new Map(),
     wild: [],
     viaOld: false,
+    dirViaOld: false,
     unclimbed: [],
     climbed: new Set(),
     epoch: 0,
@@ -4433,6 +4434,8 @@ interface Reading {
    * parts: where it is, by any other spelling, the text does not tell.
    */
   viaOld: boolean;
+  /** An earlier `mkdir` made a folder at such a path. */
+  dirViaOld: boolean;
   /** Folders a `mkdir -p` made, those above them not yet among `madeDirs`. */
   unclimbed: string[];
   /** Folders a `mkdir -p` made, with those above them: not gone up from a second time. */
@@ -4580,6 +4583,8 @@ function collectTargets(command: string, startDir: string | null, depth: number,
   let folding = false;
   // The command being read makes something at a path with a link that was there among its parts.
   let throughOld = false;
+  // The same for a folder `mkdir` makes.
+  let foldedOld = false;
   /** A placed path as told from the folder the line starts in. */
   const anchor = (path: string): string =>
     posix.isAbsolute(path) || path.startsWith('~')
@@ -4808,7 +4813,7 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     // The same word, given the same way from the same place, adds nothing new: a long line of
     // repeats is read in the time of one.
     if (item.entries === undefined) {
-      const flags = `${item.tree ? 't' : ''}${item.certain === false ? 'u' : ''}${item.ifExists ? 'e' : ''}${item.pattern ? 'p' : ''}${item.dotfiles ? 'd' : ''}${item.nocase ? 'c' : ''}${item.gone ? 'g' : ''}${linking ? 'l' : ''}${folding ? 'f' : ''}`;
+      const flags = `${item.tree ? 't' : ''}${item.certain === false ? 'u' : ''}${item.ifExists ? 'e' : ''}${item.pattern ? 'p' : ''}${item.dotfiles ? 'd' : ''}${item.nocase ? 'c' : ''}${item.gone ? 'g' : ''}${linking ? 'l' : ''}${folding ? 'f' : ''}${item.parents ? 'P' : ''}`;
       const kinds = item.touches
         ? `${item.touches.tracked ? 't' : ''}${item.touches.untracked ? 'u' : ''}${item.touches.ignored ? 'i' : ''}`
         : '-';
@@ -4913,13 +4918,25 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         if (
           !item.pathspec &&
           r.viaLink !== null &&
-          (earlier || makesNow) &&
+          (earlier || makesNow || folding) &&
           [path, ...made].some((p) => r.viaLink?.(p))
         ) {
           if (earlier) r.unmatched = true;
           if (makesNow) throughOld = true;
+          if (folding) foldedOld = true;
         }
         if (r.viaOld && !item.pathspec) r.unmatched = true;
+        // A folder `mkdir` made through such a link is a folder under another spelling too: a
+        // later copy, move or link to what is neither on disk nor a folder the line made by
+        // that spelling may land inside it.
+        if (
+          r.dirViaOld &&
+          item.entries !== undefined &&
+          !r.madeDirs.has(anchor(path)) &&
+          !(r.isDir?.(path) ?? false)
+        ) {
+          r.unmatched = true;
+        }
         // The folder a command runs in, and the top of the tree, stay what they are: it is what
         // they hold that is made.
         const runsIn = anchor(from === null || from === '' ? '.' : from);
@@ -5001,6 +5018,16 @@ function collectTargets(command: string, startDir: string | null, depth: number,
         }
         known.certain ||= certain;
         known.dotfiles ||= item.dotfiles ?? false;
+        known.follows ||= item.follows ?? false;
+        known.parents ||= item.parents ?? false;
+        // One mention takes the name as it is and the other does not: which holds for what
+        // lands there is not told by one target.
+        if (
+          known.noFollow !== (item.noFollow ?? false) ||
+          known.asWritten !== (item.asWritten ?? false)
+        ) {
+          r.unmatched = true;
+        }
         for (const e of entries) {
           if (known.entries.length >= MAX_ENTRIES) break;
           known.entries.push(e.name);
@@ -5584,7 +5611,9 @@ function collectTargets(command: string, startDir: string | null, depth: number,
     }
     pending = [];
     if (throughOld) r.viaOld = true;
+    if (foldedOld) r.dirViaOld = true;
     throughOld = false;
+    foldedOld = false;
     if (linked || kept !== r.touched.size + r.through.size + r.madeDirs.size + r.wild.length) {
       r.epoch++;
     }

@@ -4,6 +4,7 @@ import {
   existsSync,
   lstatSync,
   opendirSync,
+  readdirSync,
   readlinkSync,
   realpathSync,
   statSync,
@@ -48,7 +49,7 @@ import {
   shellMayWrite,
   shellMayWriteFiles,
 } from './shell.js';
-import { isLiteralScope, patternSegments } from './scope.js';
+import { isLiteralScope, patternSegments, patternsMayOverlap } from './scope.js';
 import {
   collapse,
   globsReaching,
@@ -165,6 +166,8 @@ interface TreeLookups {
   roots: string[];
   /** True once `roots` holds every working tree of the project: nothing is left to look up. */
   all?: boolean;
+  /** For a folder looked at: whether it, or one above it below the tree's top, holds `.git`. */
+  nested?: Map<string, boolean>;
   /** Directory looked up, to the project tree that holds it (null: not this project). */
   dirs: Map<string, string | null>;
 }
@@ -387,18 +390,23 @@ export class HookHandler {
   ): Promise<Located | 'unknown' | null> {
     const deny = this.k.config.redaction.denyPaths;
     const inTree = tryResolveInsideRoot(treeRoot, abs);
-    if (inTree) return { ...inTree, root: treeRoot, own: !isDeniedPath(inTree.rel, deny) };
+    const own = inTree ? { ...inTree, root: treeRoot, own: !isDeniedPath(inTree.rel, deny) } : null;
+    // A path in the session's tree is in that tree, unless a folder on the way to it holds a
+    // repository of its own: then it may be in a working tree kept inside this one.
+    if (own !== null && (trees === null || !inRepositoryBelow(own, trees))) {
+      return own;
+    }
     if (trees === null) return null;
-    if (trees.all === undefined) {
-      // One call lists every working tree of the project; any path is then placed by name.
-      const listed = (await this.k.ports.git.workingTrees?.(treeRoot).catch(() => null)) ?? null;
-      trees.all = listed !== null;
-      if (listed !== null) trees.roots = listed.filter((t) => t !== treeRoot);
-    }
+    await this.otherTrees(treeRoot, trees);
+    // The innermost working tree that holds the path is the one it belongs to.
+    let inner: Located | null = null;
     for (const root of trees.roots) {
+      if (inner !== null && root.length <= inner.root.length) continue;
+      if (own !== null && root.length <= treeRoot.length) continue;
       const found = tryResolveInsideRoot(root, abs);
-      if (found) return { ...found, root, own: false };
+      if (found) inner = { ...found, root, own: false };
     }
+    if (inner !== null || own !== null) return inner ?? own;
     if (trees.all) return null;
     const dir = nearestDirectory(abs);
     if (dir === null) return null;
@@ -412,6 +420,17 @@ export class HookHandler {
     if (root === null) return null;
     const found = tryResolveInsideRoot(root, abs);
     return found ? { ...found, root, own: false } : null;
+  }
+
+  /** The other working trees of the project, listed once for a call. */
+  private async otherTrees(treeRoot: string, trees: TreeLookups): Promise<string[]> {
+    if (trees.all === undefined) {
+      // One call lists every working tree of the project; any path is then placed by name.
+      const listed = (await this.k.ports.git.workingTrees?.(treeRoot).catch(() => null)) ?? null;
+      trees.all = listed !== null;
+      if (listed !== null) trees.roots = listed.filter((t) => t !== treeRoot);
+    }
+    return trees.roots;
   }
 
   /** Root of the working tree holding `dir` when it is another tree of this project, else null. */
@@ -565,6 +584,8 @@ export class HookHandler {
     possible: Writes;
     limit: string | null;
     understood: boolean;
+    /** The line's text was read fully, but what one of its copies brings could not be listed. */
+    unlisted: boolean;
   }> {
     const certain: Writes = {
       paths: [],
@@ -773,6 +794,32 @@ export class HookHandler {
       const landing = (at: Located | null): void => {
         if (at !== null) into.landings.push(at);
       };
+      /**
+       * The project's working trees kept under a folder that is written as a whole or by a
+       * wildcard: each holds its files under its own names, and is a scope of its own.
+       */
+      const treesBelow = async (base: string, rest: readonly string[]): Promise<void> => {
+        if (trees === null || !hasLinkedTrees(treeRoot)) return;
+        for (const root of await this.otherTrees(treeRoot, trees)) {
+          if (!root.startsWith(`${base}${sep}`)) continue;
+          const parts = root.slice(base.length + 1).split(sep);
+          // The parts of the pattern that lead to the tree's top; what is left names files in it.
+          let k = 0;
+          while (k < parts.length && rest[k] !== undefined && rest[k] !== '**') {
+            try {
+              if (!globToRegExp(rest[k] as string).test(parts[k] as string)) break;
+            } catch {
+              break;
+            }
+            k++;
+          }
+          if (k < parts.length && rest[k] !== '**') continue;
+          const top = await this.locate(project, treeRoot, root, trees);
+          if (top === null || top === 'unknown' || top.root !== root) continue;
+          const left = rest[k] === '**' ? rest.slice(k) : rest.slice(parts.length);
+          scope(top, left.length > 0 ? left : ['**']);
+        }
+      };
       // Another user's home (`~name`) is wherever the system says: not placed by guessing. A
       // line that names one is not read fully, and is warned about as a whole.
       if (t.unplaced) continue;
@@ -833,6 +880,7 @@ export class HookHandler {
         if (at !== null) {
           scope(at, rest);
           if (t.tree) scope(at, [...rest, '**']);
+          await treesBelow(base, t.tree ? [...rest, '**'] : rest);
         } else if (t.tree) {
           // A pattern above the project that takes the project with it (`rm -rf ~/*`).
           const left = downTo(base, treeRoot, rest);
@@ -933,12 +981,21 @@ export class HookHandler {
       }
       // A whole tree is written when the text says so; a path merely given to a program counts
       // as a tree only when it is a directory.
-      if (t.tree && (t.certain || directory)) scope(at, ['**']);
+      if (t.tree && (t.certain || directory)) {
+        scope(at, ['**']);
+        await treesBelow(path, ['**']);
+      }
     }
     // What the text shows as written is not also reported as a mere possibility.
     const sure = new Set(certain.paths.map((p) => p.abs));
     possible.paths = possible.paths.filter((p) => !sure.has(p.abs));
-    return { certain, possible, limit, understood: reading.understood && !unsure };
+    return {
+      certain,
+      possible,
+      limit,
+      understood: reading.understood && !unsure,
+      unlisted: reading.understood && unsure,
+    };
   }
 
   /** The rules the user marked as enforced that have a scope. */
@@ -973,6 +1030,37 @@ export class HookHandler {
   ): { deny: RuleHit | null; warn: RuleHit[]; cut: boolean } {
     const warn: RuleHit[] = [];
     let cut = false;
+    // The names a big copy brings are held once against every pattern that can match under
+    // the folder they land in, whatever the folder is called (nothing is walked there; the
+    // names are in hand); only one that fits is looked at rule by rule.
+    const brought = new Map<Memory, string[]>();
+    for (const b of writes.bulk ?? []) {
+      const under = b.at.rel === '' ? '**' : `${b.at.rel}/**`;
+      const reach = rules
+        .map((rule) => ({
+          rule,
+          test: null as ((rel: string, under?: string) => boolean) | null,
+          globs: rule.scope.paths.filter((g) => patternsMayOverlap(g, under)),
+        }))
+        .filter((x) => x.globs.length > 0);
+      if (reach.length === 0) continue;
+      const any = globsTest(
+        reach.flatMap((x) => x.globs),
+        false,
+      );
+      const prefix = b.at.rel === '' ? '' : `${b.at.rel}/`;
+      for (let i = 0; i < b.names.length && !cut; i++) {
+        if ((i & 1023) === 1023 && timeUp()) cut = true;
+        const name = toPosix(b.names[i] as string);
+        if (!any(name, prefix)) continue;
+        for (const x of reach) {
+          if (!(x.test ??= globsTest(x.globs, false))(name, prefix)) continue;
+          const hits = brought.get(x.rule) ?? [];
+          if (hits.length < 5) hits.push(`${prefix}${name}`);
+          brought.set(x.rule, hits);
+        }
+      }
+    }
     for (const rule of rules) {
       const globs = rule.scope.paths;
       // A copy may bring thousands of paths: each rule's patterns are compiled once, and the
@@ -987,18 +1075,7 @@ export class HookHandler {
           covers.push(p.rel);
         }
       }
-      for (const b of writes.bulk ?? []) {
-        // Only the patterns that can match under the folder are tried on its names.
-        const reaching = globsReaching(landingScope(b.at), globs);
-        if (reaching.length === 0) continue;
-        const names = globsTest(reaching, false);
-        const prefix = b.at.rel === '' ? '' : `${b.at.rel}/`;
-        for (let i = 0; i < b.names.length && !cut && covers.length < 5; i++) {
-          if ((i & 1023) === 1023 && timeUp()) cut = true;
-          const name = toPosix(b.names[i] as string);
-          if (names(name, prefix)) covers.push(`${prefix}${name}`);
-        }
-      }
+      covers.push(...(brought.get(rule) ?? []));
       const maybe: string[] = [];
       const unsearched: string[] = [];
       let wholeTree = false;
@@ -1210,7 +1287,7 @@ export class HookHandler {
       // Only a line Mindly reads fully is checked exactly, and only such a line is ever blocked.
       // Any other stands for a possible write of the whole tree: a warning when a file an
       // enforced rule covers is there.
-      const { certain, possible, limit, understood } = await this.shellWrites(
+      const { certain, possible, limit, understood, unlisted } = await this.shellWrites(
         project,
         evt.cwd,
         tool.command,
@@ -1326,7 +1403,9 @@ export class HookHandler {
         warnings.push(text((m) => m.title));
         plain.push(text(plainTitle));
       };
-      if (understood) {
+      // A line whose text was read fully but whose copies could not all be listed is blocked
+      // for what it certainly writes, and is then not told it could not be read.
+      if (understood || (unlisted && rule !== null)) {
         for (const hit of [...rules.warn, ...mayApply].slice(0, 5)) {
           warn((title) =>
             hit.unfinished
@@ -1766,23 +1845,50 @@ function globsTest(
 ): (rel: string, under?: string) => boolean {
   const opts = nocase ? { nocase: true } : {};
   let tests: { anywhere: boolean; re: RegExp; tail: string }[];
+  // Whether any pattern may match at all: by how the path ends, or by a text it must hold.
+  let ends: RegExp | null = null;
+  let holds: RegExp | null = null;
   try {
+    const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+    const needles: string[] = [];
+    let open = false;
     tests = globs.map((g) => {
       const last = g.slice(g.lastIndexOf('/') + 1);
       // (None for a pattern with groups or classes: a group may hold a `/`.)
-      const tail = /[[{]/.test(g) ? '' : last.slice(last.search(/[^*?]*$/));
+      const plain = !/[[{]/.test(g);
+      const tail = plain ? last.slice(last.search(/[^*?]*$/)) : '';
+      if (tail === '') {
+        // The longest text between its wildcards, without the `/` around it.
+        const needle = plain
+          ? g
+              .split(/[*?]+/)
+              .map((part) => part.replace(/^\/+|\/+$/g, ''))
+              .reduce((a, b) => (b.length > a.length ? b : a), '')
+          : '';
+        if (needle === '') open = true;
+        else needles.push(nocase ? needle.toLowerCase() : needle);
+      }
       return {
         anywhere: !g.includes('/'),
         re: globToRegExp(g.includes('/') ? g.replace(/^\.\//, '') : g, opts),
         tail: nocase ? tail.toLowerCase() : tail,
       };
     });
+    if (!open) {
+      const tails = tests.filter((t) => t.tail !== '').map((t) => escape(t.tail));
+      ends = new RegExp(tails.length > 0 ? `(?:${tails.join('|')})$` : '^(?!)');
+      holds = new RegExp(needles.length > 0 ? needles.map(escape).join('|') : '^(?!)');
+    }
   } catch {
     // A pattern that does not compile is left to the one-path test.
     return (rel) => matchesAnyGlob(rel, globs, opts);
   }
   return (rel, under = '') => {
     const end = nocase ? rel.toLowerCase() : rel;
+    if (ends !== null && holds !== null && !ends.test(end)) {
+      const whole = `${under}${rel}`;
+      if (!holds.test(nocase ? whole.toLowerCase() : whole)) return false;
+    }
     // The whole path is put together only for a pattern its end fits.
     let path: string | null = null;
     return tests.some((t) => {
@@ -2144,6 +2250,42 @@ function nearestThere(path: string): string {
     else low = mid + 1;
   }
   return low === ends.length ? root : path.slice(0, ends[low]);
+}
+
+/**
+ * Whether a path placed in a working tree is, or lies under, a folder below the top that holds
+ * a `.git` entry: a repository or working tree of its own. Each folder is looked at once.
+ */
+function inRepositoryBelow(at: { abs: string; rel: string }, trees: TreeLookups): boolean {
+  const seen = (trees.nested ??= new Map<string, boolean>());
+  const walked: string[] = [];
+  let found = false;
+  // One folder for each part of the path below the top of the tree.
+  let left = at.rel === '' ? 0 : at.rel.split('/').length;
+  for (let dir = at.abs; left > 0; dir = dirname(dir), left--) {
+    const known = seen.get(dir);
+    if (known !== undefined) {
+      found = known;
+      break;
+    }
+    walked.push(dir);
+    if (exists(join(dir, '.git'))) {
+      found = true;
+      break;
+    }
+  }
+  for (const dir of walked) seen.set(dir, found);
+  return found;
+}
+
+/** Whether the project has working trees besides its main one, as its `.git` tells. */
+function hasLinkedTrees(treeRoot: string): boolean {
+  try {
+    const git = join(treeRoot, '.git');
+    return statSync(git).isFile() || readdirSync(join(git, 'worktrees')).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** The deepest existing directory at or above `path`; null when there is none. */
