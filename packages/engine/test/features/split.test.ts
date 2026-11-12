@@ -307,6 +307,15 @@ describe('plan validation', () => {
     expect(check(two(['src/API/**'], ['src/api/**']))).toMatch(/could both own the same new files/);
     expect(check(two(['src/API/**'], ['src/app/**']))).toBeNull();
     expect(check(two(['src/**/*.ts'], ['src/**/*.css']))).toBeNull();
+    // An alternative of a group may hold a slash: both of these own src/b/c.
+    expect(check(two(['src/{a,b/c}'], ['src/*/c']))).toMatch(
+      /src\/\{a,b\/c\} and src\/\*\/c are not clearly disjoint/,
+    );
+    expect(check(two(['src/{api,lib/billing}/**'], ['src/lib/**']))).toMatch(
+      /not clearly disjoint/,
+    );
+    expect(check(two(['src/{api,lib/billing}/**'], ['src/app/**']))).toBeNull();
+    expect(check(two(['{..,src}/x.ts'], ['web/**']))).toMatch(/project-relative globs/);
     const withContract = (contract: unknown[]) => ({
       goal: 'g',
       parts: [part('a', ['a/**']), part('b', ['b/**'])],
@@ -488,6 +497,53 @@ describe('split through hook events', () => {
       }),
     );
     expect(ok.decision ?? null).toBeNull();
+  });
+
+  it('treats a folder in owns as everything below it', async () => {
+    const { mindly, svc, pid } = await setup();
+    const folders: SplitPlan = {
+      ...PLAN,
+      parts: [part('api', ['src/api/']), part('page', ['src/app'], ['api'])],
+    };
+    const strict = await svc.create({
+      projectId: pid,
+      plan: folders,
+      slug: 'folders',
+      strict: true,
+      plannedBy: 'plan-file',
+      connectedAgents: null,
+    });
+    const apiWt = strict.parts[0]!.worktree;
+    await mindly.hooks.handle(event(apiWt, 'claude-code', 'api-1', 'session_start'));
+    const own = await mindly.hooks.handle(
+      event(apiWt, 'claude-code', 'api-1', 'pre_tool', {
+        tool: writeTool('src/api/billing.ts', 'x'),
+      }),
+    );
+    expect(own.decision ?? null).toBeNull();
+    const denied = await mindly.hooks.handle(
+      event(apiWt, 'claude-code', 'api-1', 'pre_tool', { tool: writeTool('src/app/page.ts', 'x') }),
+    );
+    expect(denied.decision).toBe('deny');
+    expect(denied.reason).toContain('src/app/page.ts (part "Part page", claude-code)');
+
+    // Two parts that name the same folder in different ways still overlap.
+    let err: unknown = null;
+    try {
+      validatePlan(
+        parsePlan({
+          goal: 'g',
+          parts: [part('a', ['src/api/']), part('b', ['src/api/billing.ts'])],
+          contract: [],
+        }),
+        FILES,
+        null,
+      );
+    } catch (e) {
+      err = e;
+    }
+    expect(isMindlyError(err, 'invalid_input')).toBe(true);
+    expect((err as Error).message).toMatch(/"a" and "b" both own src\/api\/billing\.ts/);
   });
 
   it("guards shell commands that may write another part's files", async () => {

@@ -640,6 +640,104 @@ describe('memory and rules', () => {
     expect((await cli(sb, ['memory', 'list', '--limit', '0'])).code).toBe(2);
   });
 
+  it('refuses an enforced rule without a scope', async () => {
+    const sb = sandbox();
+    const r = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'No edits',
+      '--enforce',
+    ]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('--enforce needs at least one --scope');
+    expect(json<unknown[]>((await cli(sb, ['memory', 'list', '--json'])).stdout)).toEqual([]);
+  });
+
+  it('enforces a rule scoped to a folder on every file below it', async () => {
+    const sb = sandbox();
+    write(sb.repo, 'infra/main.tf', '# infra\n');
+    write(sb.repo, 'deploy/k8s/app.yaml', 'kind: Deployment\n');
+    const add = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'Infrastructure is changed by hand',
+      '--scope',
+      'infra',
+      '--scope',
+      'deploy/',
+      '--enforce',
+    ]);
+    expect(add.code).toBe(0);
+    expect(add.stdout).not.toContain('No file in this project matches');
+    const write1 = async (path: string): Promise<string> => {
+      const r = await cli(sb, ['hook', 'claude-code', 'PreToolUse'], {
+        stdin: JSON.stringify({
+          session_id: 'cc1',
+          cwd: sb.repo,
+          tool_name: 'Write',
+          tool_input: { file_path: join(sb.repo, path), content: 'x' },
+        }),
+      });
+      expect(r.code).toBe(0);
+      return r.stdout;
+    };
+    await cli(sb, ['hook', 'claude-code', 'SessionStart'], {
+      stdin: JSON.stringify({ session_id: 'cc1', cwd: sb.repo, source: 'startup' }),
+    });
+    expect(await write1('infra/main.tf')).toContain('"deny"');
+    expect(await write1('deploy/k8s/app.yaml')).toContain('"deny"');
+    expect(await write1('README.md')).not.toContain('"deny"');
+    expect(await write1('docs/infra.md')).not.toContain('"deny"');
+  });
+
+  it('says so when a scope matches no file of the project', async () => {
+    const sb = sandbox();
+    write(sb.repo, 'src/generated/api.ts', 'export const api = 1;\n');
+    const rooted = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'Never edit generated code',
+      '--scope',
+      'generated/**',
+      '--enforce',
+    ]);
+    expect(rooted.code).toBe(0);
+    expect(rooted.stdout).toContain('No file in this project matches the scope "generated/**" yet');
+    expect(rooted.stdout).toContain('"**/generated/**" matches at any depth');
+    const typo = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'Never edit vendored code',
+      '--scope',
+      'vendor/**',
+    ]);
+    expect(typo.stdout).toContain('No file in this project matches the scope "vendor/**" yet');
+    expect(typo.stdout).toContain('Check the spelling');
+    const fine = await cli(sb, [
+      'memory',
+      'add',
+      '--kind',
+      'rule',
+      '--title',
+      'Generated code is regenerated',
+      '--scope',
+      'src/generated',
+    ]);
+    expect(fine.stdout).not.toContain('No file in this project matches');
+  });
+
   it('contract add shows the pinned hash of a command', async () => {
     const sb = sandbox();
     const m = json<{ id: string }>(

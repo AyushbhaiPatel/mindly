@@ -214,8 +214,8 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .requiredOption('--title <title>', 'short title')
     .option('--body <body>', 'details', '')
     .option('--tag <tag>', 'tag (repeatable)', collect)
-    .option('--scope <glob>', 'limit to paths matching this glob (repeatable)', collect)
-    .option('--enforce', 'rules only: deny tool calls that violate it')
+    .option('--scope <glob>', 'limit to a file, a folder or a glob (repeatable)', collect)
+    .option('--enforce', 'rules only: block edits to the --scope paths')
     .option('--pin', 'always include in session context')
     .option('--json', 'machine-readable output')
     .action(

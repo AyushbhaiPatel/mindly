@@ -134,7 +134,9 @@ add a new migration instead". Ask the user before changing
 prisma/migrations/20261103_add_currency/migration.sql.
 ```
 
-Rules can be scoped to paths and branches. Agents can only propose rules; you approve them.
+Rules can be scoped to paths and branches, and an enforced rule blocks edits to the paths in its
+scope (a file, a folder such as `prisma/migrations`, or a glob; see [docs/rules.md](docs/rules.md)).
+Agents can only propose rules; you approve them.
 
 The block covers editing tools and shell commands whose text shows the write (`sed -i`, `rm`,
 `mv`, `cp`, `tee`, `git checkout -- path`, a `>` redirection), also when a whole directory goes
@@ -397,7 +399,7 @@ mindly conflicts                     # open conflicts; mindly conflict <id> reso
 mindly rules [--approve <id>]        # approved and proposed rules
 mindly rules import [--dry-run]      # import rules from CLAUDE.md, AGENTS.md, .cursorrules, …
 mindly rules sync [--dry-run|--off]  # keep approved rules in AGENTS.md, CLAUDE.md, GEMINI.md
-mindly memory add --kind rule|decision|fact|mistake|note --title "…" [--enforce] [--scope <glob>]
+mindly memory add --kind rule|decision|fact|mistake|note --title "…" [--scope <path|glob>] [--enforce]
 mindly memory list|search <q>|show <id>|approve|reject|archive|forget
 mindly contract add <memoryId> --kind <kind> …   # turn a decision into a check
 mindly trust                         # review and allow this repo's .mindly/config.json checks

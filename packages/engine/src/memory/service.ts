@@ -92,7 +92,8 @@ export function cleanScopePaths(paths: readonly string[] | undefined): string[] 
     if (
       !p ||
       p.startsWith('/') ||
-      p.split('/').includes('..') ||
+      // `..` may also be one alternative of a group: `{..,src}/x` stands for `../x`.
+      p.split(/[/{},]/).includes('..') ||
       p.length > 300 ||
       hasUnsafeChars(p)
     ) {
