@@ -1,6 +1,6 @@
 // A rule limited to the folder being written asks git for no less than the rule itself covers there.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
@@ -170,8 +170,6 @@ it('lists every file the rule covers under the folder', () => {
       }
     }
   }
-  if (process.env['R39_LIMIT_OUT'])
-    writeFileSync(process.env['R39_LIMIT_OUT'], failures.join('\n') + '\n');
   console.log(
     `${pairs} pairs, ${files} covered files held against the limited pattern, ${failures.length} pairs with a file missing`,
   );
