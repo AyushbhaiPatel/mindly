@@ -2559,6 +2559,63 @@ const unsettled: {
       { name: 'another name for such a file', command: 'ln .env.l* out/' },
     ],
   },
+  {
+    title: 'a copy that follows links, after another command with the same destination',
+    scopes: ['**/*.pem'],
+    prep: 'mkdir -p docs/v1 out a && echo d > docs/v1/i.md && ln -s ../certs docs/latest && echo a > a/f.txt',
+    covered: endsInPem,
+    cases: [
+      { name: 'alone', command: 'cp -rL docs out/' },
+      { name: 'after mkdir -p of the folder', command: 'mkdir -p backup && cp -rL docs backup/' },
+      { name: 'after a copy of a folder to it', command: 'cp -r a out/ && cp -rL docs out/' },
+      { name: 'after a copy of a file to it', command: 'cp a/f.txt out/ && cp -rL docs out/' },
+    ],
+  },
+  {
+    title: 'mkdir through a link that was there, then a covered file copied by where it leads',
+    scopes: ['**/*.pem'],
+    prep: 'mkdir stage && ln -s stage current',
+    covered: endsInPem,
+    cases: [
+      { name: 'a copy', command: 'mkdir -p current/n && cp certs/server.pem stage/n' },
+      { name: 'by a wildcard', command: 'mkdir -p current/n && cp certs/* stage/n' },
+      { name: 'another name', command: 'mkdir -p current/n && ln certs/server.pem stage/n' },
+    ],
+  },
+  {
+    title: 'mkdir through a link that was there, then a copy into the covered folder it made',
+    scopes: ['stage/n/**'],
+    prep: 'mkdir stage && ln -s stage current',
+    covered: (rel) => rel.startsWith('stage/n/'),
+    cases: [{ name: 'a copy', command: 'mkdir -p current/n && cp a.txt stage/n/' }],
+  },
+  {
+    title: 'a copy of more than 2,000 files to a new folder under node_modules',
+    scopes: ['**/*.pem'],
+    prep: [
+      'echo node_modules > .gitignore && mkdir -p node_modules/pkg big/deep/sub && echo k > big/deep/sub/k.pem',
+      'for d in $(seq 1 42); do mkdir -p big/d$d; (cd big/d$d && seq 1 50 | sed "s/$/.ts/" | xargs touch); done',
+    ].join(' && '),
+    covered: endsInPem,
+    cases: [
+      { name: 'the folder', command: 'cp -r big node_modules/big' },
+      { name: 'its content', command: 'cp -r big/. node_modules/big2' },
+      { name: 'a few files of it', command: 'cp -r big/deep node_modules/' },
+      { name: 'to a folder elsewhere', command: 'cp -r big vendored' },
+    ],
+  },
+  {
+    title: 'a folder inside a repository kept in the checkout, under a rule that names files',
+    scopes: ['**/*.pem'],
+    prep: 'mkdir -p vendor/repo/certs && echo k > vendor/repo/certs/server.pem && git -C vendor/repo init -q && git -C vendor/repo add -A && git -C vendor/repo commit -qm v',
+    covered: endsInPem,
+    cases: [
+      { name: 'a folder in it removed', command: 'rm -rf vendor/repo/certs' },
+      { name: 'its files by a wildcard', command: 'rm -f vendor/repo/certs/*.pem' },
+      { name: 'a change of mode', command: 'chmod -R 700 vendor/repo/certs' },
+      { name: 'the repository as a whole', command: 'rm -rf vendor/repo' },
+    ],
+  },
 ];
 
 describe('lines whose paths nothing settles are never let through in silence', () => {
@@ -3073,6 +3130,80 @@ describe('a linked worktree kept inside the main checkout', () => {
     });
   });
 
+  describe('written from the main checkout, or from a worktree beside it', () => {
+    let g: ReturnType<typeof setUp>;
+    let beside: string;
+    beforeAll(() => {
+      g = setUp(
+        ['certs/**'],
+        `echo 'trees/' > .gitignore && git add -A && git commit -qm ignore && git worktree add -q ${WT} && echo l > ${WT}/a.log`,
+      );
+      beside = `${g.dir}-beside`;
+      g.git('worktree', 'add', '-q', beside);
+    });
+    afterAll(() => g.mindly.close());
+    const write = (cwd: string, path: string) =>
+      g.mindly.hooks.handle({
+        agentKind: 'claude-code',
+        event: 'pre_tool',
+        externalSessionId: 'edits',
+        cwd,
+        transcriptPath: null,
+        startSource: null,
+        prompt: null,
+        lastMessage: null,
+        tool: {
+          name: 'Write',
+          writes: true,
+          shell: false,
+          edits: [{ path, addedText: 'x\n', removedText: '', wholeFile: true }],
+          command: null,
+          failed: false,
+          outputExcerpt: null,
+        },
+      });
+
+    it('a tool call onto its covered file is blocked, wherever the session is', async () => {
+      const wt = join(g.dir, WT);
+      const target = join(wt, 'certs/server.pem');
+      expect((await write(wt, target)).decision, 'from the worktree').toBe('deny');
+      expect((await write(g.dir, target)).decision, 'from the main checkout').toBe('deny');
+      expect((await write(beside, target)).decision, 'from a worktree beside').toBe('deny');
+      // A worktree beside the main checkout is reached from it too.
+      expect((await write(g.dir, join(beside, 'certs/server.pem'))).decision).toBe('deny');
+      expect(verdictOf(await g.shell(`rm -rf ${beside}/certs`))).toBe('deny');
+    });
+
+    for (const command of [
+      'rm -rf trees/w1/certs',
+      'rm -f trees/*/certs/*.pem',
+      'touch trees/w1/certs/new.pem',
+      'echo x > trees/w1/certs/server.pem',
+      'rm -rf trees/w1',
+      'rm -rf trees',
+    ]) {
+      it(`a line in the main checkout reaches its covered files: ${command}`, async () => {
+        const inRule = (rel: string) => rel.startsWith(`${WT}/certs/`);
+        expect(runInCopy(g.dir, command, inRule).written, 'the real run').not.toEqual([]);
+        expect(verdictOf(await g.shell(command)), `hook on \`${command}\``).toBe('deny');
+      });
+    }
+
+    it('a file of the worktree is held against the rules by its name there', async () => {
+      // `trees/**` in the main checkout is no rule for `a.log` of the worktree.
+      const other = setUp(
+        ['trees/**'],
+        `echo 'trees/' > .gitignore && git add -A && git commit -qm ignore && git worktree add -q ${WT} && echo l > ${WT}/a.log`,
+      );
+      try {
+        expect(verdictOf(await other.shell('rm -f trees/w1/a.log'))).toBe('allow');
+        expect(verdictOf(await other.shell('rm -f *.log', join(other.dir, WT)))).toBe('allow');
+      } finally {
+        other.mindly.close();
+      }
+    });
+  });
+
   describe('a rule for the folder the worktrees are kept in', () => {
     let g: ReturnType<typeof setUp>;
     // What the rule is there for: the files beside the worktrees, not the worktrees.
@@ -3132,6 +3263,41 @@ describe('the folders mkdir -p makes on the way', () => {
     const r = await g.shell('mkdir -p out/a/b && touch out/a/b/x');
     expect(r.decision).toBeNull();
     expect(r.context ?? '').not.toContain('enforced');
+  });
+});
+
+describe('a line read fully, with a copy whose sources cannot be listed', () => {
+  let g: ReturnType<typeof setUp>;
+  beforeAll(() => {
+    g = setUp(
+      ['certs/**'],
+      'mkdir -p docs/v1 out pkg/a/keys && echo d > docs/v1/i.md && ln -s v1 docs/cur && echo k > pkg/a/keys/k.txt',
+    );
+  });
+  afterAll(() => g.mindly.close());
+
+  for (const command of [
+    'cp -rL docs certs/',
+    'cp -rL docs out/; touch certs/new.pem',
+    'cp pkg/*/*.txt out/; rm -f certs/server.pem',
+  ]) {
+    it(`is blocked for the covered write it certainly makes: ${command}`, async () => {
+      const r = await g.shell(command);
+      expect(r.decision).toBe('deny');
+      expect(r.reason).toContain(RULE);
+      // Blocked, it is not also told that it could not be read.
+      expect(`${r.reason} ${r.context ?? ''}`).not.toContain('could not read');
+    });
+  }
+
+  it('is warned about, and not blocked, where it makes no covered write for certain', async () => {
+    const r = await g.shell('cp -rL docs out/; touch src/new.ts');
+    expect(r.decision).toBeNull();
+    expect(r.context ?? '').toContain('could not read this command fully');
+    // A line not read fully by its text is never blocked.
+    const unread = await g.shell('cp -r pkg/*/keys certs/');
+    expect(unread.decision).toBeNull();
+    expect(unread.context ?? '').toContain('could not read this command fully');
   });
 });
 
@@ -3361,6 +3527,7 @@ describe('lines that stay read fully', () => {
     'echo x > n.txt && mv n.txt m.txt',
     'mkdir -p src && cp src/a.ts b.ts',
     'cp a.txt dist/',
+    'mkdir -p dist/assets && cp a.txt dist/assets/',
     'rm -rf packages/*/dist',
     // A name after `--`, and a mode, where nothing is covered.
     'rm -- -f',
@@ -3879,6 +4046,57 @@ describe('git commands read without false warnings or slow reading', () => {
       }
     } finally {
       g.mindly.close();
+    }
+  });
+
+  describe('a folder of 45,000 files under thirty enforced rules of five scopes each', () => {
+    let g: ReturnType<typeof guarded>;
+    beforeAll(() => {
+      const rules: Record<string, string[]> = { [RULE]: ['certs/**', '**/*.pem'] };
+      for (let i = 1; i <= 30; i++) {
+        rules[`Rule number ${i} is kept`] = [
+          `area${i}/**`,
+          `**/*.gen${i}.ts`,
+          `conf${i}/*.json`,
+          `**/secret${i}/**`,
+          `deep/**/x${i}/*.key`,
+        ];
+      }
+      g = guarded(rules);
+      file(g.dir, 'certs/server.pem', 'k1\n');
+      g.git('add', '-A');
+      g.git('commit', '-q', '-m', 'base');
+      // 90 folders of 500 files each.
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          'for d in $(seq 1 90); do mkdir -p src/d$d; (cd src/d$d && seq 1 500 | sed "s/$/.ts/" | xargs touch); done; mkdir node_modules; echo node_modules > .gitignore',
+        ],
+        { cwd: g.dir, env: GIT_ENV },
+      );
+    }, 120_000);
+    afterAll(() => g.mindly.close());
+
+    for (const command of [
+      'cp -r src out',
+      'mv src src.old',
+      'cp -a src backup',
+      'rm -rf node_modules',
+    ]) {
+      it(`is answered in good time, and in silence: ${command}`, async () => {
+        await g.shell('true');
+        let best = Infinity;
+        let said: Verdict = 'warn';
+        for (let k = 0; k < 3; k++) {
+          const t0 = performance.now();
+          said = verdictOf(await g.shell(command));
+          best = Math.min(best, performance.now() - t0);
+        }
+        expect(said).toBe('allow');
+        // 200 ms is the aim; the bound leaves room for a busy runner.
+        expect(best).toBeLessThan(500);
+      }, 60_000);
     }
   });
 

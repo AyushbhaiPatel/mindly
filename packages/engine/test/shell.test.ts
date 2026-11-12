@@ -2025,6 +2025,15 @@ describe('write targets of a shell command', () => {
     ] as const) {
       expect(fully(line, ['current']), line).toBe(read);
     }
+    // A folder `mkdir` made through such a link is a folder under another spelling too: a copy
+    // to what is neither on disk nor a folder the line made by that spelling is not read.
+    expect(fully('mkdir -p current/n && cp certs/server.pem stage/n', ['current'])).toBe(false);
+    expect(fully('mkdir -p current/n && cp a.txt stage/n/', ['current'])).toBe(false);
+    expect(fully('mkdir -p dist/assets && cp a.txt dist/assets/', ['current'])).toBe(true);
+    // A target named twice keeps what either mention says of it.
+    const twice = (line: string) => readShellWrites(line, { understoodOnly: true });
+    expect(twice('cp -r a out/ && cp -rL docs out/').targets[0]).toMatchObject({ follows: true });
+    expect(twice('mkdir x/k/b; mkdir -p x/k/b').targets[0]).toMatchObject({ parents: true });
     // A destination a copy may fill as a folder holds names not known, and is no plain file.
     expect(fully('cp tpl/* stage && cp -r stage/. conf/')).toBe(false);
     expect(fully('cp -t stage tpl/* && cp -a stage/. conf/')).toBe(false);

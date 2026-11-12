@@ -18,7 +18,7 @@
  * follows symbolic links, so it cannot leave it. Every loop checks the deadline it was given.
  */
 import { existsSync, opendirSync, readFileSync, type Dir } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { globToRegExp, toPosix } from '@mindly/core';
 import { isLiteralScope, literalPrefix, patternSegments, patternsMayOverlap } from './scope.js';
 import type { FileKinds } from './shell.js';
@@ -84,6 +84,20 @@ export const SEARCH_LIMITS = {
   pathspecs: 48,
   gitMs: 400,
 };
+
+/**
+ * Whether the folder a scope starts in is, or lies under, a folder below the tree's top that
+ * holds a `.git` entry: a repository of its own, whose files the tree's git does not list.
+ */
+function insideRepository(scope: WrittenScope): boolean {
+  let left = toPosix(relative(scope.root, scope.base))
+    .split('/')
+    .filter((x) => x !== '').length;
+  for (let dir = scope.base; left > 0 && left < 64; dir = dirname(dir), left--) {
+    if (existsSync(join(dir, '.git'))) return true;
+  }
+  return false;
+}
 
 /** The scope pattern as shown to people. */
 export function scopeLabel(scope: WrittenScope): string {
@@ -467,7 +481,8 @@ export class ScopeSearch {
     const facts = this.facts.get(scope.root) ?? null;
     // The files of the kinds the command touches, from git's listings.
     const pool = this.pool(scope);
-    if (facts === null || pool === null) {
+    // Inside a repository kept in the tree git lists nothing: the folder is walked.
+    if (facts === null || pool === null || insideRepository(scope)) {
       // Without git's listings the scope is walked. Where there is no git, every covered file
       // found counts. Where git did not answer in time, what it said of the files found, by
       // name, tells their kind; one it said nothing of could be of a kind the command leaves
