@@ -701,6 +701,17 @@ export class KvRepo {
     this.db.prepare('DELETE FROM kv WHERE key = ?').run(key);
   }
 
+  /**
+   * Entries whose key starts with `prefix`, in key order. The prefix is matched as a key range,
+   * so it may hold any character.
+   */
+  list<T>(prefix: string, limit = 100): { key: string; value: T | null }[] {
+    const rows = this.db
+      .prepare('SELECT key, value FROM kv WHERE key >= ? AND key < ? ORDER BY key LIMIT ?')
+      .all(prefix, `${prefix}\uffff`, Math.max(1, Math.min(1000, Math.trunc(limit)))) as Row[];
+    return rows.map((r) => ({ key: str(r, 'key'), value: json<T | null>(r, 'value', null) }));
+  }
+
   /** Deletes the keys `<prefix><session id>` of every session of a project; returns how many. */
   deleteForSessions(prefix: string, projectId: string): number {
     const r = this.db

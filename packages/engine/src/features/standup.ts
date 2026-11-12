@@ -1,5 +1,7 @@
 import { sanitizeLine } from '@mindly/core';
 import type { Kernel } from '../kernel.js';
+import { notifySettled } from '../ports.js';
+import { withNotificationId } from './outbox.js';
 import type { Mindly, MindlyModule } from '../mindly.js';
 import { serviceOf } from './shared.js';
 
@@ -77,10 +79,22 @@ export function needsYouCount(d: StandupDigest): number {
 export function standupDueAt(time: string, now: number): number | null {
   const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
   if (!m) return null;
-  const d = new Date(now);
-  d.setHours(Number(m[1]), Number(m[2]), 0, 0);
-  if (d.getTime() > now) d.setDate(d.getDate() - 1);
-  return d.getTime();
+  const base = new Date(now);
+  // Each day's time is built on its own. On the day clocks go forward a time in the skipped
+  // hour does not exist and lands an hour later; moving that result back a day would give the
+  // later time on the day before as well, after that day's standup, and send a second one.
+  const on = (dayOffset: number): number =>
+    new Date(
+      base.getFullYear(),
+      base.getMonth(),
+      base.getDate() + dayOffset,
+      Number(m[1]),
+      Number(m[2]),
+      0,
+      0,
+    ).getTime();
+  const today = on(0);
+  return today > now ? on(-1) : today;
 }
 
 function titles(items: readonly StandupItem[]): string {
@@ -314,7 +328,12 @@ export class StandupService {
 
   /**
    * Sends a short pager summary (counts only). The caller (daemon) decides when, typically via
-   * `isDue`, and calls `markDelivered` afterwards. Never throws.
+   * `isDue`, and calls `markDelivered` once this returns true. Never throws.
+   *
+   * True when the summary reached a channel or there is nothing to send it to; false when the
+   * channels that were tried all failed, so the caller can try again. A scheduled standup is
+   * something the user asked for by setting its time, so it does not depend on
+   * `notify.triggers`.
    */
   async notify(projectId: string, digest: StandupDigest = this.build(projectId)): Promise<boolean> {
     try {
@@ -323,15 +342,23 @@ export class StandupService {
       const turns = digest.agents.reduce((n, a) => n + a.turns, 0);
       const files = digest.agents.reduce((n, a) => n + a.filesChanged, 0);
       const waiting = needsYouCount(digest);
-      await this.k.ports.notifier.send({
-        trigger: 'standup',
-        title: `Mindly standup: ${name}`,
-        body: `${plural(sessions, 'session')}, ${plural(turns, 'turn')}, ${plural(files, 'file')} changed; ${waiting} item${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} you.`,
-        projectName: name,
-        priority: waiting > 0 ? 'default' : 'low',
-        dedupeKey: `standup:${projectId}:${new Date(digest.until).toISOString().slice(0, 10)}`,
-      });
-      return true;
+      // The dedupe key names the day, and each retry raises the standup afresh: the id follows
+      // the key, so every attempt at one day's standup carries the same one.
+      const results = await this.k.ports.notifier.send(
+        withNotificationId(
+          {
+            trigger: 'standup',
+            title: `Mindly standup: ${name}`,
+            body: `${plural(sessions, 'session')}, ${plural(turns, 'turn')}, ${plural(files, 'file')} changed; ${waiting} item${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} you.`,
+            projectName: name,
+            priority: waiting > 0 ? 'default' : 'low',
+            dedupeKey: `standup:${projectId}:${new Date(digest.until).toISOString().slice(0, 10)}`,
+          },
+          'key',
+        ),
+        { ignoreTriggers: true },
+      );
+      return notifySettled(results);
     } catch (err) {
       this.k.logger.warn('standup notification failed', {
         error: err instanceof Error ? err.message : String(err),

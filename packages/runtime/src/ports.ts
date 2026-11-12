@@ -248,7 +248,7 @@ export function createSplitGitPort(): SplitGitPort {
   };
 }
 import { createLlmHelpers, createProvider } from '@mindly/llm';
-import { createNotifier } from '@mindly/notify';
+import { createNotifier, type NotifierLog } from '@mindly/notify';
 
 const GRAPH_TTL_MS = 60_000;
 const GRAPH_MAX_FILES = 5_000;
@@ -408,14 +408,26 @@ export function createLlmPort(
   };
 }
 
-export function createNotifierPort(config: UserConfig['notify']): NotifierPort {
-  const notifier = createNotifier(config);
+/**
+ * The pager. `redactPatterns` are the user's `redaction.extraPatterns`: what they asked to keep
+ * out of stored text is kept out of what leaves the machine too. `log` hears once about each
+ * channel that fails.
+ */
+export function createNotifierPort(
+  config: UserConfig['notify'],
+  opts: { redactPatterns?: readonly string[]; log?: NotifierLog } = {},
+): NotifierPort {
+  const notifier = createNotifier(config, {
+    ...(opts.redactPatterns ? { redactPatterns: opts.redactPatterns } : {}),
+    ...(opts.log ? { log: opts.log } : {}),
+  });
   return {
-    send: async (n) => {
+    send: async (n, options) => {
       try {
-        await notifier.send(n);
+        return await notifier.send(n, options);
       } catch {
-        // Notifications are best-effort.
+        // Notifications are best-effort; the notifier itself never throws.
+        return [];
       }
     },
   };

@@ -8,7 +8,13 @@ import {
   type Run,
   type RunStatus,
 } from '@mindly/core';
-import type { Mindly, NotifyTrigger } from '@mindly/engine';
+import {
+  notifyOutbox,
+  notifySettled,
+  withNotificationId,
+  type Mindly,
+  type NotifyTrigger,
+} from '@mindly/engine';
 import type { ConflictReport } from '@mindly/store';
 import type { RunnerPort } from '@mindly/runners';
 import type { Scheduler } from './scheduler.js';
@@ -88,7 +94,11 @@ export function reportConflict(
   return { ...res, eventId: event.id };
 }
 
-/** Sends a pager notification (titles and counts only). Never throws. */
+/**
+ * Sends a pager notification (titles and counts only). Never throws. One that reached no channel
+ * is put in the outbox and tried again by the outbox tick, so a pager that is down for a moment
+ * does not lose the alert.
+ */
 export async function notify(
   ctx: JobContext,
   n: {
@@ -101,7 +111,10 @@ export async function notify(
   },
 ): Promise<void> {
   try {
-    await ctx.mindly.kernel.ports.notifier.send(n);
+    // One id for every attempt, the first one included, so a receiver sees one id per alert.
+    const once = withNotificationId(n);
+    const results = await ctx.mindly.kernel.ports.notifier.send(once);
+    if (!notifySettled(results)) notifyOutbox(ctx.mindly).enqueue(once);
   } catch (err) {
     ctx.logger.warn('notification failed', { trigger: n.trigger, error: describeError(err) });
   }

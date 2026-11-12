@@ -24,6 +24,7 @@ import { getAdapter } from '@mindly/adapters';
 import type { Mindly } from '@mindly/engine';
 import { openMindly, type RuntimeOptions } from '@mindly/runtime';
 import { readStdin, StdinTooLarge, type CliIo } from './io.js';
+import { startPagerSender } from './pager.js';
 
 /** Largest hook payload read from stdin. */
 export const MAX_HOOK_STDIN_BYTES = 2 * 1024 * 1024;
@@ -31,9 +32,11 @@ export const MAX_HOOK_STDIN_BYTES = 2 * 1024 * 1024;
 /** Injection points for tests. */
 export interface HookDeps {
   open: (options: RuntimeOptions) => Pick<Mindly, 'hooks' | 'close'>;
+  /** Runs once the agent has its answer; must not wait. Optional so a test double needs none. */
+  afterAnswer?: (mindly: Pick<Mindly, 'hooks' | 'close'>, env: NodeJS.ProcessEnv) => void;
 }
 
-const defaultDeps: HookDeps = { open: openMindly };
+const defaultDeps: HookDeps = { open: openMindly, afterAnswer: startPagerSender };
 
 export { readStdin };
 
@@ -112,6 +115,15 @@ export async function runHook(
     timer = setTimeout(() => resolve('timeout'), timeoutMs);
   });
   const opened: { mindly: Pick<Mindly, 'hooks' | 'close'> | null } = { mindly: null };
+  // A notification this hook raised is sent by a separate process: a hook never waits for a
+  // pager. Whatever way the hook ends, a raised notification gets its sender.
+  const handOff = (): void => {
+    try {
+      if (opened.mindly) deps.afterAnswer?.(opened.mindly, io.env);
+    } catch {
+      // The notification stays in the outbox for the daemon or the next sender.
+    }
+  };
   const work = (async (): Promise<HookResult> => {
     // Yield once so the deadline timer is armed before any synchronous database work.
     await Promise.resolve();
@@ -127,13 +139,16 @@ export async function runHook(
     outcome = await Promise.race([work, deadline]);
   } catch (err) {
     clearTimeout(timer);
+    handOff();
     closeQuietly(opened.mindly);
     return fail('hook failed', { error: describeError(err) });
   }
   clearTimeout(timer);
   if (outcome === 'timeout') {
-    // The handler keeps running in the background; main.ts exits the process right away.
+    // The handler keeps running in the background; main.ts exits the process right away. A
+    // notification it raised before the deadline still gets its sender.
     work.catch(() => undefined);
+    handOff();
     return fail('deadline exceeded', { timeoutMs });
   }
   closeQuietly(opened.mindly);
@@ -142,10 +157,12 @@ export async function runHook(
   try {
     rendered = adapter.render(event, outcome);
   } catch (err) {
+    handOff();
     return fail('render failed', { error: describeError(err) });
   }
   logger.debug('hook handled', { agent, event: nativeEvent, ms: Date.now() - started });
   if (rendered.stdout !== '') io.stdout.write(rendered.stdout);
+  handOff();
   return rendered.exitCode;
 }
 

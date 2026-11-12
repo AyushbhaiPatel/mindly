@@ -630,34 +630,44 @@ class Finder {
 
 /**
  * Redacts the credentials HTTP clients are given on command lines in `text`, replacing each with
- * `marker`. Returns the new text and how many credentials were replaced.
+ * `marker`. Returns the new text, how many credentials were replaced, and where in `text` each
+ * replacement was made (in order, not overlapping).
  */
 export function redactCommandCredentials(
   text: string,
   marker: string,
-): { text: string; count: number } {
+): { text: string; count: number; edits: { at: number; len: number }[] } {
   const finder = new Finder(text, marker);
   finder.all();
-  if (finder.edits.length === 0) return { text, count: 0 };
+  if (finder.edits.length === 0) return { text, count: 0, edits: [] };
   // Edits come in order of the text; a header and an option in one run may not.
   const edits = finder.edits;
   if (edits.some((e, k) => k > 0 && e.from < (edits[k - 1]?.from ?? 0))) {
     edits.sort((a, b) => a.from - b.from || b.to - a.to);
   }
   const parts: string[] = [];
+  const made: { at: number; len: number }[] = [];
   let at = 0;
+  let from = 0;
   let open = false;
   for (const edit of edits) {
     if (open && edit.from <= at) {
       if (edit.to > at) at = edit.to;
       continue;
     }
-    if (open) parts.push(marker);
+    if (open) {
+      parts.push(marker);
+      made.push({ at: from, len: at - from });
+    }
     parts.push(text.slice(at, edit.from));
     open = true;
+    from = edit.from;
     at = edit.to;
   }
-  if (open) parts.push(marker);
+  if (open) {
+    parts.push(marker);
+    made.push({ at: from, len: at - from });
+  }
   parts.push(text.slice(at));
-  return { text: parts.join(''), count: (parts.length - 1) / 2 };
+  return { text: parts.join(''), count: made.length, edits: made };
 }

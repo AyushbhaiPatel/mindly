@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import {
-  MAX_REDACT_INPUT,
   MindlyError,
+  MAX_REDACT_INPUT,
   redact,
   sanitizeForContext,
   sanitizeLine,
@@ -90,7 +90,7 @@ export function prepareDiff(diff: string): {
 } {
   const r = redact(diff);
   let text = r.text.replace(DIFF_CONTROL_RE, '');
-  // Redaction shortens text without dropping any of it; only its input cap cuts the diff.
+  // Redaction keeps every character but the secrets, so only its own input cap shortens a diff.
   let truncated = diff.length > MAX_REDACT_INPUT;
   if (text.length > MAX_REVIEW_DIFF_CHARS) {
     text = text.slice(0, MAX_REVIEW_DIFF_CHARS);

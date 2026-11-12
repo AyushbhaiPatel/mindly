@@ -22,6 +22,7 @@ import {
   type MindlyEvent,
 } from '@mindly/core';
 import type { BusEvents, Kernel } from '../kernel.js';
+import { NotifyOutbox } from './outbox.js';
 import type { Mindly, MindlyModule } from '../mindly.js';
 
 /*
@@ -530,8 +531,10 @@ export class FailoverService {
     if (!this.k.config.notify.triggers.includes('rate_limited')) return;
     try {
       const project = sanitizeLine(this.k.store.projects.get(projectId).name, 80);
-      // Titles and counts only: never prompt text or code (docs/security.md, T3).
-      await this.k.ports.notifier.send({
+      // Titles and counts only: never prompt text or code (docs/security.md, T3). This runs
+      // inside a hook, which never waits for a pager: the page is written to the outbox and sent
+      // by a separate process (see outbox.ts).
+      new NotifyOutbox(this.k).enqueue({
         trigger: 'rate_limited',
         title: `${session.agentKind} hit its usage limit`,
         body: `${session.agentKind} hit its usage limit in ${project}; handoff ready for ${to ?? 'the next agent'}`,

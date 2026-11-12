@@ -25,6 +25,19 @@ export function sessionLabel(s: Session): string {
 // Tasks
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * A file path as other agents see it in warnings and summaries. Paths may hold characters that
+ * render as nothing (tag characters, zero-width spaces, direction marks): they are removed, so
+ * a path cannot carry hidden instructions to another agent.
+ */
+function shownPath(path: string): string {
+  return sanitizeLine(path, 300);
+}
+
+function shownPaths(paths: readonly string[]): string {
+  return paths.map(shownPath).join(', ');
+}
+
 export class TaskService {
   constructor(private readonly k: Kernel) {}
 
@@ -198,7 +211,7 @@ export class IntentService {
         projectId: session.projectId,
         sessionId: session.id,
         taskId: session.currentTaskId,
-        summary: `Editing ${files.slice(0, 3).join(', ')}${files.length > 3 ? ', …' : ''}`,
+        summary: `Editing ${files.slice(0, 3).map(shownPath).join(', ')}${files.length > 3 ? ', …' : ''}`,
         targets: { files, symbols: [] },
         ttlMs: INTENT_TTL_MS,
       });
@@ -218,8 +231,8 @@ export class IntentService {
         projectId: session.projectId,
         kind: 'intent_overlap',
         severity: 'warning',
-        title: `${sessionLabel(session)} and ${sessionLabel(otherSession)} are both changing ${shared[0] ?? 'the same files'}`,
-        detail: `${sessionLabel(otherSession)} is working on: ${other.summary}. Shared files: ${shared.join(', ')}.`,
+        title: `${sessionLabel(session)} and ${sessionLabel(otherSession)} are both changing ${shared[0] === undefined ? 'the same files' : shownPath(shared[0])}`,
+        detail: `${sessionLabel(otherSession)} is working on: ${sanitizeLine(other.summary, 300)}. Shared files: ${shownPaths(shared)}.`,
         sessionIds: pair,
         paths: shared,
         fingerprint: fingerprint('intent_overlap', ...pair, ...shared.sort()),
@@ -232,7 +245,7 @@ export class IntentService {
         files: shared,
       });
       report.warnings.push(
-        `${sessionLabel(otherSession)} is also working on ${shared.join(', ')} ("${other.summary}"). Coordinate before overwriting its changes.`,
+        `${sessionLabel(otherSession)} is also working on ${shownPaths(shared)} ("${sanitizeLine(other.summary, 300)}"). Coordinate before overwriting its changes.`,
       );
       if (isNew) {
         this.k.store.events.append({
@@ -247,8 +260,8 @@ export class IntentService {
           to: { sessionIds: [otherSession.id] },
           kind: 'conflict',
           priority: 6,
-          title: `${sessionLabel(session)} started editing ${shared.join(', ')}`,
-          body: `You declared work on these files ("${other.summary}"). Check for overlapping changes before continuing.`,
+          title: `${sessionLabel(session)} started editing ${shownPaths(shared)}`,
+          body: `You declared work on these files ("${sanitizeLine(other.summary, 300)}"). Check for overlapping changes before continuing.`,
           dedupeKey: `overlap:${conflict.id}`,
         });
       }

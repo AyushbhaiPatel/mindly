@@ -410,7 +410,23 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   `credentials.json` and `service-account*.json`, at any depth. `redaction.denyPaths` adds more.
 - Model API keys are read from environment variables at call time and never written to disk by
   Mindly.
-- Pager payloads contain titles and counts only, never code or prompt text.
+- Pager payloads contain titles and counts only, never code or prompt text. They go through
+  the same redaction as stored text, `redaction.extraPatterns` included, after control and
+  invisible characters are removed. A hook never contacts a pager: a notification it raises is
+  written, already redacted, to an outbox in the local database, and the hook starts one
+  detached `mindly notify flush` that sends it and waits for the answer. The daemon flushes the
+  outbox as well; a lease in the database lets only one process send at a time. One that
+  reached no channel is tried again (after 30 s, 2 min, 10 min, 30 min) and dropped after five
+  attempts or six hours. Webhook payloads carry an `id` that is the same on every attempt, so a
+  receiver can drop the rare repeat (a sender killed after the pager took the request but before
+  it answered); a new occurrence of an alert gets a new id. Two gaps remain, both covered by a
+  running daemon: a page written by work a hook left running past its deadline gets no sender of
+  its own (the hook process exits), and on macOS a hook goes by the sender's process id alone, so
+  a process that took a dead sender's id within 15 s is taken for the sender. Either page waits for
+  the daemon or the next page's sender. Channel URLs must be `https` (`http` only for localhost) without credentials;
+  `mindly config set` refuses others, a config file that already holds one keeps working with
+  that channel left out (`mindly config get`, `mindly doctor` and the daemon log name it), and
+  the rule is checked again when sending. Redirects are not followed.
 - Checkpoints (`mindly bisect`) store the working tree after each agent edit as git commits
   inside the repository itself, under `refs/mindly/steps/<worktree id>/<step>`. They hold code,
   not prompts; the prompt is linked by event id and goes through the usual redaction and
@@ -431,6 +447,21 @@ A cloned repository ships `.mindly/config.json` that defines a shadow-merge chec
   deny-list are never read, files over 512 KB are skipped, and a path that now resolves outside
   the tree (a symlink) is not followed. The track record is computed from local data, is not
   available to agents over MCP, and is never included in a saves card.
+- Characters that render as nothing (zero-width and format characters, tag characters,
+  variation selectors) and control characters cannot hide a secret: it is looked for in copies
+  of the text with those characters removed, turned into spaces, or a mix of the two, and in one
+  where each run of them between letters or digits becomes a mark that the token patterns (API
+  keys, access tokens, JWTs) read past and count as a word boundary, so a key split inside and
+  glued to words on either side is still found (a word glued after it by such characters is
+  replaced with it, as the key's characters run on). The mark is the first of the noncharacters
+  U+FDD0..U+FDEF, then the private-use characters U+E000..U+E0FF, that the text does not hold; a
+  text that holds all 288 gets no such copy, and there a key both split inside and glued to words
+  on both sides by hidden characters can be missed. What any copy finds is replaced in the
+  original together with any such characters inside it. Redaction changes nothing else: a stored
+  prompt, or a prompt passed to an agent or a model, keeps the user's own characters
+  (emoji joiners, a Persian zero-width non-joiner, bidi controls in a diff under review). Text that
+  one agent's work puts in front of another agent (shared context, memories, coordination
+  warnings, file paths) is shown without them.
 
 ### T4. Local network and browser attacks on the daemon
 

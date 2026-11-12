@@ -335,6 +335,19 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
       act((o: object) => async (out) => (await import('./commands/insight.js')).standup(out, o)),
     );
 
+  const notify = program.command('notify').description('Alerts sent to your pager channels');
+  notify
+    .command('test')
+    .description('Send one test notification through every configured channel')
+    .option('--json', 'machine-readable output')
+    .action(
+      act((o: object) => async (out) => (await import('./commands/notify.js')).notifyTest(out, o)),
+    );
+  notify
+    .command('flush', { hidden: true })
+    .description('Send what waits in the pager outbox (started by hooks)')
+    .action(act(() => async (out) => (await import('./commands/notify.js')).notifyFlush(out)));
+
   program
     .command('track')
     .description('Which agent does better in which part of this repository, as counts')

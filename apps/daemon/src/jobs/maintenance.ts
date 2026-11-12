@@ -1,5 +1,12 @@
-import { describeError } from '@mindly/core';
-import { needsYouCount, savesOf, selfHealingOf, standupService, trackOf } from '@mindly/engine';
+import { describeError, unusableNotifyChannels } from '@mindly/core';
+import {
+  needsYouCount,
+  notifyOutbox,
+  savesOf,
+  selfHealingOf,
+  standupService,
+  trackOf,
+} from '@mindly/engine';
 import type { JobContext } from './context.js';
 import { DECLARED_INTENT_PREFIX } from '@mindly/engine';
 import { HOOK_ANCESTRY_PREFIX, HOOK_ANCESTRY_TTL_MS } from '@mindly/core';
@@ -97,17 +104,73 @@ export async function trackSurvivalTick(ctx: JobContext): Promise<number> {
   return r.checked;
 }
 
+/** Attempts to send one day's standup before it is given up. */
+export const STANDUP_MAX_ATTEMPTS = 6;
+/** Wait between two attempts for the same standup. */
+export const STANDUP_RETRY_MS = 10 * 60_000;
+
+interface StandupAttempts {
+  /** The scheduled time (ms) these attempts are for. */
+  due: number;
+  count: number;
+  lastAt: number;
+}
+
 /**
  * Sends the scheduled standup (when `config.standup.time` is set) for each project that is due,
- * then marks it delivered. Projects with nothing to report are marked without a notification.
+ * and marks it delivered once it has been sent. Projects with nothing to report are marked
+ * without a notification. A standup that reached no channel stays due and is tried again every
+ * ten minutes, up to `STANDUP_MAX_ATTEMPTS` times, before that day's is given up.
  */
 export async function standupTick(ctx: JobContext): Promise<void> {
   if (!ctx.mindly.config.standup.time) return;
   const svc = standupService(ctx.mindly);
+  const kv = ctx.mindly.store.kv;
+  const now = ctx.mindly.kernel.clock.now();
   for (const p of ctx.mindly.store.projects.list().slice(0, MAX_PROJECTS)) {
-    if (!svc.isDue(p.id)) continue;
+    if (!svc.isDue(p.id, now)) continue;
+    const due = svc.dueAt(now) ?? 0;
+    const key = `standup.attempts:${p.id}`;
+    const seen = kv.get<StandupAttempts>(key);
+    const tried = seen && seen.due === due ? seen : null;
+    if (tried && now - tried.lastAt < STANDUP_RETRY_MS) continue;
     const digest = svc.build(p.id);
-    if (digest.agents.length > 0 || needsYouCount(digest) > 0) await svc.notify(p.id, digest);
-    svc.markDelivered(p.id);
+    const sent =
+      digest.agents.length > 0 || needsYouCount(digest) > 0 ? await svc.notify(p.id, digest) : true;
+    const count = (tried?.count ?? 0) + 1;
+    if (sent || count >= STANDUP_MAX_ATTEMPTS) {
+      if (!sent) {
+        ctx.logger.warn('standup not delivered', { project: p.name, attempts: count });
+      }
+      svc.markDelivered(p.id);
+      kv.delete(key);
+    } else {
+      kv.set(key, { due, count, lastAt: now } satisfies StandupAttempts);
+    }
+  }
+}
+
+/**
+ * Sends what waits in the pager outbox: notifications raised in a hook, which cannot wait for a
+ * pager, and ones whose channels failed before.
+ */
+export async function notifyOutboxTick(ctx: JobContext): Promise<void> {
+  const r = await notifyOutbox(ctx.mindly).flush({ budgetMs: 20_000 });
+  if (r.delivered > 0 || r.dropped > 0) ctx.logger.info('pager outbox', { ...r });
+}
+
+/**
+ * Says once, at start, which notification channels of the config file are not used because their
+ * URL cannot be (a file written before channel URLs were checked). The URL itself is not logged.
+ */
+export function warnUnusableChannels(ctx: JobContext): void {
+  const path = ctx.mindly.paths?.config;
+  if (!path) return;
+  for (const c of unusableNotifyChannels(path)) {
+    ctx.logger.warn('notification channel not used', {
+      channel: `notify.channels[${c.index}]`,
+      type: c.type,
+      problem: c.problem,
+    });
   }
 }
