@@ -21,6 +21,8 @@ export interface AppState {
   versions: Readonly<Record<Topic, number>>;
   notify(text: string, tone?: Toast['tone']): void;
   navigate(tab: string, params?: Record<string, string>): void;
+  /** Reads the project list again, after something stored on a project changed. */
+  reloadProjects(): Promise<void>;
   params: URLSearchParams;
 }
 
