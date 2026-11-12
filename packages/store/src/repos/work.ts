@@ -307,6 +307,9 @@ export class IntentRepo {
 // File changes (provenance)
 // ---------------------------------------------------------------------------------------------
 
+/** Joins the working tree of a change (`file_changes` as `c`; no row before v7). */
+const WITH_WORKTREE = 'LEFT JOIN file_change_worktrees w ON w.change_id = c.id';
+
 function toFileChange(r: Row, hashes: string[]): FileChange {
   return {
     id: str(r, 'id'),
@@ -318,6 +321,7 @@ function toFileChange(r: Row, hashes: string[]): FileChange {
     addedLines: num(r, 'added_lines'),
     removedLines: num(r, 'removed_lines'),
     promptEventId: strOrNull(r, 'prompt_event_id'),
+    worktree: strOrNull(r, 'worktree'),
     createdAt: num(r, 'created_at'),
   };
 }
@@ -333,7 +337,10 @@ export class FileChangeRepo {
    * `mindly track` measures survival over); `hunkHashes` also hold fragments, for provenance.
    */
   record(
-    input: Omit<FileChange, 'id' | 'createdAt'> & { lineHashes?: readonly string[] },
+    input: Omit<FileChange, 'id' | 'createdAt' | 'worktree'> & {
+      worktree?: string | null;
+      lineHashes?: readonly string[];
+    },
   ): FileChange {
     const now = this.clock.now();
     const id = uuidv7(now);
@@ -356,6 +363,11 @@ export class FileChangeRepo {
           input.promptEventId,
           now,
         );
+      if (input.worktree !== undefined && input.worktree !== null) {
+        this.db
+          .prepare('INSERT INTO file_change_worktrees (change_id, worktree) VALUES (?, ?)')
+          .run(id, input.worktree);
+      }
       const stmt = this.db.prepare(
         'INSERT OR IGNORE INTO file_change_hunks (change_id, hash) VALUES (?, ?)',
       );
@@ -377,6 +389,7 @@ export class FileChangeRepo {
       addedLines: input.addedLines,
       removedLines: input.removedLines,
       promptEventId: input.promptEventId,
+      worktree: input.worktree ?? null,
       createdAt: now,
     };
   }
@@ -385,8 +398,8 @@ export class FileChangeRepo {
   findByHash(projectId: string, path: string, hash: string): FileChange[] {
     const rows = this.db
       .prepare(
-        `SELECT c.* FROM file_change_hunks h JOIN file_changes c ON c.id = h.change_id
-         WHERE h.hash = ? AND c.project_id = ? AND c.path = ? ORDER BY c.created_at DESC LIMIT 10`,
+        `SELECT c.*, w.worktree FROM file_change_hunks h JOIN file_changes c ON c.id = h.change_id
+         ${WITH_WORKTREE} WHERE h.hash = ? AND c.project_id = ? AND c.path = ? ORDER BY c.created_at DESC LIMIT 10`,
       )
       .all(hash, projectId, path) as Row[];
     return rows.map((r) => toFileChange(r, [hash]));
@@ -396,7 +409,8 @@ export class FileChangeRepo {
     return (
       this.db
         .prepare(
-          'SELECT * FROM file_changes WHERE project_id = ? AND path = ? ORDER BY created_at DESC LIMIT ?',
+          `SELECT c.*, w.worktree FROM file_changes c ${WITH_WORKTREE}
+           WHERE c.project_id = ? AND c.path = ? ORDER BY c.created_at DESC LIMIT ?`,
         )
         .all(projectId, path, limit(max, 50)) as Row[]
     ).map((r) => toFileChange(r, []));
@@ -406,7 +420,8 @@ export class FileChangeRepo {
     return (
       this.db
         .prepare(
-          'SELECT * FROM file_changes WHERE session_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 500',
+          `SELECT c.*, w.worktree FROM file_changes c ${WITH_WORKTREE}
+           WHERE c.session_id = ? AND c.created_at >= ? ORDER BY c.created_at DESC LIMIT 500`,
         )
         .all(sessionId, since ?? 0) as Row[]
     ).map((r) => toFileChange(r, []));
@@ -417,7 +432,8 @@ export class FileChangeRepo {
     return (
       this.db
         .prepare(
-          'SELECT * FROM file_changes WHERE project_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT ?',
+          `SELECT c.*, w.worktree FROM file_changes c ${WITH_WORKTREE}
+           WHERE c.project_id = ? AND c.created_at > ? ORDER BY c.created_at DESC LIMIT ?`,
         )
         .all(projectId, since, Math.max(1, Math.min(5000, Math.trunc(limit)))) as Row[]
     ).map((r) => toFileChange(r, []));
@@ -590,6 +606,24 @@ export class ConflictRepo {
       }
     }
     return n;
+  }
+
+  /**
+   * How many conflicts were opened and resolved at or after `since`, and how many are open now
+   * (acknowledged ones included). Counted in the database, so the numbers hold however many
+   * conflicts a project has collected.
+   */
+  counts(projectId: string, since: number): { opened: number; resolved: number; open: number } {
+    const r = this.db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(created_at >= ?), 0) AS opened,
+           COALESCE(SUM(status = 'resolved' AND resolved_at IS NOT NULL AND resolved_at >= ?), 0) AS resolved,
+           COALESCE(SUM(status IN ('open', 'acknowledged')), 0) AS open
+         FROM conflicts WHERE project_id = ?`,
+      )
+      .get(since, since, projectId) as Row;
+    return { opened: num(r, 'opened'), resolved: num(r, 'resolved'), open: num(r, 'open') };
   }
 
   list(

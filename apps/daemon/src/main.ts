@@ -11,7 +11,8 @@ import { startDaemon, type Daemon } from './daemon.js';
 export async function main(): Promise<number> {
   let daemon: Daemon;
   try {
-    daemon = await startDaemon();
+    // `--force`: start although the recorded daemon's port is held without an answer.
+    daemon = await startDaemon({ force: process.argv.slice(2).includes('--force') });
   } catch (err) {
     process.stderr.write(
       `mindly daemon: ${isMindlyError(err) ? err.message : 'failed to start (see the log)'}\n`,

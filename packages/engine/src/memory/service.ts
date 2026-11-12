@@ -5,11 +5,9 @@ import {
   invalidInput,
   isDeniedPath,
   isRepoFileSource,
-  normalizeLine,
   redactText,
   sanitizeForContext,
   sanitizeLine,
-  sha256,
   MindlyError,
   tryResolveInsideRoot,
   type Memory,
@@ -20,7 +18,11 @@ import {
 } from '@mindly/core';
 import type { MemoryFilter, MemoryPatch, MemorySearchHit } from '@mindly/store';
 import type { Kernel } from '../kernel.js';
+import { evidenceHash } from './evidence-hash.js';
+import { excerptState, normalizeBlock } from './excerpts.js';
 import { stripManagedSection } from './managed-section.js';
+
+export { normalizeBlock } from './excerpts.js';
 
 export const MAX_TITLE = 160;
 export const MAX_BODY = 4000;
@@ -171,7 +173,8 @@ export function cleanScopePaths(paths: readonly string[] | undefined): string[] 
     if (
       !p ||
       p.startsWith('/') ||
-      p.split('/').includes('..') ||
+      // `..` may also be one alternative of a group: `{..,src}/x` stands for `../x`.
+      p.split(/[/{},]/).includes('..') ||
       p.length > 300 ||
       hasUnsafeChars(p)
     ) {
@@ -538,7 +541,8 @@ export class MemoryService {
     return {
       rel: resolved.rel,
       excerpt: this.clean(excerpt, 2000),
-      hash: sha256(normExcerpt),
+      // Describes the text as found when the stored excerpt cannot be looked for as written.
+      hash: evidenceHash(normExcerpt, normalizeBlock(this.clean(excerpt, 2000))),
       valid,
     };
   }
@@ -552,7 +556,12 @@ export class MemoryService {
   ): Memory {
     const cur = this.k.store.memories.get(id);
     const clean: MemoryPatch = { ...patch };
-    if (patch.title !== undefined) clean.title = sanitizeLine(redactText(patch.title), MAX_TITLE);
+    if (patch.title !== undefined) {
+      clean.title = sanitizeLine(
+        redactText(patch.title, { extraPatterns: this.k.config.redaction.extraPatterns }),
+        MAX_TITLE,
+      );
+    }
     if (patch.body !== undefined) clean.body = this.clean(patch.body, MAX_BODY);
     if (patch.tags !== undefined) clean.tags = cleanTags(patch.tags);
     if (patch.scope?.paths !== undefined) {
@@ -682,43 +691,6 @@ function normalizeTitle(t: string): string {
     .trim();
 }
 
-/** Normalises a multi-line block for excerpt matching (whitespace-insensitive per line). */
-export function normalizeBlock(text: string): string {
-  return text
-    .split(/\r?\n/)
-    .map(normalizeLine)
-    .filter((l) => l.length > 0)
-    .join('\n');
-}
-
-const MAX_WINDOW_LINES = 20_000;
-
-/**
- * Decides whether an evidence excerpt is still present in `content`. Matches the normalised
- * stored excerpt as a substring, or (because stored excerpts are redacted/sanitised and may differ
- * from the original) any run of normalised lines whose hash equals the stored content hash.
- */
-export function excerptPresent(
-  content: string,
-  excerpt: string,
-  contentHash: string | null,
-): boolean {
-  const normContent = normalizeBlock(content);
-  const normExcerpt = normalizeBlock(excerpt);
-  if (normExcerpt.length > 0 && normContent.includes(normExcerpt)) return true;
-  if (!contentHash) return false;
-  if (normExcerpt.length > 0 && sha256(normExcerpt) === contentHash) {
-    // The stored excerpt is the original; the substring test above is authoritative.
-    return false;
-  }
-  const n = Math.max(1, normExcerpt.split('\n').length);
-  const lines = normContent.split('\n').slice(0, MAX_WINDOW_LINES);
-  for (let i = 0; i + n <= lines.length; i++) {
-    if (sha256(lines.slice(i, i + n).join('\n')) === contentHash) return true;
-  }
-  return false;
-}
-
 /**
  * A file evidence points at, as read for judging it: its text without Mindly's own section (rules
  * Mindly wrote into an instruction file are not evidence for those same rules), gone, or
@@ -744,9 +716,11 @@ export function readEvidenceFile(
 }
 
 /**
- * Whether an evidence row holds in `file`: `unknown` when the file cannot be looked at, `invalid`
- * when it is gone or no longer holds the excerpt, `valid` otherwise. The one judgement behind both
- * the self-healing sweep and a restatement, so the two can never disagree about a row.
+ * Whether an evidence row holds in `file`: `unknown` when the file cannot be looked at, or when
+ * evidence stored in an earlier form could not be placed but is not shown to be gone; `invalid`
+ * when the file is gone or no longer holds the excerpt; `valid` otherwise. Excerpts are read by
+ * the same functions the self-healing sweep uses (see `excerpts.ts`), so a restatement and the
+ * sweep do not disagree about a row.
  */
 export function judgeEvidence(
   file: EvidenceFile,
@@ -755,7 +729,8 @@ export function judgeEvidence(
   if (file.kind === 'unreadable') return 'unknown';
   if (file.kind === 'missing') return 'invalid';
   if (e.excerpt === null) return 'valid';
-  return excerptPresent(file.content, e.excerpt, e.contentHash) ? 'valid' : 'invalid';
+  const state = excerptState(file.content, e.excerpt, e.contentHash);
+  return state === 'present' ? 'valid' : state === 'absent' ? 'invalid' : 'unknown';
 }
 
 /** {@link judgeEvidence} of one row, its file read under `projectRoot`. */

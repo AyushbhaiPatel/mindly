@@ -125,3 +125,17 @@ export function splitList(s: string): string[] {
     .map((x) => x.trim())
     .filter(Boolean);
 }
+
+/**
+ * Splits the "applies to files" field into path patterns, one per line, as the form shows them.
+ * Each line is kept as written apart from the space around it: a comma is part of the pattern
+ * (in a file name, or between the alternatives of `{api,web}`), and so is space inside braces.
+ * A scope saved from the command line therefore comes back unchanged when only the title or
+ * the body of a memory is edited.
+ */
+export function splitGlobs(s: string): string[] {
+  return s
+    .split(/\r?\n|\r/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}

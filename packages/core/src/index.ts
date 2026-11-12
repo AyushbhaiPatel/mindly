@@ -1,4 +1,5 @@
 export * from './config.js';
+export * from './daemon-probe.js';
 export * from './domain.js';
 export * from './errors.js';
 export * from './glob.js';
@@ -7,6 +8,7 @@ export * from './ids.js';
 export * from './layout.js';
 export * from './logger.js';
 export * from './paths.js';
+export * from './process.js';
 export * from './redact.js';
 export * from './text.js';
 

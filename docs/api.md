@@ -39,7 +39,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 
 | Method | Path                                                                             | Response                                                                                                          |
 | ------ | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| GET    | `/api/health`                                                                    | `{ ok: true, version }`                                                                                           |
+| GET    | `/api/health`                                                                    | `{ ok: true, version, pid, home }` (`home`: a hash identifying the daemon's `MINDLY_HOME`, never the path)        |
 | GET    | `/api/projects`                                                                  | `Project[]`                                                                                                       |
 | GET    | `/api/projects/:projectId/overview`                                              | `Overview` (below)                                                                                                |
 | GET    | `/api/projects/:projectId/sessions?limit`                                        | `Session[]` (most recent first)                                                                                   |
@@ -258,7 +258,8 @@ also blocks later ones. This under-counts rather than inflates.
 
 `GET …/saves/card.svg` renders the confirmed saves since `since` (default 7 days ago) as a 1200×630
 SVG: counts by kind and agent names only. `details=1` adds the project name and each save's sentence
-and files; without it the card contains no project name, path or code.
+and files; without it the card contains no project name, path or code. The card is taller than 630
+when it shows details or all seven kinds of save.
 
 ### Track record
 
@@ -298,7 +299,7 @@ interface TrackReport {
       bisect: TrackRate; // reliable bisect results whose first bad step is one edit of this agent (once per step)
       contracts: TrackRate; // contract breaks right after its edit in the project's own checkout
       mergeChecks: TrackRate; // merge conflicts (shadow merge, split merge check) naming only its session
-      ruleAttempts: TrackRate; // confirmed rule_enforced saves; a count only (rate and interval always null)
+      ruleAttempts: TrackRate; // sessions an enforced rule stopped that did not write those files afterwards, once per session and rule; a count only (rate and interval always null)
       kept: TrackRate; // tracked lines (added or changed) still present, of those from edits at least 7 days old
       keptFrom: { edits: number; sessions: number }; // checked edits behind `kept`; its own minimum
     }[];
@@ -313,6 +314,10 @@ interface TrackReport {
   usageLimits: { agent: string; limited: number; sessions: number }[]; // per agent, not per area
   survival: { pending: number; checkedNow: number }; // edits in the window still waiting for their check
   truncated: boolean; // a query hit its row limit: the record is partial
+  // set when the window is longer than the kept event log (retention.eventsDays): when the kept
+  // events start. Outcomes read from events before it are missing, so their counts are too low
+  // (equal to window.to when no event of the window is kept)
+  eventsSince: number | null;
 }
 ```
 

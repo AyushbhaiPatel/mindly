@@ -140,7 +140,7 @@ async function plan(
       }
       if (!install && !isRecord(config['hooks'])) return;
       const hooks = hooksObject(config, paths.settings);
-      removeGroupedHooks(hooks, KIND);
+      removeGroupedHooks(hooks, KIND, options.command);
       if (install) addGroupedHooks(hooks, hookSpecs(options.command), paths.settings);
       dropIfEmpty(config, 'hooks');
     },

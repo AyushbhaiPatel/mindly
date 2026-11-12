@@ -11,6 +11,7 @@ import {
   type HandoffSplitBrief,
   type Memory,
   type Session,
+  type Task,
 } from '@mindly/core';
 import { LIVE_WINDOW_MS, type Kernel } from '../kernel.js';
 import type { ProjectContext } from '../projects.js';
@@ -20,6 +21,7 @@ import { sessionLabel } from '../coordination/work.js';
 import type { TelepathyService } from '../coordination/telepathy.js';
 import { memoryLine, relativeTime, renderSections, type Section } from './render.js';
 import { contractLines, liveContract } from '../features/split-contract.js';
+import { RATE_LIMIT_HANDOFF_MAX_AGE_MS } from '../features/failover.js';
 
 interface Candidate {
   item: ContextItem;
@@ -30,6 +32,12 @@ interface Candidate {
   /** Mandatory items are included even if they exceed the budget (bounded by their own size). */
   mandatory?: boolean;
   delivery?: Delivery;
+}
+
+/** What a guest (see `ContextBuilder.asGuest`) may present as its own. */
+export interface GuestView {
+  /** True for a task the caller took up itself; none when omitted. */
+  ownsTask?: (taskId: string) => boolean;
 }
 
 export interface BuiltContext {
@@ -49,6 +57,26 @@ export class ContextBuilder {
     private readonly mistakes: MistakeService,
   ) {}
 
+  /** Sessions the context being built is read for as a guest (see `asGuest`), with their view. */
+  private readonly guests = new Map<string, GuestView>();
+
+  /**
+   * Builds context for `session` as a guest: an MCP server that cannot tell whether the session
+   * is its client's or another window's. What belongs to the session is left for it and nothing
+   * is recorded against it: a handoff waiting for it is not picked up, messages to it are not
+   * shown or marked delivered, no packet of what was served is kept (the session's own context
+   * would then leave those memories out), and only the tasks `view` names are listed as the
+   * caller's own.
+   */
+  asGuest(session: Session, build: () => BuiltContext, view: GuestView = {}): BuiltContext {
+    this.guests.set(session.id, view);
+    try {
+      return build();
+    } finally {
+      this.guests.delete(session.id);
+    }
+  }
+
   // ------------------------------------------------------------------ session start
 
   sessionStart(project: ProjectContext, session: Session): BuiltContext {
@@ -56,8 +84,12 @@ export class ContextBuilder {
     const pid = project.project.id;
     const cands: Candidate[] = [];
 
+    // An agent taking over in a part's worktree (a usage-limit handoff) needs the part's brief
+    // as well: which files it owns, the shared contract and the branch to commit on.
     const handoff = this.claimHandoff(session);
+    const brief = handoff?.packet.split ? null : this.splitBriefAgain(session);
     if (handoff) cands.push(...this.handoffCandidates(handoff));
+    if (brief) cands.push(...this.handoffCandidates(brief, handoff !== null));
 
     cands.push(...this.deliveryCandidates(session, 1));
 
@@ -160,7 +192,7 @@ export class ContextBuilder {
       });
     }
 
-    for (const t of this.k.store.tasks.ownedBy(session.id)) {
+    for (const t of this.ownTasks(session)) {
       cands.push({
         item: {
           ref: t.id,
@@ -194,7 +226,10 @@ export class ContextBuilder {
     const pid = project.project.id;
     const cands: Candidate[] = [...this.deliveryCandidates(session, 0)];
 
-    const served = this.recentlyServed(session);
+    // A guest has no history of its own with the session: what the session saw is not its own.
+    const served = this.guests.has(session.id)
+      ? new Map<string, number>()
+      : this.recentlyServed(session);
     const hits = this.k.store.memories.search(pid, prompt, {
       trust: ['approved', 'verified', 'proposed'],
       ...(session.branch ? { branch: session.branch } : {}),
@@ -312,6 +347,7 @@ export class ContextBuilder {
   }
 
   private deliveryCandidates(session: Session, order: number): Candidate[] {
+    if (this.guests.has(session.id)) return [];
     const now = this.k.clock.now();
     return this.telepathy.pending(session, 15).map((d) => {
       const from = d.sourceSessionId ? this.k.store.sessions.find(d.sourceSessionId) : null;
@@ -336,17 +372,22 @@ export class ContextBuilder {
   }
 
   private claimHandoff(session: Session): Handoff | null {
+    if (this.guests.has(session.id)) return null;
     for (const h of this.k.store.handoffs.pendingFor(
       session.projectId,
       session.agentKind,
       session.id,
       safeRealpath(session.worktree),
+      RATE_LIMIT_HANDOFF_MAX_AGE_MS,
     )) {
       // A brief of a split that is no longer active is not for anyone.
       if (h.packet.split) {
         const split = this.k.store.splits.find(h.packet.split.splitId);
         if (!split || split.status !== 'active') continue;
       }
+      // The agent that hit its limit took a new prompt and is working again: its work is not up
+      // for grabs. The handoff is settled when that turn ends, one way or the other.
+      if (h.reason === 'rate_limit' && this.resumedSince(h)) continue;
       if (this.k.store.handoffs.claim(h.id, session.id)) {
         this.k.store.events.append({
           projectId: session.projectId,
@@ -354,12 +395,14 @@ export class ContextBuilder {
           type: 'handoff.claimed',
           payload: { handoffId: h.id, from: h.fromSessionId, reason: h.reason },
         });
-        if (h.taskId) {
-          this.k.store.tasks.update(h.taskId, {
+        // A task that was finished or dropped in the meantime stays that way.
+        const task = h.taskId ? this.k.store.tasks.find(h.taskId) : null;
+        if (task && task.status !== 'done' && task.status !== 'abandoned') {
+          this.k.store.tasks.update(task.id, {
             ownerSessionId: session.id,
             status: 'in_progress',
           });
-          this.k.store.sessions.setCurrentTask(session.id, h.taskId);
+          this.k.store.sessions.setCurrentTask(session.id, task.id);
         }
         return h;
       }
@@ -367,11 +410,57 @@ export class ContextBuilder {
     return null;
   }
 
-  private handoffCandidates(h: Handoff): Candidate[] {
+  /** True while the session that made `h` is in a turn it started after making it. */
+  private resumedSince(h: Handoff): boolean {
+    const from = this.k.store.sessions.find(h.fromSessionId);
+    if (from?.status !== 'active') return false;
+    const [lastPrompt] = this.k.store.events.query(h.projectId, {
+      sessionId: from.id,
+      types: ['prompt.submitted'],
+      order: 'desc',
+      limit: 1,
+    });
+    return lastPrompt !== undefined && lastPrompt.createdAt > h.createdAt;
+  }
+
+  /**
+   * The brief of the split part whose worktree the session runs in, once it has been claimed. A
+   * brief is claimed by the first session of the part; an agent restarted in the same worktree,
+   * or one whose context was compacted, needs it again to know its goal and the files it owns.
+   * The part's task follows the new session unless its owner is still running.
+   */
+  private splitBriefAgain(session: Session): Handoff | null {
+    const part = this.k.store.splits.partForWorktree(
+      session.projectId,
+      safeRealpath(session.worktree),
+    );
+    if (!part?.handoffId) return null;
+    let h: Handoff;
+    try {
+      h = this.k.store.handoffs.get(part.handoffId);
+    } catch {
+      return null;
+    }
+    if (h.status !== 'claimed' || !h.packet.split) return null;
+    const task = this.k.store.tasks.find(part.taskId);
+    if (task && task.status !== 'done' && task.status !== 'abandoned') {
+      const owner = task.ownerSessionId ? this.k.store.sessions.find(task.ownerSessionId) : null;
+      if (!owner || owner.status === 'ended') {
+        this.k.store.tasks.update(task.id, { ownerSessionId: session.id });
+      }
+      if (!owner || owner.status === 'ended' || owner.id === session.id) {
+        this.k.store.sessions.setCurrentTask(session.id, task.id);
+      }
+    }
+    return h;
+  }
+
+  /** `compact`: a shorter split brief, shown next to a handoff that already carries the goal. */
+  private handoffCandidates(h: Handoff, compact = false): Candidate[] {
     if (h.packet.split) {
       const split = this.k.store.splits.find(h.packet.split.splitId);
       const contract = split ? contractLines(liveContract(this.k.store, split)) : [];
-      return [splitBriefCandidate(h, h.packet.split, contract)];
+      return [splitBriefCandidate(h, h.packet.split, contract, compact)];
     }
     const from = this.k.store.sessions.find(h.fromSessionId);
     const who = from ? sessionLabel(from) : 'another agent';
@@ -380,6 +469,10 @@ export class ContextBuilder {
       `You are continuing work handed off by ${who} (${h.reason === 'rate_limit' ? 'it hit its usage limit' : h.reason}).`,
       `Goal: ${sanitizeLine(p.goal || h.summary, 400)}`,
     ];
+    // The goal of a manual handoff is the sender's task when it has one; what the sender wrote
+    // about the state of the work is then only in the summary.
+    if (h.reason === 'manual' && h.summary && h.summary !== p.goal)
+      lines.push(`Summary from ${who}: ${sanitizeLine(h.summary, 400)}`);
     if (p.plan.length)
       lines.push(
         `Plan: ${p.plan.map((s) => `${s.done ? '[x]' : '[ ]'} ${sanitizeLine(s.text, 120)}`).join('; ')}`,
@@ -444,6 +537,22 @@ export class ContextBuilder {
     ];
   }
 
+  /**
+   * The session's unfinished tasks, newest first. For a guest, only the ones it took up itself
+   * and that are still with the session (where a guest's work lives): the session's other tasks
+   * are another window's as far as it can tell, and a task someone has since taken is theirs.
+   */
+  private ownTasks(session: Session): Task[] {
+    const guest = this.guests.get(session.id);
+    if (!guest) return this.k.store.tasks.ownedBy(session.id);
+    const owns = guest.ownsTask;
+    if (!owns) return [];
+    return this.k.store.tasks
+      .list(session.projectId, { statuses: ['open', 'in_progress', 'blocked'] })
+      .filter((t) => t.ownerSessionId === session.id && owns(t.id))
+      .slice(0, 20);
+  }
+
   /** Memory ids already shown to this session recently, with when they were shown. */
   private recentlyServed(session: Session): Map<string, number> {
     const since = this.k.clock.now() - RECENT_SERVE_WINDOW_MS;
@@ -492,6 +601,9 @@ export class ContextBuilder {
     if (!text) {
       return { text: null, packet: null, deliveries: [] };
     }
+    // A guest leaves no trace on the session: a packet kept against it would make the session's
+    // own context leave out what the guest was shown (and bisect read it as what the session saw).
+    if (this.guests.has(session.id)) return { text, packet: null, deliveries: [] };
     this.telepathy.markDelivered(session, deliveries);
     const packet = this.k.store.contextPackets.record({
       projectId: project.project.id,
@@ -520,11 +632,16 @@ export class ContextBuilder {
 }
 
 /** The brief of a split part, rendered as the first section of the session. */
-function splitBriefCandidate(h: Handoff, brief: HandoffSplitBrief, contract: string[]): Candidate {
+function splitBriefCandidate(
+  h: Handoff,
+  brief: HandoffSplitBrief,
+  contract: string[],
+  compact = false,
+): Candidate {
   const globs = (g: readonly string[]): string => g.map((x) => sanitizeLine(x, 160)).join(', ');
   const lines = [
     `You are working on part "${sanitizeLine(brief.title, 120)}" of the split "${sanitizeLine(brief.goal, 300)}" in this worktree (branch ${sanitizeLine(h.packet.branch ?? '', 120)}). Other agents work on the other parts in their own worktrees.`,
-    `Your part: ${sanitizeForContext(h.packet.goal, 3000).replace(/\n/g, ' ')}`,
+    `Your part: ${sanitizeForContext(h.packet.goal, compact ? 600 : 3000).replace(/\n/g, ' ')}`,
     `Files you own (edit only these): ${globs(brief.owns)}`,
   ];
   if (brief.reads.length) lines.push(`Files you may read for context: ${globs(brief.reads)}`);
@@ -543,7 +660,10 @@ function splitBriefCandidate(h: Handoff, brief: HandoffSplitBrief, contract: str
       `Shared contract (approved decisions): ${contract.map((c) => sanitizeLine(c, 300)).join('; ')}`,
     );
   }
-  lines.push('When your part is finished, mark its task done (mindly_update_task).');
+  lines.push(
+    `Commit your work in this worktree on its branch${h.packet.branch ? ` (${sanitizeLine(h.packet.branch, 120)})` : ''} and stay on that branch: only what is committed there is merged.`,
+  );
+  lines.push('When your part is finished and committed, mark its task done (mindly_update_task).');
   return {
     item: {
       ref: h.id,

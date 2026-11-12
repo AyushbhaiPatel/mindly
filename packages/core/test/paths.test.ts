@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ensureHome, isDeniedPath, resolveInsideRoot, mindlyHome } from '../src/paths.js';
+import {
+  deniedPathTest,
+  ensureHome,
+  isDeniedPath,
+  resolveInsideRoot,
+  mindlyHome,
+} from '../src/paths.js';
 
 describe('resolveInsideRoot', () => {
   const root = mkdtempSync(join(tmpdir(), 'syn-root-'));
@@ -17,11 +23,37 @@ describe('resolveInsideRoot', () => {
     expect(resolveInsideRoot(root, 'src/new/file.ts').rel).toBe('src/new/file.ts');
   });
 
+  it('keeps names that only start with dots inside the root', () => {
+    expect(resolveInsideRoot(root, '..cache/a.ts').rel).toBe('..cache/a.ts');
+    expect(resolveInsideRoot(root, join(root, '...', 'b.ts')).rel).toBe('.../b.ts');
+    expect(() => resolveInsideRoot(root, '..')).toThrow(/outside/);
+    expect(() => resolveInsideRoot(root, '../..cache/a.ts')).toThrow(/outside/);
+  });
+
   it('rejects traversal, symlink escapes and NUL bytes', () => {
     expect(() => resolveInsideRoot(root, '../etc/passwd')).toThrow(/outside/);
     expect(() => resolveInsideRoot(root, '/etc/passwd')).toThrow(/outside/);
     expect(() => resolveInsideRoot(root, 'escape/x')).toThrow(/outside/);
     expect(() => resolveInsideRoot(root, 'a\0b')).toThrow(/NUL/);
+  });
+
+  it('places a long path that is not there in time that grows with its length', () => {
+    const best = (parts: number): number => {
+      const input = `${'b/'.repeat(parts)}f`;
+      let fastest = Infinity;
+      for (let k = 0; k < 5; k++) {
+        const started = performance.now();
+        expect(resolveInsideRoot(root, input).rel).toBe(input);
+        fastest = Math.min(fastest, performance.now() - started);
+      }
+      return fastest;
+    };
+    // Four times the parts may take four times as long, give or take; a walk that starts over
+    // at each part takes sixteen. Measured against the shorter path, so a slow machine passes.
+    const short = best(500);
+    const long = best(2000);
+    expect(long).toBeLessThan(Math.max(8 * short, 5));
+    expect(long).toBeLessThan(250);
   });
 });
 
@@ -39,13 +71,58 @@ describe('home', () => {
 });
 
 describe('isDeniedPath', () => {
-  it.each(['.env', 'config/.env.production', 'keys/server.pem', 'home/.ssh/config', '.npmrc'])(
-    'denies %s',
-    (p) => expect(isDeniedPath(p)).toBe(true),
-  );
+  it.each([
+    '.env',
+    'config/.env.production',
+    '.env-prod',
+    'apps/web/.env_local',
+    '.envrc',
+    'keys/server.pem',
+    'keys/id_dsa',
+    'keys/id_ed25519.pub',
+    'home/.ssh/config',
+    '.npmrc',
+  ])('denies %s', (p) => expect(isDeniedPath(p)).toBe(true));
   it('allows normal source and custom deny-lists', () => {
     expect(isDeniedPath('src/env.ts')).toBe(false);
+    expect(isDeniedPath('src/.environment.ts')).toBe(false);
+    expect(isDeniedPath('src/id_token.ts')).toBe(false);
     expect(isDeniedPath('vault/x.txt', ['vault/**'])).toBe(true);
+  });
+  it('says the same when compiled once for many paths', () => {
+    const extra = [
+      'vault/**',
+      '*.sqlite',
+      'docs/{a,b}.md',
+      'build/x?.bin',
+      'config/{local,prod/secret}.json',
+    ];
+    const denied = deniedPathTest(extra);
+    for (const p of [
+      '.env',
+      './.env',
+      'config/.env.production',
+      'keys/server.pem',
+      'keys/SERVER.PEM',
+      'home/.ssh/config',
+      '.npmrc',
+      'src/env.ts',
+      'src/pem.ts',
+      'vault/x.txt',
+      'a/vault/x.txt',
+      'data/app.sqlite',
+      'docs/a.md',
+      'docs/c.md',
+      'build/x1.bin',
+      'build/x12.bin',
+      'secrets/k.txt',
+      'SECRETS/k.txt',
+      'config/local.json',
+      'config/prod/secret.json',
+      'config/other.json',
+    ]) {
+      expect(denied(p), p).toBe(isDeniedPath(p, extra));
+    }
   });
 });
 

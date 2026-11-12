@@ -26,7 +26,7 @@ import { compactSteps, planJsonFile, validateInstallOptions } from '../shared/pl
 import { isRecord } from '../shared/payload.js';
 import { parseToml, TOML_BLOCK_BEGIN, upsertMcpServerToml } from './toml.js';
 
-export { findPatchText, MAX_PATCH_BYTES, parseApplyPatch } from './apply-patch.js';
+export { findPatchText, MAX_PATCH_BYTES, parseApplyPatch, readApplyPatch } from './apply-patch.js';
 
 const KIND = 'codex';
 
@@ -139,7 +139,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): AgentAdapter
       (config) => {
         if (!install && !isRecord(config['hooks'])) return;
         const h = hooksObject(config, paths.hooks);
-        removeGroupedHooks(h, KIND);
+        removeGroupedHooks(h, KIND, options.command);
         if (install) addGroupedHooks(h, hookSpecs(options.command), paths.hooks);
         dropIfEmpty(config, 'hooks');
       },

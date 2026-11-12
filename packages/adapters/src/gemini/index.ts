@@ -14,12 +14,19 @@ import { parseClaudeStyle } from '../shared/claude-style.js';
 import { hookCommand, isMindlyHookCommand, MCP_SERVER_NAME, mcpLaunch } from '../shared/command.js';
 import { cloneJson, readConfigText, stepIfChanged } from '../shared/config-files.js';
 import { detectAgent } from '../shared/detect.js';
-import { contextText, jsonOutput, reasonText, SILENT, userMessageText } from '../shared/event.js';
+import {
+  contextText,
+  jsonOutput,
+  MAX_NOTICE_CHARS,
+  reasonText,
+  SILENT,
+  userMessageText,
+} from '../shared/event.js';
 import type { HookSpec } from '../shared/json-hooks.js';
 import { addGroupedHooks, removeGroupedHooks } from '../shared/json-hooks.js';
 import type { PlanMode } from '../shared/plan.js';
 import { validateInstallOptions } from '../shared/plan.js';
-import { isRecord, readString } from '../shared/payload.js';
+import { capText, isRecord, readString } from '../shared/payload.js';
 import { buildTool } from '../shared/tools.js';
 import {
   editJsoncArrayItem,
@@ -124,7 +131,9 @@ function parseGemini(nativeEvent: string, payload: unknown): NormalizedHookEvent
 /**
  * Renders a result as Gemini CLI hook JSON. Gemini reads `hookSpecificOutput.additionalContext`
  * on SessionStart, BeforeAgent and AfterTool only. BeforeTool has no context channel, so a deny
- * folds the context into the reason the model sees. Decisions are top-level `decision` /
+ * folds the context into the reason the model sees; without a deny or an ask the context is
+ * dropped, and only what the call is warned about under enforced rules goes to the person, as
+ * the `systemMessage`. Decisions are top-level `decision` /
  * `reason`; `allow` is never emitted so Gemini's own confirmations still apply, and AfterAgent
  * never gets a decision (a deny there would force a retry turn).
  */
@@ -144,6 +153,13 @@ function renderGemini(event: NormalizedHookEvent, result: HookResult): RenderedH
         out['reason'] = reasonText(result);
         // Gemini shows the systemMessage in its confirmation prompt.
         notice ??= reasonText(result);
+      }
+      // The model cannot be told before the tool runs what an enforced rule has to say about
+      // it: the person is.
+      const warned = result.enforcementWarning ?? null;
+      if (result.decision !== 'deny' && result.decision !== 'ask' && warned !== null) {
+        const warning = capText(warned, MAX_NOTICE_CHARS);
+        if (warning.trim() !== '') notice = notice === null ? warning : `${notice}\n\n${warning}`;
       }
     } else if (context !== null && event.event !== 'stop') {
       out['hookSpecificOutput'] = {
@@ -185,7 +201,7 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
   const before = isRecord(current) ? current : {};
   // Validates every event list and computes what the element edits below must produce.
   const after = cloneJson(before);
-  removeGroupedHooks(after, KIND);
+  removeGroupedHooks(after, KIND, options.command);
   const specs = install ? hookSpecs(options.command) : [];
   addGroupedHooks(after, specs, file);
 
@@ -199,7 +215,9 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
       const group: unknown = groups[i];
       if (!isRecord(group) || !Array.isArray(group['hooks'])) continue;
       const inner = group['hooks'] as unknown[];
-      const kept = inner.filter((h) => !(isRecord(h) && isMindlyHookCommand(h['command'], KIND)));
+      const kept = inner.filter(
+        (h) => !(isRecord(h) && isMindlyHookCommand(h['command'], KIND, options.command)),
+      );
       if (kept.length === inner.length) continue;
       const value = kept.length > 0 ? { ...group, hooks: kept } : undefined;
       text = editJsoncArrayItem(file, text ?? '', FORMAT, ['hooks', event], i, value);

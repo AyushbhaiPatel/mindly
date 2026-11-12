@@ -40,6 +40,26 @@ describe('claude-code parse', () => {
     ]);
   });
 
+  it('counts the files of a long edit list, not its edits, against the cap', () => {
+    const edit = (path?: string) => ({
+      ...(path ? { file_path: path } : {}),
+      old_string: 'a',
+      new_string: 'b',
+    });
+    const many = Array.from({ length: 700 }, () => edit());
+    const one = a.parse('PreToolUse', {
+      ...(f('PreToolUse.MultiEdit') as object),
+      tool_input: { file_path: '/repo/src/a.ts', edits: many },
+    })?.tool;
+    expect(one?.edits).toHaveLength(500);
+    expect(one?.editsCut).toBeUndefined();
+    const other = a.parse('PreToolUse', {
+      ...(f('PreToolUse.MultiEdit') as object),
+      tool_input: { file_path: '/repo/src/a.ts', edits: [...many, edit('/repo/certs/a.pem')] },
+    })?.tool;
+    expect(other?.editsCut).toBe(true);
+  });
+
   it('parses MultiEdit into one FileEdit per edit', () => {
     const edits = a.parse('PreToolUse', f('PreToolUse.MultiEdit'))?.tool?.edits;
     expect(edits).toHaveLength(2);

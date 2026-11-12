@@ -76,4 +76,10 @@ jobs:
         working-directory: release/mindly-cli
       - run: npm pack --pack-destination "$RUNNER_TEMP"
         working-directory: release/mindly-cli
+      # The package is built with the latest 22.x; the smoke test runs it on the exact minimum in
+      # `engines` (the first 22.x whose node:sqlite has FTS5), so an API or SQLite feature newer
+      # than that is caught here.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.16.0
       - run: node scripts/smoke-release.mjs "$RUNNER_TEMP"/mindly-cli-*.tgz

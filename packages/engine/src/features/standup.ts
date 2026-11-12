@@ -1,6 +1,9 @@
 import { sanitizeLine } from '@mindly/core';
 import type { Kernel } from '../kernel.js';
+import { notifySettled } from '../ports.js';
+import { withNotificationId } from './outbox.js';
 import type { Mindly, MindlyModule } from '../mindly.js';
+import { serviceOf } from './shared.js';
 
 /*
  * Morning standup: a digest of what every agent did since the last standup, built from the event
@@ -76,10 +79,22 @@ export function needsYouCount(d: StandupDigest): number {
 export function standupDueAt(time: string, now: number): number | null {
   const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
   if (!m) return null;
-  const d = new Date(now);
-  d.setHours(Number(m[1]), Number(m[2]), 0, 0);
-  if (d.getTime() > now) d.setDate(d.getDate() - 1);
-  return d.getTime();
+  const base = new Date(now);
+  // Each day's time is built on its own. On the day clocks go forward a time in the skipped
+  // hour does not exist and lands an hour later; moving that result back a day would give the
+  // later time on the day before as well, after that day's standup, and send a second one.
+  const on = (dayOffset: number): number =>
+    new Date(
+      base.getFullYear(),
+      base.getMonth(),
+      base.getDate() + dayOffset,
+      Number(m[1]),
+      Number(m[2]),
+      0,
+      0,
+    ).getTime();
+  const today = on(0);
+  return today > now ? on(-1) : today;
 }
 
 function titles(items: readonly StandupItem[]): string {
@@ -242,13 +257,14 @@ export class StandupService {
       .filter((m) => m.createdAt >= since && m.trust !== 'rejected');
     const item = (m: { id: string; title: string }): StandupItem => ({ id: m.id, title: m.title });
 
-    const conflicts = s.conflicts.list(projectId, {
-      statuses: ['open', 'acknowledged', 'resolved', 'dismissed'],
-      limit: 500,
+    // Counted in the store: a list of every conflict the project ever had is capped, and the cap
+    // would drop the less severe open ones first.
+    const conflictCounts = s.conflicts.counts(projectId, since);
+    // Open conflicts come most severe first, so the critical ones are never cut off by the limit.
+    const openConflicts = s.conflicts.list(projectId, {
+      statuses: ['open', 'acknowledged'],
+      limit: 100,
     });
-    const openConflicts = conflicts.filter(
-      (c) => c.status === 'open' || c.status === 'acknowledged',
-    );
 
     const handoffs = s.handoffs.list(projectId, 100);
     const toStandupHandoff = (h: (typeof handoffs)[number]): StandupHandoff => ({
@@ -272,13 +288,7 @@ export class StandupService {
         facts: created.filter((m) => m.kind === 'fact').map(item),
         rules: created.filter((m) => m.kind === 'rule').map(item),
       },
-      conflicts: {
-        opened: conflicts.filter((c) => c.createdAt >= since).length,
-        resolved: conflicts.filter(
-          (c) => c.status === 'resolved' && c.resolvedAt !== null && c.resolvedAt >= since,
-        ).length,
-        open: openConflicts.length,
-      },
+      conflicts: conflictCounts,
       handoffs: handoffs.filter((h) => h.createdAt >= since).map(toStandupHandoff),
       rateLimits,
       blockedTasks: s.tasks.list(projectId, { statuses: ['blocked'], limit: 50 }).map(item),
@@ -318,7 +328,12 @@ export class StandupService {
 
   /**
    * Sends a short pager summary (counts only). The caller (daemon) decides when, typically via
-   * `isDue`, and calls `markDelivered` afterwards. Never throws.
+   * `isDue`, and calls `markDelivered` once this returns true. Never throws.
+   *
+   * True when the summary reached a channel or there is nothing to send it to; false when the
+   * channels that were tried all failed, so the caller can try again. A scheduled standup is
+   * something the user asked for by setting its time, so it does not depend on
+   * `notify.triggers`.
    */
   async notify(projectId: string, digest: StandupDigest = this.build(projectId)): Promise<boolean> {
     try {
@@ -327,15 +342,23 @@ export class StandupService {
       const turns = digest.agents.reduce((n, a) => n + a.turns, 0);
       const files = digest.agents.reduce((n, a) => n + a.filesChanged, 0);
       const waiting = needsYouCount(digest);
-      await this.k.ports.notifier.send({
-        trigger: 'standup',
-        title: `Mindly standup: ${name}`,
-        body: `${plural(sessions, 'session')}, ${plural(turns, 'turn')}, ${plural(files, 'file')} changed; ${waiting} item${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} you.`,
-        projectName: name,
-        priority: waiting > 0 ? 'default' : 'low',
-        dedupeKey: `standup:${projectId}:${new Date(digest.until).toISOString().slice(0, 10)}`,
-      });
-      return true;
+      // The dedupe key names the day, and each retry raises the standup afresh: the id follows
+      // the key, so every attempt at one day's standup carries the same one.
+      const results = await this.k.ports.notifier.send(
+        withNotificationId(
+          {
+            trigger: 'standup',
+            title: `Mindly standup: ${name}`,
+            body: `${plural(sessions, 'session')}, ${plural(turns, 'turn')}, ${plural(files, 'file')} changed; ${waiting} item${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} you.`,
+            projectName: name,
+            priority: waiting > 0 ? 'default' : 'low',
+            dedupeKey: `standup:${projectId}:${new Date(digest.until).toISOString().slice(0, 10)}`,
+          },
+          'key',
+        ),
+        { ignoreTriggers: true },
+      );
+      return notifySettled(results);
     } catch (err) {
       this.k.logger.warn('standup notification failed', {
         error: err instanceof Error ? err.message : String(err),
@@ -345,16 +368,9 @@ export class StandupService {
   }
 }
 
-const services = new WeakMap<Mindly, StandupService>();
-
 /** The standup service attached to `mindly` (created on first use). */
 export function standupService(mindly: Mindly): StandupService {
-  let svc = services.get(mindly);
-  if (!svc) {
-    svc = new StandupService(mindly.kernel);
-    services.set(mindly, svc);
-  }
-  return svc;
+  return serviceOf(mindly, 'standup', () => new StandupService(mindly.kernel));
 }
 
 /** Standup module: attaches the service (no hook-time work; the daemon drives scheduling). */

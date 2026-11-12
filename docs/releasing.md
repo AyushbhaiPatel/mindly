@@ -69,10 +69,15 @@ node scripts/smoke-release.mjs /tmp/mindly-release/mindly-cli-<version>.tgz
 The smoke test installs the tarball in a fresh temp directory with a temp `HOME` and
 `MINDLY_HOME` (network is needed for the third-party dependencies) and checks `npx mindly
 --version`, `mindly doctor`, `mindly init --project --yes --agents claude-code` in a temp git repo
-(hooks must point at the installed package, with and without `mindly` on `PATH`), a
+(hooks must point at the installed package, with and without `mindly` on `PATH`), that `init`
+run through `npm exec` refuses and writes nothing, that `npm i -g` into a temp prefix followed by
+`mindly init` records the global `mindly` and its hook runs with no registry to reach, a
 `SessionStart` hook payload, and `mindly daemon start`, `/api/health`, the dashboard at `/` and
-`mindly daemon stop`. CI runs the build, `npm pack --dry-run` and this smoke test on Node 22 for
-every pull request; it never publishes.
+`mindly daemon stop`. CI runs the build and `npm pack --dry-run` on the latest Node 22, then this
+smoke test on Node 22.16.0, the oldest release in `engines` (`^22.16.0 || >=24.0.0`: the first
+Node versions whose built-in SQLite has FTS5; no 23.x release has it), for every pull request; it
+never publishes. Change the three `engines` fields, `apps/cli/src/node-check.ts` and that CI step
+together.
 
 ## Publish (later, from GitHub Actions)
 

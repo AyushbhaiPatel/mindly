@@ -1,4 +1,5 @@
-import { mkdtempSync, statSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -18,6 +19,45 @@ describe('database', () => {
     store.close();
     // Reopening is idempotent.
     Store.open(path).close();
+  });
+
+  it('opens while another process is applying the same migrations', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syn-db-'));
+    const path = join(dir, 'mindly.db');
+    const ready = join(dir, 'ready');
+    const sqlFile = join(dir, 'migrations.json');
+    writeFileSync(sqlFile, JSON.stringify(MIGRATIONS));
+    // The other process: takes the write lock on an empty database, applies every migration
+    // slowly and commits. Whoever opens meanwhile read version 0 before it had to wait.
+    const script = `
+      const { DatabaseSync } = require('node:sqlite');
+      const fs = require('node:fs');
+      const [path, ready, sqlFile] = process.argv.slice(1);
+      const db = new DatabaseSync(path);
+      db.exec('PRAGMA journal_mode = WAL');
+      db.exec('BEGIN IMMEDIATE');
+      fs.writeFileSync(ready, '');
+      setTimeout(() => {
+        const all = JSON.parse(fs.readFileSync(sqlFile, 'utf8'));
+        for (const sql of all) db.exec(sql);
+        db.exec('PRAGMA user_version = ' + all.length);
+        db.exec('COMMIT');
+        db.close();
+      }, 300);
+    `;
+    const child = spawn(process.execPath, ['--no-warnings', '-e', script, path, ready, sqlFile], {
+      stdio: 'ignore',
+    });
+    const exited = new Promise<number | null>((done) => child.on('exit', done));
+    for (let i = 0; i < 500 && !existsSync(ready); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(existsSync(ready)).toBe(true);
+    const store = Store.open(path);
+    expect(schemaVersion(store.db)).toBe(MIGRATIONS.length);
+    expect(store.projects.upsertByRoot('/repo', 'repo').name).toBe('repo');
+    store.close();
+    expect(await exited).toBe(0);
   });
 
   it('rolls back failed transactions including nested ones', () => {
@@ -69,6 +109,59 @@ describe('sessions', () => {
     expect(again.created).toBe(false);
     expect(again.session.status).toBe('active');
     expect(again.session.branch).toBe('main');
+  });
+
+  it('moves only the rows nobody else changed, and leaves current tasks alone', () => {
+    const { store, project, clock, a, b } = setup();
+    const mine = store.tasks.create({
+      projectId: project.id,
+      title: 'mine',
+      status: 'in_progress',
+      ownerSessionId: a.id,
+    });
+    const touched = store.tasks.create({
+      projectId: project.id,
+      title: 'touched by the other window',
+      status: 'in_progress',
+      ownerSessionId: a.id,
+    });
+    const intent = store.intents.declare({
+      projectId: project.id,
+      sessionId: a.id,
+      taskId: null,
+      summary: 'mine',
+      targets: { files: ['a.ts'], symbols: [] },
+      ttlMs: 60_000,
+    });
+    const sameMs = store.tasks.create({
+      projectId: project.id,
+      title: 'changed in the same millisecond',
+      status: 'in_progress',
+      ownerSessionId: a.id,
+    });
+    store.sessions.setCurrentTask(a.id, touched.id);
+    const stamp = (kind: 'task' | 'intent', id: string) => ({
+      id,
+      ...store.sessions.rowStamp(kind, id)!,
+    });
+    const seen = [stamp('task', mine.id), stamp('task', touched.id), stamp('task', sameMs.id)];
+    const seenIntent = stamp('intent', intent.id);
+    // Changed by the other window: once later, once within the same millisecond.
+    store.tasks.update(sameMs.id, { status: 'blocked' });
+    clock.advance(10);
+    store.tasks.update(touched.id, { status: 'blocked' });
+    const moved = store.sessions.moveRows(a.id, b.id, {
+      intents: [seenIntent],
+      tasks: seen,
+      messages: [],
+    });
+    expect(store.tasks.get(sameMs.id).ownerSessionId).toBe(a.id);
+    expect(moved.tasks).toEqual([mine.id]);
+    expect(moved.intents).toEqual([intent.id]);
+    expect(store.tasks.get(mine.id).ownerSessionId).toBe(b.id);
+    expect(store.tasks.get(touched.id).ownerSessionId).toBe(a.id);
+    expect(store.sessions.get(a.id).currentTaskId).toBe(touched.id);
+    expect(store.sessions.get(b.id).currentTaskId).toBeNull();
   });
 
   it('lists live sessions and ends stale ones', () => {
@@ -316,6 +409,33 @@ describe('intents and file changes', () => {
     expect(store.fileChanges.findByHash(project.id, 'src/a.ts', 'h2')[0]?.sessionId).toBe(a.id);
     expect(store.fileChanges.otherEditors(project.id, b.id, 'src/a.ts', 0)).toEqual([a.id]);
   });
+
+  it('keeps the working tree a change was made in, null when not given', () => {
+    const { store, project, a } = setup();
+    const base = {
+      projectId: project.id,
+      sessionId: a.id,
+      tool: 'Edit',
+      hunkHashes: [],
+      addedLines: 1,
+      removedLines: 0,
+      promptEventId: null,
+    };
+    expect(store.fileChanges.record({ ...base, path: 'x.ts', worktree: '/wt' }).worktree).toBe(
+      '/wt',
+    );
+    expect(store.fileChanges.record({ ...base, path: 'y.ts' }).worktree).toBeNull();
+    expect(store.fileChanges.forPath(project.id, 'x.ts')[0]?.worktree).toBe('/wt');
+    // Two processes opening an older store at once may both apply v7.
+    store.db.exec(MIGRATIONS[6] as string);
+    expect(store.fileChanges.forPath(project.id, 'x.ts')[0]?.worktree).toBe('/wt');
+    expect(store.fileChanges.since(project.id, 0).map((c) => [c.path, c.worktree])).toEqual(
+      expect.arrayContaining([
+        ['x.ts', '/wt'],
+        ['y.ts', null],
+      ]),
+    );
+  });
 });
 
 describe('conflicts', () => {
@@ -438,7 +558,7 @@ describe('deliveries', () => {
 
 describe('misc repos', () => {
   it('claims handoffs atomically', () => {
-    const { store, project, a, b } = setup();
+    const { store, project, a, b, clock } = setup();
     const packet = {
       goal: 'g',
       plan: [],
@@ -460,6 +580,25 @@ describe('misc repos', () => {
       packet,
     });
     expect(store.handoffs.pendingFor(project.id, 'codex', b.id)).toHaveLength(1);
+    // A usage-limit handoff ages out; a manual one does not.
+    const manual = store.handoffs.create({
+      projectId: project.id,
+      fromSessionId: a.id,
+      toAgentKind: 'codex',
+      taskId: null,
+      reason: 'manual',
+      summary: 'm',
+      packet,
+    });
+    const ids = (hs: { id: string }[]) => hs.map((x) => x.id).sort();
+    expect(ids(store.handoffs.pendingFor(project.id, 'codex', b.id, null, 60_000))).toEqual(
+      ids([h, manual]),
+    );
+    clock.advance(60_001);
+    expect(ids(store.handoffs.pendingFor(project.id, 'codex', b.id, null, 60_000))).toEqual([
+      manual.id,
+    ]);
+    expect(store.handoffs.pendingFor(project.id, 'codex', b.id)).toHaveLength(2);
     expect(store.handoffs.claim(h.id, b.id)).toBe(true);
     expect(store.handoffs.claim(h.id, a.id)).toBe(false);
   });
@@ -517,5 +656,39 @@ describe('misc repos', () => {
     expect(store.snapshots.get(s.id).state).toEqual({ tasks: [] });
     store.kv.set('k', { a: 1 });
     expect(store.kv.get('k')).toEqual({ a: 1 });
+  });
+
+  it("deletes the keys of a project's sessions under a prefix", () => {
+    const { store, a, b } = setup();
+    const other = store.projects.upsertByRoot('/elsewhere', 'elsewhere');
+    const c = store.sessions.upsert({
+      projectId: other.id,
+      agentKind: 'codex',
+      externalId: 'cx-2',
+      worktree: '/elsewhere',
+      branch: 'main',
+      transcriptPath: null,
+    }).session;
+    for (const s of [a, b, c]) store.kv.set(`notes:${s.id}`, [1]);
+    store.kv.set(`other:${a.id}`, 1);
+    expect(store.kv.deleteForSessions('notes:', a.projectId)).toBe(2);
+    expect(store.kv.get(`notes:${a.id}`)).toBeNull();
+    expect(store.kv.get(`notes:${b.id}`)).toBeNull();
+    expect(store.kv.get(`notes:${c.id}`)).toEqual([1]);
+    expect(store.kv.get(`other:${a.id}`)).toBe(1);
+  });
+
+  it('deletes the keys under a prefix last written before a time', () => {
+    const { store } = setup();
+    store.kv.set('notes:old', 1);
+    store.kv.set('notes_x', 1);
+    store.kv.set('other:old', 1);
+    store.db.prepare('UPDATE kv SET updated_at = 0').run();
+    store.kv.set('notes:fresh', 1);
+    expect(store.kv.deleteStale('notes:', 1)).toBe(1);
+    expect(store.kv.get('notes:old')).toBeNull();
+    expect(store.kv.get('notes_x')).toBe(1);
+    expect(store.kv.get('other:old')).toBe(1);
+    expect(store.kv.get('notes:fresh')).toBe(1);
   });
 });

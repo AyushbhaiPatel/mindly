@@ -31,6 +31,7 @@ import { findRepoRoot } from '@mindly/git';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary } from '../diff.js';
 import { confirm, type CliIo } from '../io.js';
+import { runnerCacheRefusal, stableNode } from '../launch-path.js';
 import { clean, splitList, UsageError, type Out } from '../util.js';
 import { renderInitSummary } from '../views/setup.js';
 import { offerRuleImport } from './import.js';
@@ -168,13 +169,17 @@ export function cliEntry(): string {
 
 /**
  * The argv agents run to reach Mindly: the global `mindly` when this process was started through
- * it, otherwise `node <absolute path to dist/main.js>` so hooks work without a global install.
+ * it, otherwise Node running `dist/main.js` so hooks work without a global install. Node is named
+ * by a path that survives upgrades when there is one ({@link stableNode}).
  */
-export async function installCommand(env: NodeJS.ProcessEnv): Promise<string[]> {
+export async function installCommand(
+  env: NodeJS.ProcessEnv,
+  entry: string = cliEntry(),
+): Promise<string[]> {
   const running = process.argv[1];
   const global = await onPath('mindly', env);
   if (global && running && sameFile(global, running)) return [global];
-  return [process.execPath, cliEntry()];
+  return [stableNode(), entry];
 }
 
 async function projectRootOf(cwd: string): Promise<string> {
@@ -263,6 +268,14 @@ interface SetupOptions {
 /** `mindly init`. */
 export async function init(out: Out, o: SetupOptions): Promise<number> {
   if (o.listAgents) return listAgents(out);
+  // Before anything is planned or written, so a dry run says the same. The entry must exist in
+  // the published package; a monorepo checkout may not be built yet (its tests run from source).
+  const layout = resolveLayout(import.meta.url);
+  const refusal = runnerCacheRefusal([layout.cliMain, process.argv[1]], layout.kind === 'release');
+  if (refusal !== null) {
+    out.warn(refusal);
+    return 1;
+  }
   const env = out.io.env;
   const statusLine = o.statusline !== false;
   const all = adaptersFor(env, { statusLine });

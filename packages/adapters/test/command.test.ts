@@ -50,6 +50,62 @@ describe('shell quoting', () => {
     expect(isMindlyHookCommand('./notify.sh', 'codex')).toBe(false);
     expect(isMindlyHookCommand(42, 'codex')).toBe(false);
   });
+
+  it('recognises the launchers Mindly writes, now and before', () => {
+    const yes = [
+      'mindly hook codex Stop',
+      'C:/tools/mindly.cmd hook codex Stop',
+      "'/opt/my tools/mindly' --profile 'it'\\''s' hook codex Stop",
+      '/usr/bin/node /usr/lib/node_modules/mindly-cli/dist/main.js hook codex Stop',
+      'node /src/mindly/apps/cli/dist/main.js hook codex Stop',
+      'npx mindly-cli hook codex Stop',
+      'npx -y mindly-cli hook codex Stop',
+      // Pinned by an install run through npx, then upgraded: still Mindly's.
+      'npx --yes mindly-cli@0.5.0 hook codex Stop',
+      'npx --yes mindly-cli@latest hook codex Stop',
+      'pnpm dlx mindly-cli@1.0.0-rc.1 hook codex Stop',
+      'pnpm exec mindly hook codex Stop',
+      'npx -p mindly-cli mindly hook codex Stop',
+      'npx --package=mindly-cli@0.5.0 mindly hook codex Stop',
+      'yarn dlx -p mindly-cli mindly hook codex Stop',
+      'npx -- mindly-cli hook codex Stop',
+    ];
+    for (const command of yes) expect(isMindlyHookCommand(command, 'codex'), command).toBe(true);
+    // A launcher Mindly cannot know by name is its own only when it is the one in use.
+    const custom = ['/usr/bin/node', '/x/main.js'];
+    expect(isMindlyHookCommand('/usr/bin/node /x/main.js hook codex Stop', 'codex')).toBe(false);
+    expect(isMindlyHookCommand('/usr/bin/node /x/main.js hook codex Stop', 'codex', custom)).toBe(
+      true,
+    );
+  });
+
+  it("leaves other tools' hook commands alone", () => {
+    const no = [
+      '/usr/local/bin/othertool hook codex Stop',
+      'othertool --flag hook codex Stop',
+      'node /opt/other/dist/main.js hook codex Stop',
+      'git hook codex run',
+      // The user's own wrappers around Mindly's command are theirs.
+      'mindly hook codex Stop || true',
+      'mindly hook codex Stop | tee /tmp/log',
+      'mindly hook codex Stop extra',
+      'mindly hook codex',
+      'hook codex Stop',
+      'echo mindly; othertool hook codex Stop',
+      'npx --yes mindly-cli-extra@1.0.0 hook codex Stop',
+      'npx --yes other-cli@1.0.0 hook codex Stop',
+      'npx --yes mindly-cli@ hook codex Stop',
+      // The runner runs another program; mindly-cli is only a package it installs.
+      'npx -p mindly-cli other-tool hook codex Stop',
+      'npx --package mindly-cli other-tool hook codex Stop',
+      'npx --package=mindly-cli other-tool hook codex Stop',
+      'npx other-tool mindly-cli hook codex Stop',
+      'npx -c mindly-cli hook codex Stop',
+      // `mindly@<version>` is the npm package called mindly, not this one.
+      'npx mindly@1.0.0 hook codex Stop',
+    ];
+    for (const command of no) expect(isMindlyHookCommand(command, 'codex'), command).toBe(false);
+  });
 });
 
 describe('classifyTool', () => {

@@ -109,6 +109,42 @@ describe('morning standup', () => {
     expect(next.needsYou.proposedRules).toHaveLength(1);
   });
 
+  it('counts conflicts however many the project has collected', async () => {
+    const { root, clock, mindly } = make();
+    mindly.use(standupModule);
+    await mindly.hooks.handle(event(root, 'claude-code', 'cc', 'session_start'));
+    const pid = mindly.store.projects.list()[0]!.id;
+    const report = (i: number, severity: 'critical' | 'warning' | 'info') =>
+      mindly.store.conflicts.report({
+        projectId: pid,
+        kind: 'file_overlap',
+        severity,
+        title: `Conflict ${i}`,
+        detail: '',
+        sessionIds: [],
+        paths: [],
+        fingerprint: `fp-${i}`,
+      }).conflict;
+    // Long ago: 600 warnings, all resolved, and 40 notes still open.
+    for (let i = 0; i < 600; i++)
+      mindly.store.conflicts.setStatus(report(i, 'warning').id, 'resolved');
+    for (let i = 600; i < 640; i++) report(i, 'info');
+    clock.advance(30 * 24 * 60 * 60_000);
+    const since = clock.now();
+    clock.advance(1000);
+    // Today: 3 notes opened, one of them resolved again, and a critical conflict.
+    for (let i = 640; i < 643; i++) report(i, 'info');
+    mindly.store.conflicts.setStatus(
+      mindly.store.conflicts.list(pid, { limit: 1 })[0]!.id,
+      'resolved',
+    );
+    report(700, 'critical');
+
+    const d = standupService(mindly).build(pid, since);
+    expect(d.conflicts).toEqual({ opened: 4, resolved: 1, open: 43 });
+    expect(d.needsYou.criticalConflicts.map((c) => c.title)).toEqual(['Conflict 700']);
+  });
+
   it('computes the scheduled time in local time', () => {
     const now = new Date(2026, 10, 4, 10, 30).getTime();
     expect(standupDueAt('09:00', now)).toBe(new Date(2026, 10, 4, 9, 0).getTime());

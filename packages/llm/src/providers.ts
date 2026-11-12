@@ -43,6 +43,8 @@ export interface ProviderOptions {
   maxResponseBytes?: number | undefined;
   /** Base retry delay in milliseconds (default 500, plus up to 100% jitter). */
   retryDelayMs?: number | undefined;
+  /** Longest `Retry-After` honoured before giving up instead of retrying (default 5 000). */
+  maxRetryWaitMs?: number | undefined;
   /** Jitter source, `Math.random` by default. */
   random?: (() => number) | undefined;
   /** Extra redaction patterns (typically `UserConfig.redaction.extraPatterns`). */
@@ -60,6 +62,11 @@ export class NoneProvider implements LlmProvider {
     this.#reason = reason;
   }
 
+  /** Why no model can be used. */
+  get reason(): string {
+    return this.#reason;
+  }
+
   complete(_req: CompletionRequest): Promise<CompletionResult> {
     return Promise.reject(new MindlyError('unavailable', this.#reason));
   }
@@ -70,6 +77,8 @@ interface Prepared {
   prompt: string;
   maxTokens: number;
   temperature: number | undefined;
+  /** The provider's patterns and the request's own, used again on the reply. */
+  extraPatterns: readonly string[];
 }
 
 abstract class HttpProvider implements LlmProvider {
@@ -80,7 +89,8 @@ abstract class HttpProvider implements LlmProvider {
   readonly #redactPatterns: readonly string[];
 
   protected constructor(defaultModel: string, options: ProviderOptions) {
-    this.model = options.model ?? defaultModel;
+    // A blank model name (`llm.model ""`) means the provider's default.
+    this.model = options.model?.trim() || defaultModel;
     this.env = options.env ?? process.env;
     this.#redactPatterns = options.redactPatterns ?? [];
     this.http = {
@@ -88,6 +98,7 @@ abstract class HttpProvider implements LlmProvider {
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       maxResponseBytes: options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
       retryDelayMs: options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS,
+      maxRetryWaitMs: options.maxRetryWaitMs,
       random: options.random ?? Math.random,
     };
   }
@@ -96,7 +107,7 @@ abstract class HttpProvider implements LlmProvider {
 
   /** Redacts outgoing text and normalises numeric parameters. */
   protected prepare(req: CompletionRequest): Prepared {
-    const extraPatterns = this.#redactPatterns;
+    const extraPatterns = [...this.#redactPatterns, ...(req.redactPatterns ?? [])];
     const maxTokens = Math.min(MAX_TOKENS_LIMIT, Math.max(1, Math.floor(req.maxTokens) || 1));
     const t = req.temperature;
     return {
@@ -104,13 +115,19 @@ abstract class HttpProvider implements LlmProvider {
       prompt: redactText(req.prompt, { extraPatterns }),
       maxTokens,
       temperature: t === undefined || !Number.isFinite(t) ? undefined : Math.min(2, Math.max(0, t)),
+      extraPatterns,
     };
   }
 
   /** Model output is untrusted: redact echoed secrets and strip control/invisible characters. */
-  protected finish(text: string, inputTokens?: number, outputTokens?: number): CompletionResult {
+  protected finish(
+    p: Prepared,
+    text: string,
+    inputTokens?: number,
+    outputTokens?: number,
+  ): CompletionResult {
     const clean = sanitizeForContext(
-      redactText(text, { extraPatterns: this.#redactPatterns }),
+      redactText(text, { extraPatterns: p.extraPatterns }),
       MAX_COMPLETION_CHARS,
     );
     const result: CompletionResult = { text: clean };
@@ -210,11 +227,12 @@ export class OllamaProvider extends HttpProvider {
           options,
         },
         signal: req.signal,
+        deadline: req.deadline,
       },
       this.http,
     );
     const res = this.parse(OllamaResponseSchema, json);
-    return this.finish(res.message.content, res.prompt_eval_count, res.eval_count);
+    return this.finish(p, res.message.content, res.prompt_eval_count, res.eval_count);
   }
 }
 
@@ -252,6 +270,7 @@ export class AnthropicProvider extends HttpProvider {
         },
         body,
         signal: req.signal,
+        deadline: req.deadline,
       },
       this.http,
     );
@@ -260,9 +279,21 @@ export class AnthropicProvider extends HttpProvider {
       .filter((c) => c.type === 'text')
       .map((c) => c.text ?? '')
       .join('');
-    return this.finish(text, res.usage?.input_tokens, res.usage?.output_tokens);
+    return this.finish(p, text, res.usage?.input_tokens, res.usage?.output_tokens);
   }
 }
+
+/**
+ * Reasoning models (the o-series and gpt-5) accept only the default temperature and spend part
+ * of the output allowance on reasoning before any visible text. Recognised by model id; this
+ * list follows OpenAI's naming as documented, it is not checked against the live API.
+ */
+export function isOpenAIReasoningModel(model: string): boolean {
+  return /^(o\d|gpt-5)/i.test(model.trim());
+}
+
+/** Output allowance for a reasoning model, so its reasoning does not leave no room for the answer. */
+const REASONING_MIN_OUTPUT_TOKENS = 4096;
 
 const OpenAIResponseSchema = z.object({
   choices: z.array(z.object({ message: z.object({ content: z.string().nullable() }) })).min(1),
@@ -280,15 +311,19 @@ export class OpenAIProvider extends HttpProvider {
   async complete(req: CompletionRequest): Promise<CompletionResult> {
     const key = this.requireKey('OPENAI_API_KEY');
     const p = this.prepare(req);
+    const reasoning = isOpenAIReasoningModel(this.model);
     const body: Record<string, unknown> = {
       model: this.model,
-      max_completion_tokens: p.maxTokens,
+      max_completion_tokens: reasoning
+        ? Math.min(MAX_TOKENS_LIMIT, Math.max(REASONING_MIN_OUTPUT_TOKENS, p.maxTokens))
+        : p.maxTokens,
       messages: [
         { role: 'system', content: p.system },
         { role: 'user', content: p.prompt },
       ],
     };
-    if (p.temperature !== undefined) body.temperature = p.temperature;
+    // Reasoning models reject any temperature but their default.
+    if (p.temperature !== undefined && !reasoning) body.temperature = p.temperature;
     const json = await postJson(
       {
         provider: this.name,
@@ -296,11 +331,12 @@ export class OpenAIProvider extends HttpProvider {
         headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
         body,
         signal: req.signal,
+        deadline: req.deadline,
       },
       this.http,
     );
     const res = this.parse(OpenAIResponseSchema, json);
     const text = res.choices[0]?.message.content ?? '';
-    return this.finish(text, res.usage?.prompt_tokens, res.usage?.completion_tokens);
+    return this.finish(p, text, res.usage?.prompt_tokens, res.usage?.completion_tokens);
   }
 }

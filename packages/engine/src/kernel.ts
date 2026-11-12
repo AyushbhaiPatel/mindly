@@ -21,6 +21,12 @@ export interface Kernel {
    * become user-sourced rules.
    */
   headless: boolean;
+  /**
+   * When this instance began to open (wall-clock ms). A hook process opens one instance per hook
+   * right after it starts its deadline, so the time since then is time the hook has used. Unset
+   * for a kernel built by hand.
+   */
+  openedAt?: number;
 }
 
 // ---------------------------------------------------------------------------------------------

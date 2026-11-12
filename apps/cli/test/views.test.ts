@@ -21,6 +21,7 @@ import {
 import { renderHandoffs, renderSnapshots } from '../src/views/continuity.js';
 import { renderMemoryList, renderRules } from '../src/views/memory.js';
 import { renderStatus, type StatusData } from '../src/views/status.js';
+import { unmergedLine } from '../src/views/split.js';
 
 /*
  * Snapshot-style tests of the main screens with fixed clocks and ids, no colour. The UTF-8
@@ -683,5 +684,89 @@ describe('human output never shows internals', () => {
     expect(all).not.toMatch(
       /\b(proposed|verified|session_start|intent_overlap|impact|rate_limited|acknowledged|tokens?|claude-code #|manual|pending)\b/,
     );
+  });
+});
+
+describe('split listing', () => {
+  it('names git data in full, cutting a long path in the middle, never its label', () => {
+    const label = ', whose git storage is reached elsewhere and cannot be checked, even committed';
+    const long = `deep/${'x'.repeat(600)}/wt`;
+    const line = unmergedLine({
+      part: 'page',
+      title: 'Billing page',
+      paths: [],
+      held: [
+        `short/wt${label}`,
+        `${long}${label}`,
+        `files in the uninitialised submodule folder ${long}`,
+      ],
+    });
+    expect(line).toContain(`short/wt${label}`);
+    expect(line).toContain(`/wt${label}`);
+    expect(line).toContain('…');
+    expect(line).toContain('files in the uninitialised submodule folder deep/');
+    expect(line.length).toBeLessThan(1400);
+  });
+
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  const label = ', whose git storage is reached elsewhere and cannot be checked, even committed';
+
+  it('does not cut a long path inside an emoji where the kept start ends', () => {
+    const p = `${'a'.repeat(132)}😀${'b'.repeat(400)}${label}`;
+    const line = unmergedLine({ part: 'p', title: 'P', paths: [], held: [p] });
+    expect(line).toContain('…');
+    expect(line).not.toMatch(lone);
+    expect(line).toContain(label);
+  });
+
+  it('does not cut a long path inside an emoji where the kept end starts', () => {
+    // The second half of the emoji is the 266th unit from the end: where the kept end would start.
+    const tail = `😀${'c'.repeat(265 - label.length)}${label}`;
+    const line = unmergedLine({
+      part: 'p',
+      title: 'P',
+      paths: [],
+      held: [`${'a'.repeat(400)}${tail}`],
+    });
+    expect(line).not.toMatch(lone);
+    expect(line).toContain(label);
+  });
+
+  it('does not start the kept end of a long path on an accent without its letter', () => {
+    const tail = `\u0301${'c'.repeat(265 - label.length)}${label}`;
+    const line = unmergedLine({
+      part: 'p',
+      title: 'P',
+      paths: [],
+      held: [`${'a'.repeat(400)}e${tail}`],
+    });
+    expect(line).not.toMatch(/…\p{M}/u);
+    expect(line).toContain(label);
+  });
+
+  it('keeps the start of a long path whose first two folders read as one character', () => {
+    // Two folder names a file system takes: 127 Arabic number signs, which join what follows,
+    // then 127 accents. With the `/` between them they are one character of 255 units.
+    const p = `${'\u0600'.repeat(127)}/${'\u0301'.repeat(127)}/${'b'.repeat(300)}${label}`;
+    const line = unmergedLine({ part: 'p', title: 'P', paths: [], held: [p] });
+    expect(line).toContain(label);
+    expect(line).not.toContain('stays: …');
+  });
+
+  it('keeps the end of a long path that ends in one long character', () => {
+    const p = `files in the uninitialised submodule folder ${'a'.repeat(200)}/e${'\u0301'.repeat(300)}`;
+    const line = unmergedLine({ part: 'p', title: 'P', paths: [], held: [p] });
+    expect(line.endsWith('…')).toBe(false);
+  });
+
+  it('still names a path that is one long character', () => {
+    const line = unmergedLine({
+      part: 'p',
+      title: 'P',
+      paths: [],
+      held: [`e${'\u0301'.repeat(500)}`, 'vendor/x'],
+    });
+    expect(line).not.toContain('stays: …, vendor/x');
+    expect(line).toContain('vendor/x');
   });
 });

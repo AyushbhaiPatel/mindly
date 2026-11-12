@@ -192,6 +192,26 @@ describe('gemini render', () => {
     });
   });
 
+  it('shows the person what enforced rules warn about, and nothing else of the context', () => {
+    const before = must(a.parse('BeforeTool', f('BeforeTool.run_shell_command')));
+    const unread = { context: '<ctx>could not read</ctx>', enforcementWarning: 'could not read' };
+    expect(out(a.render(before, result(unread)).stdout)).toEqual({
+      systemMessage: 'could not read',
+    });
+    expect(out(a.render(before, result({ ...unread, userMessage: 'note' })).stdout)).toEqual({
+      systemMessage: 'note\n\ncould not read',
+    });
+    const long = out(a.render(before, result({ enforcementWarning: 'x'.repeat(5000) })).stdout);
+    expect((long['systemMessage'] as string).length).toBe(2000);
+    // A deny carries the context in its reason; an ask shows its reason.
+    expect(
+      out(a.render(before, result({ ...unread, decision: 'deny', reason: 'no' })).stdout),
+    ).toEqual({ decision: 'deny', reason: 'no\n\n<ctx>could not read</ctx>' });
+    expect(
+      out(a.render(before, result({ ...unread, decision: 'ask', reason: 'sure?' })).stdout),
+    ).toEqual({ decision: 'ask', reason: 'sure?', systemMessage: 'sure?' });
+  });
+
   it('never emits allow, BeforeTool context, AfterAgent decisions or SessionEnd output', () => {
     const before = must(a.parse('BeforeTool', f('BeforeTool.write_file')));
     expect(a.render(before, result({ decision: 'allow', context: 'ctx' })).stdout).toBe('');

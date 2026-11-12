@@ -1,5 +1,6 @@
 import {
   conflictNeedsUser,
+  daemonHomeId,
   MINDLY_VERSION,
   describeError,
   type Memory,
@@ -80,7 +81,15 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   await app.register(async (pub) => {
     pub.addHook('onRequest', publicGuard());
 
-    pub.get('/api/health', async () => ({ ok: true, version: MINDLY_VERSION }));
+    // `pid` and `home` say which daemon this is: every home defaults to the same port, so the
+    // CLI must not take another home's daemon for its own. `home` is a hash, never the path.
+    const home = mindly.paths ? daemonHomeId(mindly.paths.home) : null;
+    pub.get('/api/health', async () => ({
+      ok: true,
+      version: MINDLY_VERSION,
+      pid: process.pid,
+      ...(home !== null ? { home } : {}),
+    }));
 
     pub.post('/api/auth/exchange', async (req, reply) => {
       const { code } = parse(ExchangeBody, req.body ?? {});

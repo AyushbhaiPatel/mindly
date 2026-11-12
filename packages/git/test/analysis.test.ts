@@ -6,6 +6,7 @@ import {
   diffLines,
   extractExports,
   extractImports,
+  extractReexports,
   hunkHashes,
   languageOf,
 } from '../src/index.js';
@@ -205,6 +206,76 @@ async def fetch(url: str,
     ...
 `;
 
+describe('extractExports (JSX and statements without semicolons)', () => {
+  const after = (component: string): string[] =>
+    names(extractExports(`${component}\nexport function formatItem(a) {}\n`, 'typescript'));
+
+  it('keeps the exports that follow a component, whatever its JSX holds', () => {
+    const bodies = [
+      'return (<Foo a={b} />);',
+      'return <div>{ok && <Foo a={b} />}</div>;',
+      'return (<ul>{items.map((i) => <li key={i}>{i}</li>)}</ul>);',
+      "return <div>{ok && <p>Don't</p>}</div>;",
+      'return <div>{ok && <a href="https://example.com/a">https://example.com/a</a>}</div>;',
+      'return <p>{done}/{total}</p>;',
+      'return <div>{ok && <p>(unfinished</p>}</div>;',
+    ];
+    for (const body of bodies) {
+      expect(after(`export function List({ items }) {\n  ${body}\n}`), body).toEqual([
+        'List',
+        'formatItem',
+      ]);
+    }
+  });
+
+  it('still reads regex literals, strings after keywords and arrows returning a regex', () => {
+    const src = [
+      'const isWord = (x) => /^\\w+$/.test(x);',
+      'const quoted = cond ? \'a\' : "b";',
+      'if (x) {}',
+      "/}\\)/.test(')');",
+      "function tag() { return'export function fake() {}' }",
+      'export const split = (s) => s.split(/[)}\\]]/);',
+      'export function last() {}',
+    ].join('\n');
+    expect(names(extractExports(src, 'javascript'))).toEqual(['last', 'split']);
+  });
+
+  it('ends a statement after a regex literal, a non-null assertion, ++ and --', () => {
+    const next = (line: string): string[] =>
+      names(
+        extractExports(`${line}\nexport function f(a) {}\nexport function g() {}\n`, 'typescript'),
+      );
+    expect(next('const RE = /^\\S+@\\S+$/')).toEqual(['f', 'g']);
+    expect(next('const el = document.body!')).toEqual(['f', 'g']);
+    expect(next('let i = 0\ni++')).toEqual(['f', 'g']);
+    expect(next('let i = 0\ni--')).toEqual(['f', 'g']);
+    // A trailing binary operator still continues on the next line.
+    expect(
+      names(extractExports('export const a = 1 +\n  2\nexport const b = a /\n  2\n', 'typescript')),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('includes constructor parameters and function-valued members in a class surface', () => {
+    const sig = (body: string): string =>
+      extractExports(`export class Service {\n${body}\n}\n`, 'typescript')[0]?.signature ?? '';
+    const two = 'constructor(\n  private readonly a: string,\n  private readonly b: number,\n) {}';
+    const three =
+      'constructor(\n  private readonly a: string,\n  private readonly b: number,\n  private readonly c: number,\n) {}';
+    expect(sig(two)).not.toBe(sig(three));
+    expect(sig('run = (a: string) => { return 1; };')).not.toBe(
+      sig('run = (a: string, b: number) => { return 1; };'),
+    );
+    expect(sig('run = async (a: string): Promise<void> => {};')).not.toBe(
+      sig('run = async (a: string): Promise<number> => {};'),
+    );
+    // Bodies, plain initialisers and private members are still not part of the surface.
+    expect(sig('run = (a: string) => { return 1; };\nlimit = 5;')).toBe(
+      sig('run = (a: string) => { return 2; };\nlimit = 6;\nprivate helper(\n  x: number,\n) {}'),
+    );
+  });
+});
+
 describe('extractExports (Python)', () => {
   it('lists public top-level names with signatures', () => {
     const exports = extractExports(PY_BEFORE, 'python');
@@ -287,9 +358,28 @@ def f():
       '.utils',
       '.helpers',
       '.models',
+      '.models.User',
       '..pkg.mod',
+      '..pkg.mod.a',
+      '..pkg.mod.b',
       'inner.mod',
     ]);
+  });
+
+  it('tells re-exports from plain imports', () => {
+    const src = `
+import a from './a';
+export { e } from './e';
+export * from './all';
+export * as ns from './ns';
+export type { T } from './types';
+`;
+    expect(extractReexports(src, 'typescript')).toEqual(['./e', './all', './ns', './types']);
+    expect(extractReexports('import os\nfrom .foo import bar\n', 'python')).toEqual([
+      '.foo',
+      '.foo.bar',
+    ]);
+    expect(extractReexports('export * from "./a"', null)).toEqual([]);
   });
 });
 
@@ -343,6 +433,72 @@ describe('buildImportGraph', () => {
     expect(graph.dependentsOf('pkg/helpers.py')).toEqual(['pkg/mod.py']);
     expect(graph.dependentsOf('pkg/mod.py')).toEqual(['main.py']);
     expect(graph.dependentsOf('../etc/passwd')).toEqual([]);
+  });
+});
+
+describe('buildImportGraph (re-exports and declaration files)', () => {
+  it('reaches importers through barrels, but not through modules that only use the file', async () => {
+    const root = tempDir();
+    write(root, 'src/lib/foo.ts', 'export function foo(a: number) {}\n');
+    write(root, 'src/lib/index.ts', "export * from './foo';\n");
+    write(root, 'src/index.ts', "export { foo } from './lib';\n");
+    write(root, 'src/direct.ts', "import { foo } from './lib/foo';\nexport const d = foo(1);\n");
+    write(root, 'src/viaBarrel.ts', "import { foo } from './lib';\n");
+    write(root, 'src/viaRoot.ts', "import { foo } from './index';\n");
+    write(root, 'src/usesDirect.ts', "import { d } from './direct';\n");
+    const graph = await buildImportGraph(root, [
+      'src/lib/foo.ts',
+      'src/lib/index.ts',
+      'src/index.ts',
+      'src/direct.ts',
+      'src/viaBarrel.ts',
+      'src/viaRoot.ts',
+      'src/usesDirect.ts',
+    ]);
+    expect(graph.dependentsOf('src/lib/foo.ts')).toEqual(['src/direct.ts', 'src/lib/index.ts']);
+    expect(graph.dependentsOf('src/lib/foo.ts', { throughReexports: true })).toEqual([
+      'src/direct.ts',
+      'src/index.ts',
+      'src/lib/index.ts',
+      'src/viaBarrel.ts',
+      'src/viaRoot.ts',
+    ]);
+  });
+
+  it('links Python package imports and __init__ re-exports to the module file', async () => {
+    const root = tempDir();
+    write(root, 'pkg/__init__.py', 'from .mod import run\n');
+    write(root, 'pkg/mod.py', 'def run():\n    pass\n');
+    write(root, 'pkg/sub/__init__.py', '');
+    write(root, 'pkg/sub/x.py', 'X = 1\n');
+    write(root, 'pkg/sub/y.py', 'from pkg.sub import x\n');
+    write(root, 'main.py', 'from pkg import mod\n');
+    write(root, 'cli.py', 'from pkg import run\n');
+    const graph = await buildImportGraph(root, [
+      'pkg/__init__.py',
+      'pkg/mod.py',
+      'pkg/sub/__init__.py',
+      'pkg/sub/x.py',
+      'pkg/sub/y.py',
+      'main.py',
+      'cli.py',
+    ]);
+    expect(graph.dependentsOf('pkg/mod.py')).toEqual(['main.py', 'pkg/__init__.py']);
+    expect(graph.dependentsOf('pkg/sub/x.py')).toEqual(['pkg/sub/y.py']);
+    expect(graph.dependentsOf('pkg/mod.py', { throughReexports: true })).toEqual([
+      'cli.py',
+      'main.py',
+      'pkg/__init__.py',
+    ]);
+  });
+
+  it('resolves imports of declaration files', async () => {
+    const root = tempDir();
+    write(root, 'src/types.d.ts', 'export interface T { id: string }\n');
+    write(root, 'src/a.ts', "import type { T } from './types';\n");
+    write(root, 'src/b.ts', "import type { T } from './types.js';\n");
+    const graph = await buildImportGraph(root, ['src/types.d.ts', 'src/a.ts', 'src/b.ts']);
+    expect(graph.dependentsOf('src/types.d.ts')).toEqual(['src/a.ts', 'src/b.ts']);
   });
 });
 

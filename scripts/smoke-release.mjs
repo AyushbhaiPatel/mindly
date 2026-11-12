@@ -12,6 +12,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -60,6 +61,25 @@ const env = {
   GIT_CONFIG_NOSYSTEM: '1',
   NO_COLOR: '1',
 };
+// The network settings of the machine running the check: without them `npm install` cannot reach
+// the registry behind a proxy, a private registry or a custom certificate authority.
+for (const name of [
+  'HTTPS_PROXY',
+  'HTTP_PROXY',
+  'NO_PROXY',
+  'https_proxy',
+  'http_proxy',
+  'no_proxy',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'npm_config_registry',
+  'npm_config_cafile',
+  'npm_config_proxy',
+  'npm_config_https_proxy',
+  'npm_config_noproxy',
+]) {
+  if (process.env[name] !== undefined) env[name] = process.env[name];
+}
 
 let failures = 0;
 const check = (ok, label, detail = '') => {
@@ -170,6 +190,91 @@ try {
     noPath.status === 0 && fallback.includes(fallbackMain) && existsSync(fallbackMain),
     'init without mindly on PATH uses node <package>/dist/main.js',
     fallback,
+  );
+
+  // 4c. `npx mindly-cli init` runs from npx's cache, which npm may clear: init must refuse and
+  // write nothing.
+  const repo3 = join(root, 'repo3');
+  mkdirSync(repo3);
+  run('git', ['init', '-q', '-b', 'main'], { cwd: repo3 });
+  const homeBefore = readdirSync(dirs.mindlyHome).sort().join(' ');
+  const viaNpx = spawnSync(
+    'npm',
+    [
+      'exec',
+      '--yes',
+      `--package=${tarball}`,
+      '--',
+      'mindly',
+      'init',
+      '--project',
+      '--yes',
+      '--agents',
+      'claude-code',
+    ],
+    {
+      cwd: repo3,
+      env: { ...env, PATH: process.env.PATH ?? '' },
+      encoding: 'utf8',
+      timeout: 600_000,
+    },
+  );
+  check(
+    viaNpx.status === 1 &&
+      (viaNpx.stderr ?? '').includes('npm i -g mindly-cli && mindly init') &&
+      !existsSync(join(repo3, '.claude')) &&
+      readdirSync(dirs.mindlyHome).sort().join(' ') === homeBefore,
+    `init through npx refuses and writes nothing (exit ${viaNpx.status})`,
+    `${viaNpx.stdout ?? ''}${viaNpx.stderr ?? ''}`.trim(),
+  );
+
+  // 4d. A global install (npm i -g, into a temp prefix): init records the global `mindly`, and the
+  // hook runs with no registry to reach.
+  const prefix = join(root, 'global');
+  const globalInstall = run('npm', ['install', '-g', '--prefix', prefix, tarball], {
+    timeout: 600_000,
+  });
+  const globalBin = join(prefix, 'bin', 'mindly');
+  const repo4 = join(root, 'repo4');
+  mkdirSync(repo4);
+  run('git', ['init', '-q', '-b', 'main'], { cwd: repo4 });
+  const globalInit = spawnSync(
+    globalBin,
+    ['init', '--project', '--yes', '--agents', 'claude-code'],
+    {
+      cwd: repo4,
+      env: { ...env, PATH: `${join(prefix, 'bin')}${delimiter}${process.env.PATH ?? ''}` },
+      encoding: 'utf8',
+      timeout: 120_000,
+    },
+  );
+  const settings4File = join(repo4, '.claude', 'settings.json');
+  const settings4 = existsSync(settings4File) ? readFileSync(settings4File, 'utf8') : '';
+  const globalCommands = [...settings4.matchAll(/"command":\s*"([^"]+)"/g)].map((m) => m[1]);
+  check(
+    globalInstall.code === 0 &&
+      globalInit.status === 0 &&
+      globalCommands.length > 0 &&
+      globalCommands.every((c) => c.startsWith(`${globalBin} `)),
+    `npm i -g, then mindly init records the global mindly (${globalCommands.length} hooks)`,
+    globalInit.status === 0
+      ? (globalCommands[0] ?? '')
+      : `${globalInstall.stderr}\n${globalInit.stdout}\n${globalInit.stderr}`,
+  );
+  const stopHook = globalCommands.find((c) => / hook claude-code Stop$/.test(c)) ?? 'false';
+  const started = Date.now();
+  const offline = spawnSync('/bin/sh', ['-c', stopHook], {
+    cwd: repo4,
+    env: { ...env, PATH: process.env.PATH ?? '', npm_config_registry: 'http://127.0.0.1:9/' },
+    input: '{}',
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  const took = Date.now() - started;
+  check(
+    offline.status === 0 && offline.stderr === '' && took < 5_000,
+    `recorded hook runs with no registry to reach (exit ${offline.status}, ${took} ms)`,
+    offline.stderr,
   );
 
   // 5. A SessionStart hook payload; with one rule in memory the hook must inject it.

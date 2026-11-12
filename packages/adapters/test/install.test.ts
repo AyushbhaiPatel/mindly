@@ -127,6 +127,79 @@ describe('claude-code install', () => {
     expect(await claude.planUninstall(opts(home))).toEqual([]);
   });
 
+  it("keeps another tool's hook whose command ends like Mindly's", async () => {
+    const home = tempDir();
+    const settings = join(home, '.claude', 'settings.json');
+    const other = {
+      hooks: [{ type: 'command', command: '/usr/local/bin/othertool hook claude-code Stop' }],
+    };
+    write(settings, JSON.stringify({ hooks: { Stop: [other], PreToolUse: [USER_HOOK] } }));
+
+    await install(claude, opts(home));
+    let hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(hooks['Stop']?.[0]).toEqual(other);
+    expect(hooks['Stop']).toHaveLength(2);
+    // Installing again replaces Mindly's own entries and nothing else.
+    await install(claude, opts(home));
+    hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(hooks['Stop']).toHaveLength(2);
+
+    applyInstallSteps(await claude.planUninstall(opts(home)));
+    expect(readJson(settings)['hooks']).toEqual({ Stop: [other], PreToolUse: [USER_HOOK] });
+
+    // The same for Cursor's flat hook lists.
+    const cursorHooks = join(home, '.cursor', 'hooks.json');
+    const flat = { command: 'othertool hook cursor stop' };
+    write(cursorHooks, JSON.stringify({ version: 1, hooks: { stop: [flat] } }));
+    await install(cursor, opts(home));
+    await install(cursor, opts(home));
+    applyInstallSteps(await cursor.planUninstall(opts(home)));
+    expect(readJson(cursorHooks)).toEqual({ version: 1, hooks: { stop: [flat] } });
+  });
+
+  it('replaces hooks written with a launcher Mindly no longer uses', async () => {
+    const home = tempDir();
+    const settings = join(home, '.claude', 'settings.json');
+    await install(claude, { ...opts(home), command: ['/usr/bin/node', '/x/main.js'] });
+    // Same launcher: replaced in place. A named Mindly launcher: also replaced.
+    await install(claude, { ...opts(home), command: ['/usr/bin/node', '/x/main.js'] });
+    let hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(hooks['Stop']).toHaveLength(1);
+    await install(claude, { ...opts(home), command: ['/old/bin/mindly'] });
+    await install(claude, opts(home));
+    hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(JSON.stringify(hooks['Stop'])).not.toContain('/old/bin/mindly');
+  });
+
+  it('replaces and removes hooks pinned to an older npx version', async () => {
+    const home = tempDir();
+    const settings = join(home, '.claude', 'settings.json');
+    const old = { ...opts(home), command: ['npx', '--yes', 'mindly-cli@0.4.0'] };
+    const now = { ...opts(home), command: ['npx', '--yes', 'mindly-cli@0.5.0'] };
+    write(settings, JSON.stringify({ hooks: { PreToolUse: [USER_HOOK] } }));
+    await install(claude, old);
+    expect(readFileSync(settings, 'utf8')).toContain('mindly-cli@0.4.0 hook claude-code');
+    // The upgrade replaces every hook the older version wrote, and adds no second set.
+    await install(claude, now);
+    const text = readFileSync(settings, 'utf8');
+    expect(text).not.toContain('mindly-cli@0.4.0');
+    const hooks = readJson(settings)['hooks'] as Record<string, unknown[]>;
+    expect(hooks['Stop']).toHaveLength(1);
+    expect(hooks['PreToolUse']).toHaveLength(2);
+    // An uninstall run from yet another version still finds them, and keeps the user's.
+    applyInstallSteps(
+      await claude.planUninstall({ ...opts(home), command: ['npx', '--yes', 'mindly-cli@latest'] }),
+    );
+    expect(readJson(settings)['hooks']).toEqual({ PreToolUse: [USER_HOOK] });
+    // The same for Codex.
+    const codexHooks = join(home, '.codex', 'hooks.json');
+    await install(codex, old);
+    await install(codex, now);
+    expect(readFileSync(codexHooks, 'utf8')).not.toContain('mindly-cli@0.4.0');
+    applyInstallSteps(await codex.planUninstall(now));
+    expect(readFileSync(codexHooks, 'utf8')).not.toContain('mindly-cli');
+  });
+
   it('keeps user hooks that share a matcher group with Mindly', async () => {
     const home = tempDir();
     const settings = join(home, '.claude', 'settings.json');
@@ -262,6 +335,38 @@ describe('codex install', () => {
     await expect(codex.planInstall(opts(home))).rejects.toSatisfy((e) =>
       isMindlyError(e, 'invalid_input'),
     );
+    // Valid TOML that Mindly's table cannot be appended to is not called invalid.
+    write(file, 'mcp_servers = { other = { command = "o" } }\n');
+    const refused = await codex.planInstall(opts(home)).catch((e: unknown) => e);
+    expect(isMindlyError(refused, 'invalid_input')).toBe(true);
+    expect((refused as Error).message).toContain('inline table');
+    expect((refused as Error).message).not.toContain('not valid TOML');
+    expect(readFileSync(file, 'utf8')).toBe('mcp_servers = { other = { command = "o" } }\n');
+  });
+
+  it("keeps the comments above the table after the user's own mindly table", async () => {
+    const home = tempDir();
+    const file = join(home, '.codex', 'config.toml');
+    write(
+      file,
+      [
+        '[mcp_servers.mindly]',
+        'command = "old"',
+        '# about mindly',
+        'args = []',
+        '',
+        '# about other',
+        '# second line',
+        '[mcp_servers.other]',
+        'command = "o"',
+        '',
+      ].join('\n'),
+    );
+    await install(codex, opts(home));
+    const toml = readFileSync(file, 'utf8');
+    expect(toml).toContain('# about other\n# second line\n[mcp_servers.other]');
+    expect(toml).not.toContain('# about mindly');
+    expect(toml).not.toContain('"old"');
   });
 });
 

@@ -36,6 +36,9 @@ describe('review helpers', () => {
     const p = prepareDiff(DIFF);
     expect(p.text).not.toContain(SECRET);
     expect(p.redactions).toBeGreaterThan(0);
+    // Redacting shortens the text but drops nothing: that is not a truncated diff.
+    expect(p.truncated).toBe(false);
+    expect(p.text).not.toContain('[diff truncated by Mindly');
     const big = prepareDiff('+x\n'.repeat(MAX_REVIEW_DIFF_CHARS));
     expect(big.truncated).toBe(true);
     expect(big.text).toContain('[diff truncated by Mindly');

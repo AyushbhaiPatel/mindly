@@ -19,9 +19,14 @@ export interface HookSpec {
 /**
  * Removes Mindly's hooks for `agentKind` from a Claude Code / Codex style `hooks` object
  * (`{ Event: [{ matcher, hooks: [{ type, command }] }] }`). Matcher groups that only contained
- * Mindly hooks are dropped, as are event keys left empty. User entries are untouched.
+ * Mindly hooks are dropped, as are event keys left empty. User entries are untouched, and so are
+ * other tools' hooks: `launcher` is the Mindly command in use now (see `isMindlyHookCommand`).
  */
-export function removeGroupedHooks(hooks: Record<string, unknown>, agentKind: string): void {
+export function removeGroupedHooks(
+  hooks: Record<string, unknown>,
+  agentKind: string,
+  launcher?: readonly string[],
+): void {
   for (const [event, groups] of Object.entries(hooks)) {
     if (!Array.isArray(groups)) continue;
     let changed = false;
@@ -33,7 +38,7 @@ export function removeGroupedHooks(hooks: Record<string, unknown>, agentKind: st
       }
       const inner = group['hooks'] as unknown[];
       const filtered = inner.filter(
-        (h) => !(isRecord(h) && isMindlyHookCommand(h['command'], agentKind)),
+        (h) => !(isRecord(h) && isMindlyHookCommand(h['command'], agentKind, launcher)),
       );
       if (filtered.length === inner.length) {
         kept.push(group);
@@ -67,11 +72,15 @@ export function addGroupedHooks(
 }
 
 /** Removes Mindly's hooks for `agentKind` from a Cursor style `hooks` object (`{ event: [{ command }] }`). */
-export function removeFlatHooks(hooks: Record<string, unknown>, agentKind: string): void {
+export function removeFlatHooks(
+  hooks: Record<string, unknown>,
+  agentKind: string,
+  launcher?: readonly string[],
+): void {
   for (const [event, entries] of Object.entries(hooks)) {
     if (!Array.isArray(entries)) continue;
     const kept = entries.filter(
-      (h) => !(isRecord(h) && isMindlyHookCommand(h['command'], agentKind)),
+      (h) => !(isRecord(h) && isMindlyHookCommand(h['command'], agentKind, launcher)),
     );
     if (kept.length === entries.length) continue;
     if (kept.length === 0) Reflect.deleteProperty(hooks, event);

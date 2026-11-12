@@ -550,6 +550,13 @@ export class MemoryRepo {
     ).map(toEvidence);
   }
 
+  /** Replaces the hash an evidence row is checked by (an earlier form moved to the exact one). */
+  setEvidenceHash(id: string, contentHash: string): void {
+    this.db
+      .prepare('UPDATE memory_evidence SET content_hash = ? WHERE id = ?')
+      .run(contentHash, id);
+  }
+
   markEvidence(id: string, valid: boolean): void {
     this.db
       .prepare('UPDATE memory_evidence SET valid = ?, checked_at = ? WHERE id = ?')
