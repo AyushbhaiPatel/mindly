@@ -281,6 +281,106 @@ export interface RedactOptions {
 
 const extraCache = new Map<string, RegExp | null>();
 
+/** Text a pattern is tried on: empty, short, words, digits, punctuation, lines. */
+const ZERO_WIDTH_PROBES = [
+  '',
+  'a',
+  'ab c',
+  'secret token 123',
+  'Deploy to prod: key=ACME-1234, user@example.com\n\tpath/to/file.ts (line 42); ÄÖ ✓ 0x1F',
+];
+
+/**
+ * True when the global regex `re` can match without matching any text (``, `a*`, `\b`,
+ * `(?=.)`) on one of a few short samples. Such a pattern would put a marker between characters.
+ */
+export function matchesZeroWidth(re: RegExp): boolean {
+  for (const probe of ZERO_WIDTH_PROBES) {
+    re.lastIndex = 0;
+    for (let m = re.exec(probe), n = 0; m !== null && n < 200; m = re.exec(probe), n++) {
+      if (m[0].length === 0) {
+        re.lastIndex = 0;
+        return true;
+      }
+    }
+  }
+  re.lastIndex = 0;
+  return false;
+}
+
+const LOOKAROUND_OPEN = /^\(\?<?[=!]/;
+
+/**
+ * True when some part of the regex `source` consumes a character: a literal, `.`, a class or
+ * an escape other than `\b`/`\B`, outside every lookaround. A pattern made only of
+ * lookarounds, anchors and word boundaries (`(?=password)`, `^`, `\B(?=q)`) never matches any
+ * text, so it cannot redact anything; at best it marks a position next to the secret.
+ */
+export function consumesText(source: string): boolean {
+  let lookaround = 0;
+  // Depth of open groups, and which of them are lookarounds.
+  const stack: boolean[] = [];
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i] as string;
+    if (ch === '\\') {
+      const next = source[i + 1];
+      i++;
+      if (next === undefined) return lookaround === 0;
+      if (next === 'b' || next === 'B') continue;
+      // Skip the rest of a multi-character escape: \k<name>, \p{...}, \u{...}, \x41, \u0041.
+      if (
+        (next === 'k' && source[i + 1] === '<') ||
+        ((next === 'p' || next === 'P' || next === 'u') && source[i + 1] === '{')
+      ) {
+        const close = source.indexOf(next === 'k' ? '>' : '}', i);
+        if (close > 0) i = close;
+      }
+      if (lookaround === 0) return true;
+      continue;
+    }
+    if (ch === '[') {
+      // A class consumes a character (even `[^]`); skip to its end.
+      let j = i + 1;
+      if (source[j] === '^') j++;
+      if (source[j] === ']') j++;
+      while (j < source.length && source[j] !== ']') j += source[j] === '\\' ? 2 : 1;
+      i = j;
+      if (lookaround === 0) return true;
+      continue;
+    }
+    if (ch === '(') {
+      const isLook = LOOKAROUND_OPEN.test(source.slice(i, i + 4));
+      stack.push(isLook);
+      if (isLook) lookaround++;
+      // Skip the group's own syntax: (?:, (?=, (?!, (?<=, (?<!, (?<name>.
+      if (source[i + 1] === '?') {
+        if (source[i + 2] === '<' && source[i + 3] !== '=' && source[i + 3] !== '!') {
+          const close = source.indexOf('>', i);
+          i = close > 0 ? close : i + 2;
+        } else {
+          i += source[i + 2] === '<' ? 3 : 2;
+        }
+      }
+      continue;
+    }
+    if (ch === ')') {
+      if (stack.pop() === true) lookaround--;
+      continue;
+    }
+    if ('^$|*+?'.includes(ch)) continue;
+    if (ch === '{') {
+      // A quantifier such as {2,5}; a lone `{` is a literal.
+      const m = /^\{\d+(,\d*)?\}/.exec(source.slice(i));
+      if (m) {
+        i += m[0].length - 1;
+        continue;
+      }
+    }
+    if (lookaround === 0) return true;
+  }
+  return false;
+}
+
 function compileExtra(source: string): RegExp | null {
   if (extraCache.has(source)) return extraCache.get(source) ?? null;
   let re: RegExp | null = null;
@@ -289,6 +389,8 @@ function compileExtra(source: string): RegExp | null {
   } catch {
     re = null;
   }
+  // The settings refuse these; a caller passing patterns of its own must not get them either.
+  if (re !== null && (!consumesText(source) || matchesZeroWidth(re))) re = null;
   extraCache.set(source, re);
   return re;
 }
@@ -503,6 +605,9 @@ function redactVisible(input: string, options: RedactOptions = {}, mark = ''): R
     const pass: Pass | null = recording ? { input, edits: [] } : null;
     const onMatch = (...args: unknown[]): string => {
       const match = String(args[0]);
+      // An empty match covers no text: there is nothing to hide there, and a marker would only
+      // point at the secret next to it.
+      if (match.length === 0) return match;
       // The match and its groups come before the offset; the whole input comes after it.
       const at = args.findIndex((a) => typeof a === 'number');
       const raw = args.slice(0, at).map((a) => (typeof a === 'string' ? a : ''));

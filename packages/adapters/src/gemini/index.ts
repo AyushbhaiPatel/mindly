@@ -201,7 +201,7 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
   const before = isRecord(current) ? current : {};
   // Validates every event list and computes what the element edits below must produce.
   const after = cloneJson(before);
-  removeGroupedHooks(after, KIND);
+  removeGroupedHooks(after, KIND, options.command);
   const specs = install ? hookSpecs(options.command) : [];
   addGroupedHooks(after, specs, file);
 
@@ -215,7 +215,9 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
       const group: unknown = groups[i];
       if (!isRecord(group) || !Array.isArray(group['hooks'])) continue;
       const inner = group['hooks'] as unknown[];
-      const kept = inner.filter((h) => !(isRecord(h) && isMindlyHookCommand(h['command'], KIND)));
+      const kept = inner.filter(
+        (h) => !(isRecord(h) && isMindlyHookCommand(h['command'], KIND, options.command)),
+      );
       if (kept.length === inner.length) continue;
       const value = kept.length > 0 ? { ...group, hooks: kept } : undefined;
       text = editJsoncArrayItem(file, text ?? '', FORMAT, ['hooks', event], i, value);

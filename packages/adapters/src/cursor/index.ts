@@ -287,7 +287,7 @@ async function plan(options: InstallOptions, mode: PlanMode): Promise<InstallSte
       if (!install && !isRecord(config['hooks'])) return;
       if (install && config['version'] === undefined) config['version'] = 1;
       const h = hooksObject(config, paths.hooks);
-      removeFlatHooks(h, KIND);
+      removeFlatHooks(h, KIND, options.command);
       if (install) addFlatHooks(h, specs, paths.hooks);
       dropIfEmpty(config, 'hooks');
     },

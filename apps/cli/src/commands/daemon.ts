@@ -1,13 +1,16 @@
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  daemonHomeId,
   ensureHome,
-  homePaths,
-  mindlyHome,
-  MindlyError,
-  resolveLayout,
   type HomePaths,
+  homePaths,
+  MINDLY_VERSION,
+  MindlyError,
+  mindlyHome,
+  probeDaemon,
+  resolveLayout,
 } from '@mindly/core';
 import type { DaemonState } from '@mindly/daemon';
 import { relativeTime } from '../present/index.js';
@@ -16,6 +19,8 @@ import { HintedError, type Out } from '../util.js';
 const HOST = '127.0.0.1';
 const START_TIMEOUT_MS = 15_000;
 const STOP_TIMEOUT_MS = 20_000;
+/** Same as `STOPPING_MARK_MS` in `@mindly/daemon`: how long a "shutting down" mark is believed. */
+const STOPPING_MARK_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 
 function sleep(ms: number): Promise<void> {
@@ -52,7 +57,13 @@ export function readState(env: NodeJS.ProcessEnv): DaemonState | null {
     ) {
       return null;
     }
-    return { pid: raw.pid, port: raw.port, startedAt: raw.startedAt, version: raw.version };
+    return {
+      pid: raw.pid,
+      port: raw.port,
+      startedAt: raw.startedAt,
+      version: raw.version,
+      ...(typeof raw.stoppingAt === 'number' ? { stoppingAt: raw.stoppingAt } : {}),
+    };
   } catch {
     return null;
   }
@@ -64,25 +75,124 @@ export function daemonAlive(env: NodeJS.ProcessEnv): boolean {
   return state !== null && pidAlive(state.pid);
 }
 
-/** True when a Mindly daemon answers `GET /api/health` on `port`. */
-export async function healthy(port: number): Promise<boolean> {
-  try {
-    const res = await fetch(`http://${HOST}:${port}/api/health`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!res.ok) return false;
-    const body = (await res.json()) as { ok?: unknown };
-    return body.ok === true;
-  } catch {
-    return false;
-  }
+/**
+ * What `daemon.json` says about this home's service, checked against the machine:
+ * - `none`: no file, or its process is gone;
+ * - `running`: the recorded process answers on the recorded port as this home's daemon;
+ * - `stopping`: it said it is shutting down and may still be finishing a job;
+ * - `silent`: the port is held open without an answer (a busy service, or another program);
+ * - `other`: a Mindly daemon answers there, but not this one: another home's, which uses the
+ *   same default port, or another process;
+ * - `leftover`: nothing of Mindly's is there; the file outlived its daemon.
+ */
+export type Recorded = 'none' | 'running' | 'stopping' | 'silent' | 'other' | 'leftover';
+
+function isStopping(state: DaemonState): boolean {
+  const age = state.stoppingAt === undefined ? null : Date.now() - state.stoppingAt;
+  return age !== null && age < STOPPING_MARK_MS && age > -STOPPING_MARK_MS;
 }
 
-/** The running daemon (state file present, process alive and answering), or null. */
-export async function runningDaemon(env: NodeJS.ProcessEnv): Promise<DaemonState | null> {
+/** Reads `daemon.json` and finds out what is really there (see {@link Recorded}). */
+export async function recordedDaemon(
+  env: NodeJS.ProcessEnv,
+): Promise<{ kind: Recorded; state: DaemonState | null }> {
   const state = readState(env);
-  if (!state || !pidAlive(state.pid)) return null;
-  return (await healthy(state.port)) ? state : null;
+  if (!state || !pidAlive(state.pid)) return { kind: 'none', state };
+  if (isStopping(state)) return { kind: 'stopping', state };
+  const probe = await probeDaemon(state.port);
+  if (probe.owner === 'silent') return { kind: 'silent', state };
+  if (probe.owner === 'absent') return { kind: 'leftover', state };
+  // "A Mindly daemon answers" is not yet "the recorded one does": it says which it is. One that
+  // does not say (an older version, still running after an upgrade) is taken to be ours.
+  const sameHome = probe.home === null || probe.home === daemonHomeId(mindlyHome(env));
+  const samePid = probe.pid === null || probe.pid === state.pid;
+  return { kind: sameHome && samePid ? 'running' : 'other', state };
+}
+
+/** True when a Mindly daemon answers `GET /api/health` on `port`. */
+export async function healthy(port: number): Promise<boolean> {
+  return (await probeDaemon(port)).owner === 'daemon';
+}
+
+/**
+ * The recorded process exists and its port is held open, but nothing answers. Mindly cannot tell
+ * a busy service from another program there, so it neither signals the process nor starts next
+ * to it unless asked to.
+ */
+function notAnswering(state: DaemonState): HintedError {
+  return new HintedError(
+    'unavailable',
+    `Process ${state.pid} holds port ${state.port} and is not answering: it may be Mindly's background service, busy, or another program`,
+    `Wait a moment and try again. To discard the recorded state and start a new service anyway (process ${state.pid} is left alone): mindly daemon start --force`,
+  );
+}
+
+/**
+ * Orders two versions (`1.2.3`, `1.2.3-rc.1`): negative when `a` is older. Null when either is
+ * not a version this can read.
+ */
+export function compareVersions(a: string, b: string): number | null {
+  const parse = (v: string): { core: number[]; pre: string | null } | null => {
+    const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(v.trim());
+    return m ? { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? null } : null;
+  };
+  const x = parse(a);
+  const y = parse(b);
+  if (x === null || y === null) return null;
+  for (let i = 0; i < 3; i++) {
+    const d = (x.core[i] as number) - (y.core[i] as number);
+    if (d !== 0) return d;
+  }
+  // A pre-release comes before its release; two pre-releases compare part by part.
+  if (x.pre === y.pre) return 0;
+  if (x.pre === null) return 1;
+  if (y.pre === null) return -1;
+  const xs = x.pre.split('.');
+  const ys = y.pre.split('.');
+  for (let i = 0; i < Math.max(xs.length, ys.length); i++) {
+    const p = xs[i];
+    const q = ys[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) - Number(q);
+    if (pn) return -1;
+    if (qn) return 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+/** True when the running service is older than this CLI, so restarting it brings it up to date. */
+function serviceOutdated(state: DaemonState): boolean {
+  const order = compareVersions(state.version, MINDLY_VERSION);
+  return order !== null && order < 0;
+}
+
+/**
+ * Said when the running service is another version than this CLI. An older service (Mindly was
+ * upgraded and the service still runs the old code, serving the new dashboard from its old API)
+ * is restarted. A newer one is not: restarting it from here would run this older CLI's version,
+ * so it is this CLI that needs updating.
+ */
+function versionNote(state: DaemonState): string | null {
+  if (state.version === MINDLY_VERSION) return null;
+  if (serviceOutdated(state)) {
+    return `It runs Mindly ${state.version}, and this is ${MINDLY_VERSION}: restart it to use this version (mindly daemon stop, then mindly daemon start).`;
+  }
+  const order = compareVersions(state.version, MINDLY_VERSION);
+  if (order !== null && order > 0) {
+    return `This mindly is ${MINDLY_VERSION}, older than the service (${state.version}): update this mindly; the service needs nothing.`;
+  }
+  return `It runs Mindly ${state.version}, and this is ${MINDLY_VERSION}.`;
+}
+
+/** The running daemon of this home (recorded, alive and answering as itself), or null. */
+export async function runningDaemon(env: NodeJS.ProcessEnv): Promise<DaemonState | null> {
+  const { kind, state } = await recordedDaemon(env);
+  return kind === 'running' ? state : null;
 }
 
 function readToken(env: NodeJS.ProcessEnv): string {
@@ -151,44 +261,166 @@ export function daemonMainPath(): string {
   return layout.daemonMain;
 }
 
-/** Starts the daemon in the background and waits until it answers. */
-export async function startBackground(env: NodeJS.ProcessEnv): Promise<DaemonState> {
-  ensureHome(mindlyHome(env));
-  const main = daemonMainPath();
-  const child = spawn(process.execPath, [main], {
-    detached: true,
-    stdio: 'ignore',
-    env,
-    windowsHide: true,
-  });
-  child.unref();
-  const pid = child.pid;
-  if (pid === undefined) throw new MindlyError('unavailable', 'could not start the daemon');
-  const deadline = Date.now() + START_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const state = readState(env);
-    if (state && state.pid === pid && (await healthy(state.port))) return state;
-    if (!pidAlive(pid)) break;
-    await sleep(100);
+const MAX_START_ERROR_BYTES = 64 * 1024;
+
+/**
+ * Why the daemon process said it could not start (its last `mindly daemon:` line), read from
+ * the start of the open file `fd`, or null.
+ */
+function startFailure(fd: number): string | null {
+  try {
+    const buf = Buffer.alloc(MAX_START_ERROR_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    const lines = buf.subarray(0, n).toString('utf8').split(/\r?\n/);
+    const said = lines.filter((l) => l.startsWith('mindly daemon: ')).pop();
+    return said === undefined ? null : said.slice('mindly daemon: '.length).trim().slice(0, 500);
+  } catch {
+    return null;
   }
-  throw new HintedError(
-    'unavailable',
-    "Mindly's background service did not start",
-    `See what went wrong in ${join(paths(env).logs, 'mindly.log')}, or run it in this terminal: mindly daemon start --foreground`,
-  );
 }
 
-/** `mindly daemon start [--foreground]`. */
-export async function daemonStart(out: Out, o: { foreground?: boolean }): Promise<number> {
-  const env = out.io.env;
-  const running = await runningDaemon(env);
-  if (running) {
-    out.line(`The background service is already running at http://${HOST}:${running.port}.`);
-    return 0;
+/**
+ * A file the daemon's stderr goes to while it starts. On POSIX its name is removed as soon as
+ * the child holds it open: both processes keep their descriptors, and nothing is left behind
+ * however the CLI ends (Ctrl-C included). Windows cannot remove an open file, so there it is
+ * removed on release, and on Ctrl-C.
+ */
+function startErrorFile(logs: string): { fd: number; spawned(): void; release(): void } {
+  const file = join(logs, `daemon-start-${process.pid}-${Date.now()}.err`);
+  const fd = openSync(file, 'w+', 0o600);
+  let named = true;
+  const unlink = (): void => {
+    if (!named) return;
+    try {
+      rmSync(file, { force: true });
+      named = false;
+    } catch {
+      // Still open elsewhere (Windows): tried again on release.
+    }
+  };
+  const onInterrupt = (): void => {
+    try {
+      closeSync(fd);
+    } catch {
+      // already closed
+    }
+    unlink();
+    process.exit(130);
+  };
+  if (process.platform === 'win32') process.once('SIGINT', onInterrupt);
+  return {
+    fd,
+    spawned: () => {
+      if (process.platform !== 'win32') unlink();
+    },
+    release: () => {
+      process.off('SIGINT', onInterrupt);
+      try {
+        closeSync(fd);
+      } catch {
+        // already closed
+      }
+      unlink();
+    },
+  };
+}
+
+/**
+ * Starts the daemon in the background and waits until it answers. `started` is false when this
+ * home's daemon turned out to be running already (another `start` won the race).
+ */
+async function launch(
+  env: NodeJS.ProcessEnv,
+  o: { force?: boolean } = {},
+): Promise<{ state: DaemonState; started: boolean }> {
+  const home = ensureHome(mindlyHome(env));
+  const before = await recordedDaemon(env);
+  // A port held without an answer makes the daemon refuse to start: say why, and how to insist.
+  if (before.kind === 'silent' && before.state && o.force !== true)
+    throw notAnswering(before.state);
+  const main = daemonMainPath();
+  // The daemon says why it cannot start on stderr, and a detached process has no terminal:
+  // keep that for the length of the start.
+  const errors = startErrorFile(home.logs);
+  let pid: number | undefined;
+  try {
+    const child = spawn(process.execPath, o.force === true ? [main, '--force'] : [main], {
+      detached: true,
+      stdio: ['ignore', 'ignore', errors.fd],
+      env,
+      windowsHide: true,
+    });
+    child.unref();
+    pid = child.pid;
+  } catch (err) {
+    errors.release();
+    throw err;
   }
+  errors.spawned();
+  try {
+    if (pid === undefined) throw new MindlyError('unavailable', 'could not start the daemon');
+    // A service that is shutting down is waited for by the new one before it starts.
+    const wait = START_TIMEOUT_MS + (before.kind === 'stopping' ? STOPPING_MARK_MS : 0);
+    const deadline = Date.now() + wait;
+    while (Date.now() < deadline) {
+      const state = readState(env);
+      if (state && state.pid === pid && (await healthy(state.port)))
+        return { state, started: true };
+      if (!pidAlive(pid)) break;
+      await sleep(100);
+    }
+    // Ours did not come up. If that is because this home's service is running after all (two
+    // starts at once: the other one won), there is nothing wrong.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const now = await recordedDaemon(env);
+      if (now.kind === 'running' && now.state) return { state: now.state, started: false };
+      if (now.kind !== 'none' && now.kind !== 'stopping') break;
+      await sleep(100);
+    }
+    const why = startFailure(errors.fd);
+    const portClash = why !== null && /already in use/.test(why);
+    throw new HintedError(
+      'unavailable',
+      why === null
+        ? "Mindly's background service did not start"
+        : `Mindly's background service did not start: ${why}`,
+      portClash
+        ? 'Pick a free port and start again: mindly config set daemon.port <port>, then mindly daemon start'
+        : `See what went wrong in ${join(home.logs, 'mindly.log')}, or run it in this terminal: mindly daemon start --foreground`,
+    );
+  } finally {
+    errors.release();
+  }
+}
+
+/** Starts the daemon in the background and waits until it answers. */
+export async function startBackground(
+  env: NodeJS.ProcessEnv,
+  o: { force?: boolean } = {},
+): Promise<DaemonState> {
+  return (await launch(env, o)).state;
+}
+
+/**
+ * `mindly daemon start [--foreground] [--force]`. `--force` discards a recorded state whose port
+ * is held without an answer and starts anyway; it never signals the recorded process.
+ */
+export async function daemonStart(
+  out: Out,
+  o: { foreground?: boolean; force?: boolean },
+): Promise<number> {
+  const env = out.io.env;
+  const alreadyRunning = (state: DaemonState): number => {
+    out.line(`The background service is already running at http://${HOST}:${state.port}.`);
+    const note = versionNote(state);
+    if (note !== null) out.warn(note);
+    return 0;
+  };
+  const running = await runningDaemon(env);
+  if (running) return alreadyRunning(running);
   if (o.foreground) {
     const { startDaemon } = await import('@mindly/daemon');
-    const daemon = await startDaemon({ env });
+    const daemon = await startDaemon({ env, ...(o.force === true ? { force: true } : {}) });
     out.line(`Mindly's background service is running at ${daemon.url} (Ctrl-C to stop).`);
     await new Promise<void>((resolve) => {
       const shutdown = (): void => {
@@ -201,36 +433,52 @@ export async function daemonStart(out: Out, o: { foreground?: boolean }): Promis
     });
     return 0;
   }
-  const state = await startBackground(env);
+  const { state, started } = await launch(env, o.force === true ? { force: true } : {});
+  if (!started) return alreadyRunning(state);
   const sc = out.screen();
   sc.text(`${sc.mark('ok')} Started Mindly's background service at http://${HOST}:${state.port}.`);
   sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
   return 0;
 }
 
-/** `mindly daemon stop`: SIGTERM after checking the pid is alive and the port is a Mindly daemon. */
+async function waitUntilGone(pid: number): Promise<boolean> {
+  const deadline = Date.now() + STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!pidAlive(pid)) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
+/**
+ * `mindly daemon stop`: SIGTERM to the recorded process, and only once it has answered on the
+ * recorded port as this home's daemon with that PID. Anything else on that port, another home's
+ * Mindly daemon included, is never signalled.
+ */
 export async function daemonStop(out: Out): Promise<number> {
   const env = out.io.env;
-  const state = readState(env);
-  if (!state || !pidAlive(state.pid)) {
+  const { kind, state } = await recordedDaemon(env);
+  if (kind === 'none' || state === null) {
     out.line('The background service is not running: nothing to stop.');
     return 0;
   }
-  if (!(await healthy(state.port))) {
-    throw new HintedError(
-      'conflict',
-      `Process ${state.pid}, named in ${paths(env).daemonState}, does not answer as Mindly's background service on port ${state.port}, so Mindly did not stop it`,
-      `If you are sure it is not running, delete ${paths(env).daemonState}`,
+  if (kind === 'silent') throw notAnswering(state);
+  if (kind === 'leftover' || kind === 'other') {
+    out.line('The background service is not running: nothing to stop.');
+    out.line(
+      out.style.dim(
+        kind === 'other'
+          ? `Port ${state.port} is used by the Mindly service of another home (a different MINDLY_HOME); it was left alone. ${paths(env).daemonState} is left over from an earlier run.`
+          : `${paths(env).daemonState} is left over from an earlier run (process ${state.pid} is not Mindly's service); mindly daemon start replaces it.`,
+      ),
     );
+    return 0;
   }
-  process.kill(state.pid, 'SIGTERM');
-  const deadline = Date.now() + STOP_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!pidAlive(state.pid)) {
-      out.line("Stopped Mindly's background service.");
-      return 0;
-    }
-    await sleep(100);
+  // Already on its way out: nothing to signal, only to wait for.
+  if (kind === 'running') process.kill(state.pid, 'SIGTERM');
+  if (await waitUntilGone(state.pid)) {
+    out.line("Stopped Mindly's background service.");
+    return 0;
   }
   throw new HintedError(
     'timeout',
@@ -242,15 +490,19 @@ export async function daemonStop(out: Out): Promise<number> {
 /** `mindly daemon status`. */
 export async function daemonStatus(out: Out, o: { json?: boolean }): Promise<number> {
   const env = out.io.env;
-  const state = readState(env);
-  const alive = state !== null && pidAlive(state.pid);
-  const answering = alive && state !== null && (await healthy(state.port));
+  const { kind, state } = await recordedDaemon(env);
   if (o.json) {
-    out.json({ running: answering, ...(state ? { state } : {}) });
+    out.json({
+      running: kind === 'running',
+      ...(state ? { state } : {}),
+      ...(kind === 'running' && state && serviceOutdated(state)
+        ? { outdated: true, cliVersion: MINDLY_VERSION }
+        : {}),
+    });
     return 0;
   }
   const sc = out.screen();
-  if (answering && state) {
+  if (kind === 'running' && state) {
     sc.summary(
       `${sc.mark('ok')} Mindly's background service is running at http://${HOST}:${state.port}`,
     );
@@ -258,15 +510,55 @@ export async function daemonStatus(out: Out, o: { json?: boolean }): Promise<num
       `Version ${state.version}, started ${relativeTime(state.startedAt, sc.now)}. It serves Mission Control and runs checks in the background.`,
       2,
     );
-    sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
-  } else if (alive && state) {
+    const note = versionNote(state);
+    if (note !== null) {
+      sc.text(`${sc.mark('warn')} ${note}`, 2);
+      if (serviceOutdated(state)) {
+        sc.next([
+          { cmd: 'mindly daemon stop', why: 'stop the old version' },
+          { cmd: 'mindly daemon start', why: `then start ${MINDLY_VERSION}` },
+        ]);
+      }
+    } else {
+      sc.next([{ cmd: 'mindly dashboard', why: 'open Mission Control in your browser' }]);
+    }
+  } else if (kind === 'stopping' && state) {
+    sc.summary(`${sc.mark('warn')} Mindly's background service is shutting down.`);
+    sc.note('It no longer answers and may still be finishing a job. This takes a few seconds.', 2);
+    sc.next([
+      { cmd: 'mindly daemon start', why: 'start it again (waits for the old one to finish)' },
+    ]);
+  } else if (kind === 'silent' && state) {
     sc.summary(
-      `${sc.mark('warn')} Process ${state.pid} should be Mindly's background service, but nothing answers on port ${state.port}`,
+      `${sc.mark('warn')} Process ${state.pid} holds port ${state.port} and is not answering.`,
+    );
+    sc.note(
+      "It may be Mindly's background service, busy, or another program. Wait a moment and ask again.",
+      2,
     );
     sc.next([
-      { cmd: 'mindly daemon stop', why: 'stop it' },
-      { cmd: 'mindly daemon start', why: 'then start it again' },
+      {
+        cmd: 'mindly daemon start --force',
+        why: `discard the recorded state and start a new service (process ${state.pid} is left alone)`,
+      },
     ]);
+  } else if (kind === 'other' && state) {
+    sc.summary("Mindly's background service is not running.");
+    sc.note(
+      `Port ${state.port}, where it last ran, is now used by the Mindly service of another home (a different MINDLY_HOME). Two homes cannot share a port.`,
+      2,
+    );
+    sc.next([
+      { cmd: 'mindly config set daemon.port <port>', why: 'give this home its own port' },
+      { cmd: 'mindly daemon start', why: 'then start its service' },
+    ]);
+  } else if (kind === 'leftover' && state) {
+    sc.summary("Mindly's background service is not running.");
+    sc.note(
+      `Its state file is left over from an earlier run: process ${state.pid} is running, but it is not Mindly's service and nothing of Mindly's is on port ${state.port}.`,
+      2,
+    );
+    sc.next([{ cmd: 'mindly daemon start', why: 'start it (replaces the leftover file)' }]);
   } else {
     sc.summary("Mindly's background service is not running.");
     sc.note(
@@ -305,6 +597,9 @@ export async function dashboard(out: Out, o: { open?: boolean }): Promise<number
   if (!state) {
     out.warn("Starting Mindly's background service...");
     state = await startBackground(env);
+  } else {
+    const note = versionNote(state);
+    if (note !== null) out.warn(note);
   }
   const { code } = await daemonRequest<{ code: string; expiresAt: number }>(
     env,

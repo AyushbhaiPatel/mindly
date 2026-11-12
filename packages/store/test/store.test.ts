@@ -1,4 +1,5 @@
-import { mkdtempSync, statSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -18,6 +19,45 @@ describe('database', () => {
     store.close();
     // Reopening is idempotent.
     Store.open(path).close();
+  });
+
+  it('opens while another process is applying the same migrations', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syn-db-'));
+    const path = join(dir, 'mindly.db');
+    const ready = join(dir, 'ready');
+    const sqlFile = join(dir, 'migrations.json');
+    writeFileSync(sqlFile, JSON.stringify(MIGRATIONS));
+    // The other process: takes the write lock on an empty database, applies every migration
+    // slowly and commits. Whoever opens meanwhile read version 0 before it had to wait.
+    const script = `
+      const { DatabaseSync } = require('node:sqlite');
+      const fs = require('node:fs');
+      const [path, ready, sqlFile] = process.argv.slice(1);
+      const db = new DatabaseSync(path);
+      db.exec('PRAGMA journal_mode = WAL');
+      db.exec('BEGIN IMMEDIATE');
+      fs.writeFileSync(ready, '');
+      setTimeout(() => {
+        const all = JSON.parse(fs.readFileSync(sqlFile, 'utf8'));
+        for (const sql of all) db.exec(sql);
+        db.exec('PRAGMA user_version = ' + all.length);
+        db.exec('COMMIT');
+        db.close();
+      }, 300);
+    `;
+    const child = spawn(process.execPath, ['--no-warnings', '-e', script, path, ready, sqlFile], {
+      stdio: 'ignore',
+    });
+    const exited = new Promise<number | null>((done) => child.on('exit', done));
+    for (let i = 0; i < 500 && !existsSync(ready); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(existsSync(ready)).toBe(true);
+    const store = Store.open(path);
+    expect(schemaVersion(store.db)).toBe(MIGRATIONS.length);
+    expect(store.projects.upsertByRoot('/repo', 'repo').name).toBe('repo');
+    store.close();
+    expect(await exited).toBe(0);
   });
 
   it('rolls back failed transactions including nested ones', () => {

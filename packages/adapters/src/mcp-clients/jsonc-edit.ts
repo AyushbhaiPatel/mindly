@@ -336,14 +336,15 @@ export function removeJsoncValue(
   }
   // A servers object left empty (typically created by our own install) is removed as well, so
   // install followed by uninstall restores the original file. The document root is never removed.
+  // One that still holds text is not empty to its owner: a commented-out server stays.
   const parent = path.slice(0, -1);
   if (options.pruneEmptyParent && parent.length > 0) {
-    const value = readJsoncValue(file, result, format, parent);
+    const after = parseText(file, result, format);
+    const left = after.root === undefined ? undefined : findNodeAtLocation(after.root, parent);
     if (
-      value !== null &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      Object.keys(value).length === 0
+      left?.type === 'object' &&
+      (left.children ?? []).length === 0 &&
+      after.body.slice(left.offset + 1, left.offset + left.length - 1).trim() === ''
     ) {
       result = removeJsoncValue(file, result, format, parent);
     }

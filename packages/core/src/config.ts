@@ -12,11 +12,68 @@ import {
 } from 'node:fs';
 import { z } from 'zod';
 import { AgentKindSchema } from './domain.js';
+import { globToRegExp } from './glob.js';
+import { consumesText, matchesZeroWidth } from './redact.js';
 import { MindlyError } from './errors.js';
 import { sha256 } from './text.js';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 
+/**
+ * Why a redaction pattern cannot be used, or null. Refused: an empty pattern; one with spaces at
+ * its ends (a typing mistake: a pattern that needs one there writes `\s`); one that does not
+ * compile; one with no part that consumes text (only lookarounds, anchors or `\b`), which can
+ * never cover a secret; and one that can match empty text on a few samples (`a*`, `x?`), which
+ * would mark every position. Redaction itself also never replaces an empty match.
+ */
+export function unusableRedactionPattern(source: string): string | null {
+  if (source.trim() === '') return 'is empty';
+  if (source !== source.trim()) {
+    return 'starts or ends with a space (write \\s where a space is meant)';
+  }
+  let re: RegExp;
+  try {
+    re = new RegExp(source, 'g');
+  } catch {
+    return 'is not a valid regular expression';
+  }
+  if (!consumesText(source)) {
+    return 'matches no text (only lookarounds, anchors or \\b), so it cannot hide anything';
+  }
+  if (matchesZeroWidth(re)) {
+    return 'can match empty text (between characters), so it would redact everything';
+  }
+  return null;
+}
+
+/** Why a deny-list glob cannot be used, or null. */
+export function unusableDenyPath(glob: string): string | null {
+  if (glob.trim() === '') return 'is empty';
+  if (glob !== glob.trim()) return 'starts or ends with a space, so it matches no file';
+  try {
+    globToRegExp(glob);
+  } catch (err) {
+    return `is not a valid glob (${err instanceof Error ? err.message : 'unreadable'})`;
+  }
+  return null;
+}
+
+const RedactionPatternSchema = z
+  .string()
+  .max(500)
+  .superRefine((p, ctx) => {
+    const why = unusableRedactionPattern(p);
+    if (why !== null)
+      ctx.addIssue({ code: 'custom', message: `pattern ${JSON.stringify(p)} ${why}` });
+  });
+
+const DenyPathSchema = z
+  .string()
+  .max(512)
+  .superRefine((g, ctx) => {
+    const why = unusableDenyPath(g);
+    if (why !== null) ctx.addIssue({ code: 'custom', message: `glob ${JSON.stringify(g)} ${why}` });
+  });
 /** True for `localhost`, `127.0.0.0/8` and `::1`. Hostnames are not resolved. */
 function isLoopbackHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
@@ -163,8 +220,8 @@ export const UserConfigSchema = z.object({
     .prefault({}),
   redaction: z
     .object({
-      extraPatterns: z.array(z.string().max(500)).max(50).default([]),
-      denyPaths: z.array(z.string().max(512)).max(200).default([]),
+      extraPatterns: z.array(RedactionPatternSchema).max(50).default([]),
+      denyPaths: z.array(DenyPathSchema).max(200).default([]),
     })
     .prefault({}),
   checkpoints: z
@@ -246,6 +303,42 @@ function readBoundedJson(path: string): unknown {
 }
 
 /**
+ * Removes the entries of a config read from disk that Mindly refuses to use (see
+ * `unusableRedactionPattern`, `unusableDenyPath`) and says what was removed. A hand-edited file
+ * with one bad redaction pattern then still loads, without that pattern, instead of either
+ * failing every command or redacting everything.
+ */
+export function dropUnusableEntries(raw: unknown): { config: unknown; warnings: string[] } {
+  const warnings: string[] = [];
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
+    return { config: raw, warnings };
+  const redaction = (raw as Record<string, unknown>)['redaction'];
+  if (redaction === null || typeof redaction !== 'object' || Array.isArray(redaction)) {
+    return { config: raw, warnings };
+  }
+  const cleaned: Record<string, unknown> = { ...(redaction as Record<string, unknown>) };
+  const lists: [string, (v: string) => string | null, string][] = [
+    ['extraPatterns', unusableRedactionPattern, 'pattern'],
+    ['denyPaths', unusableDenyPath, 'glob'],
+  ];
+  for (const [key, why, what] of lists) {
+    const list = cleaned[key];
+    if (!Array.isArray(list)) continue;
+    cleaned[key] = list.filter((entry: unknown) => {
+      if (typeof entry !== 'string') return true;
+      const reason = why(entry);
+      if (reason !== null) {
+        warnings.push(
+          `redaction.${key}: ignored the ${what} ${JSON.stringify(entry)}, which ${reason}`,
+        );
+      }
+      return reason === null;
+    });
+  }
+  return { config: { ...(raw as Record<string, unknown>), redaction: cleaned }, warnings };
+}
+
+/**
  * The notification channels of a raw config whose URL cannot be used, with the reason. A config
  * file written before URLs were checked may hold one; it never worked.
  */
@@ -311,17 +404,24 @@ function withoutUnusableChannels(raw: unknown): unknown {
 }
 
 /**
- * Reads the user config. A notification channel whose URL cannot be used is left out, so a file
- * written before URLs were checked does not stop every command; `mindly config set` refuses such
- * a URL and `mindly notify test` names the channels that were left out.
+ * Reads the user config, and what in it was ignored. Redaction patterns and deny-list globs that
+ * cannot be used are dropped with a warning (see `dropUnusableEntries`). A notification channel
+ * whose URL cannot be used is left out as well, so a file written before URLs were checked does
+ * not stop every command; `mindly config set` refuses such a URL and `mindly notify test` names
+ * the channels that were left out.
  */
-export function loadUserConfig(path: string): UserConfig {
-  if (!existsSync(path)) return defaultUserConfig();
-  const parsed = UserConfigSchema.safeParse(withoutUnusableChannels(readBoundedJson(path)));
+export function readUserConfig(path: string): { config: UserConfig; warnings: string[] } {
+  if (!existsSync(path)) return { config: defaultUserConfig(), warnings: [] };
+  const { config, warnings } = dropUnusableEntries(readBoundedJson(path));
+  const parsed = UserConfigSchema.safeParse(withoutUnusableChannels(config));
   if (!parsed.success) {
     throw new MindlyError('invalid_input', `invalid config: ${z.prettifyError(parsed.error)}`);
   }
-  return parsed.data;
+  return { config: parsed.data, warnings };
+}
+
+export function loadUserConfig(path: string): UserConfig {
+  return readUserConfig(path).config;
 }
 
 /** Atomically writes JSON with owner-only permissions. */
@@ -382,16 +482,36 @@ export interface LoadedProjectConfig {
   config: ProjectConfig;
   /** sha256 of the raw file; compared against the project's trusted hash. */
   hash: string | null;
+  /** Entries Mindly ignores because they cannot be used (an `ignore` glob that does not parse). */
+  warnings: string[];
 }
 
 export function loadProjectConfig(path: string): LoadedProjectConfig {
-  if (!existsSync(path)) return { config: ProjectConfigSchema.parse({}), hash: null };
+  if (!existsSync(path)) {
+    return { config: ProjectConfigSchema.parse({}), hash: null, warnings: [] };
+  }
   const raw = readRegularFileBounded(path, MAX_CONFIG_BYTES);
   let json: unknown;
   try {
     json = JSON.parse(raw);
   } catch (cause) {
     throw new MindlyError('invalid_input', 'project config is not valid JSON', { cause });
+  }
+  // A glob that does not parse would make every path check throw: it is left out, and said so.
+  const warnings: string[] = [];
+  if (
+    json !== null &&
+    typeof json === 'object' &&
+    Array.isArray((json as { ignore?: unknown }).ignore)
+  ) {
+    const ignore = (json as { ignore: unknown[] }).ignore.filter((entry) => {
+      if (typeof entry !== 'string') return true;
+      const why = unusableDenyPath(entry);
+      if (why !== null)
+        warnings.push(`ignore: left out the glob ${JSON.stringify(entry)}, which ${why}`);
+      return why === null;
+    });
+    json = { ...(json as Record<string, unknown>), ignore };
   }
   const parsed = ProjectConfigSchema.safeParse(json);
   if (!parsed.success) {
@@ -400,5 +520,5 @@ export function loadProjectConfig(path: string): LoadedProjectConfig {
       `invalid project config: ${z.prettifyError(parsed.error)}`,
     );
   }
-  return { config: parsed.data, hash: sha256(raw) };
+  return { config: parsed.data, hash: sha256(raw), warnings };
 }

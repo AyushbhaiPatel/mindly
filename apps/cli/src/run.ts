@@ -123,12 +123,25 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
   config
     .command('set')
     .argument('<key>', 'dotted key, e.g. hooks.timeoutMs')
-    .argument('<value>', 'JSON value or plain text')
+    .argument(
+      '<value>',
+      'JSON value or plain text; a list takes one item as plain text, several as a JSON array: \'["a","b"]\'',
+    )
     .description('Validate and write one setting')
     .action(
       act(
         (key: string, value: string) => async (out) =>
           (await import('./commands/config.js')).configSet(out, key, value),
+      ),
+    );
+  config
+    .command('unset')
+    .argument('<key>', 'dotted key, e.g. standup.time')
+    .description('Remove one setting, so it goes back to its default (or off)')
+    .action(
+      act(
+        (key: string) => async (out) =>
+          (await import('./commands/config.js')).configUnset(out, key),
       ),
     );
   config
@@ -142,6 +155,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .command('start')
     .description('Start the daemon (in the background unless --foreground)')
     .option('--foreground', 'run in this terminal')
+    .option(
+      '--force',
+      'start even when the recorded process holds its port without answering (that process is left alone)',
+    )
     .action(
       act((o: object) => async (out) => (await import('./commands/daemon.js')).daemonStart(out, o)),
     );

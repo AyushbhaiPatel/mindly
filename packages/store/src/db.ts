@@ -26,7 +26,7 @@ export function openDatabase(path: string, options: OpenOptions = {}): Db {
 
   const db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
   db.exec(`PRAGMA busy_timeout = ${Math.trunc(options.busyTimeoutMs ?? 5000)}`);
-  if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL');
+  if (path !== ':memory:') enableWal(db);
   db.exec('PRAGMA synchronous = NORMAL');
   db.exec('PRAGMA foreign_keys = ON');
   // Schema objects (triggers, views) must not be able to call application-defined functions.
@@ -40,18 +40,50 @@ export function schemaVersion(db: Db): number {
   return row?.user_version ?? 0;
 }
 
+const WAL_ATTEMPTS = 50;
+const WAL_RETRY_MS = 20;
+
+/**
+ * Switches the database to WAL. On a brand-new file this needs an exclusive lock that SQLite does
+ * not wait for (`busy_timeout` is not consulted), so a process opening the database at the same
+ * moment as another gets "database is locked" once. The switch is retried for about a second.
+ */
+function enableWal(db: Db): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      db.exec('PRAGMA journal_mode = WAL');
+      return;
+    } catch (err) {
+      if (attempt >= WAL_ATTEMPTS || !isBusy(err)) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, WAL_RETRY_MS);
+    }
+  }
+}
+
+function isBusy(err: unknown): boolean {
+  const code = (err as { errcode?: unknown } | null)?.errcode;
+  // SQLITE_BUSY (5) and SQLITE_LOCKED (6), including their extended codes.
+  if (typeof code === 'number' && ((code & 0xff) === 5 || (code & 0xff) === 6)) return true;
+  return err instanceof Error && /database (table )?is locked/i.test(err.message);
+}
+
 export function migrate(db: Db): void {
-  const current = schemaVersion(db);
   const latest = MIGRATIONS.length;
-  if (current > latest) {
-    throw new MindlyError(
+  const tooNew = (current: number): MindlyError =>
+    new MindlyError(
       'unavailable',
       `database schema v${current} is newer than this Mindly (v${latest}); upgrade Mindly`,
     );
-  }
-  for (let v = current; v < latest; v++) {
+  const seen = schemaVersion(db);
+  if (seen > latest) throw tooNew(seen);
+  for (let v = seen; v < latest; v++) {
     const sql = MIGRATIONS[v] as string;
     transaction(db, () => {
+      // Another process may have applied this step while we waited for the write lock: the
+      // version is only trustworthy once we hold it.
+      const current = schemaVersion(db);
+      if (current > latest) throw tooNew(current);
+      if (current !== v) return;
       db.exec(sql);
       db.exec(`PRAGMA user_version = ${v + 1}`);
     });

@@ -1,4 +1,5 @@
 export * from './config.js';
+export * from './daemon-probe.js';
 export * from './domain.js';
 export * from './errors.js';
 export * from './glob.js';

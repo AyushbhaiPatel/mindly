@@ -45,6 +45,9 @@ describe('isMindlyStatusLine', () => {
     ['mindly statusline | tee x', false],
     ['~/.claude/statusline.sh', false],
     ['npx ccstatusline@latest', false],
+    ['npx --yes mindly-cli@0.4.0 statusline', true],
+    ['npx --yes mindly-cli@latest statusline', true],
+    ['npx --yes ccstatusline@latest statusline', false],
     ['my-tool statusline', false],
     ['statusline', false],
   ])('%s -> %s', (command, expected) => {

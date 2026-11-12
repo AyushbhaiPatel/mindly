@@ -39,7 +39,7 @@ the CLI. All bodies are JSON (`application/json`, max 256 KB). All ids are UUIDv
 
 | Method | Path                                                                             | Response                                                                                                          |
 | ------ | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| GET    | `/api/health`                                                                    | `{ ok: true, version }`                                                                                           |
+| GET    | `/api/health`                                                                    | `{ ok: true, version, pid, home }` (`home`: a hash identifying the daemon's `MINDLY_HOME`, never the path)        |
 | GET    | `/api/projects`                                                                  | `Project[]`                                                                                                       |
 | GET    | `/api/projects/:projectId/overview`                                              | `Overview` (below)                                                                                                |
 | GET    | `/api/projects/:projectId/sessions?limit`                                        | `Session[]` (most recent first)                                                                                   |

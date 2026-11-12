@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { z } from 'zod';
-import { shellJoin } from '../shared/command.js';
+import { isPackageRunnerLauncher, shellJoin, shellWords } from '../shared/command.js';
 import { parseJsonConfig, readConfigText } from '../shared/config-files.js';
 import { isRecord, MAX_PATH_CHARS } from '../shared/payload.js';
 
@@ -23,36 +23,10 @@ export function statusLineSetting(command: readonly string[]): Record<string, un
 }
 
 /**
- * Splits a command into words when it uses only the quoting {@link shellJoin} produces (bare safe
- * characters and single-quoted segments). Returns null for anything else: pipes, redirections,
- * variables, other quoting.
- */
-function shellWords(command: string): string[] | null {
-  const words: string[] = [];
-  const re = /\s+|[A-Za-z0-9_@%+=:,./-]+|'[^']*'|\\'/gy;
-  let word: string | null = null;
-  let consumed = 0;
-  for (const m of command.matchAll(re)) {
-    if (m.index !== consumed) return null;
-    consumed += m[0].length;
-    const token = m[0];
-    if (/^\s/.test(token)) {
-      if (word !== null) words.push(word);
-      word = null;
-    } else {
-      const text = token === "\\'" ? "'" : token.startsWith("'") ? token.slice(1, -1) : token;
-      word = (word ?? '') + text;
-    }
-  }
-  if (consumed !== command.length) return null;
-  if (word !== null) words.push(word);
-  return words;
-}
-
-/**
  * True when a `statusLine` settings value is exactly one Mindly writes: `<launcher> statusline`
  * and nothing else, where the launcher is `command` (the current one) or one Mindly may have
- * written before: a `mindly` executable, or Node running the CLI's `dist/main.js`. A user's
+ * written before: a `mindly` executable, Node running the CLI's `dist/main.js`, or a package
+ * runner asked for `mindly-cli` at any version. A user's
  * own command that merely calls `mindly statusline` (in a pipe, a script, with extra arguments)
  * is not Mindly's.
  */
@@ -66,6 +40,7 @@ export function isMindlyStatusLine(value: unknown, command?: readonly string[]):
   if (words === null || words.at(-1) !== 'statusline') return false;
   const base = (p: string) => p.split(/[\\/]/).pop() ?? '';
   const launcher = words.slice(0, -1);
+  if (isPackageRunnerLauncher(launcher)) return true;
   if (launcher.length === 1) return /^mindly(\.cmd|\.exe)?$/.test(base(launcher[0] as string));
   return (
     launcher.length === 2 &&

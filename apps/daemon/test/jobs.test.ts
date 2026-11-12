@@ -451,7 +451,10 @@ describe('maintenance and failover', () => {
     const s = seedSession(t.daemon, repo());
     const run = createShadowMergeRun(t.daemon.jobs, s.projectId, 'user');
     await t.daemon.stop();
-    t = await testDaemon({ home });
+    t = await testDaemon({ home, port: 0 });
+    // Not before it holds the port: until then another daemon may still own these runs.
+    expect(t.daemon.mindly.store.runs.get(run.id).status).toBe('queued');
+    await t.daemon.listen();
     expect(t.daemon.mindly.store.runs.get(run.id).status).toBe('cancelled');
   });
 });

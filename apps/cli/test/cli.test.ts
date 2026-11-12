@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   cpSync,
@@ -11,13 +11,26 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { once } from 'node:events';
+import { createServer, type AddressInfo, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { codename, shortId } from '@mindly/core';
+import { codename, MINDLY_VERSION, shortId } from '@mindly/core';
 import { openMindly } from '@mindly/runtime';
 import { diffSummary, runHook, styleFor } from '../src/index.js';
+import { EXPORT_QUERIES } from '../src/commands/data.js';
 import { ToolNameScan } from '../src/io.js';
 import { cli, fixture, sandbox, tempDir, testIo, write, type Sandbox } from './helpers.js';
+
+/** A port on 127.0.0.1 that nothing listens on right now. */
+async function freePort(): Promise<number> {
+  const probe = createServer().listen(0, '127.0.0.1');
+  await once(probe, 'listening');
+  const port = (probe.address() as AddressInfo).port;
+  probe.close();
+  await once(probe, 'close');
+  return port;
+}
 
 function json<T = Record<string, unknown>>(text: string): T {
   return JSON.parse(text) as T;
@@ -542,6 +555,61 @@ describe('hook', () => {
 const BUILT_MAIN = join(import.meta.dirname, '..', 'dist', 'main.js');
 
 describe.skipIf(!existsSync(BUILT_MAIN))('built binary', () => {
+  it.skipIf(process.platform === 'win32')(
+    'daemon start interrupted while it waits leaves no file behind',
+    async () => {
+      const sb = sandbox();
+      const port = await freePort();
+      expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+      const logs = join(sb.mindlyHome, 'logs');
+      const leftovers = (): string[] => readdirSync(logs).filter((f) => f.endsWith('.err'));
+      // A service that says it is shutting down: the start waits for it.
+      const old = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+        stdio: 'ignore',
+      });
+      await once(old, 'spawn');
+      writeFileSync(
+        join(sb.mindlyHome, 'daemon.json'),
+        JSON.stringify({
+          pid: old.pid,
+          port,
+          startedAt: 1,
+          version: '0.0.1',
+          stoppingAt: Date.now(),
+        }),
+      );
+      const start = spawn(process.execPath, [BUILT_MAIN, 'daemon', 'start'], {
+        env: sb.env,
+        cwd: sb.repo,
+        stdio: 'ignore',
+      });
+      try {
+        await new Promise((r) => setTimeout(r, 1500));
+        expect(start.exitCode).toBeNull();
+        expect(leftovers()).toEqual([]);
+        start.kill('SIGINT');
+        await once(start, 'exit');
+        expect(leftovers()).toEqual([]);
+      } finally {
+        start.kill('SIGKILL');
+        // The service the interrupted start launched comes up once the old one is gone: stop it.
+        old.kill('SIGKILL');
+        await once(old, 'exit');
+        for (let i = 0; i < 100; i++) {
+          const status = json<{ running: boolean }>(
+            (await cli(sb, ['daemon', 'status', '--json'])).stdout,
+          );
+          if (status.running) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        await cli(sb, ['daemon', 'stop']);
+      }
+      expect(existsSync(join(sb.mindlyHome, 'daemon.json'))).toBe(false);
+      expect(leftovers()).toEqual([]);
+    },
+    60_000,
+  );
+
   it('cold `mindly hook` process latency stays well under a second', async () => {
     const sb = sandbox();
     // Something to say, so SessionStart answers with context.
@@ -940,6 +1008,208 @@ describe('doctor, config, export, misc', () => {
     expect((await cli(sb, ['config', 'path'])).stdout.trim()).toBe(file);
   });
 
+  it('config unsets optional settings and takes text and lists as typed', async () => {
+    const sb = sandbox();
+    const file = join(sb.mindlyHome, 'config.json');
+    // A setting that exists but is not set is not "no such setting".
+    const unset = await cli(sb, ['config', 'get', 'llm.model']);
+    expect(unset.code).toBe(0);
+    expect(unset.stdout.trim()).toBe('null');
+    expect((await cli(sb, ['config', 'get', 'llm.nope'])).code).toBe(1);
+
+    expect((await cli(sb, ['config', 'set', 'standup.time', '09:30'])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'hooks.timeoutMs', '1000'])).code).toBe(0);
+    const off = await cli(sb, ['config', 'unset', 'standup.time']);
+    expect(off.code).toBe(0);
+    expect(off.stdout).toContain('standup.time is no longer set.');
+    expect(json(readFileSync(file, 'utf8'))).toEqual({ hooks: { timeoutMs: 1000 } });
+    const back = await cli(sb, ['config', 'unset', 'hooks.timeoutMs']);
+    expect(back.stdout).toContain('hooks.timeoutMs is back to its default: 1500');
+    expect(json(readFileSync(file, 'utf8'))).toEqual({});
+    expect((await cli(sb, ['config', 'unset', 'hooks.timeoutMs'])).stdout).toContain(
+      'nothing changed',
+    );
+    expect((await cli(sb, ['config', 'unset', 'hooks.nope'])).code).toBe(1);
+
+    // Text stays text, lists take a,b or JSON.
+    expect((await cli(sb, ['config', 'set', 'llm.model', '4'])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'notify.triggers', 'standup'])).code).toBe(0);
+    expect(
+      (await cli(sb, ['config', 'set', 'failover.order', '["codex","claude-code"]'])).code,
+    ).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'redaction.denyPaths', '["a,b", "c"]'])).code).toBe(0);
+    expect(json(readFileSync(file, 'utf8'))).toEqual({
+      llm: { model: '4' },
+      notify: { triggers: ['standup'] },
+      failover: { order: ['codex', 'claude-code'] },
+      redaction: { denyPaths: ['a,b', 'c'] },
+    });
+    expect((await cli(sb, ['config', 'set', 'notify.triggers', 'standup,nope'])).code).toBe(1);
+  });
+
+  it('config clears a list for a blank value and refuses one with spaces at its ends', async () => {
+    const sb = sandbox();
+    const file = join(sb.mindlyHome, 'config.json');
+    for (const empty of ['', ' ', '""']) {
+      expect((await cli(sb, ['config', 'set', 'redaction.extraPatterns', empty])).code).toBe(0);
+      expect(json(readFileSync(file, 'utf8'))).toEqual({ redaction: { extraPatterns: [] } });
+    }
+    const spaced = await cli(sb, ['config', 'set', 'redaction.extraPatterns', '  ACME-\\d{6} ']);
+    expect(spaced.code).toBe(1);
+    expect(spaced.stderr).toContain('starts or ends with a space');
+    const glob = await cli(sb, ['config', 'set', 'redaction.denyPaths', 'config/*.secret ']);
+    expect(glob.code).toBe(1);
+    expect(glob.stderr).toContain('starts or ends with a space, so it matches no file');
+    // A pattern that only looks around covers nothing: refused with that reason.
+    const look = await cli(sb, ['config', 'set', 'redaction.extraPatterns', '(?=password)']);
+    expect(look.code).toBe(1);
+    expect(look.stderr).toContain('matches no text');
+    // Spaces at the ends are a typing mistake: refused, with what to write instead.
+    expect(json(readFileSync(file, 'utf8'))).toEqual({ redaction: { extraPatterns: [] } });
+    // Patterns that would redact between characters are refused, with the reason.
+    for (const pattern of ['a*', '(?:)', 'x?', '\\b', '(?=.)', '(?<=a)', '(?=x)']) {
+      const r = await cli(sb, ['config', 'set', 'redaction.extraPatterns', pattern]);
+      expect(r.code, pattern).toBe(1);
+      expect(r.stderr).toMatch(/can match empty text|matches no text/);
+    }
+    expect((await cli(sb, ['config', 'set', 'redaction.extraPatterns', '\\bsecret\\b'])).code).toBe(
+      0,
+    );
+    const broken = await cli(sb, ['config', 'set', 'redaction.denyPaths', 'config/{prod']);
+    expect(broken.code).toBe(1);
+    expect(broken.stderr).toContain('is not a valid glob');
+    expect(
+      (await cli(sb, ['config', 'set', 'redaction.extraPatterns', JSON.stringify(['ok-\\d+', ''])]))
+        .code,
+    ).toBe(1);
+    // Nothing in the list redacts what it should not.
+    expect(
+      (await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm not npm'])).code,
+    ).toBe(0);
+    expect((await cli(sb, ['memory', 'list'])).stdout).toContain('Use pnpm not npm');
+  });
+
+  it('a bad hand-edited entry does not block changing other settings', async () => {
+    const sb = sandbox();
+    mkdirSync(sb.mindlyHome, { recursive: true });
+    const file = join(sb.mindlyHome, 'config.json');
+    writeFileSync(file, JSON.stringify({ redaction: { extraPatterns: ['(?i)secret'] } }));
+    const set = await cli(sb, ['config', 'set', 'hooks.timeoutMs', '1000']);
+    expect(set.code).toBe(0);
+    expect(set.stderr).toContain('ignored the pattern "(?i)secret"');
+    const deny = await cli(sb, ['config', 'set', 'redaction.denyPaths', '["build/**"]']);
+    expect(deny.code).toBe(0);
+    expect((await cli(sb, ['config', 'unset', 'hooks.timeoutMs'])).code).toBe(0);
+    // The file keeps the user's entry as written; only the key that was set changed.
+    expect(json(readFileSync(file, 'utf8'))).toEqual({
+      redaction: { extraPatterns: ['(?i)secret'], denyPaths: ['build/**'] },
+    });
+    // The key that holds the bad entry is fixed the same way, strictly.
+    const still = await cli(sb, ['config', 'set', 'redaction.extraPatterns', '(?i)secret']);
+    expect(still.code).toBe(1);
+    expect(still.stderr).toContain('is not a valid regular expression');
+    const fixed = await cli(sb, ['config', 'set', 'redaction.extraPatterns', '[Ss]ecret-\\d+']);
+    expect(fixed.code).toBe(0);
+    expect(fixed.stderr).toBe('');
+    expect((await cli(sb, ['config', 'get', 'redaction'])).stderr).toBe('');
+  });
+
+  it('a bad ignore glob in the project config is left out, and doctor says so', async () => {
+    const sb = sandbox();
+    // Doctor looks at the project once Mindly's data folder exists.
+    expect((await cli(sb, ['memory', 'add', '--kind', 'fact', '--title', 'x'])).code).toBe(0);
+    write(sb.repo, '.mindly/config.json', JSON.stringify({ ignore: ['config/{prod', 'dist/**'] }));
+    write(sb.repo, 'src/a.ts', 'export const a = 1;\n');
+    const doctor = json<{ checks: { name: string; status: string; detail: string }[] }>(
+      (await cli(sb, ['doctor', '--json'])).stdout,
+    ).checks;
+    expect(doctor.find((c) => c.name === 'project-config')).toMatchObject({
+      status: 'warn',
+      detail: expect.stringContaining('left out the glob "config/{prod"'),
+    });
+    expect(doctor.find((c) => c.name === 'project')?.detail).not.toContain('invalid');
+    // Path checks keep working.
+    const why = await cli(sb, ['why', 'src/a.ts']);
+    expect(why.stderr).not.toMatch(/unterminated/i);
+  });
+
+  it('a hand-edited empty pattern is ignored with a warning, not applied', async () => {
+    const sb = sandbox();
+    mkdirSync(sb.mindlyHome, { recursive: true });
+    writeFileSync(
+      join(sb.mindlyHome, 'config.json'),
+      JSON.stringify({
+        redaction: { extraPatterns: ['', 'ACME-\\d{6}'], denyPaths: ['config/*.secret '] },
+      }),
+    );
+    expect(
+      (await cli(sb, ['memory', 'add', '--kind', 'rule', '--title', 'Use pnpm not npm'])).code,
+    ).toBe(0);
+    expect((await cli(sb, ['memory', 'list'])).stdout).toContain('Use pnpm not npm');
+    const get = await cli(sb, ['config', 'get', 'redaction.extraPatterns']);
+    expect(get.code).toBe(0);
+    expect(json(get.stdout)).toEqual(['ACME-\\d{6}']);
+    expect(get.stderr).toContain('ignored the pattern ""');
+    expect(get.stderr).toContain('ignored the glob "config/*.secret "');
+    const doctor = await cli(sb, ['doctor', '--json']);
+    const checks = json<{ checks: { name: string; status: string; detail: string }[] }>(
+      doctor.stdout,
+    ).checks;
+    expect(checks.find((c) => c.name === 'config')).toMatchObject({
+      status: 'warn',
+      detail: expect.stringContaining('ignored the pattern ""'),
+    });
+    // Unsetting a list fixes that list; the other one is still reported until it is fixed too.
+    const unset = await cli(sb, ['config', 'unset', 'redaction.extraPatterns']);
+    expect(unset.code).toBe(0);
+    expect(unset.stderr).toContain('ignored the glob "config/*.secret "');
+    expect(unset.stderr).not.toContain('ignored the pattern');
+    expect((await cli(sb, ['config', 'unset', 'redaction.denyPaths'])).code).toBe(0);
+    expect((await cli(sb, ['config', 'get', 'redaction'])).stderr).toBe('');
+  });
+
+  it('config keeps a list item that contains commas whole', async () => {
+    const sb = sandbox();
+    const file = join(sb.mindlyHome, 'config.json');
+    const pattern = 'ACME-[A-Z0-9]{20,40}';
+    const glob = 'config/{prod,staging}.json';
+    expect((await cli(sb, ['config', 'set', 'redaction.extraPatterns', pattern])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'redaction.denyPaths', glob])).code).toBe(0);
+    expect(json(readFileSync(file, 'utf8'))).toEqual({
+      redaction: { extraPatterns: [pattern], denyPaths: [glob] },
+    });
+    expect(json((await cli(sb, ['config', 'get', 'redaction.extraPatterns'])).stdout)).toEqual([
+      pattern,
+    ]);
+    expect(json((await cli(sb, ['config', 'get', 'redaction.denyPaths'])).stdout)).toEqual([glob]);
+    // The glob works as one: the files it names are refused, and nothing else breaks.
+    write(sb.repo, 'config/prod.json', '{}');
+    const why = await cli(sb, ['why', 'config/prod.json']);
+    expect(why.stderr).not.toContain('Unterminated');
+    // Several items come as a JSON array; unset takes the whole list away.
+    expect(
+      (await cli(sb, ['config', 'set', 'redaction.denyPaths', JSON.stringify([glob, 'a,b'])])).code,
+    ).toBe(0);
+    expect(json(readFileSync(file, 'utf8'))).toMatchObject({
+      redaction: { denyPaths: [glob, 'a,b'] },
+    });
+    expect((await cli(sb, ['config', 'unset', 'redaction.denyPaths'])).code).toBe(0);
+    expect(json((await cli(sb, ['config', 'get', 'redaction.denyPaths'])).stdout)).toEqual([]);
+  });
+
+  it('config set says why it will not read a linked config file', async () => {
+    const sb = sandbox();
+    mkdirSync(sb.mindlyHome, { recursive: true });
+    const real = join(tempDir('mindly-cli-cfg-'), 'config.json');
+    writeFileSync(real, '{}');
+    symlinkSync(real, join(sb.mindlyHome, 'config.json'));
+    const r = await cli(sb, ['config', 'set', 'hooks.timeoutMs', '1000']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('not a regular file');
+    expect(r.stderr).not.toContain('not valid JSON');
+    expect(readFileSync(real, 'utf8')).toBe('{}');
+  });
+
   it('export writes owner-only JSON and refuses to overwrite', async () => {
     const sb = sandbox();
     await cli(sb, ['memory', 'add', '--kind', 'fact', '--title', 'Exported fact']);
@@ -954,6 +1224,83 @@ describe('doctor, config, export, misc', () => {
     expect(data.memories.map((m) => m.title)).toEqual(['Exported fact']);
     expect((await cli(sb, ['export', '--out', 'mindly-export.json'])).code).toBe(1);
     expect((await cli(sb, ['export', '--out', 'mindly-export.json', '--force'])).code).toBe(0);
+  });
+
+  it('export covers every table that holds project data', async () => {
+    const sb = sandbox();
+    const mindly = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
+    let pid: string;
+    let sessionId: string;
+    try {
+      const db = mindly.store.db;
+      const tables = (
+        db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'memories_fts%'",
+          )
+          .all() as { name: string }[]
+      ).map((t) => t.name);
+      const exported = new Set(
+        EXPORT_QUERIES.map(([, sql]) => /^SELECT \* FROM (\w+) /.exec(sql)?.[1] ?? ''),
+      );
+      // `projects` is exported as the `project` object.
+      expect(tables.filter((t) => t !== 'projects' && !exported.has(t))).toEqual([]);
+
+      pid = mindly.store.projects.upsertByRoot(sb.repo, 'repo').id;
+      db.prepare(
+        `INSERT INTO saves (id, project_id, kind, status, title, session_ids, paths, evidence, fingerprint, refs, created_at)
+         VALUES ('s1', ?, 'rule_enforced', 'caught', 'SAVE-MARKER', '[]', '[]', '[]', 'f', '{}', 1)`,
+      ).run(pid);
+      mindly.store.kv.set(`standup:last:${pid}`, 123);
+      mindly.store.kv.set('other:state', 1);
+      // Keys that name one of the project's records instead of the project.
+      const session = mindly.store.sessions.upsert({
+        projectId: pid,
+        agentKind: 'codex',
+        externalId: 'cx-export',
+        worktree: sb.repo,
+        branch: 'main',
+        transcriptPath: null,
+      }).session;
+      db.prepare(
+        `INSERT INTO handoffs (id, project_id, from_session_id, to_agent_kind, reason, summary, packet, status, created_at)
+         VALUES ('h-export-1', ?, ?, 'claude-code', 'manual', 's', '{}', 'pending', 1)`,
+      ).run(pid, session.id);
+      db.prepare(
+        `INSERT INTO splits (id, project_id, slug, goal, status, task_id, base_commit, worktree_root, planned_by, created_at, updated_at)
+         VALUES ('sp-export-1', ?, 'x', 'g', 'active', 't', 'c', '/w', 'user', 1, 1)`,
+      ).run(pid);
+      sessionId = session.id;
+      mindly.store.kv.set(`failover.detected:${session.id}`, 'e');
+      mindly.store.kv.set('failover.launched:h-export-1', 1);
+      mindly.store.kv.set('split.conflicts:sp-export-1', []);
+    } finally {
+      mindly.close();
+    }
+    const data = json<{ saves: { title: string }[]; state: { key: string }[] }>(
+      (await cli(sb, ['export'])).stdout,
+    );
+    expect(data.saves.map((r) => r.title)).toEqual(['SAVE-MARKER']);
+    expect(data.state.map((r) => r.key).sort()).toEqual(
+      [
+        'failover.launched:h-export-1',
+        `failover.detected:${sessionId}`,
+        'split.conflicts:sp-export-1',
+        `standup:last:${pid}`,
+      ].sort(),
+    );
+
+    // Forgetting the project removes its bookkeeping rows too, and nobody else's.
+    expect((await cli(sb, ['forget', '--project', '--yes'])).code).toBe(0);
+    const after = openMindly({ env: sb.env, disableNotify: true, disableLlm: true });
+    try {
+      const keys = after.store.db.prepare('SELECT key FROM kv ORDER BY key').all() as {
+        key: string;
+      }[];
+      expect(keys.map((k) => k.key)).toEqual(['other:state']);
+    } finally {
+      after.close();
+    }
   });
 
   it('forget --project deletes the project data after confirmation', async () => {
@@ -993,6 +1340,267 @@ describe('doctor, config, export, misc', () => {
     expect(long.code).toBe(2);
     expect(long.stderr).toContain('at most 300 characters');
   });
+
+  it('daemon status and stop point to start when daemon.json outlived its daemon', async () => {
+    const sb = sandbox();
+    mkdirSync(sb.mindlyHome, { recursive: true });
+    const stateFile = join(sb.mindlyHome, 'daemon.json');
+    // The recorded PID belongs to a live program that is not a Mindly daemon.
+    const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+      stdio: 'ignore',
+    });
+    await once(bystander, 'spawn');
+    // On the recorded port: nothing at all, then a program that resets what it does not know.
+    const closed = createServer().listen(0, '127.0.0.1');
+    await once(closed, 'listening');
+    const closedPort = (closed.address() as AddressInfo).port;
+    closed.close();
+    await once(closed, 'close');
+    const resetting = createServer((socket) => socket.resetAndDestroy()).listen(0, '127.0.0.1');
+    await once(resetting, 'listening');
+    try {
+      for (const port of [closedPort, (resetting.address() as AddressInfo).port]) {
+        writeFileSync(
+          stateFile,
+          JSON.stringify({ pid: bystander.pid, port, startedAt: 1, version: '0.0.1' }),
+        );
+        const status = await cli(sb, ['daemon', 'status']);
+        expect(status.code).toBe(0);
+        expect(status.stdout).toContain("Mindly's background service is not running.");
+        expect(status.stdout).toContain('left over from an earlier run');
+        expect(status.stdout).toContain('mindly daemon start');
+        expect(status.stdout).not.toContain('mindly daemon stop');
+        expect(status.stdout).not.toContain('kill');
+        const stop = await cli(sb, ['daemon', 'stop']);
+        expect(stop.code).toBe(0);
+        expect(stop.stdout).toContain('nothing to stop');
+        expect(stop.stdout).toContain('mindly daemon start replaces it');
+      }
+      // Nothing was signalled.
+      await new Promise((r) => setTimeout(r, 100));
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
+    } finally {
+      resetting.close();
+      bystander.kill('SIGKILL');
+    }
+  });
+
+  it('a process that holds the port without answering is neither signalled nor replaced', async () => {
+    const sb = sandbox();
+    // An ephemeral port for the service this test starts in the end.
+    expect((await cli(sb, ['config', 'set', 'daemon.port', '0'])).code).toBe(0);
+    const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+      stdio: 'ignore',
+    });
+    await once(bystander, 'spawn');
+    // Accepts connections and never answers: a busy service, or any other program.
+    const held: Socket[] = [];
+    const server = createServer((socket) => held.push(socket)).listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+    const stateFile = join(sb.mindlyHome, 'daemon.json');
+    const state = JSON.stringify({ pid: bystander.pid, port, startedAt: 1, version: '0.0.1' });
+    writeFileSync(stateFile, state);
+    let started = false;
+    try {
+      const status = await cli(sb, ['daemon', 'status']);
+      expect(status.code).toBe(0);
+      expect(status.stdout).toContain(`holds port ${port} and is not answering`);
+      expect(status.stdout).toContain('busy, or another program');
+      expect(status.stdout).toContain('mindly daemon start --force');
+      expect(status.stdout).not.toContain('kill');
+      expect(status.stdout).not.toContain('left over');
+
+      const stop = await cli(sb, ['daemon', 'stop']);
+      expect(stop.code).toBe(1);
+      expect(stop.stderr).toContain('is not answering');
+      expect(stop.stderr).not.toContain('kill');
+      const start = await cli(sb, ['daemon', 'start']);
+      expect(start.code).toBe(1);
+      expect(start.stderr).toContain('busy, or another program');
+      expect(start.stderr).toContain('mindly daemon start --force');
+      expect(readFileSync(stateFile, 'utf8')).toBe(state);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
+
+      // Asked to, a new service starts; the recorded process is still left alone.
+      const forced = await cli(sb, ['daemon', 'start', '--force']);
+      started = forced.code === 0;
+      expect(forced.stderr).toBe('');
+      expect(forced.code).toBe(0);
+      const now = json<{ pid: number; port: number }>(readFileSync(stateFile, 'utf8'));
+      expect(now.pid).not.toBe(bystander.pid);
+      expect(now.port).not.toBe(port);
+      expect(
+        json<{ running: boolean }>((await cli(sb, ['daemon', 'status', '--json'])).stdout),
+      ).toMatchObject({ running: true });
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
+    } finally {
+      if (started) await cli(sb, ['daemon', 'stop']);
+      for (const socket of held) socket.destroy();
+      server.close();
+      bystander.kill('SIGKILL');
+    }
+    expect(existsSync(stateFile)).toBe(false);
+  }, 60_000);
+
+  it("another home's service on the recorded port is not this home's: status, stop, start", async () => {
+    const other = sandbox();
+    const sb = sandbox();
+    const port = await freePort();
+    expect((await cli(other, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+    expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+    const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+      stdio: 'ignore',
+    });
+    await once(bystander, 'spawn');
+    let started = false;
+    try {
+      const up = await cli(other, ['daemon', 'start']);
+      started = up.code === 0;
+      expect(up.stderr).toBe('');
+      expect(up.code).toBe(0);
+      // This home's file is left over: a live PID that is not Mindly's, and the shared port.
+      writeFileSync(
+        join(sb.mindlyHome, 'daemon.json'),
+        JSON.stringify({ pid: bystander.pid, port, startedAt: 1, version: '0.0.1' }),
+      );
+      const status = await cli(sb, ['daemon', 'status']);
+      expect(status.stdout).toContain("Mindly's background service is not running.");
+      expect(status.stdout).toContain('used by the Mindly service of another home');
+      expect(status.stdout).toContain('mindly config set daemon.port');
+      expect(
+        json<{ running: boolean }>((await cli(sb, ['daemon', 'status', '--json'])).stdout).running,
+      ).toBe(false);
+
+      const stop = await cli(sb, ['daemon', 'stop']);
+      expect(stop.code).toBe(0);
+      expect(stop.stdout).toContain('nothing to stop');
+      expect(stop.stdout).toContain('left alone');
+      await new Promise((r) => setTimeout(r, 100));
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
+      expect(
+        json<{ running: boolean }>((await cli(other, ['daemon', 'status', '--json'])).stdout)
+          .running,
+      ).toBe(true);
+
+      // Two homes cannot share a port: the start says so, on the terminal and in the log.
+      const start = await cli(sb, ['daemon', 'start']);
+      expect(start.code).toBe(1);
+      expect(start.stderr).toContain("already in use by another Mindly home's daemon");
+      expect(start.stderr).toContain('mindly config set daemon.port <port>');
+      expect(readFileSync(join(sb.mindlyHome, 'logs', 'mindly.log'), 'utf8')).toContain(
+        'already in use',
+      );
+      expect(readdirSync(join(sb.mindlyHome, 'logs')).filter((f) => f.endsWith('.err'))).toEqual(
+        [],
+      );
+    } finally {
+      if (started) await cli(other, ['daemon', 'stop']);
+      bystander.kill('SIGKILL');
+    }
+  }, 60_000);
+
+  it('daemon start says why the service did not start when the port is taken', async () => {
+    const sb = sandbox();
+    const taken = createServer((socket) => socket.end()).listen(0, '127.0.0.1');
+    await once(taken, 'listening');
+    const port = (taken.address() as AddressInfo).port;
+    try {
+      expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+      const start = await cli(sb, ['daemon', 'start']);
+      expect(start.code).toBe(1);
+      expect(start.stderr).toContain(`port ${port} is already in use by another program`);
+      expect(start.stderr).toContain('mindly config set daemon.port <port>');
+      expect(readFileSync(join(sb.mindlyHome, 'logs', 'mindly.log'), 'utf8')).toContain(
+        `port ${port} is already in use`,
+      );
+      expect(existsSync(join(sb.mindlyHome, 'daemon.json'))).toBe(false);
+    } finally {
+      taken.close();
+    }
+  }, 60_000);
+
+  it('says when the running service is an older version than the CLI', async () => {
+    const sb = sandbox();
+    const port = await freePort();
+    expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+    let started = false;
+    try {
+      const up = await cli(sb, ['daemon', 'start']);
+      started = up.code === 0;
+      expect(up.code).toBe(0);
+      const file = join(sb.mindlyHome, 'daemon.json');
+      // Same version: nothing to say.
+      expect((await cli(sb, ['daemon', 'status'])).stdout).not.toContain('restart it');
+      // The service kept running through an upgrade of the CLI.
+      const state = json<Record<string, unknown>>(readFileSync(file, 'utf8'));
+      writeFileSync(file, JSON.stringify({ ...state, version: '0.0.1' }));
+      const status = await cli(sb, ['daemon', 'status']);
+      expect(status.stdout).toContain('Version 0.0.1');
+      expect(status.stdout).toContain(`It runs Mindly 0.0.1, and this is ${MINDLY_VERSION}`);
+      expect(status.stdout).toContain('mindly daemon stop');
+      expect(status.stdout).not.toContain('&&');
+      expect(
+        json<{ running: boolean; outdated?: boolean }>(
+          (await cli(sb, ['daemon', 'status', '--json'])).stdout,
+        ),
+      ).toMatchObject({ running: true, outdated: true, cliVersion: MINDLY_VERSION });
+      const again = await cli(sb, ['daemon', 'start']);
+      expect(again.code).toBe(0);
+      expect(again.stdout).toContain('already running');
+      expect(again.stderr).toContain('It runs Mindly 0.0.1');
+      expect(again.stderr).toContain('mindly daemon stop, then mindly daemon start');
+
+      // A service newer than this CLI: restarting it from here would downgrade it.
+      writeFileSync(file, JSON.stringify({ ...state, version: '99.0.0' }));
+      const newer = await cli(sb, ['daemon', 'status']);
+      expect(newer.stdout).toContain(
+        `This mindly is ${MINDLY_VERSION}, older than the service (99.0.0)`,
+      );
+      expect(newer.stdout).toContain('update this mindly');
+      expect(newer.stdout).not.toContain('daemon stop');
+      expect(
+        json<{ outdated?: boolean }>((await cli(sb, ['daemon', 'status', '--json'])).stdout)
+          .outdated,
+      ).toBeUndefined();
+      const newerStart = await cli(sb, ['daemon', 'start']);
+      expect(newerStart.code).toBe(0);
+      expect(newerStart.stderr).toContain('older than the service');
+      expect(newerStart.stderr).not.toContain('daemon stop');
+      writeFileSync(file, JSON.stringify(state));
+    } finally {
+      if (started) await cli(sb, ['daemon', 'stop']);
+    }
+  }, 60_000);
+
+  it('of two daemon starts at once, both succeed and one service runs', async () => {
+    const sb = sandbox();
+    const port = await freePort();
+    expect((await cli(sb, ['config', 'set', 'daemon.port', String(port)])).code).toBe(0);
+    let results: { code: number; stdout: string; stderr: string }[] = [];
+    try {
+      results = await Promise.all([cli(sb, ['daemon', 'start']), cli(sb, ['daemon', 'start'])]);
+      for (const r of results) {
+        expect(r.stderr).toBe('');
+        expect(r.code).toBe(0);
+        expect(r.stdout).toMatch(/Started Mindly's background service|is already running/);
+      }
+      expect(results.filter((r) => r.stdout.includes('Started'))).toHaveLength(1);
+      expect(
+        json<{ running: boolean; state: { port: number } }>(
+          (await cli(sb, ['daemon', 'status', '--json'])).stdout,
+        ),
+      ).toMatchObject({ running: true, state: { port } });
+    } finally {
+      if (results.some((r) => r.code === 0)) await cli(sb, ['daemon', 'stop']);
+    }
+    expect(existsSync(join(sb.mindlyHome, 'daemon.json'))).toBe(false);
+  }, 60_000);
 
   it('exit codes: usage 2, help 0', async () => {
     const sb = sandbox();

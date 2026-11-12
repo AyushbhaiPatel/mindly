@@ -1,3 +1,4 @@
+import { daemonHomeId } from '@mindly/core';
 import { statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -36,7 +37,15 @@ describe('auth matrix', () => {
     const { daemon: d } = await setup();
     const res = await d.app.inject({ method: 'GET', url: '/api/health', headers: { host: HOST } });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, version: expect.any(String) });
+    // It says which daemon it is: its PID and a hash of its home, never the path.
+    const body = res.json() as { home: string };
+    expect(body).toEqual({
+      ok: true,
+      version: expect.any(String),
+      pid: process.pid,
+      home: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
+    expect(body.home).toBe(daemonHomeId(d.paths.home));
   });
 
   it('rejects requests without a token', async () => {

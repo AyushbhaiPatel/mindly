@@ -442,8 +442,8 @@ mindly replay --prompt "…" --agents claude-code,codex
 
 ```bash
 mindly init | uninstall | doctor
-mindly config get|set <key> <value>
-mindly daemon start|stop|status
+mindly config get|set|unset <key> [value]
+mindly daemon start [--force] | stop | status
 mindly export | forget --project
 ```
 
@@ -457,6 +457,9 @@ validates every value:
 ```bash
 mindly config get shadowMerge
 mindly config set checkpoints.keepDays 30
+mindly config set notify.triggers '["agent_blocked","standup"]'   # a list: a JSON array
+mindly config set redaction.extraPatterns 'ACME-[A-Z0-9]{20,40}' # one item as plain text
+mindly config unset standup.time                           # back to the default (here: off)
 ```
 
 | Setting                                 | Default       | What it does                                                     |
