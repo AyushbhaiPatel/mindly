@@ -53,6 +53,11 @@ export interface NormalizedHookEvent {
     /** True for shell-like tools. */
     shell: boolean;
     edits: FileEdit[];
+    /**
+     * True when the tool changes more files than `edits` holds (a patch beyond the adapter's
+     * cap): the list is not the whole write, and must not be checked as if it were.
+     */
+    editsCut?: boolean;
     /** Shell command text, if any (only used for intent and mistake matching; never executed). */
     command: string | null;
     /** post_tool: whether the tool reported failure. */
@@ -73,6 +78,13 @@ export interface HookResult {
   reason: string | null;
   /** Short notice to show the human user (not the model), when the agent supports it. */
   userMessage: string | null;
+  /**
+   * pre_tool only: what the call is warned about under rules the user marked as enforced, as
+   * plain text on one line: a covered file it names or may reach, a shell line that could not be
+   * read fully or to its end, a file with another name. It is part of `context` too; an agent
+   * that takes no context before a tool runs shows this to the person instead.
+   */
+  enforcementWarning?: string | null;
 }
 
 export const EMPTY_HOOK_RESULT: HookResult = Object.freeze({

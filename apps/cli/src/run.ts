@@ -214,8 +214,8 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .requiredOption('--title <title>', 'short title')
     .option('--body <body>', 'details', '')
     .option('--tag <tag>', 'tag (repeatable)', collect)
-    .option('--scope <glob>', 'limit to paths matching this glob (repeatable)', collect)
-    .option('--enforce', 'rules only: deny tool calls that violate it')
+    .option('--scope <glob>', 'limit to a file, a folder or a glob (repeatable)', collect)
+    .option('--enforce', 'rules only: block edits to the --scope paths')
     .option('--pin', 'always include in session context')
     .option('--json', 'machine-readable output')
     .action(
@@ -334,6 +334,19 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .action(
       act((o: object) => async (out) => (await import('./commands/insight.js')).standup(out, o)),
     );
+
+  const notify = program.command('notify').description('Alerts sent to your pager channels');
+  notify
+    .command('test')
+    .description('Send one test notification through every configured channel')
+    .option('--json', 'machine-readable output')
+    .action(
+      act((o: object) => async (out) => (await import('./commands/notify.js')).notifyTest(out, o)),
+    );
+  notify
+    .command('flush', { hidden: true })
+    .description('Send what waits in the pager outbox (started by hooks)')
+    .action(act(() => async (out) => (await import('./commands/notify.js')).notifyFlush(out)));
 
   program
     .command('track')
@@ -496,7 +509,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
   splitCmd
     .command('merge')
     .description('Merge the parts into one integration branch (no push)')
-    .option('--force', 'merge even if some parts are not marked done')
+    .option(
+      '--force',
+      'merge even if some parts are not marked done or have uncommitted work (which is left out)',
+    )
     .option('--json', 'machine-readable output')
     .action(
       act(
@@ -508,6 +524,10 @@ function build(io: CliIo, setCode: (code: number) => void): Command {
     .command('abort')
     .description('Remove the worktrees (and branches) the split created')
     .option('--keep-branches', 'keep the part branches')
+    .option(
+      '--discard',
+      'with --yes, also remove uncommitted work and commits no other branch has (without --yes, the question covers only what it lists)',
+    )
     .option('-y, --yes', 'do not ask')
     .option('--json', 'machine-readable output')
     .action(

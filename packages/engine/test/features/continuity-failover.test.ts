@@ -16,6 +16,7 @@ import {
 } from '../../src/index.js';
 import { event, writeTool } from '../helpers.js';
 import { make, tmp } from './continuity-helpers.js';
+import { notifyOutbox } from '../../src/features/outbox.js';
 
 const SECRET_PROMPT = 'Refactor the zebra-billing module carefully';
 
@@ -98,6 +99,8 @@ describe('rate-limit failover', () => {
         .map((e) => e.payload.signature),
     ).toEqual(['claude.usage_limit_reached']);
 
+    // A hook never waits for the pager: the page waits in the outbox for a sender.
+    await notifyOutbox(mindly).flush();
     expect(sent).toHaveLength(1);
     expect(sent[0]!.trigger).toBe('rate_limited');
     expect(sent[0]!.body).toContain('handoff ready for codex');

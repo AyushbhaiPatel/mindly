@@ -68,7 +68,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await splitOf(d.mindly)
-    .abort(created.split.id)
+    .abort(created.split.id, { discardUncommitted: true })
     .catch(() => undefined);
   await d.stop();
 });
@@ -200,7 +200,7 @@ describe('split endpoints', () => {
       conflictedPaths: ['README.md'],
     });
 
-    await splitOf(d.mindly).abort(created.split.id);
+    await splitOf(d.mindly).abort(created.split.id, { discardUncommitted: true });
     expect((await overview()).split).toBeNull();
   });
 

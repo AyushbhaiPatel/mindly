@@ -1,3 +1,5 @@
+import { lstatSync } from 'node:fs';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import {
   isDeniedPath,
   isMindlyError,
@@ -6,12 +8,17 @@ import {
   resolveInsideRoot,
   sanitizeForContext,
   sanitizeLine,
+  tryResolveInsideRoot,
   MindlyError,
   type Logger,
+  type ProcessLookup,
+  type ProcessRef,
   type Session,
 } from '@mindly/core';
-import { LIVE_WINDOW_MS, type Mindly, type ProjectContext } from '@mindly/engine';
+import type { Mindly, ProjectContext } from '@mindly/engine';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+
+export { SessionResolver } from './session.js';
 
 /** Per-connection settings for the MCP server. */
 export interface McpContext {
@@ -23,68 +30,77 @@ export interface McpContext {
   pid?: number;
   /** Server start time used in the fallback session id. Defaults to the engine clock. */
   startTime?: number;
+  /** Whether a PID is in use; decides if another server's claim on a session holds. */
+  alive?: (pid: number) => boolean;
+  /** Where process facts (parent, start time) come from. Defaults to this machine. */
+  processes?: ProcessLookup;
+  /** The server's own ancestors, nearest first. Defaults to those of this process. */
+  ancestors?: readonly ProcessRef[];
   /** Maximum `mindly_send_message` calls per window. Defaults to 20. */
   messageLimit?: number;
   /** Rate-limit window in milliseconds. Defaults to one minute. */
   messageWindowMs?: number;
 }
 
-/** The project and calling session a tool call operates on. */
-export interface CallScope {
-  project: ProjectContext;
-  session: Session;
+/**
+ * The project as a tool call sees it: `root` is the working tree the server runs in, which is a
+ * linked worktree when the client was started in one. Paths an agent gives, the files read for
+ * evidence and the lines `mindly_why` explains are the ones of that tree, as they are for hooks.
+ */
+export interface ScopedProject extends ProjectContext {
+  /** Root of the main checkout (the project's own root). */
+  mainRoot: string;
+  /** Directory the client started the server in. */
+  cwd: string;
 }
 
-/**
- * Resolves the calling session lazily on every tool call. MCP carries no hook session id, so the
- * caller is the most recently active live session of `agentKind` in the project (sessions created
- * by hooks are preferred over MCP fallback sessions). When there is none, a session with external
- * id `mcp-<pid>-<startTime>` is created (or reactivated).
- */
-export class SessionResolver {
-  private readonly externalId: string;
+/** The project and calling session a tool call operates on. */
+export interface CallScope {
+  project: ScopedProject;
+  /**
+   * The session the call speaks for. On a guess its `currentTaskId` is the server's own current
+   * task, not the other window's.
+   */
+  session: Session;
+  /** Present while the server speaks for a session it only guessed at. */
+  guess?: GuessScope;
+  /**
+   * Present while the server acts as a session it only guessed at that is the one window there
+   * is: tells it that this call wrote task `taskId` (and perhaps made it the session's current
+   * task) in its own right, so that a task it tracks from an earlier guess stays its own.
+   */
+  ownWrite?: (taskId: string) => void;
+}
 
-  constructor(
-    private readonly mindly: Mindly,
-    private readonly ctx: McpContext,
-  ) {
-    const pid = ctx.pid ?? process.pid;
-    const start = ctx.startTime ?? mindly.kernel.clock.now();
-    this.externalId = `mcp-${pid}-${start}`;
-  }
-
-  /** External id used for the fallback session of this server process. */
-  get fallbackExternalId(): string {
-    return this.externalId;
-  }
-
-  async resolve(): Promise<CallScope> {
-    const project = await this.mindly.projects.resolve(this.ctx.cwd);
-    const store = this.mindly.store;
-    const live = store.sessions
-      .listLive(project.project.id, LIVE_WINDOW_MS)
-      .filter((s) => s.agentKind === this.ctx.agentKind && s.status !== 'ended');
-    const preferred = live.find((s) => !s.externalId.startsWith('mcp-')) ?? live[0];
-    if (preferred) {
-      store.sessions.touch(preferred.id);
-      return { project, session: store.sessions.get(preferred.id) };
-    }
-    const existing = store.sessions.findByExternal(
-      project.project.id,
-      this.ctx.agentKind,
-      this.externalId,
-    );
-    const branch = existing ? null : await this.mindly.kernel.ports.git.currentBranch(this.ctx.cwd);
-    const { session } = store.sessions.upsert({
-      projectId: project.project.id,
-      agentKind: this.ctx.agentKind,
-      externalId: this.externalId,
-      worktree: this.ctx.cwd,
-      branch,
-      transcriptPath: null,
-    });
-    return { project, session };
-  }
+/** What a call made on a guessed session records of its own work. */
+export interface GuessScope {
+  /** The guessed session (the one in the store; `CallScope.session` is a view of it). */
+  sessionId: string;
+  /** The session whose work a handoff from this call describes: the server's own, not the window's. */
+  workOf(): Session;
+  /** The memories the server recorded on the guess, for its handoffs. */
+  decisionIds(): string[];
+  /** The server's own session, in whose name it files what the window must not take as its own. */
+  self(): Session;
+  /** Notes a handoff the server filed in the name of `from` (its own session). */
+  noteHandoff(id: string, from: string): void;
+  /**
+   * Notes a row this call wrote. Intents, tasks and messages go along with the server until it
+   * is home; memories stay where they are and are named in its handoffs.
+   */
+  note(kind: 'intent' | 'task' | 'message' | 'memory', id: string): void;
+  /** Notes the task this call made the server's current one. */
+  noteCurrentTask(taskId: string): void;
+  /** True when the server wrote this row while on a guess. */
+  wrote(kind: 'intent' | 'task', id: string): boolean;
+  /**
+   * True when task `id` is the server's own: it wrote the task on a guess, the task is still
+   * where the server's work is, nothing but the server has changed it since, and no live
+   * session other than the server's own has it as its current task.
+   */
+  owns(id: string): boolean;
+  /** Stops taking task `id` along: it is no longer the server's own. */
+  disown(id: string): void;
 }
 
 /** Sliding-window rate limiter (per server process). */
@@ -111,18 +127,87 @@ export class RateLimiter {
   }
 }
 
+function there(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A path an agent gave, placed in the working tree. */
+export interface PlacedPath {
+  /** POSIX path relative to the root of the working tree. */
+  rel: string;
+  /** Something the agent should know about how the path was read, or null. */
+  note: string | null;
+}
+
 /**
- * Resolves a path supplied by an agent (project-relative, or absolute inside the project) and
- * enforces containment and the deny-list. Returns the project-relative POSIX path.
+ * Places a path supplied by an agent in the working tree and enforces containment and the
+ * deny-list. An absolute path must be inside the tree. A relative path can mean two things when
+ * the server runs in a subfolder: relative to that folder, as a shell would read it, or relative
+ * to the root of the tree, which is how Mindly itself prints paths. What exists decides:
+ *
+ * - from the server's folder when that names something that exists;
+ * - else from the root, when it exists there, or when only there the folder it would be in
+ *   exists (a file about to be created);
+ * - else from the server's folder.
+ *
+ * When both readings name an existing file the server's folder wins and the note says so. Git's
+ * own folder is never a project file: what it holds (configuration, hooks, stored credentials)
+ * is not for agents to read or to build checks on.
  */
-export function projectPath(mindly: Mindly, project: ProjectContext, input: string): string {
-  const resolved = resolveInsideRoot(project.root, input);
+export function placePath(mindly: Mindly, project: ProjectContext, input: string): PlacedPath {
+  const root = project.root;
+  const cwd = (project as Partial<ScopedProject>).cwd;
+  const inside = (abs: string): { rel: string; abs: string } | null => {
+    const r = tryResolveInsideRoot(root, abs);
+    return r && r.rel !== '' ? r : null;
+  };
+  let chosen: string;
+  let note: string | null = null;
+  if (isAbsolute(input)) {
+    chosen = input;
+  } else {
+    const fromRoot = resolve(root, input);
+    const fromCwd =
+      cwd !== undefined && tryResolveInsideRoot(root, cwd) ? resolve(cwd, input) : null;
+    if (fromCwd === null || fromCwd === fromRoot) {
+      chosen = fromRoot;
+    } else if (inside(fromCwd) && there(fromCwd)) {
+      chosen = fromCwd;
+      const other = inside(fromRoot);
+      if (other && there(fromRoot)) {
+        note = `"${sanitizeLine(input, 200)}" was read from the folder this server runs in (${inside(fromCwd)?.rel}); ${other.rel} exists too, give it as an absolute path if you meant that one.`;
+      }
+    } else if (inside(fromRoot) && there(fromRoot)) {
+      chosen = fromRoot;
+    } else if (inside(fromRoot) && !there(dirname(fromCwd)) && there(dirname(fromRoot))) {
+      chosen = fromRoot;
+    } else {
+      chosen = fromCwd;
+    }
+  }
+  const resolved = resolveInsideRoot(root, chosen);
   if (resolved.rel === '')
     throw new MindlyError('invalid_input', 'path must be inside the project');
+  if (resolved.rel.split('/').some((segment) => segment.toLowerCase() === '.git')) {
+    throw new MindlyError('forbidden', 'path is inside the git folder');
+  }
   if (isDeniedPath(resolved.rel, mindly.config.redaction.denyPaths)) {
     throw new MindlyError('forbidden', 'path is on the deny-list');
   }
-  return resolved.rel;
+  if (note === null && !there(dirname(resolved.abs))) {
+    note = `${resolved.rel}: the folder it would be in does not exist in this checkout.`;
+  }
+  return { rel: resolved.rel, note };
+}
+
+/** `placePath` for callers that only need the project-relative path. */
+export function projectPath(mindly: Mindly, project: ProjectContext, input: string): string {
+  return placePath(mindly, project, input).rel;
 }
 
 /** Throws `invalid_input` unless `id` is a UUID. */
@@ -130,14 +215,24 @@ export function requireUuid(id: string, what: string): void {
   if (!isUuid(id)) throw new MindlyError('invalid_input', `${what} must be a UUID`);
 }
 
+let extraPatterns: readonly string[] = [];
+
+/**
+ * Sets the user's `redaction.extraPatterns` for everything this module renders. Called when a
+ * server is created: a process runs one server over one configuration.
+ */
+export function useRedaction(patterns: readonly string[]): void {
+  extraPatterns = [...patterns];
+}
+
 /** Redacts and sanitises stored or agent-supplied text for display (one line). */
 export function safeLine(text: string, max = 200): string {
-  return sanitizeLine(redactText(text), max);
+  return sanitizeLine(redactText(text, { extraPatterns }), max);
 }
 
 /** Redacts and sanitises stored or agent-supplied text for display (multi-line). */
 export function safeText(text: string, max = 2000): string {
-  return sanitizeForContext(redactText(text), max);
+  return sanitizeForContext(redactText(text, { extraPatterns }), max);
 }
 
 /** A successful tool result with plain text and optional structured content. */
@@ -154,7 +249,7 @@ export function ok(text: string, structured?: Record<string, unknown>): CallTool
  */
 export function toolError(err: unknown, tool: string, logger: Logger): CallToolResult {
   if (isMindlyError(err)) {
-    const message = sanitizeLine(redactText(err.message), 300);
+    const message = safeLine(err.message, 300);
     logger.info('mcp tool rejected', { tool, code: err.code });
     return {
       content: [{ type: 'text', text: `${err.code}: ${message}` }],

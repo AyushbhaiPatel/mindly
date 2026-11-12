@@ -12,6 +12,36 @@ There are three ways to get one:
 Rules that an agent picked up stay **proposed** until you approve them with
 `mindly rules --approve <id>`. `mindly rules` lists them all.
 
+## Scopes and enforced rules
+
+A rule can be limited to part of the project with `--scope` (repeatable). A scoped rule is shown
+to an agent when it is about to edit a matching file.
+
+| Scope              | Matches                                                        |
+| ------------------ | -------------------------------------------------------------- |
+| `src/api`          | the file or folder `src/api` and everything below it           |
+| `src/api/`         | only what is below the folder `src/api`                        |
+| `infra`            | a file or folder named `infra` at any depth, and what is below |
+| `*.sql`            | every `.sql` file, at any depth                                |
+| `src/*.ts`         | `.ts` files directly in `src`                                  |
+| `src/**/*.test.ts` | test files anywhere below `src`                                |
+| `**/generated/**`  | everything below a `generated` folder at any depth             |
+
+A scope with a slash starts at the project root, so `generated/**` does not match
+`src/generated/api.ts`; write `**/generated/**` or `src/generated` instead. A scope without a
+slash is looked for at any depth, like a line in `.gitignore`. `mindly memory add` tells you when
+a scope matches no file of the project.
+
+`--enforce` turns a rule into a block: an agent's edit to a file in the rule's scope is denied
+and the agent is told to ask you first. An enforced rule therefore needs at least one `--scope`:
+
+```bash
+mindly memory add --kind rule --title "Applied migrations are never edited" \
+  --scope prisma/migrations --enforce
+```
+
+The same patterns are used for the files a part of `mindly split` owns.
+
 ## Import from your instruction files
 
 When you run `mindly init` inside a repository, Mindly reads the instruction files you already

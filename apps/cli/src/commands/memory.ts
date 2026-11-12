@@ -4,9 +4,11 @@ import {
   codename,
   TRUST_LEVELS,
   type ContractKind,
+  matchesGlob,
   type Memory,
 } from '@mindly/core';
 import { commandHash, contractsOf, USER } from '@mindly/engine';
+import { listFiles } from '@mindly/git';
 import { z } from 'zod';
 import { projectPath, withProject, type ProjectScope } from '../context.js';
 import { resolveId } from '../ids.js';
@@ -118,7 +120,13 @@ export async function memoryShow(out: Out, id: string, raw: { json?: boolean }):
 export async function memoryAdd(out: Out, raw: unknown): Promise<number> {
   const o = parseOptions(AddOptions, raw);
   if (o.enforce && o.kind !== 'rule') throw new UsageError('--enforce only works with --kind rule');
-  return withProject(out.io, ({ mindly, project }) => {
+  // An enforced rule blocks edits to the paths it is scoped to, so without one it blocks nothing.
+  if (o.enforce && !o.scope?.length) {
+    throw new UsageError(
+      '--enforce needs at least one --scope: an enforced rule blocks edits to the paths it covers (for example --scope "prisma/migrations/**")',
+    );
+  }
+  return withProject(out.io, async ({ mindly, project }) => {
     const m = mindly.memory.remember({
       projectId: project.project.id,
       projectRoot: project.root,
@@ -144,9 +152,50 @@ export async function memoryAdd(out: Out, raw: unknown): Promise<number> {
           : `It is ${trustWord(m.trust, m.source)}.`,
         2,
       );
+      for (const miss of await unmatchedScopes(project.root, m.scope.paths)) {
+        sc.text(
+          `${sc.mark('warn')} No file in this project matches the scope "${clean(miss.glob, 100)}" yet.`,
+        );
+        sc.note(
+          miss.deeper
+            ? `A scope with a slash starts at the project root. "${clean(miss.deeper, 100)}" matches at any depth.`
+            : 'Check the spelling, or leave it if the files do not exist yet.',
+          2,
+        );
+      }
     }
     return 0;
   });
+}
+
+/** `listFiles` stops at this many files; past it a missing match proves nothing. */
+const MAX_LISTED_FILES = 20_000;
+
+/**
+ * Scopes that match none of the project's files, usually a pattern written from the wrong folder.
+ * `deeper` is the same pattern at any depth, when that one does match.
+ */
+async function unmatchedScopes(
+  root: string,
+  scopes: readonly string[],
+): Promise<{ glob: string; deeper: string | null }[]> {
+  if (scopes.length === 0) return [];
+  let files: string[];
+  try {
+    files = await listFiles(root, MAX_LISTED_FILES);
+  } catch {
+    return [];
+  }
+  if (files.length === 0 || files.length >= MAX_LISTED_FILES) return [];
+  const matches = (glob: string): boolean => files.some((f) => matchesGlob(f, glob));
+  const out: { glob: string; deeper: string | null }[] = [];
+  for (const glob of scopes) {
+    if (matches(glob)) continue;
+    const deeper = `**/${glob.replace(/^\.\//, '')}`;
+    const rooted = glob.includes('/') && !glob.startsWith('**/');
+    out.push({ glob, deeper: rooted && deeper.length <= 300 && matches(deeper) ? deeper : null });
+  }
+  return out;
 }
 
 type Action = 'approve' | 'reject' | 'archive';

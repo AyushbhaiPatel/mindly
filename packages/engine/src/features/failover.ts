@@ -23,6 +23,7 @@ import {
   type MindlyEvent,
 } from '@mindly/core';
 import type { BusEvents, Kernel } from '../kernel.js';
+import { NotifyOutbox } from './outbox.js';
 import type { Mindly, MindlyModule } from '../mindly.js';
 
 /*
@@ -902,7 +903,7 @@ export interface HandoffExtras {
 export async function buildHandoffPacket(
   k: Kernel,
   session: Session,
-  extras: HandoffExtras = {},
+  extras: HandoffExtras & { decisionIds?: readonly string[] } = {},
 ): Promise<{ packet: HandoffPacket; taskId: string | null }> {
   const now = k.clock.now();
   // A task the session already finished is not what it was doing when it stopped: the goal then
@@ -919,11 +920,14 @@ export async function buildHandoffPacket(
     limit: 3,
   });
   const recentPrompts = promptSummaries(prompts);
+  const decisionIds = extras.decisionIds ? new Set(extras.decisionIds) : null;
   const decisions = k.store.memories
     .list(session.projectId, { updatedSince: now - DAY_MS, limit: 200 })
     .filter(
       (m) =>
-        m.source.sessionId === session.id && m.createdAt >= now - DAY_MS && m.trust !== 'rejected',
+        (decisionIds ? decisionIds.has(m.id) : m.source.sessionId === session.id) &&
+        m.createdAt >= now - DAY_MS &&
+        m.trust !== 'rejected',
     )
     .map((m) => m.title)
     .slice(0, 10);
@@ -958,6 +962,14 @@ export interface ManualHandoffInput {
   summary: string;
   nextSteps?: string[];
   blockers?: string[];
+  /**
+   * Whose work the packet describes (task, prompts, files, memories), when that is not the
+   * session the handoff is filed from: an MCP server that speaks for a session it only guessed
+   * at hands off its own work, never the other window's.
+   */
+  workOf?: Session;
+  /** The memories this work recorded, when they cannot be found by session (see `workOf`). */
+  decisionIds?: readonly string[];
 }
 
 /** Manual handoffs: create, list and cancel. */
@@ -984,7 +996,8 @@ export class HandoffService {
         .filter((s) => s.length > 0);
     const nextSteps = cleanList(input.nextSteps);
     const blockers = cleanList(input.blockers);
-    const { packet, taskId } = await buildHandoffPacket(this.k, session, {
+    const { packet, taskId } = await buildHandoffPacket(this.k, input.workOf ?? session, {
+      ...(input.decisionIds ? { decisionIds: input.decisionIds } : {}),
       goal: summary,
       ...(nextSteps ? { nextSteps } : {}),
       ...(blockers ? { blockers } : {}),
@@ -1236,8 +1249,10 @@ export class FailoverService {
     if (!this.k.config.notify.triggers.includes('rate_limited')) return;
     try {
       const project = sanitizeLine(this.k.store.projects.get(projectId).name, 80);
-      // Titles and counts only: never prompt text or code (docs/security.md, T3).
-      await this.k.ports.notifier.send({
+      // Titles and counts only: never prompt text or code (docs/security.md, T3). This runs
+      // inside a hook, which never waits for a pager: the page is written to the outbox and sent
+      // by a separate process (see outbox.ts).
+      new NotifyOutbox(this.k).enqueue({
         trigger: 'rate_limited',
         title: `${session.agentKind} hit its usage limit`,
         body: `${session.agentKind} hit its usage limit in ${project}; handoff ready for ${to ?? 'the next agent'}`,

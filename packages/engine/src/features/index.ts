@@ -16,6 +16,7 @@ export * from './bisect.js';
 export * from './checkpoints.js';
 export * from './contracts.js';
 export * from './impact.js';
+export * from './outbox.js';
 export * from './provenance.js';
 export * from './saves.js';
 export * from './saves-card.js';

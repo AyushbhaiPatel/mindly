@@ -16,7 +16,18 @@ import {
   type RunStatus,
   type Snapshot,
 } from '@mindly/core';
-import { json, limit, num, numOrNull, str, strOrNull, toJson, type Db, type Row } from '../db.js';
+import {
+  json,
+  limit,
+  num,
+  numOrNull,
+  str,
+  strOrNull,
+  toJson,
+  transaction,
+  type Db,
+  type Row,
+} from '../db.js';
 
 // ---------------------------------------------------------------------------------------------
 // Context packets (Context X-Ray)
@@ -327,11 +338,110 @@ export class ContractRepo {
     ).map(toContract);
   }
 
+  /**
+   * Stores a result and keeps the contract's last passing/failing one (see `lastConclusive`), in
+   * one transaction. A passing or failing result is remembered as it is. Before any other result
+   * replaces a passing or failing state, that state is remembered: it is the newest conclusive
+   * result whatever was remembered before (nothing, for a contract last run before this was kept;
+   * something older, when a process of a previous version wrote the state alone).
+   * Throws `not_found`, writing nothing, for a contract that no longer exists.
+   */
   recordResult(id: string, state: ContractState, message: string | null): Contract {
+    return transaction(this.db, () => {
+      const now = this.clock.now();
+      const conclusive = state === 'passing' || state === 'failing';
+      if (!conclusive) {
+        this.db
+          .prepare(
+            `INSERT INTO kv (key, value, updated_at)
+               SELECT ?, json_quote(state), ? FROM contracts
+               WHERE id = ? AND state IN ('passing', 'failing')
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(conclusiveKey(id), now, id);
+      }
+      const res = this.db
+        .prepare('UPDATE contracts SET state = ?, last_message = ?, last_run_at = ? WHERE id = ?')
+        .run(state, message, now, id);
+      if (Number(res.changes) === 0) throw notFound('contract', id);
+      if (conclusive) this.setLastConclusive(id, state);
+      return this.get(id);
+    });
+  }
+
+  /**
+   * The last result of a contract that was passing or failing, kept apart from `state` so a later
+   * `error` does not hide it. 'none': known to have had neither. Undefined: nothing recorded yet
+   * (a contract last run before this was kept).
+   */
+  lastConclusive(id: string): ContractConclusive | undefined {
+    const r = this.db.prepare('SELECT value FROM kv WHERE key = ?').get(conclusiveKey(id)) as
+      Row | undefined;
+    const v = r ? json<unknown>(r, 'value', null) : null;
+    return v === 'passing' || v === 'failing' || v === 'none' ? v : undefined;
+  }
+
+  setLastConclusive(id: string, value: ContractConclusive): void {
     this.db
-      .prepare('UPDATE contracts SET state = ?, last_message = ?, last_run_at = ? WHERE id = ?')
-      .run(state, message, this.clock.now(), id);
-    return this.get(id);
+      .prepare(
+        `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(conclusiveKey(id), toJson(value), this.clock.now());
+  }
+
+  /**
+   * The hash of the pattern and file content a check of this contract last ran out of time on,
+   * so that check is not repeated; null when none did.
+   */
+  slowRun(id: string): string | null {
+    const r = this.db.prepare('SELECT value FROM kv WHERE key = ?').get(slowKey(id)) as
+      Row | undefined;
+    const v = r ? json<unknown>(r, 'value', null) : null;
+    return typeof v === 'string' ? v : null;
+  }
+
+  setSlowRun(id: string, runHash: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(slowKey(id), toJson(runHash), this.clock.now());
+  }
+
+  /** Drops what is remembered for contracts that no longer exist (deleted with their memory). */
+  pruneConclusive(): void {
+    const prune = this.db.prepare(
+      `DELETE FROM kv WHERE key LIKE ? AND substr(key, ?) NOT IN (SELECT id FROM contracts)`,
+    );
+    for (const prefix of KV_PREFIXES) prune.run(`${prefix}%`, prefix.length + 1);
+  }
+
+  /** The distinct patterns of all stored pattern contracts. */
+  patterns(): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT json_extract(spec, '$.pattern') AS pattern FROM contracts
+           WHERE json_extract(spec, '$.pattern') IS NOT NULL`,
+        )
+        .all() as Row[]
+    ).map((r) => str(r, 'pattern'));
+  }
+
+  /** Deletes kv entries under `prefix` other than the keys in `keep`. */
+  pruneKeys(prefix: string, keep: readonly string[]): void {
+    const kept = new Set(keep);
+    const rows = this.db
+      .prepare('SELECT key FROM kv WHERE key LIKE ?')
+      // `%` and `_` in the prefix only widen the match; the check below is exact.
+      .all(`${prefix}%`) as Row[];
+    const drop = this.db.prepare('DELETE FROM kv WHERE key = ?');
+    for (const r of rows) {
+      const key = str(r, 'key');
+      if (key.startsWith(prefix) && !kept.has(key)) drop.run(key);
+    }
   }
 
   approve(id: string, hash: string | null): void {
@@ -340,8 +450,20 @@ export class ContractRepo {
 
   delete(id: string): void {
     this.db.prepare('DELETE FROM contracts WHERE id = ?').run(id);
+    const drop = this.db.prepare('DELETE FROM kv WHERE key = ?');
+    for (const prefix of KV_PREFIXES) drop.run(`${prefix}${id}`);
   }
 }
+
+/** A contract's last passing/failing result, or 'none' when it never had one. */
+export type ContractConclusive = 'passing' | 'failing' | 'none';
+
+const CONCLUSIVE_PREFIX = 'contract:conclusive:';
+const SLOW_PREFIX = 'contract:slow:';
+/** Every kv entry kept per contract, removed with it. */
+const KV_PREFIXES = [CONCLUSIVE_PREFIX, SLOW_PREFIX] as const;
+const conclusiveKey = (id: string): string => `${CONCLUSIVE_PREFIX}${id}`;
+const slowKey = (id: string): string => `${SLOW_PREFIX}${id}`;
 
 // ---------------------------------------------------------------------------------------------
 // Snapshots (time machine)
@@ -566,7 +688,42 @@ export class KvRepo {
       .run(key, toJson(value), this.clock.now());
   }
 
+  /**
+   * Deletes at most `max` keys starting with `prefix` that were last written before `before`.
+   * Returns how many went. The prefix is matched literally (`%` and `_` in it are not wildcards).
+   */
+  deleteStale(prefix: string, before: number, max = 200): number {
+    const like = `${prefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    return Number(
+      this.db
+        .prepare(
+          `DELETE FROM kv WHERE key IN (
+             SELECT key FROM kv WHERE key LIKE ? ESCAPE '\\' AND updated_at < ? LIMIT ?)`,
+        )
+        .run(like, before, Math.max(0, Math.trunc(max))).changes,
+    );
+  }
+
   delete(key: string): void {
     this.db.prepare('DELETE FROM kv WHERE key = ?').run(key);
+  }
+
+  /**
+   * Entries whose key starts with `prefix`, in key order. The prefix is matched as a key range,
+   * so it may hold any character.
+   */
+  list<T>(prefix: string, limit = 100): { key: string; value: T | null }[] {
+    const rows = this.db
+      .prepare('SELECT key, value FROM kv WHERE key >= ? AND key < ? ORDER BY key LIMIT ?')
+      .all(prefix, `${prefix}\uffff`, Math.max(1, Math.min(1000, Math.trunc(limit)))) as Row[];
+    return rows.map((r) => ({ key: str(r, 'key'), value: json<T | null>(r, 'value', null) }));
+  }
+
+  /** Deletes the keys `<prefix><session id>` of every session of a project; returns how many. */
+  deleteForSessions(prefix: string, projectId: string): number {
+    const r = this.db
+      .prepare('DELETE FROM kv WHERE key IN (SELECT ? || id FROM sessions WHERE project_id = ?)')
+      .run(prefix, projectId);
+    return Number(r.changes);
   }
 }

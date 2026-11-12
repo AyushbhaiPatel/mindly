@@ -20,7 +20,7 @@ import {
   TrustMark,
   type Column,
 } from '../components/ui';
-import { splitList } from '../format';
+import { splitGlobs, splitList } from '../format';
 import { useAction, useApp, useResource } from '../state';
 import {
   MEMORY_KINDS,
@@ -604,7 +604,7 @@ function MemoryForm({ existing, onDone }: { existing?: Memory; onDone(m?: Memory
       title: title.trim(),
       body: body.trim(),
       tags: splitList(tags),
-      scopePaths: splitList(paths),
+      scopePaths: splitGlobs(paths),
       enforce: kind === 'rule' && enforce,
       pinned,
     };

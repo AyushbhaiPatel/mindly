@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import type { UserConfig } from '@mindly/core';
+import { isMindlyError, type UserConfig } from '@mindly/core';
 import type { GitPort, LlmPort, NotifierPort } from '@mindly/engine';
 import {
   addWorktree,
@@ -12,6 +12,7 @@ import {
   createBisectWorkspace,
   checkpointDiskUsage,
   checkpointRefName,
+  branchOnlyWork,
   createSnapshotRef,
   deleteCheckpointRefs,
   currentBranch,
@@ -21,6 +22,10 @@ import {
   fileAtRef,
   fileStateAtRef,
   findRepoRoot,
+  flaggedChanges,
+  ignoredDeniedFiles,
+  gitDataPaths,
+  worktreeScan,
   headCommit,
   hunkHashes,
   isManifestPath,
@@ -32,6 +37,7 @@ import {
   openWarmWorkspace,
   removeWarmWorkspace,
   removeWorktree,
+  restoreFromHead,
   restoreSnapshotToBranch,
   runChecks,
   runGit,
@@ -40,6 +46,7 @@ import {
   tryLockCheckpoint,
   worktreeId,
   assertValidBranchName,
+  assertValidRevision,
   type ExportedSymbol,
   type ImportGraph,
 } from '@mindly/git';
@@ -99,21 +106,88 @@ export function createSplitGitPort(): SplitGitPort {
     branchExists: (repoRoot, branch) => branchExists(repoRoot, branch),
     addWorktree: async (repoRoot, path, branch, startPoint) =>
       (await addWorktree(repoRoot, path, branch, startPoint)).path,
-    removeWorktree: (repoRoot, path) => removeWorktree(repoRoot, path),
-    deleteBranch: (repoRoot, branch) => deleteBranch(repoRoot, branch),
-    changedSince: async (repoRoot, worktree, base) => {
-      const captured = await captureWorktreeCommit(worktree, { message: 'mindly split status' });
+    removeWorktree: (repoRoot, path, options) => removeWorktree(repoRoot, path, options),
+    restoreFromHead: (_repoRoot, worktree, paths) => restoreFromHead(worktree, paths),
+    gitDataIn: (_repoRoot, worktree) => gitDataPaths(worktree),
+    lastLook: async (_repoRoot, worktree, secretDeny) => {
+      const scan = await worktreeScan(worktree, secretDeny);
+      return {
+        stray: [...new Set([...scan.untracked, ...scan.ignoredDenied])].sort(),
+        gitData: scan.gitData,
+      };
+    },
+    deleteBranch: (repoRoot, branch, expectedTip) => deleteBranch(repoRoot, branch, expectedTip),
+    branchOnlyWork: (repoRoot, branch, options) => branchOnlyWork(repoRoot, branch, options),
+    uncommittedWork: async (repoRoot, worktree, branch, extraDeny, secretDeny, since) => {
+      const captured = await captureWorktreeCommit(worktree, {
+        message: 'mindly split status',
+        extraDeny,
+      });
+      const res = await runGit(
+        [
+          'diff',
+          '--name-only',
+          '-z',
+          '--no-renames',
+          `refs/heads/${branch}`,
+          captured.commit,
+          '--',
+        ],
+        { cwd: repoRoot, timeoutMs: 30_000 },
+      );
+      const ignored = await ignoredDeniedFiles(worktree, secretDeny);
+      // Edited files flagged skip-worktree or assume-unchanged: neither the capture nor git's
+      // status sees them.
+      const flagged = await flaggedChanges(worktree, extraDeny);
+      const paths = new Set([
+        ...res.stdout.split('\0').filter((p) => p !== ''),
+        // Left out of the capture because they are on the deny-list: still work in the worktree.
+        ...captured.skipped,
+        // New nested repositories, left out of the capture: not on the branch either.
+        ...captured.nested,
+        ...flagged.changed,
+        // Written into the folder of an uninitialised submodule: git lists nothing there.
+        ...flagged.uninitialised,
+      ]);
+      // The same look at the worktree, against another commit (status asks for both).
+      const changed =
+        since === undefined
+          ? undefined
+          : [
+              ...(
+                await runGit(
+                  ['diff', '--name-only', '-z', '--no-renames', since, captured.commit, '--'],
+                  { cwd: repoRoot, timeoutMs: 30_000 },
+                )
+              ).stdout
+                .split('\0')
+                .filter((p) => p !== ''),
+              ...captured.nested,
+            ];
+      return {
+        paths: [...paths].sort(),
+        denied: [...new Set([...captured.skipped, ...ignored, ...flagged.denied])].sort(),
+        ignoredDenied: ignored.filter((p) => !paths.has(p)),
+        ...(changed ? { changedSince: changed } : {}),
+      };
+    },
+    changedSince: async (repoRoot, worktree, base, extraDeny) => {
+      const captured = await captureWorktreeCommit(worktree, {
+        message: 'mindly split status',
+        extraDeny,
+      });
       const res = await runGit(
         ['diff', '--name-only', '-z', '--no-renames', base, captured.commit, '--'],
         { cwd: repoRoot, timeoutMs: 30_000 },
       );
-      return res.stdout.split('\0').filter((p) => p !== '');
+      return [...res.stdout.split('\0').filter((p) => p !== ''), ...captured.nested];
     },
-    mergeCheck: async (repoRoot, base, sides) => {
+    mergeCheck: async (repoRoot, base, sides, extraDeny) => {
       const captured: { label: string; commit: string }[] = [];
       for (const side of sides) {
         const c = await captureWorktreeCommit(side.worktree, {
           message: `mindly split capture ${side.label}`,
+          extraDeny,
         });
         captured.push({ label: side.label, commit: c.commit });
       }
@@ -175,7 +249,7 @@ export function createSplitGitPort(): SplitGitPort {
   };
 }
 import { createLlmHelpers, createProvider } from '@mindly/llm';
-import { createNotifier } from '@mindly/notify';
+import { createNotifier, type NotifierLog } from '@mindly/notify';
 
 const GRAPH_TTL_MS = 60_000;
 const GRAPH_MAX_FILES = 5_000;
@@ -231,6 +305,44 @@ export function createGitPort(): GitPort {
         // Bare repositories (no main worktree) fall back to the worktree's own top level.
         return basename(common) === '.git' ? dirname(common) : top;
       }, null),
+    workingTrees: (cwd) =>
+      safe(async () => {
+        const res = await runGit(['worktree', 'list', '--porcelain'], { cwd, timeoutMs: 5_000 });
+        const trees: string[] = [];
+        for (const line of res.stdout.split('\n')) {
+          if (!line.startsWith('worktree ')) continue;
+          try {
+            trees.push(realpathSync(line.slice('worktree '.length)));
+          } catch {
+            // A worktree whose folder is gone holds no file.
+          }
+        }
+        return trees;
+      }, null),
+    listFiles: async (root, query) => {
+      const how = {
+        known: ['--cached', '--others', '--exclude-standard'],
+        ignored: ['--others', '--ignored', '--exclude-standard', '--directory'],
+        tracked: ['--cached'],
+        dirs: ['--others', '--exclude-standard', '--directory', '--no-empty-directory'],
+      }[query.kind];
+      try {
+        const res = await runGit(['ls-files', '-z', ...how, '--', ...query.pathspecs], {
+          cwd: root,
+          timeoutMs: query.timeoutMs,
+          maxBuffer: 4 * 1024 * 1024,
+          // The one place pathspecs are patterns: each carries its own magic prefix.
+          env: { GIT_LITERAL_PATHSPECS: '0' },
+        });
+        return { files: res.stdout.split('\0').filter((f) => f !== ''), complete: true };
+      } catch (err) {
+        // Too slow or too much to list: what is there is not known. Anything else: no git here.
+        const cut =
+          isMindlyError(err, 'timeout') ||
+          (isMindlyError(err) && err.message.includes('size limit'));
+        return cut ? { files: [], complete: false } : null;
+      }
+    },
     currentBranch: (cwd) => safe(() => currentBranch(cwd), null),
     headCommit: (cwd) => safe(() => headCommit(cwd), null),
     changedFiles: (cwd) => safe(async () => (await changedFiles(cwd)).map((f) => f.path), []),
@@ -258,7 +370,9 @@ export function createGitPort(): GitPort {
     },
     dependentsOf: async (repoRoot, file) => {
       const graph = await graphFor(repoRoot);
-      return graph ? graph.dependentsOf(file).slice(0, 500) : [];
+      // A consumer that imports through a barrel (`export * from './file'`) depends on the file
+      // as much as a direct importer does.
+      return graph ? graph.dependentsOf(file, { throughReexports: true }).slice(0, 500) : [];
     },
     createSnapshotRef: (repoRoot, worktree, id) =>
       safe(async () => {
@@ -268,6 +382,17 @@ export function createGitPort(): GitPort {
     restoreSnapshotToBranch: async (repoRoot, id, branch) => {
       await restoreSnapshotToBranch(repoRoot, id, branch);
     },
+    isAncestor: (cwd, ancestor, descendant) =>
+      safe(async () => {
+        assertValidRevision(ancestor);
+        assertValidRevision(descendant);
+        const res = await runGit(['merge-base', '--is-ancestor', ancestor, descendant], {
+          cwd,
+          okExitCodes: [0, 1],
+          timeoutMs: 5_000,
+        });
+        return res.exitCode === 0;
+      }, false),
     isMerged: (repoRoot, branch, into) =>
       safe(async () => {
         assertValidBranchName(branch);
@@ -297,14 +422,26 @@ export function createLlmPort(
   };
 }
 
-export function createNotifierPort(config: UserConfig['notify']): NotifierPort {
-  const notifier = createNotifier(config);
+/**
+ * The pager. `redactPatterns` are the user's `redaction.extraPatterns`: what they asked to keep
+ * out of stored text is kept out of what leaves the machine too. `log` hears once about each
+ * channel that fails.
+ */
+export function createNotifierPort(
+  config: UserConfig['notify'],
+  opts: { redactPatterns?: readonly string[]; log?: NotifierLog } = {},
+): NotifierPort {
+  const notifier = createNotifier(config, {
+    ...(opts.redactPatterns ? { redactPatterns: opts.redactPatterns } : {}),
+    ...(opts.log ? { log: opts.log } : {}),
+  });
   return {
-    send: async (n) => {
+    send: async (n, options) => {
       try {
-        await notifier.send(n);
+        return await notifier.send(n, options);
       } catch {
-        // Notifications are best-effort.
+        // Notifications are best-effort; the notifier itself never throws.
+        return [];
       }
     },
   };
