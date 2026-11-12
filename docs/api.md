@@ -258,7 +258,8 @@ also blocks later ones. This under-counts rather than inflates.
 
 `GET …/saves/card.svg` renders the confirmed saves since `since` (default 7 days ago) as a 1200×630
 SVG: counts by kind and agent names only. `details=1` adds the project name and each save's sentence
-and files; without it the card contains no project name, path or code.
+and files; without it the card contains no project name, path or code. The card is taller than 630
+when it shows details or all seven kinds of save.
 
 ### Track record
 
